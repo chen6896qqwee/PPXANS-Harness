@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      - name: Run full test suite
+        run: npm test
+        timeout-minutes: 15
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install web deps
+        working-directory: web
+        run: npm ci --no-audit --no-fund
+      - name: Type check
+        working-directory: web
+        run: npx tsc --noEmit
+      - name: Production build
+        working-directory: web
+        run: npm run build
+        timeout-minutes: 10
+
+  eval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Local capability eval
+        run: node scripts/eval.js
+        timeout-minutes: 5
+      - name: LLM E2E regression
+        env:
+          PPX_E2E_BASE_URL: ${{ secrets.PPX_E2E_BASE_URL }}
+          PPX_E2E_API_KEY: ${{ secrets.PPX_E2E_API_KEY }}
+          PPX_E2E_MODEL: ${{ secrets.PPX_E2E_MODEL }}
+        run: |
+          if [ -n "$PPX_E2E_BASE_URL" ]; then
+            node scripts/eval.js --llm
+          else
+            echo "PPX_E2E_BASE_URL not set; skipping LLM E2E regression"
+          fi
+        timeout-minutes: 10

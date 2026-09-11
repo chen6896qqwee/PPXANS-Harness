@@ -1,0 +1,82 @@
+@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  /* 系统字体栈 (无网络依赖, 本地渲染) */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", "Helvetica Neue",
+    Arial, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas,
+    "Courier New", monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+}
+
+/* ===== 皮皮虾 UI 设计令牌 (2026-08-21) ===== */
+:root {
+  /* 品牌/主色调 (蓝紫渐变系, 替代散落的硬编码色) */
+  --ppx-accent: #4da3ff;        /* 主蓝 (tab 选中/链接/强调) */
+  --ppx-accent-deep: #1d5cff;   /* 主按钮蓝 */
+  --ppx-accent-hover: #1a4fd8;  /* 按钮 hover */
+  --ppx-teal: #28b894;          /* 品牌绿 */
+  --ppx-bg: #0f1115;            /* 页面底 */
+  --ppx-panel: #15181d;         /* 面板底 */
+  --ppx-border: #26292f;        /* 边框 */
+  --ppx-ok: #3ddc84;            /* 成功绿 */
+  --ppx-warn: #f0b429;          /* 进行中黄 */
+  --ppx-err: #ff6b6b;           /* 失败红 */
+  --ppx-text-dim: #8b93a3;      /* 次级文字 */
+}
+
+/* 消息进场动画 (气泡/工具卡用 .msg-in) */
+@keyframes msgIn {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+.msg-in { animation: msgIn 0.22s ease-out both; }
+
+/* 毛玻璃 (header / 顶部吸附条) */
+.glass {
+  background: color-mix(in srgb, var(--ppx-bg) 78%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+/* 细滚动条 (暗色系, 尽量隐身不抢视觉) */
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { background: #2c3038; border-radius: 6px; }
+*::-webkit-scrollbar-thumb:hover { background: #3a3f4a; }
+* { scrollbar-width: thin; scrollbar-color: #2c3038 transparent; }
+
+/* 文本选中色: 品牌蓝半透明 */
+::selection { background: rgba(77, 163, 255, 0.3); }
+
+/* 输入框聚焦光晕 (统一, 替代各处零散 focus:border) */
+.field { transition: border-color 0.15s, box-shadow 0.15s; }
+.field:focus {
+  border-color: var(--ppx-accent);
+  box-shadow: 0 0 0 3px rgba(77, 163, 255, 0.15);
+  outline: none;
+}
+
+/* 按钮按下的微反馈 */
+button:active { transform: scale(0.98); }
+button { transition: transform 0.08s, background-color 0.15s, opacity 0.15s; }
