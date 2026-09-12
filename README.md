@@ -65,8 +65,9 @@ npm run dsh -- web
 ```
 
 - 源码位置：`.deps/deepseek-harness/`（完整保留 deepseek-harness 的 packages/apps/docs/scripts/vendor 等）
-- `src/llm/client.js` 的 `DEFAULT_DSH_ROOT` 已自动指向该目录；可用 `PPX_DSH_ROOT` 覆盖
-- 未安装/构建 dsh 时，皮皮虾仍走默认 http 后端，不受影响
+- **构建形态优先（v1.5.1+）**：`dshRoot` 存在 `lib/bin.js`（已安装的 dsh npm 包，如 `npm i -g @deepseek-ai/dsh`）时直接零构建运行；否则回退源码形态（`apps/cli/src/bin.ts` + `node_modules/tsx`）
+- 定位优先级：`PPX_DSH_ROOT` 环境变量 > provider 的 `dsh_root` 配置 > 内嵌 `.deps/deepseek-harness` 默认目录
+- 未安装/构建 dsh 时，健康检查判不可用并自动回退 http/cloud，不受影响
 
 ## 🚀 快速开始
 

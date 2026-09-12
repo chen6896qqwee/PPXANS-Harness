@@ -45,7 +45,7 @@ export class LLMClient {
     // openclaw 后端专用
     this.mjs = provider.mjs || DEFAULT_MJS;
     this.sessionKey = provider.session_key || "ppx:main";
-    const dshRoot = provider.dsh_root || DEFAULT_DSH_ROOT;
+    const dshRoot = process.env.PPX_DSH_ROOT || provider.dsh_root || DEFAULT_DSH_ROOT;
     this.dshRoot = path.isAbsolute(dshRoot) ? dshRoot : path.resolve(PPX_ROOT, dshRoot);
     this._tmpCounter = 0;
     if (this.backend === "openclaw") info(`LLMClient[${this.providerId}] backend=openclaw mjs=${this.mjs} session=${this.sessionKey}`);
@@ -93,22 +93,37 @@ export class LLMClient {
   }
 
   // ===== DeepSeek Harness 后端 (dsh headless 一次性运行器) ====
+  // 两种形态:
+  //   built: dsh npm 包已安装 (dshRoot/lib/bin.js) — 零构建, 直接跑, 优先
+  //   src:   dsh 源码树 (dshRoot/apps/cli/src/bin.ts + node_modules/tsx) — 内嵌 .deps 形态
+  _dshResolveBin() {
+    const built = path.join(this.dshRoot, "lib", "bin.js");
+    if (fs.existsSync(built)) return { kind: "built", bin: built };
+    const src = path.join(this.dshRoot, "apps", "cli", "src", "bin.ts");
+    if (fs.existsSync(src)) return { kind: "src", bin: src };
+    return null;
+  }
+
   _dshReadyOrThrow() {
-    if (!fs.existsSync(path.join(this.dshRoot, "apps/cli/src/bin.ts"))) {
-      throw new Error("[皮皮虾] dsh 源码未就绪: " + this.dshRoot + "/apps/cli/src/bin.ts 不存在。\n请先 clone deepseek-harness 到 .deps/deepseek-harness。");
+    const r = this._dshResolveBin();
+    if (!r) {
+      throw new Error("[皮皮虾] dsh 未就绪: " + this.dshRoot + " 下找不到 lib/bin.js (已安装 dsh npm 包) 或 apps/cli/src/bin.ts (dsh 源码)。\n请设置 PPX_DSH_ROOT 指向 dsh 安装目录，或 clone deepseek-harness 到 .deps/deepseek-harness 后运行 npm run dsh:install。");
     }
-    if (!fs.existsSync(path.join(this.dshRoot, "node_modules", "tsx"))) {
-      throw new Error("[皮皮虾] dsh 依赖未安装: " + this.dshRoot + "/node_modules/tsx 不存在。\n请先运行 npm run dsh:install（等价于 cd .deps/deepseek-harness && pnpm install）。");
+    if (r.kind === "src" && !fs.existsSync(path.join(this.dshRoot, "node_modules", "tsx"))) {
+      throw new Error("[皮皮虾] dsh 源码形态依赖未安装: " + this.dshRoot + "/node_modules/tsx 不存在。\n请先运行 npm run dsh:install（等价于 cd .deps/deepseek-harness && pnpm install），或将 PPX_DSH_ROOT 指向已安装的 dsh npm 包目录。");
     }
   }
 
-  // 驱动 `node --import tsx/esm apps/cli/src/bin.ts --profile headless "<task>"`,
+  // 驱动 `node <dsh bin> --profile headless "<task>"`,
   // stdout = 最终助手文本, exit 0 = turn 完成, 1 = 出错(stderr 带错误)
   async _dshChatAsync(messages) {
     this._dshReadyOrThrow();
     const lastUser = [...messages].reverse().find(m => m && m.role === "user");
     const text = lastUser?.content || "";
-    const args = ["--import", "tsx/esm", "apps/cli/src/bin.ts", "--profile", "headless", text];
+    const r = this._dshResolveBin();
+    const args = r.kind === "built"
+      ? [r.bin, "--profile", "headless", text]
+      : ["--import", "tsx/esm", "apps/cli/src/bin.ts", "--profile", "headless", text];
     const stdout = await new Promise((resolve, reject) => {
       const child = spawn(process.execPath, args, { cwd: this.dshRoot, stdio: ["ignore", "pipe", "pipe"] });
       let out = "", err = "";
@@ -337,11 +352,16 @@ export class LLMClient {
       return ok;
     }
     if (this.backend === "deepseek") {
-      const okRoot = fs.existsSync(path.join(this.dshRoot, "apps/cli/src/bin.ts"));
-      const okDeps = fs.existsSync(path.join(this.dshRoot, "node_modules", "tsx"));
-      if (!okRoot) info("[health] deepseek 不可用: dsh 源码缺失 " + this.dshRoot);
-      else if (!okDeps) info("[health] deepseek 不可用: dsh 依赖未安装 (请运行 npm run dsh:install)");
-      return okRoot && okDeps && nodeVersionOk(process.versions.node);
+      const r = this._dshResolveBin();
+      if (!r) {
+        info("[health] deepseek 不可用: dsh 未就绪 " + this.dshRoot + " (缺 lib/bin.js 或 apps/cli/src/bin.ts)");
+        return false;
+      }
+      if (r.kind === "src" && !fs.existsSync(path.join(this.dshRoot, "node_modules", "tsx"))) {
+        info("[health] deepseek 不可用: dsh 源码形态依赖未安装 (请运行 npm run dsh:install 或设 PPX_DSH_ROOT)");
+        return false;
+      }
+      return nodeVersionOk(process.versions.node);
     }
     if (!this.apiKey) return false;
     try {
