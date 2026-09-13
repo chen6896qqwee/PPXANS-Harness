@@ -36,11 +36,12 @@ const kernel = spawn(process.execPath, [path.join(ROOT, "src", "server.js")], {
 children.push(kernel);
 
 // 前端 Next.js 生产服务 (3000, 代理到 8899)
+// Windows: .cmd 必须 shell:true 才能 spawn（shell:false + npm.cmd 会 EINVAL）
 const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
 const web = spawn(npmCmd, ["run", "start"], {
   cwd: WEB,
   stdio: "inherit",
-  shell: false, // 数组传参+显式 npm.cmd，规避 DEP0190 shell 注入
+  shell: process.platform === "win32", // win 必须 shell 跑 .cmd；posix 保持 false
 });
 children.push(web);
 
