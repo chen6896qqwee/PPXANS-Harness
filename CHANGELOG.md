@@ -1,5 +1,19 @@
 # CHANGELOG
 
+## v1.5.2 (2026-09-13) - 修复: src/memory 被 .gitignore 误排除 (仓库完整性)
+
+> **事故**: .gitignore 裸规则 `memory/` 匹配了任意层级的 memory 目录，包括 `src/memory/`，导致整个记忆子系统 9 个文件从 git 仓库静默消失（npm 包仍含源码，但 clone 仓库后代码无法运行，536 测试全挂）。
+
+### 修复
+- .gitignore: `memory/ experience/ sessions/ logs/` → 精确 `/data/*` 前缀（运行数据实际都在 data/ 下）
+- 从 git 历史恢复 `src/memory/*` 9 文件（与 npm v1.5.1 载荷逐字节一致）
+- 测试: `.deps` 内嵌 dsh 为可选底座（README 声明未安装自动回退 http/cloud），缺失时 skip 而非 fail
+
+### 验证
+- 全量测试: 530 pass / 0 fail / 6 skip (4 网络 + 2 dsh 可选)
+- 自愈基准: 7/7 (100%)
+- 已推送 GitHub main (b422201)，远程 `src/memory` 9 文件确认在库
+
 ## v1.5.0-dev (2026-08-21) - 有机体八系统全通 + 模型路由中枢 + WebUI 美感升级
 > 一次"从躯体到会进化"的冲刺: P0-P4 四大系统落地打通循环/内分泌/排泄/免疫, 模型接入重构为"本地零配置默认可跑、云端/本地自由接入", 产品壳与静态壳 WebUI 视觉统一升级。
 
