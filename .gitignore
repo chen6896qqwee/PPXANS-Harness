@@ -33,3 +33,6 @@ __nonexistent__/
 # --- 系统 ---
 .DS_Store
 Thumbs.db
+
+# --- 运行时使用计数 ---
+skills/.usage.json

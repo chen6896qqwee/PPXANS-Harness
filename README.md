@@ -1,5 +1,9 @@
 # 🦐 皮皮虾 (PPX Agent) 测试版
 
+> **PPX Agent** — a self-healing, self-learning autonomous agent written in pure Node.js, **zero runtime dependencies**.
+> 33 built-in tools · L0–L3 layered memory · MCP client · multi-model routing · self-heal 7/7 · 536 tests.
+> 中文说明见下。姊妹项目：[**ppx Harness**](https://github.com/chen6896qqwee/ppx-harness)（dsh 插件版，英文 README，面向国际用户）— 本站是独立零依赖版，ppx Harness 是 DeepSeek Harness 引擎上的能力包，二选一即可，代码不互通。
+
 > 🛡️ **自愈基准**：故意注入破坏 -> 自愈引擎修复 -> 输出修复率。
 > 跑 `node scripts/selfheal-bench.js` -> **7/7 100%**（发布前门禁，`PPX_MIN_SELFHEAL` 可设阈值）。
 
