@@ -18,10 +18,10 @@ web/_dev.log
 data/
 *.db
 *.sqlite
-memory/
-experience/
-sessions/
-logs/
+/data/memory/
+/data/experience/
+/data/sessions/
+/data/logs/
 
 # --- 外部依赖源码 (.deps 内嵌项目不入库) ---
 .deps/

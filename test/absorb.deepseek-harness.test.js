@@ -9,9 +9,17 @@ import { LLMClient } from "../src/llm/client.js";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-test("deepseek-harness 源码已内嵌到 .deps/deepseek-harness", () => {
-  const dshRoot = path.join(ROOT, ".deps", "deepseek-harness");
-  assert.ok(fs.existsSync(dshRoot), ".deps/deepseek-harness 目录存在");
+// .deps 内嵌 dsh 为可选底座（.gitignore 排除，未安装时自动回退 http/cloud）
+const dshRoot = path.join(ROOT, ".deps", "deepseek-harness");
+const hasDsh = fs.existsSync(dshRoot);
+
+function skipIfNoDsh(t) {
+  if (!hasDsh) t.skip(".deps/deepseek-harness 未安装（可选底座，健康检查自动回退）");
+}
+
+test("deepseek-harness 源码已内嵌到 .deps/deepseek-harness", (t) => {
+  skipIfNoDsh(t);
+  if (!hasDsh) return;
   assert.ok(fs.existsSync(path.join(dshRoot, "apps/cli/src/bin.ts")), "dsh CLI 入口存在");
   assert.ok(fs.existsSync(path.join(dshRoot, "packages/skill/skill/README.md")), "dsh skill 包存在");
   assert.ok(fs.existsSync(path.join(dshRoot, "docs/architecture.md")), "dsh 架构文档存在");
@@ -36,8 +44,10 @@ test("config 的 providers 首位 dsh 指向内嵌 dsh", () => {
   assert.equal(cfg.providers[0].dsh_root, ".deps/deepseek-harness");
 });
 
-test("dsh 底座项目技能目录也包含新增技能", () => {
-  const base = path.join(ROOT, ".deps", "deepseek-harness", ".dsh", "skills");
+test("dsh 底座项目技能目录也包含新增技能", (t) => {
+  skipIfNoDsh(t);
+  if (!hasDsh) return;
+  const base = path.join(dshRoot, ".dsh", "skills");
   for (const name of ["agent-professional-training", "cupid-lover-comms"]) {
     assert.ok(fs.existsSync(path.join(base, name, "SKILL.md")), `${name} 在 dsh .dsh/skills 中存在`);
   }
