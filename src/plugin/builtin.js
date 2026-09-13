@@ -15,6 +15,7 @@ import { LocalShellProvider } from "../seam/shell.js";
 import { registerDelegateTools } from "../tools/delegate.js";
 import { Traces } from "../utils/trace.js";
 import { RuntimeBus } from "../bus/runtime-bus.js";
+import { resolveLLM, resolveAllLLMs } from "../llm/router.js";
 export { isUsableProvider, resolveLLM, resolveAllLLMs } from "../llm/router.js";
 import { ModeRegistry, registerDefaultModes } from "../mode/index.js";
 import { planExecExecutor } from "../mode/plan-exec.js";
