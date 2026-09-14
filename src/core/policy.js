@@ -142,6 +142,7 @@ export class ToolLoopPolicy {
 //   runTool          (name, args) => Promise<string>, 工具执行 (trace/事件由调用方负责)
 //   shrinkMessages   (messages, budget) => messages, 溢出降档裁剪 (agent 上下文管理职责)
 //   histTokenCap     () => number, 当前历史 token 预算上限
+//   onEvent          (type, payload) => void, 可选策略事件回调 (工具失败路径: 溢出降档/熔断/错误重试), 供 trace 埋点
 export async function runToolLoop({
   seedMessages,
   llm,
@@ -149,12 +150,14 @@ export async function runToolLoop({
   config = {},
   isInterrupted = () => false,
   onStep = null,
+  onEvent = null,
   runTool,
   shrinkMessages,
   histTokenCap = () => 8192,
 }) {
   const policy = new ToolLoopPolicy(config.agent || config);
   let messages = [...seedMessages];
+  const ev = (type, payload) => { if (onEvent) { try { onEvent(type, payload); } catch {} } };
 
   for (let round = 0; round < policy.maxRounds; round++) {
     if (isInterrupted()) return "[皮皮虾] 任务已被中断 (operator cancelled).";
@@ -171,6 +174,7 @@ export async function runToolLoop({
       // 交由上层 _llmWithFallback 切换 provider / 调用方处理)
       if (policy.shouldShrinkOverflow(e)) {
         const cap = policy.nextOverflowCap(histTokenCap());
+        ev("tool/overflow", { round, shrink: policy.overflowShrinks, max: policy.overflowShrinkMax });
         warn(`上下文溢出, 降档裁剪后重试 (${policy.overflowShrinks}/${policy.overflowShrinkMax}): ${String(e?.message || e).slice(0, 120)}`);
         messages = shrinkMessages(messages, cap);
         continue;
@@ -198,6 +202,7 @@ export async function runToolLoop({
       }
     }
     if (policy.shouldRetryErrors(errors)) {
+      ev("tool/error_retry", { round, errors: errors.length, retries: policy.errorRetries, max: policy.maxErrorRetry });
       messages.push({
         role: "user",
         content: "以下工具调用失败, 请修正参数或改用其他方式后重试:\n" + errors.join("\n"),
@@ -208,6 +213,8 @@ export async function runToolLoop({
     // P0③ harness 融断: 探索循环 / 重复命令 (无产出的自转) → 注入方向盘给模型
     const steer = policy.recordTurn(toolCalls);
     if (steer) {
+      if (steer.includes("连续探索循环")) ev("tool/explore_break", { round });
+      else ev("tool/repeat_warn", { round });
       messages.push({ role: "user", content: steer });
       continue;
     }

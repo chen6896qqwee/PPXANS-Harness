@@ -26,6 +26,34 @@
 - 本刀纯重构, 无功能变更, 不改任何行为与配置键语义
 - 后续刀序 (方案): ② 记忆+学习服务化 (MemoryService) → ③ 结构化事件流 traceId → ④ 工具超时预算。
 
+## v1.6.0-dev (2026-09-14) - 重构第三刀: 结构化事件流 traceId 贯穿 (core/trace.js)
+
+> **刀序调整**: 原方案 ②→③ 对调为先 ③→②。理由: 记忆模块此前零可观测性 (src/memory/ 全 9 文件仅 1 个 console.warn), 没有事件流, 第二刀记忆服务化抽取后无法验证"L1 何时升 L2"等行为等价。事件流是记忆服务化的验证基础设施。
+
+### 新增
+- `src/core/trace.js`: AsyncLocalStorage (node:async_hooks 原生, 零依赖) 贯穿 traceId + EventTracer 事件流
+  - `runWithTrace(fn, meta)`: 入口生成 traceId, 深层异步子调用自动继承, 无需手动传参
+  - `EventTracer.event(type, payload, {durationMs, error})`: 写 data/logs/traces/events-YYYY-MM-DD.jsonl, 落盘前 PII 脱敏
+  - `EventTracer.span(type, fn)`: 包装子操作自动记录耗时, 失败带 error 并重抛
+  - 与 src/utils/trace.js (工具调用轨迹) 互补, 工具轨迹结构不动
+
+### 埋点 (关键路径, 高频工具调用不碰)
+- 对话入口: chat()/chatStream() 包 runWithTrace (traceId 生成)
+- 记忆升降级: memory/extract (提炼条数) / memory/summarize / memory/query (命中数) / memory/scene_assign / memory/persona (L3 画像) / memory/learn (经验)
+- 工具失败路径 (policy.js 增 onEvent 回调): tool/overflow (溢出降档) / tool/explore_break (探索熔断) / tool/repeat_warn (重复) / tool/error_retry (错误重试)
+- 学习: learning/refine / learning/refine_skill / learning/upgrade_skill
+- Agent spawn: agent/spawn (spawn_agent 工具调用时)
+
+### 安全增强
+- `src/utils/pii.js` 补 URL query 敏感参数脱敏规则 (url_secret): `?token=/key=/secret=/sign=` 等参数值落盘前替换为 [REDACTED], 保留参数名不误伤合法 URL 参数
+  - 此前 URL query 里的凭证 (最常见的泄漏渠道) 完全未覆盖, traces.record 同样受益
+
+### 验证
+- 新增 test/trace.test.js (8 项): traceId 贯穿深层异步 / meta 注入 / 无上下文降级 / PII 脱敏 / span 成败 / runToolLoop onEvent 事件
+- 全量测试: 560 pass / 0 fail / 6 skip (552 + 8 新增)
+- 真实 smoke: agent chat 事件落盘, 构造期画像 build 事件 traceId=null 为预期 (无对话上下文), 对话内 build 带 traceId (已实证)
+- 零功能变更, 配置键语义不变
+
 ## v1.5.2 (2026-09-13) - 修复: src/memory 被 .gitignore 误排除 (仓库完整性)
 
 > **事故**: .gitignore 裸规则 `memory/` 匹配了任意层级的 memory 目录，包括 `src/memory/`，导致整个记忆子系统 9 个文件从 git 仓库静默消失（npm 包仍含源码，但 clone 仓库后代码无法运行，536 测试全挂）。

@@ -8,6 +8,8 @@ import { TOOL_ERROR_PREFIX } from "../tools/index.js";
 // 重构第一刀 (2026-09-14): 工具循环执行策略抽至 src/core/policy.js
 // (探索熔断/重复检测/溢出降档/错误重试/结果裁剪/循环驱动), 重新导出保持测试与外部兼容
 import { runToolLoop, LLM_FAILED_HINT } from "../core/policy.js";
+// 重构第三刀 (2026-09-14): 结构化事件流 traceId 贯穿 (AsyncLocalStorage), 关键路径埋点
+import { EventTracer, runWithTrace } from "../core/trace.js";
 export { isOverflowError as _isOverflowError, trimToolResult, toToolContent } from "../core/policy.js";
 import { imageFileToDataUrl } from "../tools/builtin.js";
 import { logicalDay } from "../utils/store.js";
@@ -107,6 +109,8 @@ export class PPXAgent {
     this.scenes = this.ctx.consume("scenes");
     this.personaStore = this.ctx.consume("personaStore");
     this.traces = this.ctx.consume("traces");
+    // 重构第三刀: 结构化事件流 (记忆升降级/工具失败/spawn/自愈触发), 独立于工具轨迹
+    this.tracer = new EventTracer(this.dataDir);
     this.bus = this.ctx.consume("bus");
     // ⑧ 免疫系: 全局闸门挂到总线命令通道 (拦截+审计)
     this.__guard = installGuard(this, { allowList: this.config.agent?.guardAllowList || [] });
@@ -222,11 +226,13 @@ export class PPXAgent {
     const cleaned = text.replace(/```(?:json|JSON)?\s*/g, "").replace(/```/g, "").trim();
     // 提取第一个最外层 JSON 数组 (贪婪匹配到最后一个 ], 容忍内容里的嵌套方括号)
     const m = cleaned.match(/\[[\s\S]*\]/);
-    if (!m) return [];
+    if (!m) { this.tracer.event("memory/extract", { count: 0, reason: "no_json" }); return []; }
     try {
       const arr = JSON.parse(m[0]);
-      return Array.isArray(arr) ? arr.map((x) => String(x.content || x).trim()).filter(Boolean) : [];
-    } catch { return []; }
+      const out = Array.isArray(arr) ? arr.map((x) => String(x.content || x).trim()).filter(Boolean) : [];
+      this.tracer.event("memory/extract", { count: out.length, existing: existing.length });
+      return out;
+    } catch { this.tracer.event("memory/extract", { count: 0, reason: "parse_fail" }); return []; }
   }
 
   // 辅助 LLM 调用前置健康探测 (v1.0.7): 模型不可用 (本地服务未运行/远端不可达) 时快速跳过,
@@ -245,6 +251,7 @@ export class PPXAgent {
       { role: "system", content: "你是记忆压缩器。把下面这段对话记录压缩成一段简洁的中文摘要(≤200字), 保留关键事实、用户偏好、进展和待办。不要客套, 直接输出摘要。" },
       { role: "user", content: String(raw).slice(0, 4000) },
     ], { timeoutMs: AUX_LLM_TIMEOUT_MS, retryMax: 0 });
+    this.tracer.event("memory/summarize", { chars: String(raw).length, ok: true });
     return r.content;
   }
 
@@ -265,15 +272,18 @@ export class PPXAgent {
   // P1: 语义记忆检索 - 原始查询 + LLM 扩展变体做 RRF 融合; 无 LLM 时退化为单查询
   async _memoryQuery(q, { limit = 5, scope = null } = {}) {
     // 有 embedder 时走 dense 语义检索 (与 BM25 RRF 融合), 否则 LLM 扩展 + RRF
+    let hits;
     if (this.facts.embedder) {
-      return this.facts.querySemantic(q, { limit, scope });
+      hits = this.facts.querySemantic(q, { limit, scope });
+    } else {
+      const variants = [q];
+      if (this.llm) {
+        try { variants.push(...(await this._expandQuery(q))); } catch { /* LLM 失败静默降级 */ }
+      }
+      hits = variants.length === 1 ? this.facts.query(q, { limit, scope }) : this.facts.queryMulti(variants, { limit, scope });
     }
-    const variants = [q];
-    if (this.llm) {
-      try { variants.push(...(await this._expandQuery(q))); } catch { /* LLM 失败静默降级 */ }
-    }
-    if (variants.length === 1) return this.facts.query(q, { limit, scope });
-    return this.facts.queryMulti(variants, { limit, scope });
+    this.tracer.event("memory/query", { q: String(q).slice(0, 80), hits: Array.isArray(hits) ? hits.length : 0, scope: scope || null });
+    return hits;
   }
 
   // ---- 多轮会话历史 (吸收 dsh "会话即事实源") ----
@@ -510,8 +520,10 @@ export class PPXAgent {
     try {
       this.personaStore.buildUserPersona(this.facts.list(), { force: true });
       this.personaStore.buildAgentPersona(this.experience.lessons, { force: true });
+      this.tracer.event("memory/persona", { ok: true });
     } catch (e) {
       warn("L3 画像生成失败:", e.message);
+      this.tracer.event("memory/persona", { ok: false }, { error: e?.message });
     }
   }
 
@@ -528,6 +540,8 @@ export class PPXAgent {
 
   // 对话主入口 (含工具调用循环)
   async chat(userMsg, { persist = true, sessionKey = "default", mode = null } = {}) {
+    // 重构第三刀: 入口生成 traceId, 记忆/工具/学习子调用自动继承 (AsyncLocalStorage)
+    return runWithTrace(async () => {
     this.clearInterrupt(); // 新一轮对话开始, 复位上一轮的中断状态
     this.bus?.emit("chat/user", { userMsg, sessionKey }, { source: "agent.chat" });
     let reply;
@@ -565,6 +579,7 @@ export class PPXAgent {
     this._lifecycleTick();
     this.evolve && this.evolve.tick();
     return reply;
+    }, { sessionKey, channel: "chat", userMsg: String(userMsg).slice(0, 200) });
   }
 
   // 生命周期: 每次对话计数 + 阶段转换 (委托 ans/lifecycle 模块)
@@ -607,6 +622,8 @@ export class PPXAgent {
   // 支持工具循环: 若消息触发工具调用, 走 _llmWithTools (触发 onTool 事件推送工具活动),
   // 最终结果作为一次 delta 推送; 否则走 streamChat 逐字流式 [P1#7]
   async chatStream(userMsg, { sessionKey = "default", onDelta, onTool, onStep } = {}) {
+    // 重构第三刀: 入口生成 traceId (无 LLM 降级 chat 时嵌套新 trace, 独立可追踪)
+    return runWithTrace(async () => {
     if (!this.llm) return this.chat(userMsg, { sessionKey });
     this.clearInterrupt(); // 新一轮对话开始, 复位中断状态
     // 内核自主决策: 高置信简单指令本地处理
@@ -649,6 +666,7 @@ export class PPXAgent {
     this._pushTurn(sessionKey, String(userMsg), reply);
     await this.memory.recordTurn(userMsg, reply);
     return reply;
+    }, { sessionKey, channel: "chatStream" });
   }
 
   // 多 provider 回退: 依次尝试, 失败切下一个
@@ -700,6 +718,7 @@ export class PPXAgent {
     if (this._onToolEvent) { try { this._onToolEvent({ type: "start", tool: name, args, ts: Date.now() }); } catch {} }
     const result = await this.tools.call(name, args, { agent: this });
     const ok = !result.startsWith(TOOL_ERROR_PREFIX);
+    if (name === "spawn_agent") this.tracer.event("agent/spawn", { args });
     this.bus?.emit("tool/result", {
       name,
       ok,
@@ -733,6 +752,7 @@ export class PPXAgent {
       runTool: (name, args) => this._runTool(name, args),
       shrinkMessages: (messages, budget) => this._shrinkMessagesForOverflow(messages, budget),
       histTokenCap: () => this._histTokenCap(),
+      onEvent: (type, payload) => this.tracer.event(type, payload),
     });
   }
 
@@ -801,6 +821,7 @@ export class PPXAgent {
     if (m) {
       this.experience.learn({ task: "用户主动分享", lesson: m[1], tags: ["user-shared"] });
       if (this.lifecycle) this.lifecycle.evolve(); // 生命周期: 进化计数 (落盘)
+      this.tracer.event("memory/learn", { lesson: m[1].slice(0, 120), source: "user-shared" });
       info(`学到经验: ${m[1]}`);
     }
   }
@@ -840,6 +861,7 @@ export class PPXAgent {
       return { distilled: 0, rejected: true, reason: g.reason, lesson };
     }
     info(`[refine] 学到经验: ${lesson}`);
+    this.tracer.event("learning/refine", { lesson: lesson.slice(0, 120) });
     return { distilled: 1, lesson };
   }
 
@@ -896,6 +918,7 @@ export class PPXAgent {
     if (res.startsWith(TOOL_ERROR_PREFIX)) return { created: 0, reason: res };
     if (this.auditor) this.auditor.record("skill_created", { lesson: `创建技能 ${name}` }); // 已过 verifySkill 闸门, 只记账
     info(`[refineSkill] 生成技能: ${name}`);
+    this.tracer.event("learning/refine_skill", { name });
     return { created: 1, name };
   }
 
@@ -934,6 +957,7 @@ export class PPXAgent {
       if (typeof w === "string" && w.startsWith(TOOL_ERROR_PREFIX)) return { upgraded: 0, reason: w, name: id };
       if (this.skills.resetUse) this.skills.resetUse(id);
       info("[upgradeSkill] 升级技能: " + id + " (uses=" + used.uses + ")");
+      this.tracer.event("learning/upgrade_skill", { id, uses: used.uses });
       return { upgraded: 1, name: id, changed: v.changed, uses: used.uses };
     } catch (e) {
       warn("[upgradeSkill] 失败: " + String(e?.message || e).slice(0, 120));
@@ -944,9 +968,11 @@ export class PPXAgent {
   // 拊新记忆归档进 L2 场景
   _archiveScenes() {
     const recent = this.facts.query("", { limit: 5 });
+    let assigned = 0;
     for (const f of recent) {
-      if (!this.scenes.findByFactId(f.id)) this.scenes.assign(f);
+      if (!this.scenes.findByFactId(f.id)) { this.scenes.assign(f); assigned++; }
     }
+    if (assigned > 0) this.tracer.event("memory/scene_assign", { assigned });
   }
 
   // 可观测: 聚合各层状态 (记忆 L0-L3 / 轨迹 / 工具 / 经验 / 自愈)
