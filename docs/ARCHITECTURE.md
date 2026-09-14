@@ -92,10 +92,12 @@
 
 ```
 src/
-├── agent/       Agent 引擎（编排 + 工具循环 + 多模型回退）
+├── core/        核心纯逻辑（policy.js 工具循环策略 / trace.js 事件流 traceId 贯穿）
+├── services/    业务服务（memory-service 记忆协调 / learning-service 自我学习，agent 薄委托）
+├── agent/       Agent 引擎（编排薄委托 + 多模型回退；工具循环/记忆/学习已抽 core/services）
 ├── ans/         ANS 模块（values 价值对齐 / proactive 主动任务 / lifecycle 生命周期，可更换）
 ├── plugin/      插件装配（Context + 内置插件）
-├── memory/      四层记忆 + 会话事件日志 + 压缩层
+├── memory/      四层记忆存储 + 会话事件日志 + 压缩层
 ├── tools/       工具系统（catalog + seam + builtin/advanced/methods/selfmod/document/ocr）
 ├── seam/        服务层能力 seam（shell 等）
 ├── llm/         LLM 客户端（router 路由中枢 + client + retry + fence + dsml + embedder）

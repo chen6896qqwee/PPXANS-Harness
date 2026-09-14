@@ -44,6 +44,10 @@ npm run chat
 | `values` | 4 条默认 | **核心价值（ANS 价值对齐）**，注入 system 最前（【核心价值·不可违背】），自定义数组直接覆盖默认 |
 | `proactive.enabled` | false | **主动任务生成**开关（默认关防打扰），开启后定时扫描记忆生成主动提醒 |
 | `proactive.interval_ms` | 3600000 | 主动提醒间隔（毫秒） |
+| `max_tool_rounds` | 8 | 工具循环最大轮次（防无限工具调用） |
+| `tool_result_budget` | 4000 | 工具结果裁剪预算（超长结果保留头尾，防撑爆上下文） |
+| `max_tool_error_retry` | 2 | 工具错误喂回模型修正的重试次数 |
+| `tool_timeout_ms` | 30000 | **全局默认工具超时**（工具未声明 `timeoutMs` 时兑底，防单个慢工具卡死对话；工具级 `timeoutMs` 优先；0=不限时）。超时触发 `tool/timeout` trace 事件（含 elapsedMs/budgetMs/retried），是熔断/自适应预算的数据基础 |
 
 ## user
 

@@ -19,7 +19,9 @@
 ### ① 神经系（认知）— ✅ 最成熟
 | 模块 | 实测能力 |
 |------|---------|
-| `src/agent/index.js` (1176行) | 编排核心：`chat`/`chatStream` 主入口、`_llmWithLeaveback` 多provider回退、`_llmWithTools` 工具循环、`_localIntent` 意图预判、`_expandQuery` 查询扩展 |
+| `src/agent/index.js` (955行) | 编排薄委托：`chat`/`chatStream` 主入口、`_llmWithFallback` 多provider回退、`_localIntent` 意图预判；工具循环/记忆/学习已抽离（下方 core/services） |
+| `src/core/` | `policy.js` 工具循环策略（循环驱动/探索熔断/重复检测/溢出降档/错误重试/超时重试）+ `trace.js` 事件流（AsyncLocalStorage traceId 贯穿 + events-*.jsonl） |
+| `src/services/` | `memory-service.js` 记忆协调（L1提炼/L2归档/L3画像/经验/检索 + afterTurn 升降级协调器）+ `learning-service.js` 自我学习（refine/refineSkill/upgradeSkill，验证闸门保留） |
 | `src/mode/` (7模式) | react(默认工具循环) / single / plan-exec / router / blackboard / graph / legion — 对应 RC1 ①的规划/决策/反思多形态 |
 | `src/llm/` | client(多后端http/openclaw/deepseek) + retry(瞬态分类重试) + fence(纯文本围栏) + dsml + embedder |
 | `src/ans/values.js` | 【核心价值·不可违背】注入 system prompt 最前 — 已实现 RC1 ⑦→① 的"价值注入" |

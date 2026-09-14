@@ -1,6 +1,6 @@
 {
   "name": "ppx-agent",
-  "version": "1.5.2",
+  "version": "1.6.0",
   "description": "皮皮虾 (PPX Agent) - 会自我修复、自我学习的超级 Agent. 零依赖纯Node智能体内核. Self-healing zero-dependency agent in pure Node.",
   "type": "module",
   "license": "Apache-2.0",
