@@ -64,14 +64,38 @@ export async function runWithPolicy(meta, args, ctx = {}) {
   let timer = null;
   let timedOut = false;
   const ctrl = new AbortController();
-  if (meta.timeoutMs > 0) {
-    timer = setTimeout(() => { timedOut = true; ctrl.abort(); }, meta.timeoutMs);
+  // 超时预算: 工具级声明优先 (meta.timeoutMs > 0), 否则全局默认 (ctx.timeoutMs, agent 从 config.agent.tool_timeout_ms 传入)
+  // v1.6.0 (第四刀): 无声明工具不再永不超时 — 有保守全局默认兑底, 避免单个慢工具卡死整个对话
+  const effectiveTimeout = meta.timeoutMs > 0 ? meta.timeoutMs : (Number(ctx.timeoutMs) || 0);
+  if (effectiveTimeout > 0) {
+    timer = setTimeout(() => { timedOut = true; ctrl.abort(); }, effectiveTimeout);
   }
   try {
-    // 兼容 execute(args) 与 execute(args, ctx) 两种签名
-    const result = fn.length >= 2
-      ? await fn(args, { ...ctx, signal: ctrl.signal })
-      : await fn(args);
+    // v1.6.0 (第四刀): 双层超时兜底 —
+    //   1) signal 传给 execute: 配合的工具提前终止释放资源 (资源超时)
+    //   2) Promise.race 强制超时返回: 不响应 signal 的工具也不至于永远挂住对话 (语义超时兜底)
+    // 这是文档指出的灰色地带: 光靠 abort 信号, 不配合的工具会无限期挂着。
+    const run = () => (fn.length >= 2 ? fn(args, { ...ctx, signal: ctrl.signal }) : fn(args));
+    let result;
+    if (effectiveTimeout > 0) {
+      let raceTimer = null;
+      const timeoutGuard = new Promise((_, reject) => {
+        raceTimer = setTimeout(() => reject(Object.assign(new Error("timeout"), { timedOut: true })), effectiveTimeout);
+      });
+      const pRun = Promise.resolve().then(run);
+      // 哨兵: 超时赢时工具方后到的 reject 忽略, 防 unhandledRejection 崩进程
+      pRun.catch(() => {});
+      try {
+        result = await Promise.race([pRun, timeoutGuard]);
+      } catch (e) {
+        if (e && e.timedOut) timedOut = true;
+        throw e;
+      } finally {
+        if (raceTimer) clearTimeout(raceTimer);
+      }
+    } else {
+      result = await run();
+    }
     if (timedOut) return `${TOOL_ERROR_PREFIX} ${meta.name}: 超时`;
     if (meta.after) {
       try { await meta.after(args, result, ctx); } catch { /* after 钩子错误不阻塞 */ }

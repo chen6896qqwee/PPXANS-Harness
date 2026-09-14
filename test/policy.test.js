@@ -6,7 +6,7 @@ import { test } from "node:test";
 import assert from "node:assert";
 import {
   runToolLoop, ToolLoopPolicy, trimToolResult, isOverflowError,
-  EXPLORE_TOOLS, DEFAULT_EXPLORE_BREAK,
+  EXPLORE_TOOLS, DEFAULT_EXPLORE_BREAK, callWithTimeoutRetry, isTimeoutResult,
 } from "../src/core/policy.js";
 import { TOOL_ERROR_PREFIX } from "../src/tools/index.js";
 
@@ -244,4 +244,100 @@ test("EXPLORE_TOOLS: 探索类工具集存在且含核心只读工具", () => {
   assert.ok(EXPLORE_TOOLS.has("read_file"));
   assert.ok(EXPLORE_TOOLS.has("web_search"));
   assert.ok(!EXPLORE_TOOLS.has("run_command"));
+});
+
+// ---- 第四刀: 超时检测与重试 (v1.6.0 feature) ----
+
+const TIMEOUT_ERR = TOOL_ERROR_PREFIX + " get_time: 超时";
+
+function mkRunTool(results) {
+  const calls = [];
+  let i = 0;
+  return [
+    async (n, a) => { calls.push([n, a]); return results[Math.min(i++, results.length - 1)]; },
+    calls,
+  ];
+}
+
+test("isTimeoutResult: 识别超时错误", () => {
+  assert.ok(isTimeoutResult(TIMEOUT_ERR));
+  assert.ok(!isTimeoutResult(TOOL_ERROR_PREFIX + " get_time: 命令不存在"));
+  assert.ok(!isTimeoutResult("正常结果"));
+});
+
+test("callWithTimeoutRetry: 幂等工具超时重试一次成功", async () => {
+  const [runTool, calls] = mkRunTool([TIMEOUT_ERR, "10:30"]);
+  const events = [];
+  const r = await callWithTimeoutRetry({
+    name: "get_time", args: {}, runTool, isIdempotent: true,
+    budgetMs: 500, onEvent: (t, p) => events.push({ t, ...p }),
+  });
+  assert.equal(r.result, "10:30");
+  assert.equal(r.retried, true);
+  assert.equal(r.timedOut, false);
+  assert.equal(calls.length, 2, "应重试一次");
+  assert.equal(events.length, 1);
+  assert.equal(events[0].t, "tool/timeout");
+  assert.equal(events[0].retried, false);
+  assert.equal(events[0].budgetMs, 500);
+  assert.ok(events[0].elapsedMs >= 0);
+});
+
+test("callWithTimeoutRetry: 超时两次失败返回结构化错误", async () => {
+  const [runTool, calls] = mkRunTool([TIMEOUT_ERR, TIMEOUT_ERR]);
+  const events = [];
+  const r = await callWithTimeoutRetry({
+    name: "get_time", args: {}, runTool, isIdempotent: true,
+    onEvent: (t, p) => events.push({ t, ...p }),
+  });
+  assert.equal(r.timedOut, true);
+  assert.equal(r.retried, true);
+  assert.equal(r.result, TIMEOUT_ERR);
+  assert.equal(calls.length, 2);
+  assert.equal(events.length, 2, "两次超时各发一次事件");
+  assert.equal(events[1].gaveUp, true);
+});
+
+test("callWithTimeoutRetry: 非幂等工具超时不重试 (副作用安全)", async () => {
+  const [runTool, calls] = mkRunTool([TIMEOUT_ERR]);
+  const events = [];
+  const r = await callWithTimeoutRetry({
+    name: "run_command", args: {}, runTool, isIdempotent: false,
+    onEvent: (t, p) => events.push({ t, ...p }),
+  });
+  assert.equal(r.retried, false);
+  assert.equal(r.timedOut, true);
+  assert.equal(calls.length, 1, "非幂等不重试");
+  assert.equal(events[0].skippedRetry, true);
+});
+
+test("callWithTimeoutRetry: 正常结果不触发超时逻辑", async () => {
+  const [runTool, calls] = mkRunTool(["正常"]);
+  const events = [];
+  const r = await callWithTimeoutRetry({ name: "get_time", args: {}, runTool, onEvent: (t) => events.push(t) });
+  assert.equal(r.result, "正常");
+  assert.equal(r.timedOut, false);
+  assert.equal(r.retried, false);
+  assert.equal(calls.length, 1);
+  assert.equal(events.length, 0);
+});
+
+test("runToolLoop: 幂等工具超时经重试后产出结论", async () => {
+  const plan = [
+    { tool_calls: [tc("t1", "get_time")], content: null },
+    { tool_calls: [], content: "10:30" },
+  ];
+  const llm = mockLLM(plan);
+  const events = [];
+  let first = true;
+  const out = await runToolLoop({
+    seedMessages: [{ role: "user", content: "几点" }],
+    llm, tools: [], config: {},
+    isIdempotentTool: () => true,
+    onEvent: (t, p) => events.push({ t, ...p }),
+    runTool: async (n) => { if (first) { first = false; return TIMEOUT_ERR; } return "10:30"; },
+    shrinkMessages: (m) => m,
+  });
+  assert.equal(out, "10:30");
+  assert.ok(events.some((e) => e.t === "tool/timeout"), "应发出 tool/timeout 事件");
 });

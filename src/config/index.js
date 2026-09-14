@@ -30,6 +30,9 @@ export const DEFAULT_CONFIG = {
     max_tool_rounds: 8,
     tool_result_budget: 4000,
     max_tool_error_retry: 2,
+    // v1.6.0 (第四刀): 全局默认工具超时预算 (工具未声明 timeoutMs 时兑底, 防单个慢工具卡死对话)
+    // 保守默认, 先跑一周采集 P50/P95/P99 再调 (第五刀自适应预算的数据基础); 0 = 不限时
+    tool_timeout_ms: 30000,
     // 模型优先级(local 本地优先/cloud 云端优先): 本地测试默认 local, 直接走本地模型; 配云端 key 也先本地
     model_preference: "local",
   },

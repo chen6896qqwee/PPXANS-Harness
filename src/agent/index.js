@@ -670,7 +670,7 @@ export class PPXAgent {
     this._lastTurnUsedTools = true;
     this.bus?.emit("tool/call", { name, args }, { source: "agent._runTool" });
     if (this._onToolEvent) { try { this._onToolEvent({ type: "start", tool: name, args, ts: Date.now() }); } catch {} }
-    const result = await this.tools.call(name, args, { agent: this });
+    const result = await this.tools.call(name, args, { agent: this, timeoutMs: Number(this.config.agent?.tool_timeout_ms) || 0 });
     const ok = !result.startsWith(TOOL_ERROR_PREFIX);
     if (name === "spawn_agent") this.tracer.event("agent/spawn", { args });
     this.bus?.emit("tool/result", {
@@ -707,7 +707,26 @@ export class PPXAgent {
       shrinkMessages: (messages, budget) => this._shrinkMessagesForOverflow(messages, budget),
       histTokenCap: () => this._histTokenCap(),
       onEvent: (type, payload) => this.tracer.event(type, payload),
+      // v1.6.0 第四刀: 超时重试决策 (幂等才重试) + 超时预算查询 (事件采集)
+      isIdempotentTool: (name) => this._toolIdempotent(name),
+      toolTimeoutOf: (name) => this._toolTimeoutOf(name),
     });
+  }
+
+  // 工具是否幂等 (可安全超时重试): 读取工具元数据, 未声明默认 true (只读/查询类)
+  _toolIdempotent(name) {
+    try {
+      const m = this.tools && typeof this.tools.metaOf === "function" ? this.tools.metaOf(name) : null;
+      return m ? !!m.idempotent : true;
+    } catch { return true; }
+  }
+
+  // 工具超时预算 (ms, 0/无声明 = 用全局默认; 事件采集用)
+  _toolTimeoutOf(name) {
+    try {
+      const m = this.tools && typeof this.tools.metaOf === "function" ? this.tools.metaOf(name) : null;
+      return m ? (m.timeoutMs > 0 ? m.timeoutMs : (Number(this.config.agent?.tool_timeout_ms) || 0)) : (Number(this.config.agent?.tool_timeout_ms) || 0);
+    } catch { return Number(this.config.agent?.tool_timeout_ms) || 0; }
   }
 
   // 离线工具路由: 无 LLM 时识别简单工具指令

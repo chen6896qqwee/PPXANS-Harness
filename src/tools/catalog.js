@@ -67,6 +67,11 @@ export class ToolCatalog {
     return this.tools.has(name);
   }
 
+  // 元数据查询 (v1.6.0 第四刀: 超时重试需要知道工具是否幂等/超时预算)
+  metaOf(name) {
+    return this.tools.get(name) || null;
+  }
+
   list() {
     return [...this.tools.keys()];
   }

@@ -1,5 +1,43 @@
 # CHANGELOG
 
+## v1.6.0 (2026-09-14) - FEATURE: 工具超时预算 (首个功能增量, 前三刀 dev 归入此版)
+
+> **定性**: 这是四刀里第一个功能增量, 非等价重构。前三刀 (抽 policy / trace 事件流 / 服务化) 是等价重构归入 v1.6.0-dev;
+> 第四刀引入超时后, 之前会永久挂起的工具调用现在会被中断 — **验证标准从「行为等价」切换为「超时行为正确」**。
+> 回滚点: 前三刀重构完成状态 = bf72a59 (干净的"三刀重构完成"), 第四刀如需大改可整体回退到该点。
+
+### 超时设计 (最小版本)
+- **工具声明 timeoutMs**: 工具级覆盖已存在 (seam.js normalizeMeta, 0=不限时)。本次补全局默认兑底 `agent.tool_timeout_ms = 30000`
+  - 优先级: 工具级 timeoutMs > 全局默认; 无声明 + 无默认 = 不限时 (向后兼容)
+- **超时触发产生 trace 事件**: `tool/timeout` 带 toolName/elapsedMs/budgetMs/retried/gaveUp/skippedRetry
+  - 这是后续熔断/自适应预算 (第五刀) 的数据基础 — 现在开始采集 P50/P95/P99 样本
+- **循环决策**: 超时 → 幂等工具重试一次 → 失败返回结构化错误
+  - 幂等边界: 非幂等工具超时不重试 (避免副作用二次执行), 事件带 skippedRetry
+  - 不做退避/熔断/自适应预算 — 需真实失败数据后 (第五刀) 再设计
+
+### 双层层超时兜底 (测试抓出的真 bug 修复)
+- seam.js runWithPolicy 原实现只靠 AbortController signal 中断: **工具不响应 signal 时会永远挂住** (abort 只是设 flag, execute 仍挂, await 永不返回)
+- 新增 Promise.race 强制超时返回: 即使工具不响应 signal 也 100ms 内强制返回 (语义超时兑底); 配合 signal 的工具仍能提前释放资源 (资源超时)
+- 哨兵 pRun.catch 防输掉方 rejection 导致 unhandledRejection 崩进程
+- 验证: 挂起工具 (永不 resolve) 超时测试从"卡死"变为 109ms 强制返回
+
+### 改动
+- `src/tools/seam.js`: 全局默认超时 (ctx.timeoutMs) + Promise.race 双层兑底
+- `src/tools/catalog.js`: 新增 metaOf(name) 元数据查询 (幂等/预算)
+- `src/core/policy.js`: isTimeoutResult + callWithTimeoutRetry (超时重试一次) + runToolLoop 接线 (isIdempotentTool/toolTimeoutOf 注入)
+- `src/agent/index.js`: _runTool 传全局默认超时; _toolIdempotent/_toolTimeoutOf 查询
+- `src/config/index.js`: DEFAULT_CONFIG agent.tool_timeout_ms=30000 (保守默认, 待数据调优)
+- 新增 test/timeout.test.js (6 项) + policy.test.js 加 7 项超时重试用例
+
+### 验证
+- 全量测试: 577 pass / 0 fail / 6 skip (566 + 11 新增)
+- 自愈基准: 7/7 (100%)
+- 超时行为正确: 挂起工具强制返回 / 工具级覆盖优先 / 幂等重试 / 非幂等不重试 / 向后兼容 (无声明不限时)
+
+### 遗留 (第五刀候选, 需真实超时数据支撑)
+- 熔断 (连续超时工具降级) / 自适应预算 (按 P95/P99 动态调 timeoutMs) / 退避策略
+- 现状: 停在 v1.6.0, 跑一段时间积累超时数据后再决策
+
 ## v1.6.0-dev (2026-09-14) - 重构第一刀: 工具循环执行策略抽离 (core/policy.js)
 
 > **起点**: 原 PPXAgent._llmWithTools (1238 行上帝对象的一部分) 集循环驱动/探索熔断/重复检测/溢出降档/错误重试于一身, 策略焊死在内核, 无法独立测试/替换。本刀把执行策略从 agent 抽离为纯逻辑模块。

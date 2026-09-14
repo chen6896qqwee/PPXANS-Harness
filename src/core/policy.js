@@ -63,6 +63,43 @@ export function toToolContent(result, budget = DEFAULT_TOOL_RESULT_BUDGET) {
   return trimToolResult(s, budget);
 }
 
+// ---- 超时检测与重试 (v1.6.0 第四刀: 首个功能增量, 非等价重构) ----
+// 语义: 工具层 (seam.js runWithPolicy) 已用 AbortController 真中断底层执行 (资源超时),
+//       这里负责策略层: 超时结果识别 + 幂等工具重试一次 + tool.timeout 事件采集。
+// 边界 (最小版本): 不搞退避/熔断/自适应预算 — 留到有真实超时数据后 (第五刀) 再设计。
+// 返回: { result, elapsedMs, timedOut, retried }
+export function isTimeoutResult(r) {
+  return typeof r === "string" && r.startsWith(TOOL_ERROR_PREFIX) && r.includes("超时");
+}
+
+export async function callWithTimeoutRetry({
+  name, args, runTool,
+  isIdempotent = true,       // 幂等工具才自动重试 (避免非幂等工具副作用二次执行)
+  budgetMs = null,           // 工具超时预算 (toolTimeoutOf 注入, 事件采集用)
+  onEvent = null,
+}) {
+  const ev = (type, payload) => { if (onEvent) { try { onEvent(type, payload); } catch {} } };
+  const t0 = Date.now();
+  let result = await runTool(name, args);
+  let elapsedMs = Date.now() - t0;
+  if (!isTimeoutResult(result)) return { result, elapsedMs, timedOut: false, retried: false };
+  // 超时: 非幂等不重试 (副作用安全边界), 直接返回结构化错误
+  if (!isIdempotent) {
+    ev("tool/timeout", { tool: name, elapsedMs, budgetMs, retried: false, skippedRetry: true });
+    return { result, elapsedMs, timedOut: true, retried: false };
+  }
+  // 幂等: 重试一次
+  ev("tool/timeout", { tool: name, elapsedMs, budgetMs, retried: false });
+  const t1 = Date.now();
+  result = await runTool(name, args);
+  elapsedMs = Date.now() - t1;
+  if (isTimeoutResult(result)) {
+    ev("tool/timeout", { tool: name, elapsedMs, budgetMs, retried: true, gaveUp: true });
+    return { result, elapsedMs, timedOut: true, retried: true };
+  }
+  return { result, elapsedMs, timedOut: false, retried: true };
+}
+
 // ---- 工具循环策略状态机 ----
 // 每轮工具循环的决策都收敛到这里: 阈值从 config 读, 状态在实例内, 判定是纯方法。
 // 换策略 = 换这个类, 不动 agent 主循环。
@@ -142,7 +179,9 @@ export class ToolLoopPolicy {
 //   runTool          (name, args) => Promise<string>, 工具执行 (trace/事件由调用方负责)
 //   shrinkMessages   (messages, budget) => messages, 溢出降档裁剪 (agent 上下文管理职责)
 //   histTokenCap     () => number, 当前历史 token 预算上限
-//   onEvent          (type, payload) => void, 可选策略事件回调 (工具失败路径: 溢出降档/熔断/错误重试), 供 trace 埋点
+//   onEvent          (type, payload) => void, 可选策略事件回调 (工具失败路径: 溢出降档/熔断/错误重试/超时), 供 trace 埋点
+//   isIdempotentTool (name) => boolean, 工具是否幂等可安全重试 (默认全 true)
+//   toolTimeoutOf    (name) => number|null, 工具超时预算 (事件采集用, 默认 null)
 export async function runToolLoop({
   seedMessages,
   llm,
@@ -151,6 +190,8 @@ export async function runToolLoop({
   isInterrupted = () => false,
   onStep = null,
   onEvent = null,
+  isIdempotentTool = () => true,
+  toolTimeoutOf = () => null,
   runTool,
   shrinkMessages,
   histTokenCap = () => 8192,
@@ -196,7 +237,15 @@ export async function runToolLoop({
       if (tc.type === "function" && tc.function) {
         let args = {};
         try { args = JSON.parse(tc.function.arguments || "{}"); } catch {}
-        const result = await runTool(tc.function.name, args);
+        // v1.6.0 第四刀: 超时检测 + 幂等重试一次 (tool/timeout 事件采集 P50/P95/P99 数据基础)
+        const { result } = await callWithTimeoutRetry({
+          name: tc.function.name,
+          args,
+          runTool,
+          isIdempotent: isIdempotentTool(tc.function.name),
+          budgetMs: toolTimeoutOf(tc.function.name),
+          onEvent,
+        });
         messages.push({ role: "tool", tool_call_id: tc.id, content: toToolContent(result, policy.resultBudget) });
         if (result.startsWith(TOOL_ERROR_PREFIX)) errors.push(result);
       }

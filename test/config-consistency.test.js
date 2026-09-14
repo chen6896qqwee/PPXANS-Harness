@@ -36,6 +36,7 @@ const CONSUMED = {
   "agent.max_tool_rounds": "src/core/policy.js ToolLoopPolicy 工具循环最大轮次",
   "agent.tool_result_budget": "src/core/policy.js trimToolResult 结果裁剪预算",
   "agent.max_tool_error_retry": "src/core/policy.js ToolLoopPolicy 工具错误重试次数",
+  "agent.tool_timeout_ms": "src/tools/seam.js runWithPolicy 全局默认超时 (工具级 timeoutMs 优先) + src/agent/index.js _runTool 传参",
   "agent.model_preference": "src/llm/router.js orderProviders 本地/云端优先级(local 默认)",
   // user
   "user.name": "src/agent/index.js userName (persona 称呼)",
