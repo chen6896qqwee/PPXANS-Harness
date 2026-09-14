@@ -54,6 +54,34 @@
 - 真实 smoke: agent chat 事件落盘, 构造期画像 build 事件 traceId=null 为预期 (无对话上下文), 对话内 build 带 traceId (已实证)
 - 零功能变更, 配置键语义不变
 
+## v1.6.0-dev (2026-09-14) - 重构第二刀: 记忆+学习服务化 (services/)
+
+> **目标达成**: 依托第三刀事件流验证基础设施, 把散在 PPXAgent 上的记忆升降级 + 自我学习逻辑抽为独立服务。
+> 验证策略: 外部调用点 (selfheal/evolve.js, tools/selfmod.js, 全部相关测试) 都走 agent 公共 API,
+> agent 保留签名做薄委托, 服务可独立装配 — 行为等价由全量测试锁死。
+
+### 新增
+- `src/services/memory-service.js` — 记忆协调服务 (对应方案「升降级协调器」轻量版)
+  - extractMemory / summarizeMemory / expandQuery / query (原 agent 四方法)
+  - refreshPersona (L3 跨天刷新, 日期标记 _personaBuilt 移入 service)
+  - archiveScenes (L2 归档) / learnFromTurn (用户主动经验)
+  - **afterTurn() 升降级协调器**: 一轮对话落盘后统一触发 L2 归档 + 经验学习 + L3 画像刷新 (原 chat persist 块三个散调用收敛于此, 可单独调参/替换)
+- `src/services/learning-service.js` — 自我学习服务
+  - refine (失败→经验) / refineSkill (成功→技能) / upgradeSkill (使用中进化), 验证闸门 (verifyLesson/verifySkill/verifyUpgradeSkill) 原样保留
+- 新增 test/services.test.js (6 项): 两个 service 不依赖 agent 直接装配, 无 LLM/轨迹不足降级分支, afterTurn 聚合, refreshPersona 跨天一次, learnFromTurn 指令识别
+
+### 改动
+- `src/agent/index.js`: 10 个方法改薄委托 (公共 API 不变, evolve/selfmod/测试零改动), chat persist 块收为 memorySvc.afterTurn, 删除 4 个不再使用的 import
+  - 行数: 1238 → 1109 (第一刀) → **955** (第二刀), 两刀合计减 283 行
+- 构造器装配: memorySvc/learningSvc 依赖注入 (llm 用 getLlm 闭包 — reloadProviders 会热替换 agent.llm, 固定引用会过期)
+- memory.summarizer/setExtractor 注入改指向 service 方法
+
+### 验证
+- 全量测试: 566 pass / 0 fail / 6 skip (560 + 6 新增)
+- 自愈基准: 7/7 (100%)
+- 行为等价: refine/skill-upgrade/audit/memory-extract/query/layers/verify 等直接调 agent 公共 API 的测试全绿
+- 零功能变更, 配置键语义不变
+
 ## v1.5.2 (2026-09-13) - 修复: src/memory 被 .gitignore 误排除 (仓库完整性)
 
 > **事故**: .gitignore 裸规则 `memory/` 匹配了任意层级的 memory 目录，包括 `src/memory/`，导致整个记忆子系统 9 个文件从 git 仓库静默消失（npm 包仍含源码，但 clone 仓库后代码无法运行，536 测试全挂）。

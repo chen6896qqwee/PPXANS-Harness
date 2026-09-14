@@ -10,6 +10,9 @@ import { TOOL_ERROR_PREFIX } from "../tools/index.js";
 import { runToolLoop, LLM_FAILED_HINT } from "../core/policy.js";
 // 重构第三刀 (2026-09-14): 结构化事件流 traceId 贯穿 (AsyncLocalStorage), 关键路径埋点
 import { EventTracer, runWithTrace } from "../core/trace.js";
+// 重构第二刀 (2026-09-14): 记忆升降级 + 自我学习收敛为独立服务, agent 只保留薄委托
+import { MemoryService } from "../services/memory-service.js";
+import { LearningService } from "../services/learning-service.js";
 export { isOverflowError as _isOverflowError, trimToolResult, toToolContent } from "../core/policy.js";
 import { imageFileToDataUrl } from "../tools/builtin.js";
 import { logicalDay } from "../utils/store.js";
@@ -21,7 +24,7 @@ import { builtinPlugins, resolveLLM, resolveAllLLMs } from "../plugin/builtin.js
 import { registerMcpTools } from "../mcp/index.js";
 import { buildCompactionMessages, transcriptToText } from "../memory/compaction.js";
 import { buildDsmlPrompt } from "../llm/dsml.js";
-import { Auditor, verifyLesson, heldOutSplit } from "../audit/verifier.js";
+import { Auditor } from "../audit/verifier.js";
 // ANS 独立模块 (可更换): 价值对齐 / 自主任务生成 / 生命周期
 import { Lifecycle } from "../ans/lifecycle.js";
 import { valuesPrompt } from "../ans/values.js";
@@ -31,7 +34,6 @@ import { scan as evictionScan, status as evictionStatus } from "../ans/eviction.
 import { installGuard, guardStatus } from "../ans/guard.js";
 import { SkillLoader } from "../skills/loader.js";
 import { EvolutionEngine } from "../selfheal/evolve.js";
-import { verifySkill, verifyUpgradeSkill } from "../skills/verify.js";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 // 辅助 LLM 调用短超时 (压缩/提炼/查询扩展/经验技能提炼等非主对话调用):
@@ -131,17 +133,12 @@ export class PPXAgent {
     this.toolsEnabled = this.ctx.consume("toolsEnabled");
     this._warnMissingCloudApi(); // 发布首启引导: 未配云端 key 时明确提示
 
-    // 注入 LLM 摘要器/提炼器 (依赖 agent 方法, 装配后注入)
-    this.memory.summarizer = (raw) => this._summarizeMemory(raw);
-    this.memory.setExtractor((u, a, related) => this._extractMemory(u, a, related));
-
     // 主动通知 + 中断状态
     this._notifyCb = null;
     this._onToolEvent = null; // 工具事件回调
     this._interrupted = false;
     this._lastTurnUsedTools = false;
     this._mcp = null; // MCP 连接句柄 (connectMcp 后赋值)
-    this._personaBuilt = null; // L3 画像上次生成日期 (跨天刷新)
     this._proactiveTimer = null; // 主动任务生成定时器
     // 生命周期 (ANS 独立模块): born → growing → mature → evolving / reproducing
     // v1.0.7 持久化: 状态落盘 data/memory/lifecycle.json, 跨进程/重启不归零 (P1)
@@ -151,6 +148,31 @@ export class PPXAgent {
     this.auditor = new Auditor({ ledgerPath: path.join(this.dataDir, "audit", "verified.json") });
     // 方法技能目录 (Superpowers 吸收): 供 _context 注入技能清单, LLM 按需 load_skill
     try { this.skills = new SkillLoader(path.join(root, "skills")); } catch { this.skills = null; }
+
+    // 重构第二刀: 记忆协调服务 + 自我学习服务 (依赖注入, llm 用闭包实时取当前 provider)
+    this.memorySvc = new MemoryService({
+      getLlm: () => this.llm,
+      facts: this.facts,
+      scenes: this.scenes,
+      personaStore: this.personaStore,
+      experience: this.experience,
+      lifecycle: this.lifecycle,
+      tracer: this.tracer,
+    });
+    this.learningSvc = new LearningService({
+      getLlm: () => this.llm,
+      traces: this.traces,
+      skills: this.skills,
+      experience: this.experience,
+      lifecycle: this.lifecycle,
+      auditor: this.auditor,
+      tracer: this.tracer,
+      toolNames: () => this._toolNames(),
+      runTool: (name, args) => this.tools.call(name, args, { agent: this }),
+    });
+    // 注入 LLM 摘要器/提炼器 (依赖 service, 装配后注入)
+    this.memory.summarizer = (raw) => this.memorySvc.summarizeMemory(raw);
+    this.memory.setExtractor((u, a, related) => this.memorySvc.extractMemory(u, a, related));
 
     // 应用 tools.disabled: 从 config/ppx.json 读取需禁用的工具, 启动时禁用 (设置 UI 写盘生效)
     this._applyDisabledTools();
@@ -202,88 +224,33 @@ export class PPXAgent {
     return loadConfig(this.root, configFile);
   }
 
-  // P1#9: LLM 结构化记忆提炼 - 从高信号对话提取关键事实/偏好/待办 (替代简单启发式)
-  // 感知式提炼: 传入已有相关记忆 (existing), 让 LLM 从源头跳过与已有记忆同义/被覆盖的提炼结果,
-  // 防同一主题反复以不同措辞入库 (字面变体逃过精确去重, 语义变体逃过 0.6 Jaccard 阈值)
-  // 返回 string[] (纯内容数组); existing 为空时行为与旧版完全一致 (向后兼容)
+  // P1#9: LLM 结构化记忆提炼 (实现已迁 src/services/memory-service.js, 此处分发保持公共 API)
   async _extractMemory(user, assistant, existing = []) {
-    if (!this.llm) return [];
-    if (!(await this._auxLlmReady())) return []; // 模型不可用时跳过提炼 (退回启发式)
-    // v1.0.7 噪声治理: 显式跳过寒暄/无信息量/关于系统本身的元讨论 (如"任务描述要详细"这类对助手的建议, 非用户长期事实)
-    const sys = "你是记忆提炼器。从对话中提取值得长期记忆的关键事实、用户偏好、待办事项。只输出 JSON 数组, 每项是{content: 一句完整中文记忆}。没有值得记的返回 []。不要解释, 只输出 JSON。\n跳过以下内容: 1) 寒暄/问候/客套话; 2) 无信息量的闲聊; 3) 对助手/系统本身的元讨论与建议 (如任务描述方式、提示词建议等); 4) 已被现有记忆覆盖的内容。";
-    let userMsg = "用户: " + String(user).slice(0, 800) + "\n助手: " + String(assistant).slice(0, 800);
-    // 感知已有记忆: 若提炼结果与已有记忆含义相同/已被覆盖, 不要输出该条
-    if (existing.length) {
-      userMsg += "\n\n【已有记忆】以下记忆已存在, 若你提炼的内容与其中任意一条含义相同或被其覆盖, 则不要输出该条 (避免重复):\n"
-        + existing.map((f, i) => `${i + 1}. ${f.content}`).join("\n");
-    }
-    const r = await this.llm.chat([
-      { role: "system", content: sys },
-      { role: "user", content: userMsg },
-    ], { timeoutMs: AUX_LLM_TIMEOUT_MS, retryMax: 0 });
-    const text = String(r.content || "").trim();
-    // 容忍模型把 JSON 包在 markdown 代码块里
-    const cleaned = text.replace(/```(?:json|JSON)?\s*/g, "").replace(/```/g, "").trim();
-    // 提取第一个最外层 JSON 数组 (贪婪匹配到最后一个 ], 容忍内容里的嵌套方括号)
-    const m = cleaned.match(/\[[\s\S]*\]/);
-    if (!m) { this.tracer.event("memory/extract", { count: 0, reason: "no_json" }); return []; }
-    try {
-      const arr = JSON.parse(m[0]);
-      const out = Array.isArray(arr) ? arr.map((x) => String(x.content || x).trim()).filter(Boolean) : [];
-      this.tracer.event("memory/extract", { count: out.length, existing: existing.length });
-      return out;
-    } catch { this.tracer.event("memory/extract", { count: 0, reason: "parse_fail" }); return []; }
+    return this.memorySvc.extractMemory(user, assistant, existing);
   }
 
   // 辅助 LLM 调用前置健康探测 (v1.0.7): 模型不可用 (本地服务未运行/远端不可达) 时快速跳过,
   // 不发起 10s 超时等待 — 本地未运行的 health() 是 ECONNREFUSED 毫秒级失败, 开销可忽略
+  // (记忆/学习方法已用 service 内部版本, 此处保留供 _maybeCompact 等使用)
   async _auxLlmReady() {
     if (!this.llm) return false;
     if (typeof this.llm.health !== "function") return true;
     try { return await this.llm.health(); } catch { return false; }
   }
 
-  // 用 LLM 把旧对话浓缩成语义摘要 (Harness 上下文工程)
+  // 用 LLM 把旧对话浓缩成语义摘要 (实现已迁 memory-service, 此处分发)
   async _summarizeMemory(raw) {
-    if (!this.llm) throw new Error("无 LLM");
-    if (!(await this._auxLlmReady())) throw new Error("LLM 不可用, 跳过辅助摘要");
-    const r = await this.llm.chat([
-      { role: "system", content: "你是记忆压缩器。把下面这段对话记录压缩成一段简洁的中文摘要(≤200字), 保留关键事实、用户偏好、进展和待办。不要客套, 直接输出摘要。" },
-      { role: "user", content: String(raw).slice(0, 4000) },
-    ], { timeoutMs: AUX_LLM_TIMEOUT_MS, retryMax: 0 });
-    this.tracer.event("memory/summarize", { chars: String(raw).length, ok: true });
-    return r.content;
+    return this.memorySvc.summarizeMemory(raw);
   }
 
-  // P1: LLM 查询扩展 - 把问题改写成多个词面变体, 补语义召回 (零依赖, 复用已有 LLM)
+  // P1: LLM 查询扩展 (实现已迁 memory-service, 此处分发)
   async _expandQuery(q) {
-    if (!(await this._auxLlmReady())) return []; // 模型不可用时跳过扩展 (退回单查询)
-    const r = await this.llm.chat([
-      { role: "system", content: "你是查询扩展器。把用户的问题改写成 3 个语义相近但词面不同的检索短语(用于语义记忆检索), 每行一个, 不要序号、不要解释。" },
-      { role: "user", content: String(q).slice(0, 300) },
-    ], { timeoutMs: AUX_LLM_TIMEOUT_MS, retryMax: 0 });
-    return String(r.content || "")
-      .split(/\n+/)
-      .map((s) => s.replace(/^[\d\.\-、)）]\s*/, "").trim())
-      .filter((s) => s && s !== String(q).trim())
-      .slice(0, 3);
+    return this.memorySvc.expandQuery(q);
   }
 
-  // P1: 语义记忆检索 - 原始查询 + LLM 扩展变体做 RRF 融合; 无 LLM 时退化为单查询
+  // P1: 语义记忆检索 (实现已迁 memory-service, 此处分发)
   async _memoryQuery(q, { limit = 5, scope = null } = {}) {
-    // 有 embedder 时走 dense 语义检索 (与 BM25 RRF 融合), 否则 LLM 扩展 + RRF
-    let hits;
-    if (this.facts.embedder) {
-      hits = this.facts.querySemantic(q, { limit, scope });
-    } else {
-      const variants = [q];
-      if (this.llm) {
-        try { variants.push(...(await this._expandQuery(q))); } catch { /* LLM 失败静默降级 */ }
-      }
-      hits = variants.length === 1 ? this.facts.query(q, { limit, scope }) : this.facts.queryMulti(variants, { limit, scope });
-    }
-    this.tracer.event("memory/query", { q: String(q).slice(0, 80), hits: Array.isArray(hits) ? hits.length : 0, scope: scope || null });
-    return hits;
+    return this.memorySvc.query(q, { limit, scope });
   }
 
   // ---- 多轮会话历史 (吸收 dsh "会话即事实源") ----
@@ -512,19 +479,9 @@ export class PPXAgent {
     } catch { return ""; }
   }
 
-  // L3 画像刷新: 跨天触发 (内存日期标记, 每天首次对话刷新一次)
+  // L3 画像刷新: 跨天触发 (实现已迁 memory-service, 此处分发; 日期标记在 service 内部)
   _maybeRefreshPersona() {
-    const today = logicalDay();
-    if (this._personaBuilt === today) return;
-    this._personaBuilt = today;
-    try {
-      this.personaStore.buildUserPersona(this.facts.list(), { force: true });
-      this.personaStore.buildAgentPersona(this.experience.lessons, { force: true });
-      this.tracer.event("memory/persona", { ok: true });
-    } catch (e) {
-      warn("L3 画像生成失败:", e.message);
-      this.tracer.event("memory/persona", { ok: false }, { error: e?.message });
-    }
+    return this.memorySvc.refreshPersona();
   }
 
   // 找视觉 provider: 当前 LLM 若是 vision 直接用, 否则从 allProviders 找第一个 vision
@@ -568,11 +525,8 @@ export class PPXAgent {
       this._pushTurn(sessionKey, String(userMsg), reply);
       await this.memory.recordTurn(userMsg, reply);
       this.bus?.emit("memory/record", { userMsg, reply }, { source: "agent.chat" });
-      // L2 场景归档: 从新记忆里找需要归档的
-      this._archiveScenes();
-      this._learnFromTurn(userMsg, reply);
-      // L3 画像: 跨天刷新 (吸收新记忆/经验)
-      this._maybeRefreshPersona();
+      // 记忆升降级协调器 (memory-service): L2 场景归档 + 用户主动经验学习 + L3 画像跨天刷新
+      this.memorySvc.afterTurn(userMsg, reply);
     }
     // 生命周期推进: 每次对话计数, 阶段转换 born→growing→mature
         this.bus?.emit("chat/reply", { reply }, { source: "agent.chat" });
@@ -816,163 +770,29 @@ export class PPXAgent {
     return [];
   }
 
+  // 用户主动经验学习 (实现已迁 memory-service, 此处分发)
   _learnFromTurn(userMsg, reply) {
-    const m = String(userMsg).match(/经验交给皮皮虾[:：]\s*(.+)/i);
-    if (m) {
-      this.experience.learn({ task: "用户主动分享", lesson: m[1], tags: ["user-shared"] });
-      if (this.lifecycle) this.lifecycle.evolve(); // 生命周期: 进化计数 (落盘)
-      this.tracer.event("memory/learn", { lesson: m[1].slice(0, 120), source: "user-shared" });
-      info(`学到经验: ${m[1]}`);
-    }
+    return this.memorySvc.learnFromTurn(userMsg, reply);
   }
 
-  // P3: 自我进化闭环 - 回放近期失败轨迹, LLM 提炼经验教训进经验库 (轨迹 → 经验 → 注入上下文)
-  // 复用已有 experience.learn, 把「哪一步坏了」沉淀为可复用教训
+  // P3: 自我进化闭环 - 失败→经验 (实现已迁 learning-service, 此处分发保持公共 API)
   async refine({ limit = 20 } = {}) {
-    if (!this.llm) return { distilled: 0, reason: "无 LLM" };
-    const failed = this.traces.read(undefined, limit).filter((t) => !t.ok);
-    if (failed.length < 2) return { distilled: 0, reason: "失败轨迹不足" };
-    const summary = failed
-      .map((t) => `工具 ${t.tool}: ${String(t.error || t.result || "").slice(0, 160)}`)
-      .join("\n");
-    let lesson;
-    try {
-      const r = await this.llm.chat([
-        { role: "system", content: "你是经验提炼器。从失败的工具调用轨迹中提炼一条可复用的经验教训, 一句话说清: 什么场景、为什么失败、下次怎么做。只输出这一句话, 不要解释。" },
-        { role: "user", content: summary.slice(0, 2000) },
-      ], { timeoutMs: AUX_LLM_TIMEOUT_MS, retryMax: 0 });
-      lesson = String(r.content || "").trim();
-    } catch { lesson = ""; }
-    if (!lesson) return { distilled: 0, reason: "LLM 未产出经验" };
-    // P0① Auditor: 经验必须过确定性验证闸门才写回经验库 (不信任模型自评)
-    //   接地防幻觉(点名工具须有失败轨迹背书) + 可操作动词 + 单句精炼
-    const knownTools = this._toolNames();
-    const g = await this.auditor.gate(
-      "lesson",
-      { lesson, failedTraces: failed, knownTools },
-      verifyLesson,
-      (p) => {
-        this.experience.learn({ task: "自动提炼", lesson: p.lesson, tags: ["auto-refine"] });
-        if (this.lifecycle) this.lifecycle.evolve(); // 生命周期: 进化计数 (落盘)
-      }
-    );
-    if (!g.committed) {
-      warn(`[refine] 经验被验证闸门拒绝 (${g.reason}): ${lesson.slice(0, 80)}`);
-      return { distilled: 0, rejected: true, reason: g.reason, lesson };
-    }
-    info(`[refine] 学到经验: ${lesson}`);
-    this.tracer.event("learning/refine", { lesson: lesson.slice(0, 120) });
-    return { distilled: 1, lesson };
+    return this.learningSvc.refine({ limit });
   }
 
-  // P2: 自我进化闭环 (下) - 从成功轨迹自动提炼可复用 Skill
-  // 轨迹 → 高频成功工具模式 → LLM 提炼 → 复用 create_skill 落盘 skills/<name>/SKILL.md
-  // 与 refine() (失败→经验) 互补, 形成「失败学教训 + 成功沉淀技能」完整闭环
+  // P2: 自我进化闭环 (下) - 成功→技能 (实现已迁 learning-service, 此处分发保持公共 API)
   async refineSkill({ limit = 50, minFreq = 2 } = {}) {
-    if (!this.llm) return { created: 0, reason: "无 LLM" };
-    const ok = this.traces.read(undefined, limit).filter((t) => t.ok);
-    if (ok.length < minFreq) return { created: 0, reason: "成功轨迹不足" };
-    // 找高频成功工具 (出现 >= minFreq 次)
-    const freq = {};
-    for (const t of ok) freq[t.tool] = (freq[t.tool] || 0) + 1;
-    const hot = Object.entries(freq).filter(([, n]) => n >= minFreq).map(([t]) => t);
-    if (!hot.length) return { created: 0, reason: "无重复成功工具模式" };
-    // 用 LLM 提炼 skill (name/description/content)
-    const summary = ok.slice(-20).map((t) => `工具 ${t.tool}: ${String(t.result || "").slice(0, 80)}`).join("\n");
-    let skill;
-    try {
-      const r = await this.llm.chat([
-        { role: "system", content: "你是技能提炼器。根据成功的工具调用轨迹, 提炼一个可复用技能。只输出 JSON: {\"name\":\"技能名(仅字母数字横线)\",\"description\":\"一句话说明\",\"content\":\"SKILL正文, 含 ## 流程(逐步工作流) 和 ## 验证(完成后必须提供的证据)\"}。不要解释, 只输出 JSON。" },
-        { role: "user", content: `高频工具: ${hot.join(", ")}\n成功轨迹:\n${summary.slice(0, 2000)}` },
-      ], { timeoutMs: AUX_LLM_TIMEOUT_MS, retryMax: 0 });
-      const text = String(r.content || "").trim().replace(/```(?:json|JSON)?\s*/g, "").replace(/```/g, "").trim();
-      const m = text.match(/\{[\s\S]*\}/);
-      if (!m) return { created: 0, reason: "LLM 未产出有效 JSON" };
-      skill = JSON.parse(m[0]);
-    } catch { return { created: 0, reason: "LLM 提炼失败" }; }
-    if (!skill || !skill.content) return { created: 0, reason: "Skill 字段缺失" };
-    // name 归一化: 仅字母/数字/横线, 非法字符剔除, 空则兜底
-    const name = String(skill.name || "").replace(/[^a-zA-Z0-9-]/g, "").toLowerCase() || ("auto-" + Date.now().toString(36));
-
-    // self-evolution "reliable verification": gate before persist (no LLM)
-    //   -> structure (## Process + ## Verify) + grounded (content references hot tool, trace-backed)
-    // P0② held-out 回归: 样本够多时切出未见过的 held-out 子集, 要求接地工具在那也有背书, 防过拟合
-    const { heldOut } = heldOutSplit(ok, { ratio: 0.4, minTotal: 6 });
-    const v = verifySkill({
-      name,
-      content: String(skill.content || ""),
-      hotTools: hot,
-      okTraces: ok,
-      minFreq,
-      heldOutTraces: heldOut.length ? heldOut : undefined,
-    });
-    if (!v.ok) {
-      warn("[refineSkill] skill rejected by verify gate: " + name + " - " + v.reason);
-      return { created: 0, reason: v.reason, rejected: true, name };
-    }
-    const res = await this.tools.call("create_skill", {
-      name,
-      description: String(skill.description || "自动提炼的技能"),
-      content: String(skill.content),
-    }, { agent: this });
-    if (res.startsWith(TOOL_ERROR_PREFIX)) return { created: 0, reason: res };
-    if (this.auditor) this.auditor.record("skill_created", { lesson: `创建技能 ${name}` }); // 已过 verifySkill 闸门, 只记账
-    info(`[refineSkill] 生成技能: ${name}`);
-    this.tracer.event("learning/refine_skill", { name });
-    return { created: 1, name };
+    return this.learningSvc.refineSkill({ limit, minFreq });
   }
 
-  // 用中自进化 (source: Hermes "skill self-improves during use"):
-  // 技能用满 minUses 次后, 读它当前内容 + 相关成功轨迹,
-  // 让 LLM 改进 SKILL.md, 过 verifyUpgradeSkill 闸门(防退化) 后写回, 重置计数防连跑。
+  // 用中自进化 (实现已迁 learning-service, 此处分发保持公共 API)
   async upgradeSkill(id, { minUses = 3, limit = 40 } = {}) {
-    try {
-      if (!this.llm) return { upgraded: 0, reason: "无 LLM" };
-      if (!this.skills || typeof this.skills.read !== "function") return { upgraded: 0, reason: "无 skills加载器" };
-      const need = this.skills.get(id);
-      if (!need) return { upgraded: 0, reason: "未知技能: " + id };
-      const used = this.skills.useOf ? this.skills.useOf(id) : { uses: 0 };
-      if ((used.uses || 0) < minUses) return { upgraded: 0, reason: "使用不足", uses: used.uses, need: minUses, name: id };
-      const prev = this.skills.read(id);
-      if (prev === null) return { upgraded: 0, reason: "读取失败", name: id };
-      const ok = this.traces && typeof this.traces.read === "function" ? this.traces.read(undefined, limit).filter((t) => t.ok) : [];
-      const sample = ok.slice(-15).map((t) => "工具 " + t.tool + ": " + String(t.result || "").slice(0, 120)).join("\n");
-      let upgraded;
-      try {
-        const r = await this.llm.chat([
-          { role: "system", content: "你是技能升级器。下面是一个已存在的技能全文 + 最近的成功工具轨迹。你的任务: 基于这些实际经验改进这个技能, 补充它的“## 流程”工作步骤/检查点和“## 反合理化”建议, 切勿删除“## 验证”段。只输出改进后的 SKILL.md 正文 (frontmatter 不用重复), 不要解释。" },
-          { role: "user", content: "当前技能 (保留效果, 改进不足):\n\n" + String(prev).slice(0, 3000) + "\n\n最近成功轨迹:\n" + String(sample).slice(0, 2000) },
-        ], { timeoutMs: AUX_LLM_TIMEOUT_MS, retryMax: 0 });
-        upgraded = String(r.content || "").trim().replace(/```(?:md|markdown)?\s*/g, "").replace(/```/g, "").trim();
-      } catch {
-        return { upgraded: 0, reason: "LLM 升级失败", name: id };
-      }
-      if (!upgraded) return { upgraded: 0, reason: "空升级结果", name: id };
-      const v = verifyUpgradeSkill({ content: upgraded, prevContent: prev });
-      if (!v.ok) {
-        warn("[upgradeSkill] 被升级闸门拦截: " + id + " - " + v.reason);
-        return { upgraded: 0, reason: v.reason, rejected: true, name: id };
-      }
-      const w = await this.tools.call("create_skill", { name: id, description: (need.description || ""), content: upgraded }, { agent: this });
-      if (typeof w === "string" && w.startsWith(TOOL_ERROR_PREFIX)) return { upgraded: 0, reason: w, name: id };
-      if (this.skills.resetUse) this.skills.resetUse(id);
-      info("[upgradeSkill] 升级技能: " + id + " (uses=" + used.uses + ")");
-      this.tracer.event("learning/upgrade_skill", { id, uses: used.uses });
-      return { upgraded: 1, name: id, changed: v.changed, uses: used.uses };
-    } catch (e) {
-      warn("[upgradeSkill] 失败: " + String(e?.message || e).slice(0, 120));
-      return { upgraded: 0, reason: String(e?.message || e).slice(0, 120), name: id };
-    }
+    return this.learningSvc.upgradeSkill(id, { minUses, limit });
   }
 
-  // 拊新记忆归档进 L2 场景
+  // L2 场景归档 (实现已迁 memory-service, 此处分发)
   _archiveScenes() {
-    const recent = this.facts.query("", { limit: 5 });
-    let assigned = 0;
-    for (const f of recent) {
-      if (!this.scenes.findByFactId(f.id)) { this.scenes.assign(f); assigned++; }
-    }
-    if (assigned > 0) this.tracer.event("memory/scene_assign", { assigned });
+    return this.memorySvc.archiveScenes();
   }
 
   // 可观测: 聚合各层状态 (记忆 L0-L3 / 轨迹 / 工具 / 经验 / 自愈)
