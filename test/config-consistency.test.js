@@ -33,9 +33,9 @@ const CONSUMED = {
   "agent.values": "src/agent/index.js _valuesPrompt (src/ans/values.js 价值对齐注入)",
   "agent.proactive.enabled": "src/agent/index.js startProactiveTicker + cli/server 主动提醒开关",
   "agent.proactive.interval_ms": "src/agent/index.js startProactiveTicker 间隔",
-  "agent.max_tool_rounds": "src/agent/index.js 工具循环最大轮次",
-  "agent.tool_result_budget": "src/agent/index.js trimToolResult 结果裁剪预算",
-  "agent.max_tool_error_retry": "src/agent/index.js 工具错误重试次数",
+  "agent.max_tool_rounds": "src/core/policy.js ToolLoopPolicy 工具循环最大轮次",
+  "agent.tool_result_budget": "src/core/policy.js trimToolResult 结果裁剪预算",
+  "agent.max_tool_error_retry": "src/core/policy.js ToolLoopPolicy 工具错误重试次数",
   "agent.model_preference": "src/llm/router.js orderProviders 本地/云端优先级(local 默认)",
   // user
   "user.name": "src/agent/index.js userName (persona 称呼)",

@@ -1,5 +1,31 @@
 # CHANGELOG
 
+## v1.6.0-dev (2026-09-14) - 重构第一刀: 工具循环执行策略抽离 (core/policy.js)
+
+> **起点**: 原 PPXAgent._llmWithTools (1238 行上帝对象的一部分) 集循环驱动/探索熔断/重复检测/溢出降档/错误重试于一身, 策略焊死在内核, 无法独立测试/替换。本刀把执行策略从 agent 抽离为纯逻辑模块。
+
+### 重构
+- 新增 `src/core/policy.js` (纯逻辑, 零 agent 引用):
+  - 纯函数: `isOverflowError` / `trimToolResult` / `toToolContent` / `LLM_FAILED_HINT` (从 agent 原样迁出)
+  - 状态机 `ToolLoopPolicy`: 阈值从 config.agent 读, 状态收敛 (探索连击/重复 sig/错误重试/溢出降档计数)
+  - 循环驱动 `runToolLoop`: 依赖全部注入 (llm/tools/runTool/shrinkMessages/histTokenCap/isInterrupted/onStep), 不持有 agent
+- `src/agent/index.js`:
+  - `_llmWithTools` 瘦身为 12 行依赖注入, 策略全部委托 runToolLoop
+  - 删除 6 个常量 + 3 个纯函数定义 (迁至 policy.js)
+  - `export { isOverflowError as _isOverflowError, trimToolResult, toToolContent } from "../core/policy.js"` 重新导出, 保持测试/外部兼容
+  - 1238 → 1109 行
+- `test/config-consistency.test.js`: CONSUMED 活文档 3 个键消费位置更新为 src/core/policy.js
+- 新增 `test/policy.test.js` (16 项): runToolLoop 循环驱动 (工具回传/中断/轮次上限/探索熔断/重复检测/溢出降档/错误重试) + ToolLoopPolicy 状态机 + 纯函数
+
+### 验证
+- 全量测试: 546 pass / 0 fail / 6 skip (含新增 16 项 policy 回归)
+- 自愈基准: 7/7 (100%)
+- 行为等价: 抽取前 530 pass / 0 fail → 抽取后 530 + 16 新增全绿
+
+### 说明
+- 本刀纯重构, 无功能变更, 不改任何行为与配置键语义
+- 后续刀序 (方案): ② 记忆+学习服务化 (MemoryService) → ③ 结构化事件流 traceId → ④ 工具超时预算。
+
 ## v1.5.2 (2026-09-13) - 修复: src/memory 被 .gitignore 误排除 (仓库完整性)
 
 > **事故**: .gitignore 裸规则 `memory/` 匹配了任意层级的 memory 目录，包括 `src/memory/`，导致整个记忆子系统 9 个文件从 git 仓库静默消失（npm 包仍含源码，但 clone 仓库后代码无法运行，536 测试全挂）。

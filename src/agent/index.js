@@ -5,6 +5,10 @@ import os from "node:os";
 import { fileURLToPath } from "node:url";
 
 import { TOOL_ERROR_PREFIX } from "../tools/index.js";
+// 重构第一刀 (2026-09-14): 工具循环执行策略抽至 src/core/policy.js
+// (探索熔断/重复检测/溢出降档/错误重试/结果裁剪/循环驱动), 重新导出保持测试与外部兼容
+import { runToolLoop, LLM_FAILED_HINT } from "../core/policy.js";
+export { isOverflowError as _isOverflowError, trimToolResult, toToolContent } from "../core/policy.js";
 import { imageFileToDataUrl } from "../tools/builtin.js";
 import { logicalDay } from "../utils/store.js";
 import { estimateTokens } from "../utils/text.js";
@@ -28,10 +32,6 @@ import { EvolutionEngine } from "../selfheal/evolve.js";
 import { verifySkill, verifyUpgradeSkill } from "../skills/verify.js";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
-// 阈值默认值 (可通过 config.agent.max_tool_rounds / tool_result_budget / max_tool_error_retry 覆盖)
-const DEFAULT_MAX_TOOL_ROUNDS = 8;
-const DEFAULT_TOOL_RESULT_BUDGET = 4000; // L4 toolResultBudget: 工具结果超过此长度裁剪, 防撑爆上下文
-const DEFAULT_MAX_TOOL_ERROR_RETRY = 2;
 // 辅助 LLM 调用短超时 (压缩/提炼/查询扩展/经验技能提炼等非主对话调用):
 // 模型不可用/网络不通时快速失败降级, 避免阻塞主对话 (主对话仍走 provider 默认长超时)
 const AUX_LLM_TIMEOUT_MS = 10000;
@@ -42,47 +42,10 @@ const AUX_LLM_TIMEOUT_MS = 10000;
 // 「历史 token 预算硬上限」, 且提供不依赖 LLM 的硬裁剪兜底 + 溢出检测降档重试。
 const DEFAULT_CONTEXT_WINDOW = 8192; // 未知窗口时的保守默认 (绝不放大历史)
 const DEFAULT_CONTEXT_RATIO = 0.6;   // 历史+工具结果占用窗口的安全比例上限
-const DEFAULT_OVERFLOW_SHRINK_MAX = 2;
+// (工具循环阈值 DEFAULT_MAX_TOOL_ROUNDS / EXPLORE_TOOLS 等已迁至 src/core/policy.js)
 
-// P0③ harness 融断: 探索连击 / 重复命令 阈值 (config.agent.explore_break_limit / repeat_flag_limit 可调)
-const DEFAULT_EXPLORE_BREAK = 3;   // 连续 3 轮只有只读/查询无产出 -> 融断
-const DEFAULT_REPEAT_FLAG = 2;     // 同一工具+args 命中 2 次 -> 警告重复
-// 探索类工具集 (read-only/发现; 不算“产出或修改”)
-const EXPLORE_TOOLS = new Set([
-  "read_file", "list_dir", "web_search", "fetch_page", "memory_search", "read_document",
-  "get_time", "read_image", "ocr_image", "list_schedules", "list_capabilities", "replay_session",
-]); // 溢出时最多再降档裁剪重试几次
-
-// 判断是否为「上下文溢出」错误 (常见信号: 消息含 context/length/token/window, 或 HTTP 400/413)
-// 注意: AbortError(用户取消/内部超时中止) 一律不算溢出, 沿用 retry.js 不重试约定。
-export function _isOverflowError(e) {
-  if (!e) return false;
-  if (e.name === "AbortError" || e.code === "ABORT_ERR") return false;
-  const status = (typeof e.status === "number" ? e.status : e.statusCode) ?? null;
-  if (status === 413) return true; // 请求体过大 (content too large)
-  if (status !== null && status !== 400 && (status >= 500 || status < 400)) return false; // 服务端/非 4xx 非溢出
-  const msg = String(e?.message || e || "");
-  // 仅在消息出现上下文/长度/token 相关措辞时判为溢出, 普适 HTTP 400 不误判
-  if (status === 400) {
-    return /context|token|length|window/i.test(msg);
-  }
-  return /context\s*(size)?\s*exceeded|maximum\s*context\s*length|too\s*many\s*tokens|context\s*window|token\s*(limit|budget)|exceeds?\s*(the\s*)?(model|context|token)|insufficient\s*context/i.test(msg);
-}
-
-// LLM 调用失败的兜底提示: 附排查指引, 避免裸抛错误对用户不友好
-export function LLM_FAILED_HINT(message) {
-  return `[皮皮虾] LLM 调用失败: ${message}
-排查指引: 1) 检查 config/ppx.json 的 providers 是否配置了可用的 API key (export XXX_API_KEY=...); 2) 本地模型 (lmstudio) 是否在运行; 3) 启动 ppx-serve 看日志确认模型加载。`;
-}
-
-// L4 toolResultBudget: 裁剪超长工具结果, 保留头尾关键信息 (默认 4000, config.agent.tool_result_budget 可调)
-export function trimToolResult(r, budget = DEFAULT_TOOL_RESULT_BUDGET) {
-  const s = String(r || "");
-  if (s.length <= budget) return s;
-  const head = s.slice(0, budget * 0.7);
-  const tail = s.slice(-budget * 0.3);
-  return head + `\n...[结果已裁剪: 共 ${s.length} 字符, 保留头尾 ${budget}]...\n` + tail;
-}
+// (工具结果裁剪 trimToolResult / 溢出判定 isOverflowError / LLM 失败提示 LLM_FAILED_HINT
+//  已迁至 src/core/policy.js, 本文件经 re-export 保持兼容)
 
 // 多模态: 提取 user 消息中的图片路径并同步读图, 注入为 OpenAI 视觉格式的 content 数组。
 // 仅当当前 LLM 是 http 后端且 provider 标记 vision=true 时生效 (openclaw/dsh 走文本围栏不传图)。
@@ -105,14 +68,7 @@ function _visionUserContent(llm, root, userMsg) {
   return content.length > 1 ? content : text;
 }
 
-// 工具结果 → OpenAI 消息 content: 图片 data URL 转 image_url 块 (多模态), 否则文本裁剪
-export function toToolContent(result, budget = DEFAULT_TOOL_RESULT_BUDGET) {
-  const s = String(result || "");
-  if (/^data:image\/[a-z0-9.+-]+;base64,/i.test(s)) {
-    return [{ type: "image_url", image_url: { url: s } }];
-  }
-  return trimToolResult(s, budget);
-}
+
 
 export class PPXAgent {
   constructor({ root = ROOT, configFile = null, plugins = [], dataDir = null, globalDataDir = null } = {}) {
@@ -764,105 +720,20 @@ export class PPXAgent {
   }
 
   // LLM + 工具调用循环 (带 provider 回退)
+  // 重构第一刀 (2026-09-14): 循环驱动/探索熔断/重复检测/溢出降档/错误重试
+  // 全部收敛到 src/core/policy.js runToolLoop, 此处只注入依赖, 策略可独立测试/替换。
   async _llmWithTools(seedMessages, llmInstance = this.llm) {
-    let messages = [...seedMessages];
-    const tools = this.toolsEnabled ? this.tools.toOpenAI() : [];
-    // 阈值从 config 读取 (可调), 默认值兜底
-    const maxRounds = Number(this.config.agent?.max_tool_rounds) || DEFAULT_MAX_TOOL_ROUNDS;
-    const resultBudget = Number(this.config.agent?.tool_result_budget) || DEFAULT_TOOL_RESULT_BUDGET;
-    const maxErrorRetry = Number(this.config.agent?.max_tool_error_retry) || DEFAULT_MAX_TOOL_ERROR_RETRY;
-    const exploreBreak = Number(this.config.agent?.explore_break_limit) || DEFAULT_EXPLORE_BREAK;
-    const repeatFlag = Number(this.config.agent?.repeat_flag_limit) || DEFAULT_REPEAT_FLAG;
-    let errorRetries = 0;
-    // P0③ 融断状态 (每轮 agent 内): 探索连击 / 重复命令 计数器
-    let exploreStreak = 0;
-    const seenSig = new Map();
-    // 上下文溢出降档: 溢出时裁剪历史后重发, 最多 DEFAULT_OVERFLOW_SHRINK_MAX 档 (第九轮 review P1)
-    let overflowShrinks = 0;
-
-    for (let round = 0; round < maxRounds; round++) {
-      if (this._interrupted) return "[皮皮虾] 任务已被中断 (operator cancelled).";
-      if (this._onStepEvent) { try { this._onStepEvent({ type: "step", round, maxRounds, ts: Date.now() }); } catch {} }
-      let resp;
-      try {
-        resp = await llmInstance.apiChat(messages, {
-          tools,
-          toolRunner: async (name, args) => this._runTool(name, args),
-        });
-      } catch (e) {
-        // 上下文溢出: 不影响其它错误路径 — 非溢出照常抛出 (交由 _llmWithFallback 切换 provider / 调用方处理)
-        if (overflowShrinks < DEFAULT_OVERFLOW_SHRINK_MAX && _isOverflowError(e)) {
-          overflowShrinks++;
-          warn(`上下文溢出, 降档裁剪后重试 (${overflowShrinks}/${DEFAULT_OVERFLOW_SHRINK_MAX}): ${String(e?.message || e).slice(0, 120)}`);
-          const cap = Math.max(200, Math.floor(this._histTokenCap() / (overflowShrinks + 1))); // 逐档缩紧
-          messages = this._shrinkMessagesForOverflow(messages, cap);
-          continue;
-        }
-        throw e;
-      }
-      const msg = resp.message;
-      messages.push(msg);
-
-      const toolCalls = msg.tool_calls;
-      if (!toolCalls || toolCalls.length === 0) {
-        return msg.content || "[皮皮虾] (无回复)";
-      }
-
-      // 工具错误重试: 若本轮有工具失败, 汇总错误喂回模型修正后重试 (最多 errorRetries 次)
-      // v1.0.7: 统一走 _runTool (trace/事件只此一份, 不再内嵌重复执行)
-      const errors = [];
-      for (const tc of toolCalls) {
-        if (tc.type === "function" && tc.function) {
-          let args = {};
-          try { args = JSON.parse(tc.function.arguments || "{}"); } catch {}
-          const result = await this._runTool(tc.function.name, args);
-          messages.push({ role: "tool", tool_call_id: tc.id, content: toToolContent(result, resultBudget) });
-          if (result.startsWith(TOOL_ERROR_PREFIX)) errors.push(result);
-        }
-      }
-      if (errors.length && errorRetries < maxErrorRetry) {
-        errorRetries++;
-        messages.push({
-          role: "user",
-          content: "以下工具调用失败, 请修正参数或改用其他方式后重试:\n" + errors.join("\n"),
-        });
-        continue;
-      }
-      // P0③ harness 融断: 探索循环 / 重复命令 (无产出的自转) → 注入方向盘给模型
-      const _called = toolCalls.filter((tc) => tc.type === "function" && tc.function);
-      if (_called.length) {
-        let _allExplore = true;
-        for (const tc of _called) {
-          if (!EXPLORE_TOOLS.has(tc.function?.name || "")) { _allExplore = false; break; }
-        }
-        let _repeatHit = false;
-        for (const tc of _called) {
-          let _a = {};
-          try { _a = JSON.parse(tc.function.arguments || "{}"); } catch {}
-          const _sig = (tc.function?.name || "") + "::" + JSON.stringify(_a).slice(0, 120);
-          seenSig.set(_sig, (seenSig.get(_sig) || 0) + 1);
-          if (seenSig.get(_sig) >= repeatFlag) _repeatHit = true;
-        }
-        if (_allExplore) exploreStreak++; else exploreStreak = 0;
-        if (_repeatHit) { exploreStreak = 0; seenSig.clear(); }
-        if (_allExplore && exploreStreak >= exploreBreak) {
-          exploreStreak = 0; seenSig.clear();
-          messages.push({
-            role: "user",
-            content: "检测到连续探索循环: 连续 " + exploreBreak + " 轮只有只读/查询工具, 未产生任何产出或修改。请停止继续探测, 基于已获得的信息直接给出结论或交付物; 若确实缺少关键信息, 明确说明并结束本轮, 不要空转。",
-          });
-          continue;
-        }
-        if (_repeatHit) {
-          messages.push({
-            role: "user",
-            content: "检测到重复执行相同工具与参数。请不要再重复该调用, 换一条不同路径推进, 或直接基于现有信息产出结论。",
-          });
-          continue;
-        }
-      }
-    }
-    return "[皮皮虾] 工具调用轮次过多, 已停止。";
+    return runToolLoop({
+      seedMessages,
+      llm: llmInstance,
+      tools: this.toolsEnabled ? this.tools.toOpenAI() : [],
+      config: this.config,
+      isInterrupted: () => this._interrupted,
+      onStep: (ev) => { if (this._onStepEvent) { try { this._onStepEvent(ev); } catch {} } },
+      runTool: (name, args) => this._runTool(name, args),
+      shrinkMessages: (messages, budget) => this._shrinkMessagesForOverflow(messages, budget),
+      histTokenCap: () => this._histTokenCap(),
+    });
   }
 
   // 离线工具路由: 无 LLM 时识别简单工具指令
