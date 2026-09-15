@@ -1,0 +1,44 @@
+# --- Node ---
+node_modules/
+*.log
+npm-debug.log*
+
+# --- 构建产物 ---
+dist/
+web/.next/
+web/out/
+web/dev/
+web/server/
+web/static/
+web/build-manifest.json
+web/fallback-build-manifest.json
+web/_dev.log
+
+# --- 运行数据 (不入库) ---
+data/
+*.db
+*.sqlite
+/data/memory/
+/data/experience/
+/data/sessions/
+/data/logs/
+
+# --- 记忆导出产物 (memory_export 工具输出) ---
+exports/
+
+# --- 审计隔离备份 (audit_verify --fix 产出) ---
+*.quarantine-*
+
+# --- 外部依赖源码 (.deps 内嵌项目不入库) ---
+.deps/
+*.zip
+
+# --- 测试残留 ---
+__nonexistent__/
+
+# --- 系统 ---
+.DS_Store
+Thumbs.db
+
+# --- 运行时使用计数 ---
+skills/.usage.json

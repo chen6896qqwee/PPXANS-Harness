@@ -1,0 +1,65 @@
+{
+  "name": "ppxans-harness",
+  "version": "2.0.0",
+  "description": "PPXANS-Harness - 皮皮虾神经系 (ANS) + Harness 一体化智能体内核. 零运行时依赖纯Node. 自愈 + 自学习 + 四层记忆 + SHA-256 审计哈希链 + 多 Agent 军团. Agent Nervous System harness in pure Node, zero runtime dependencies.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "author": "chen6896qqwee <chen6896qqwee@users.noreply.github.com>",
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "src/agent/index.js",
+  "bin": {
+    "ppx": "bin/ppx.js",
+    "ppxans": "bin/ppx.js",
+    "ppx-serve": "bin/ppx-serve.js",
+    "ppx-channels": "bin/ppx-channels.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chen6896qqwee/ppx-agent.git"
+  },
+  "scripts": {
+    "start": "node src/agent/index.js",
+    "chat": "node src/cli.js",
+    "serve": "node src/server.js",
+    "web": "node scripts/start-web.js",
+    "web:build": "npm run build --prefix web",
+    "release": "node scripts/release.js",
+    "eval": "node scripts/eval.js",
+    "dsh": "cd .deps/deepseek-harness && pnpm dsh",
+    "dsh:install": "cd .deps/deepseek-harness && pnpm install",
+    "dsh:build": "cd .deps/deepseek-harness && pnpm run build",
+    "selfheal": "node scripts/selfheal-bench.js",
+    "selfheal:run": "node src/selfheal/run.js",
+    "audit:verify": "node scripts/audit-verify.js",
+    "bench": "node scripts/bench.js",
+    "test": "node --test --test-force-exit test/*.test.js",
+    "prepublishOnly": "npm run selfheal && npm test"
+  },
+  "keywords": [
+    "agent",
+    "ai",
+    "llm",
+    "memory",
+    "autonomous",
+    "self-healing",
+    "zero-dependency",
+    "audit-chain",
+    "memory-governance",
+    "agent-nervous-system"
+  ],
+  "files": [
+    "bin/",
+    "src/",
+    "config/",
+    "README.md",
+    "LICENSE"
+  ],
+  "exports": {
+    ".": "./src/agent/index.js",
+    "./server": "./src/server.js",
+    "./cli": "./src/cli.js",
+    "./audit": "./src/audit/audit-chain.js"
+  }
+}
