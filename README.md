@@ -51,35 +51,17 @@
 | ✅ **测试隔离** | 所有测试用临时目录, 不污染生产数据 (P0) |
 | 🔐 **HTTP 认证** | Bearer Token, 未配置自动生成随机token (P0) |
 | ✅ **Markdown 渲染** | Web UI marked.js 渲染代码块/列表 (P1) |
-| ✅ **OpenClaw / DeepSeek Harness 底座** | LLM 引擎通过 `openclaw agent` CLI 驱动 OpenClaw，或通过 `dsh` 后端驱动内嵌 DeepSeek Harness（`.deps/deepseek-harness`）；围栏协议代理工具，保留多 provider 回退 |
+| ✅ **自研底座 (唯一)** | 纯 Node fetch 直连 OpenAI 兼容 API (OpenAI/DeepSeek/火山/通义/智谱/本地 lmstudio/ollama/vLLM)，零运行时依赖，SSE 流式 + 原生 tool_calls + 文本工具调用修复，无任何外部引擎底座 |
 | ✅ **多模型 API 优先** | OpenAI/DeepSeek/火山/通义 + 本地模型兜底 |
 
-## 独立底座
+## 独立底座（自研，无外部引擎）
 
-皮皮虾是**独立自包含的 agent**：默认用 `src/llm/router.js` 在本地/HTTP、内嵌 dsh 引擎、云端 OpenAI 兼容 API 之间自动回退（OpenAI/DeepSeek/火山/通义/本地），多 provider 自动回退 + 瞬态错误重试。
+皮皮虾是**独立自包含的 agent，只跑自己的底座**：`src/llm/client.js` 用纯 Node `fetch` 直连任意 OpenAI 兼容 API（OpenAI/DeepSeek/火山/通义/智谱/本地 lmstudio/ollama/vLLM），零第三方引擎依赖。
 
-- 默认：本地/HTTP 直连优先（router 按 local → dsh 引擎 → cloud 顺序回退，配 API key 即可跑）
-- **DeepSeek Harness 底座（可选，需手动安装）**：`.deps/deepseek-harness` 为**可选底座，不随仓库分发**（见 .gitignore），需先 `npm run dsh:install` + `npm run dsh:build` 才可用；`dsh` 已加入 `providers` 首位（default_id=dsh）。未安装时健康检查自动判不可用并回退 http/cloud，不受影响。
-- 可选引擎：`openclaw` / `dsh` 后端代码保留（`backend: "openclaw"` / `"deepseek"`），需自行在 config 加 provider 或用环境变量 `PPX_OPENCLAW_MJS` / `PPX_DSH_ROOT` 指定引擎位置
+- **v2.5.0 起外部引擎底座全部移除**：`openclaw` / `dsh`（DeepSeek Harness）后端代码、`_optional_engines` 配置、`.deps/` 内嵌目录、`dsh` npm 脚本、`openclaw-smoke.js` 全部删除。
+- 默认：本地/HTTP 直连优先（router 按 local → 云端真 key 顺序回退，配 API key 即可跑）
+- 多 provider 自动回退 + 瞬态错误重试（429/5xx/timeout）+ SSE 流式 + 原生 tool_calls + 文本工具调用修复（自研围栏 ⟪tool⟫ / DSML 解析）
 - 保留：皮皮虾四层记忆 / 自愈 / 方法Skill / 工具 / web 壳 全部保留
-
-### DeepSeek Harness 可选底座（dsh，需手动安装）
-
-> `.deps/` 在 .gitignore 中，clone 后目录为空。若要用 dsh 底座，需先按下面步骤安装：
-
-```bash
-# 首次安装/构建内嵌 dsh（需要网络安装依赖）
-npm run dsh:install
-npm run dsh:build
-
-# 直接运行 dsh CLI（等同 deepseek-harness 仓库的 pnpm dsh）
-npm run dsh -- web
-```
-
-- 源码位置（安装后）：`.deps/deepseek-harness/`（完整保留 deepseek-harness 的 packages/apps/docs/scripts/vendor 等）
-- **构建形态优先（v1.5.1+）**：`dshRoot` 存在 `lib/bin.js`（已安装的 dsh npm 包，如 `npm i -g @deepseek-ai/dsh`）时直接零构建运行；否则回退源码形态（`apps/cli/src/bin.ts` + `node_modules/tsx`）
-- 定位优先级：`PPX_DSH_ROOT` 环境变量 > provider 的 `dsh_root` 配置 > 内嵌 `.deps/deepseek-harness` 默认目录
-- 未安装/构建 dsh 时，健康检查判不可用并自动回退 http/cloud，不受影响
 
 ## 🚀 快速开始
 

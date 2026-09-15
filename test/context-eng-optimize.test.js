@@ -56,26 +56,3 @@ test("v0.8.0: _trimHistory token 预算 - 信息量感知裁剪, 低信息量长
   assert.ok(joined.includes("5432"), "高信息量轮次在 token 预算下保留");
   assert.ok(out.length < hist.length, "低信息量长轮次被裁剪");
 });
-
-test("v0.6.6: _proxyChat 动态预算 - persona 保留且历史按信息量筛选", async () => {
-  const client = new LLMClient({ id: "openclaw" });
-  // 构造超长 persona + 大量历史
-  const messages = [
-    { role: "system", content: "你是皮皮虾, 一个会自我修复的超级Agent。".repeat(200) }, // ~4400字
-    ...Array.from({ length: 20 }, (_, i) => ({ role: "user", content: `你好第${i}次` })),
-    { role: "user", content: "请分析 src/agent/index.js 的架构" },
-  ];
-  // 直接触发 _proxyChat 但拦截引擎调用, 只看组装的上下文
-  let captured = "";
-  const orig = client._openclawChatAsync.bind(client);
-  client._openclawChatAsync = async (msgs) => { captured = msgs[0].content; return { content: "完成", usage: null }; };
-  const tools = [];
-  const toolRunner = null;
-  await client._proxyChat(messages, { tools, toolRunner, engine: "openclaw" });
-  assert.ok(captured.includes("角色设定"), "persona 保留");
-  assert.ok(captured.includes("皮皮虾"), "persona 内容在");
-  assert.ok(captured.includes("分析 src/agent/index.js"), "最新高信息量任务保留");
-  // persona 不应被全量塞入 (应被预算截断)
-  assert.ok(captured.includes("...["), "persona 被预算截断(含截断标记)而非全量拷贝");
-  void orig;
-});

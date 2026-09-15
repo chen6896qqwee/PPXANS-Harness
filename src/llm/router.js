@@ -1,9 +1,10 @@
-// src/llm/router.js - 模型路由 (provider 选择中枢, 唯一真相源)
+// src/llm/router.js - 模型路由 (provider 选择中枢, 唯一真相源, 自研底座)
 // 目标: "本地默认优先, 云端可自由接入"
 //   - 占位死配置过滤: model 含 REPLACE_WITH_YOUR_ENDPOINT 等占位符的 provider 视为不可用(省得误选+报噪音警告)
 //   - 本地优先(默认): 本地测试直接用本地模型 (lmstudio/ollama, 127.0.0.1 即零配置可用), 配真实云端 key 也先走本地
 //   - 云端优先(可选): 设 agent.model_preference=cloud → 配真 key 的云端排前 (深度/智谱/千问/火山/OpenAI), 本地兜底
 //   - 健康排序: 启动时异步探测各 provider /models, 能连的排前, 连不上自动降级
+// 全部 provider 均为自研 http 底座 (OpenAI 兼容 API 直连), 无外部引擎依赖。
 // 用法 (与旧 builtin.resolveLLM 同签名, 向后兼容):
 //   const llm = resolveLLM(config);            // 同步选择主 LLM
 //   const all = resolveAllLLMs(config);        // 全量可用 provider
@@ -31,13 +32,6 @@ function isLocal(p) {
   return LOCAL_HOST_RE.test(String(p.base_url || ""));
 }
 
-function isOpenclaw(p) {
-  return p.backend === "openclaw" || p.id === "openclaw";
-}
-function isDeepseek(p) {
-  return p.backend === "deepseek" || p.backend === "dsh" || p.id === "dsh";
-}
-
 // 占位符过滤 + 可用判定 (与旧 isUsableProvider 同语义, 增加占位符排除)
 export function isUsableProvider(prov) {
   if (!prov) return false;
@@ -45,19 +39,17 @@ export function isUsableProvider(prov) {
   if (PLACEHOLDER_RE.test(String(prov.model || ""))) return false;
   if (hasRealKey(prov)) return true;          // 云端真 key
   if (isLocal(prov)) return true;              // 本地推理零配置可用
-  if (isOpenclaw(prov) || isDeepseek(prov)) return true; // 外部引擎底座
   return false;
 }
 
 // 排序: 按 agent.model_preference 决定本地/云端谁优先 (默认 local)
-//   - local:  本地优先(lmstudio/ollama) > 外部引擎 > 云端真key   [本地测试默认]
-//   - cloud:  云端真key优先 > 外部引擎 > 本地兜底              [正式发布可配]
+//   - local:  本地优先(lmstudio/ollama) > 云端真key   [本地测试默认]
+//   - cloud:  云端真key优先 > 本地兜底              [正式发布可配]
 // 健康状态排序由 orderByHealth 异步完成; 这里是"无探测时代理"的基础排序
 function orderProviders(provs, preference) {
   const cloud = provs.filter((p) => hasRealKey(p) && !isLocal(p));
-  const engine = provs.filter((p) => isOpenclaw(p) || isDeepseek(p));
   const local = provs.filter((p) => isLocal(p)); // 本地服务都收 (lmstudio 常带字面 api_key, 仍零配置)
-  return preference === "cloud" ? [...cloud, ...engine, ...local] : [...local, ...engine, ...cloud];
+  return preference === "cloud" ? [...cloud, ...local] : [...local, ...cloud];
 }
 
 export function resolvePreference(config) {

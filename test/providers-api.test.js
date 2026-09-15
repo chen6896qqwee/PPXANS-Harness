@@ -52,14 +52,16 @@ test("providers: dsml 类型校验 (v1.1.1 新增键)", () => {
   assert.ok(bad && /dsml/.test(bad), "dsml 非布尔应报错: " + bad);
 });
 
-test("providers: validate 合法 openclaw (缺 mjs 应报错)", () => {
-  const err = validateProvider({ id: "openclaw", backend: "openclaw" });
-  assert.ok(err && /mjs/.test(err), "openclaw 缺 mjs 应报错");
+test("providers: validate 自研底座仅 http 后端 (缺 base_url 应报错)", () => {
+  const err = validateProvider({ id: "http", backend: "http" });
+  assert.ok(err && /base_url/.test(err), "http 缺 base_url 应报错: " + err);
 });
 
-test("providers: validate 合法 deepseek (缺 dsh_root 应报错)", () => {
-  const err = validateProvider({ id: "dsh", backend: "deepseek" });
-  assert.ok(err && /dsh_root/.test(err), "deepseek 缺 dsh_root 应报错");
+test("providers: validate 非法后端 (openclaw/deepseek 已移除) 应报错", () => {
+  const err1 = validateProvider({ id: "openclaw", backend: "openclaw", base_url: "https://x/v1" });
+  assert.ok(err1, "openclaw 后端已移除, 不应合法");
+  const err2 = validateProvider({ id: "dsh", backend: "deepseek", base_url: "https://x/v1" });
+  assert.ok(err2, "deepseek 后端已移除, 不应合法");
 });
 
 test("providers: validate 缺 id", () => {

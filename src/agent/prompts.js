@@ -8,7 +8,7 @@ import { context as rewardContext } from "../ans/reward.js";
 import { imageFileToDataUrl } from "../tools/builtin.js";
 
 // 多模态: 提取 user 消息中的图片路径并同步读图, 注入 OpenAI 视觉格式的 content 数组。
-// 仅当当前 LLM 是 http 后端且 provider 标记 vision=true 时生效 (openclaw/dsh 走文本围栏不传图)。
+// 仅当当前 LLM 是 http 后端且 provider 标记 vision=true 时生效 (自研底座唯一后端)。
 // 返回 string (无图/不支持) 或 [{type:text}, {type:image_url}...]
 export function visionUserContent(llm, root, userMsg) {
   const text = String(userMsg);

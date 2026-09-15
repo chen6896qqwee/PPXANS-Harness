@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert";
 import { parseDsml, buildDsmlPrompt } from "../src/llm/dsml.js";
-import { parseToolCalls, proxyToolLoop } from "../src/llm/fence.js";
+import { parseToolCalls } from "../src/llm/fence.js";
 
 const P = "\uFF5C"; // ｜
 
@@ -55,16 +55,4 @@ test("parseToolCalls: 围栏优先, DSML 兜底", () => {
   const d = parseToolCalls(`<${P}DSML${P}tool_calls><${P}DSML${P}invoke name="get_time"></${P}DSML${P}invoke></${P}DSML${P}tool_calls>`);
   assert.equal(d.calls.length, 1);
   assert.equal(d.calls[0].function.name, "get_time");
-});
-
-test("proxyToolLoop: 引擎输出 DSML 也能走工具循环", async () => {
-  const replies = [
-    `<${P}DSML${P}tool_calls><${P}DSML${P}invoke name="get_time"></${P}DSML${P}invoke></${P}DSML${P}tool_calls>`,
-    "现在是 14:35",
-  ];
-  let i = 0;
-  const engineReply = async () => replies[i++];
-  const toolRunner = async (name) => { assert.equal(name, "get_time"); return "2026-08-16 14:35"; };
-  const final = await proxyToolLoop(engineReply, toolRunner);
-  assert.equal(final, "现在是 14:35");
 });

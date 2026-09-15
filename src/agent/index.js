@@ -375,6 +375,7 @@ export class PPXAgent {
     }
     // 工具类任务: 优先原生 tool_calls 后端 (http)。
     // openclaw 是完整 agent 运行时, 会拒绝围栏协议(视为伪协议); 实测 http 原生 tool_calls 全链路通过。
+    // v2.5.0: 外部引擎底座已移除, 仅 http 后端 (原生 tool_calls + 文本工具修复)。
     if (this.toolsEnabled) {
       const native = clients.filter((c) => c.supportsNativeToolCalls);
       const fence = clients.filter((c) => !c.supportsNativeToolCalls);
@@ -402,7 +403,7 @@ export class PPXAgent {
     throw lastErr || new Error("所有 provider 均失败");
   }
 
-  // 统一工具执行入口 (供 http 原生 tool_calls + openclaw/dsh 围栏代理共用) [P0#1]
+  // 统一工具执行入口 (http 原生 tool_calls + 文本工具调用修复) [P0#1]
   // v1.0.7: 移除未使用的 llmInstance 死参数, 所有工具执行统一走此入口 (trace/事件只此一份)
   async _runTool(name, args) {
     const t0 = Date.now();
@@ -636,8 +637,7 @@ export class PPXAgent {
   _warnMissingCloudApi() {
     const provs = (this.config && this.config.providers) || [];
     const isLocal = (p) => /127\.0\.0\.1|localhost|lm-studio|ollama/i.test(p.base_url || "");
-    const isSpecial = (p) => p.backend === "openclaw" || p.backend === "dsh" || p.id === "dsh";
-    const cloud = provs.filter((p) => !isLocal(p) && !isSpecial(p));
+    const cloud = provs.filter((p) => !isLocal(p));
     const hasCloudKey = cloud.some((p) => p.api_key || (p.api_key_env && process.env[p.api_key_env]));
     const hasLocal = provs.some(isLocal);
     // 默认本地优先(agent.model_preference=local): 有本地模型即满足运行, 不告警(本地测试正用本地模型)

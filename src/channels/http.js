@@ -506,8 +506,8 @@ export class HttpChannel extends Channel {
           }
           const healthy = await client.health();
           const detail = healthy
-            ? `${client.backend === "openclaw" ? "openclaw 后端: Node 版本满足" : client.backend === "deepseek" ? "dsh 源码就绪" : fromCache ? "复用 agent 客户端, 探测通过" : "API 端点可达"}`
-            : "探测失败, 请检查 key/base_url/engine 路径/Node 版本";
+            ? (fromCache ? "复用 agent 客户端, 探测通过" : "API 端点可达")
+            : "探测失败, 请检查 key/base_url";
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ok: true, healthy, detail, source: fromCache ? "agent-cache" : "disk-config" }));
         } catch (e) {

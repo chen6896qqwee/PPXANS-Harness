@@ -69,7 +69,7 @@ test("_userContent: 无 vision provider 时返回纯文本", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ppx-img4-"));
   fs.writeFileSync(path.join(root, "a.png"), PNG);
   const agent = new PPXAgent({ root });
-  agent.llm = { backend: "openclaw", vision: false };
+  agent.llm = { backend: "http", vision: false };
   agent.allProviders = [];
   assert.equal(agent._userContent("看这张图 a.png"), "看这张图 a.png");
   agent.shutdown();
@@ -79,8 +79,8 @@ test("_userContent: 无 vision provider 时返回纯文本", () => {
 test("_visionLLM: 当前非 vision 时从 allProviders 找 vision provider", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ppx-img5-"));
   const agent = new PPXAgent({ root });
-  agent.llm = { backend: "openclaw", vision: false };
-  agent.allProviders = [{ backend: "openclaw", vision: false }, { backend: "http", vision: true, model: "qwen-vl-max" }];
+  agent.llm = { backend: "http", vision: false };
+  agent.allProviders = [{ backend: "http", vision: false }, { backend: "http", vision: true, model: "qwen-vl-max" }];
   const v = agent._visionLLM();
   assert.ok(v && v.vision === true, "应从 allProviders 找到 vision provider");
   agent.shutdown();

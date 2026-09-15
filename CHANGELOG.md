@@ -1,5 +1,26 @@
 # CHANGELOG
 
+## v2.5.0 (2026-09-15) - 独立底座: 移除全部外部引擎, 只保留自研基座
+
+> **定性**: 皮皮虾不再依赖任何第三方智能体底座 (OpenClaw / DeepSeek Harness)。LLM 直连全部走自研 http 底座 (纯 Node fetch, OpenAI 兼容 API)。
+
+### 移除 (外部引擎底座全删)
+- `src/llm/client.js`: 删除 `backend=openclaw` / `backend=deepseek` 两个外部引擎后端分支 (~290 行)，仅保留自研 http 后端 (原生 tool_calls / SSE 流式 / 文本工具调用修复)
+- `src/llm/router.js`: 删除 isOpenclaw/isDeepseek/engine 排序，只留 local → cloud
+- `src/llm/fence.js`: 删除 buildFencePrompt/proxyToolLoop (围栏代理仅服务外部引擎)，保留自研 parseToolFence/parseToolCalls (文本工具调用修复仍用于本地/DSML 模型)
+- `src/config/providers.js`: 白名单去掉 mjs/session_key/dsh_root；validate 显式拒绝非 http 后端
+- `config/ppx.json`: 删除 dsh provider (原 default 首位) + `_optional_engines`
+- `package.json`: 删除 dsh / dsh:install / dsh:build 三个 npm 脚本
+- 删除: `scripts/openclaw-smoke.js`、`test/absorb.deepseek-harness.test.js`、`test/tool-proxy.test.js`
+
+### 修复
+- `src/plugin/builtin.js`: 修复 `resolveLLM is not defined` —— 仅 `export {x} from` 不产生本地绑定，导致 llmPlugin 装配失败被隔离、LLM 实际未注入；改为 import + re-export (既存 bug)
+
+### 测试
+- 全量: **679 pass / 0 fail / 4 skip** (移除外部引擎专属测试后净 679，较 v2.4.0 的 699 减少 20 项外部引擎相关)
+- 自愈基准: **7/7 (100%)**
+- 更新: fence/dsml/dsml-prompt/health/multimodal/providers-api/tool-vis/context-eng-optimize (mock 全部改为 http 后端语义)
+
 ## v2.4.0 (2026-09-15) - 正式发布: P0-P3 全部落地
 
 > **定性**: v3.0 框架四阶段全部完成, 从 v2.0.0 基线 597 测试增至 699 (+102 全绿)。

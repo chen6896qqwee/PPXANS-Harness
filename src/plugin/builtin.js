@@ -26,7 +26,10 @@ import { exportMemorySnapshot, mergeSnapshotBack, hasSnapshot } from "../memory/
 
 // fork 工具 (供 ctx.consume("fork") 取用)
 const forkTools = { exportMemorySnapshot, mergeSnapshotBack, hasSnapshot };
-export { isUsableProvider, resolveLLM, resolveAllLLMs } from "../llm/router.js";
+// LLM 路由: import 本地绑定 + re-export 向后兼容 (v2.5.0 修复: 仅 export-from 不产生本地绑定,
+// 导致 llmPlugin 里 resolveLLM/resolveAllLLMs 未定义, 插件装配被隔离且 LLM 实际未注入)
+import { isUsableProvider, resolveLLM, resolveAllLLMs } from "../llm/router.js";
+export { isUsableProvider, resolveLLM, resolveAllLLMs };
 import { ModeRegistry, registerDefaultModes } from "../mode/index.js";
 import { planExecExecutor } from "../mode/plan-exec.js";
 import { routerExecutor } from "../mode/router.js";

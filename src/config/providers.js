@@ -14,7 +14,7 @@ import { info, warn, error } from "../utils/logger.js";
 const PROVIDER_KEYS = [
   "id", "backend", "base_url", "api_key", "api_key_env",
   "model", "models", "vision", "timeout_ms",
-  "mjs", "session_key", "dsh_root", "dsml",
+  "dsml",
 ];
 
 function getProvidersPath(root) {
@@ -66,17 +66,11 @@ export function validateProvider(p) {
   if (!p || typeof p !== "object") return "提供方必须是对象";
   if (!p.id || typeof p.id !== "string") return "缺少 id";
   if (!/^[a-zA-Z][a-zA-Z0-9_-]{0,29}$/.test(p.id)) return "id 必须以字母开头, 仅含字母/数字/横线/下划线, 2-30字符";
-  // 必须至少有一类后端配置
-  const isEngineBackend = p.backend === "openclaw" || p.backend === "deepseek";
-  const hasEnginePath = !!p.mjs || !!p.dsh_root;
-  const hasHttpField = !!p.base_url || !!p.api_key || !!p.api_key_env;
-  if (isEngineBackend) {
-    if (p.backend === "openclaw" && !hasEnginePath) return "openclaw 后端需 mjs 字段 (openclaw.mjs 路径)";
-    if (p.backend === "deepseek" && !hasEnginePath) return "deepseek 后端需 dsh_root 字段";
-  } else {
-    if (!hasHttpField) return "http 后端至少需要 base_url 或 api_key 或 api_key_env 之一";
-    if (!p.base_url) return "http 后端需 base_url";
+  // 自研底座: 仅支持 http 后端 (OpenAI 兼容 API 直连); 显式非 http 后端一律拒绝
+  if (p.backend && p.backend !== "http") {
+    return `后端 ${p.backend} 已不受支持 (v2.5.0 起仅保留自研 http 底座, 外部引擎底座已移除)`;
   }
+  if (!p.base_url) return "http 后端需 base_url";
   if (p.vision != null && typeof p.vision !== "boolean") return "vision 必须是布尔";
   if (p.dsml != null && typeof p.dsml !== "boolean") return "dsml 必须是布尔";
   if (p.timeout_ms != null && (!Number.isFinite(p.timeout_ms) || p.timeout_ms < 1000)) return "timeout_ms 至少 1000ms";

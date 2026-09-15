@@ -1,151 +1,133 @@
 {
-    "agent":  {
-                  "name":  "皮皮虾",
-                  "yuan":  "ppx",
-                  "max_tool_rounds":  8,
-                  "tool_result_budget":  4000,
-                  "max_tool_error_retry":  2,
-                  "proactive":  {
-                                    "enabled":  true,
-                                    "interval_ms":  3600000
-                                },
-                  "evolve":  {
-                                 "enabled":  true,
-                                 "every_calls":  20,
-                                 "min_interval_ms":  30000
-                             }
-              },
-    "user":  {
-                 "name":  "兄弟"
-             },
-    "providers":  [
-                      {
-                          "id":  "dsh",
-                          "backend":  "deepseek",
-                          "dsh_root":  ".deps/deepseek-harness",
-                          "timeout_ms":  180000
-                      },
-                      {
-                          "id":  "openai",
-                          "base_url":  "https://api.openai.com/v1",
-                          "api_key_env":  "OPENAI_API_KEY",
-                          "model":  "gpt-4o-mini",
-                          "timeout_ms":  180000,
-                          "context_window":  128000
-                      },
-                      {
-                          "id":  "deepseek",
-                          "base_url":  "https://api.deepseek.com/v1",
-                          "api_key_env":  "DEEPSEEK_API_KEY",
-                          "model":  "deepseek-chat",
-                          "timeout_ms":  180000,
-                          "context_window":  65536
-                      },
-                      {
-                          "id":  "dashscope",
-                          "base_url":  "https://dashscope.aliyuncs.com/compatible-mode/v1",
-                          "api_key_env":  "DASHSCOPE_API_KEY",
-                          "model":  "qwen-turbo",
-                          "timeout_ms":  180000,
-                          "context_window":  131072
-                      },
-                      {
-                          "id":  "qwen-vl",
-                          "base_url":  "https://dashscope.aliyuncs.com/compatible-mode/v1",
-                          "api_key_env":  "DASHSCOPE_API_KEY",
-                          "model":  "qwen-vl-max",
-                          "vision":  true,
-                          "timeout_ms":  180000,
-                          "context_window":  32768
-                      },
-                      {
-                          "id":  "lmstudio",
-                          "base_url":  "http://127.0.0.1:1234/v1",
-                          "api_key":  "lm-studio",
-                          "model":  "gemma-4-e2b-uncensored-hauhaucs-aggressive-q8_k_p",
-                          "vision":  false,
-                          "timeout_ms":  180000
-                      },
-                      {
-                          "id":  "zhipu",
-                          "base_url":  "https://open.bigmodel.cn/api/paas/v4",
-                          "api_key_env":  "ZHIPU_API_KEY",
-                          "model":  "glm-5v-turbo",
-                          "vision":  true,
-                          "timeout_ms":  180000,
-                          "context_window":  65536
-                      }
-                  ],
-    "_optional_engines":  {
-                              "_note":  "可选引擎。火山引擎 volcengine 需先填真实 endpoint(model 不能留 REPLACE_WITH_YOUR_ENDPOINT 占位), 把它加回 providers 数组并设 VOLCENGINE_API_KEY 即启用；本地引擎(openclaw/dsh)默认不启用, 要用时把对象移入 providers 并设对应路径环境变量。",
-                              "openclaw":  {
-                                               "id":  "openclaw",
-                                               "backend":  "openclaw",
-                                               "mjs":  "",
-                                               "session_key":  "ppx:main",
-                                               "timeout_ms":  180000
-                                           }
-                          },
-    "memory":  {
-                   "enabled":  true,
-                   "token_budget":  2500,
-                   "decay_per_day":  0.02,
-                   "hit_bonus":  5,
-                   "base_importance":  10,
-                   "compile_threshold":  4.5,
-                   "forget_speed":  1,
-                   "memory_ttl_days":  90
-               },
-    "audit":  {
-                  "enabled":  true,
-                  "_note":  "工具调用审计哈希链 (吸收自 ppx-v2)。append-only + SHA-256 链式防篡改, 落 data/logs/audit.ndjson。设 false 可关闭 (性能敏感场景)。校验: ppx 对话里调 audit_verify 工具, 或 npm run audit:verify。"
-              },
-    "embedding":  {
-                      "base_url":  "http://127.0.0.1:1234/v1",
-                      "api_key":  "lm-studio",
-                      "model":  "text-embedding-nomic-embed-text-v1.5"
-                  },
-    "experience":  {
-                       "enabled":  true
-                   },
-    "selfheal":  {
-                     "enabled":  true,
-                     "check_interval_ms":  60000
-                 },
-    "tools":  {
-                  "enabled":  true
-              },
-    "channels":  {
-                     "http":  {
-                                  "enabled":  true,
-                                  "port":  8899,
-                                  "auth_token":  ""
-                              },
-                     "log":  {
-                                 "enabled":  true,
-                                 "target":  "console"
-                             },
-                     "feishu":  {
-                                    "enabled":  false,
-                                    "appId":  "",
-                                    "appSecret":  "",
-                                    "verifyToken":  ""
-                                },
-                     "wechat":  {
-                                    "enabled":  false,
-                                    "path":  "/wechat/webhook",
-                                    "token":  "",
-                                    "encodingAESKey":  "",
-                                    "corpId":  "",
-                                    "corpSecret":  "",
-                                    "agentId":  ""
-                                }
-                 },
-    "security":  {
-                     "allow_all":  false,
-                     "command_timeout_ms":  30000,
-                     "deny":  [
-
-                              ]
-                 }
+  "agent": {
+    "name": "皮皮虾",
+    "yuan": "ppx",
+    "max_tool_rounds": 8,
+    "tool_result_budget": 4000,
+    "max_tool_error_retry": 2,
+    "proactive": {
+      "enabled": true,
+      "interval_ms": 3600000
+    },
+    "evolve": {
+      "enabled": true,
+      "every_calls": 20,
+      "min_interval_ms": 30000
+    }
+  },
+  "user": {
+    "name": "兄弟"
+  },
+  "providers": [
+    {
+      "id": "openai",
+      "base_url": "https://api.openai.com/v1",
+      "api_key_env": "OPENAI_API_KEY",
+      "model": "gpt-4o-mini",
+      "timeout_ms": 180000,
+      "context_window": 128000
+    },
+    {
+      "id": "deepseek",
+      "base_url": "https://api.deepseek.com/v1",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "model": "deepseek-chat",
+      "timeout_ms": 180000,
+      "context_window": 65536
+    },
+    {
+      "id": "dashscope",
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "api_key_env": "DASHSCOPE_API_KEY",
+      "model": "qwen-turbo",
+      "timeout_ms": 180000,
+      "context_window": 131072
+    },
+    {
+      "id": "qwen-vl",
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "api_key_env": "DASHSCOPE_API_KEY",
+      "model": "qwen-vl-max",
+      "vision": true,
+      "timeout_ms": 180000,
+      "context_window": 32768
+    },
+    {
+      "id": "lmstudio",
+      "base_url": "http://127.0.0.1:1234/v1",
+      "api_key": "lm-studio",
+      "model": "gemma-4-e2b-uncensored-hauhaucs-aggressive-q8_k_p",
+      "vision": false,
+      "timeout_ms": 180000
+    },
+    {
+      "id": "zhipu",
+      "base_url": "https://open.bigmodel.cn/api/paas/v4",
+      "api_key_env": "ZHIPU_API_KEY",
+      "model": "glm-5v-turbo",
+      "vision": true,
+      "timeout_ms": 180000,
+      "context_window": 65536
+    }
+  ],
+  "memory": {
+    "enabled": true,
+    "token_budget": 2500,
+    "decay_per_day": 0.02,
+    "hit_bonus": 5,
+    "base_importance": 10,
+    "compile_threshold": 4.5,
+    "forget_speed": 1,
+    "memory_ttl_days": 90
+  },
+  "audit": {
+    "enabled": true,
+    "_note": "工具调用审计哈希链 (吸收自 ppx-v2)。append-only + SHA-256 链式防篡改, 落 data/logs/audit.ndjson。设 false 可关闭 (性能敏感场景)。校验: ppx 对话里调 audit_verify 工具, 或 npm run audit:verify。"
+  },
+  "embedding": {
+    "base_url": "http://127.0.0.1:1234/v1",
+    "api_key": "lm-studio",
+    "model": "text-embedding-nomic-embed-text-v1.5"
+  },
+  "experience": {
+    "enabled": true
+  },
+  "selfheal": {
+    "enabled": true,
+    "check_interval_ms": 60000
+  },
+  "tools": {
+    "enabled": true
+  },
+  "channels": {
+    "http": {
+      "enabled": true,
+      "port": 8899,
+      "auth_token": ""
+    },
+    "log": {
+      "enabled": true,
+      "target": "console"
+    },
+    "feishu": {
+      "enabled": false,
+      "appId": "",
+      "appSecret": "",
+      "verifyToken": ""
+    },
+    "wechat": {
+      "enabled": false,
+      "path": "/wechat/webhook",
+      "token": "",
+      "encodingAESKey": "",
+      "corpId": "",
+      "corpSecret": "",
+      "agentId": ""
+    }
+  },
+  "security": {
+    "allow_all": false,
+    "command_timeout_ms": 30000,
+    "deny": []
+  }
 }

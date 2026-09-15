@@ -1,37 +1,18 @@
-// src/llm/client.js - LLM 客户端
-// 后端两种模式:
-//   backend="openclaw" : 通过 `openclaw agent` CLI 驱动 OpenClaw 引擎 (底座=OpenClaw)
-//   backend="http"     : 直接 OpenAI 兼容 HTTP API (零依赖, 用 fetch)  [默认]
-import { spawn } from "node:child_process";
-import os from "node:os";
-import path from "node:path";
-import fs from "node:fs";
-import { fileURLToPath } from "node:url";
-import { info, warn } from "../utils/logger.js";
-import { estimateTokens, truncateByTokens } from "../utils/text.js";
-import { buildFencePrompt, proxyToolLoop, parseToolCalls } from "./fence.js";
+// src/llm/client.js - LLM 客户端 (自研底座: 仅 OpenAI 兼容 HTTP 直连)
+// 后端模式: backend="http" (默认唯一后端, 零依赖, 用 fetch)
+//   - 直连任意 OpenAI 兼容 API: OpenAI/DeepSeek/火山/通义/智谱/本地 (lmstudio/ollama/vLLM)
+//   - 原生 tool_calls + 文本工具调用修复 (围栏/DSML 解析, 自研)
+//   - SSE 流式 / 瞬态错误重试 / provider 健康探测
+// 历史: v2.4.0 前支持 openclaw/dsh 外部引擎底座, v2.5.0 起全部移除, 只保留自研 http 底座。
+import { parseToolCalls } from "./fence.js";
 import { withRetry } from "./retry.js";
+import { warn } from "../utils/logger.js";
 
-const PPX_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
-// DeepSeek Harness 已内嵌到 ppx-agent/.deps/deepseek-harness；仍可用 PPX_DSH_ROOT 覆盖。
-const DEFAULT_DSH_ROOT = process.env.PPX_DSH_ROOT || path.join(PPX_ROOT, ".deps", "deepseek-harness");
-const DEFAULT_MJS = process.env.PPX_OPENCLAW_MJS || "";
-
-// 纯函数: 校验 Node 版本是否满足 OpenClaw 引擎要求 (>=22.22.3 / >=24.15 / >=25.9, 且 23 与 24.0-24.14 不支持)
-export function nodeVersionOk(version) {
-  const v = String(version).split(".").map(Number);
-  const [maj, min, pat] = v;
-  return (maj === 22 && (min > 22 || (min === 22 && pat >= 3))) ||
-         (maj === 24 && min >= 15) ||
-         (maj === 25 && min >= 9) || maj > 25;
-}
 export class LLMClient {
   constructor(provider) {
-    this.providerId = provider.id || "openclaw";
-    // 后端选择: 显式 backend=openclaw, 或 id=openclaw
-    this.backend = provider.backend === "openclaw" || provider.id === "openclaw" ? "openclaw"
-      : provider.backend === "deepseek" || provider.backend === "dsh" || provider.id === "dsh" ? "deepseek"
-      : "http";
+    this.providerId = provider.id || "http";
+    // 唯一后端: http (OpenAI 兼容 API 直连)
+    this.backend = "http";
     this.baseUrl = (provider.base_url || "").replace(/\/$/, "");
     this.apiKey = provider.api_key || process.env[provider.api_key_env] || "";
     this.apiKeyEnvName = provider.api_key_env || ""; // 供缺失 key 报错时提示应设置的环境变量名
@@ -42,115 +23,11 @@ export class LLMClient {
     this.context_window = Number(provider.context_window) || Number(provider.models?.context_window) || 8192;
     this.timeoutMs = provider.timeout_ms || 120000;
     this.retryMax = provider.retry_max ?? 3; // 单次调用内瞬态错误重试次数 (429/5xx/timeout)
-    // openclaw 后端专用
-    this.mjs = provider.mjs || DEFAULT_MJS;
-    this.sessionKey = provider.session_key || "ppx:main";
-    const dshRoot = process.env.PPX_DSH_ROOT || provider.dsh_root || DEFAULT_DSH_ROOT;
-    this.dshRoot = path.isAbsolute(dshRoot) ? dshRoot : path.resolve(PPX_ROOT, dshRoot);
-    this._tmpCounter = 0;
-    if (this.backend === "openclaw") info(`LLMClient[${this.providerId}] backend=openclaw mjs=${this.mjs} session=${this.sessionKey}`);
-  }
-
-  // ===== OpenClaw 后端异步版 (async spawn, 不阻塞事件循环) ====
-  async _openclawChatAsync(messages) {
-    this._openclawReadyOrThrow();
-    const lastUser = [...messages].reverse().find(m => m && (m.role === "user"));
-    const text = lastUser?.content || "";
-    const tmp = path.join(os.tmpdir(), `ppx_msg_${Date.now()}_${this._tmpCounter++}.txt`);
-    fs.writeFileSync(tmp, String(text), "utf8");
-    try {
-      const args = [
-        this.mjs, "agent",
-        "--session-key", this.sessionKey,
-        "--message-file", tmp,
-        "--json",
-        "--timeout", String(Math.floor(this.timeoutMs / 1000)),
-      ];
-      const stdout = await new Promise((resolve, reject) => {
-        const child = spawn(process.execPath, args, { stdio: ["ignore", "pipe", "pipe"] });
-        let out = "", err = "";
-        child.stdout.on("data", d => out += d);
-        child.stderr.on("data", d => err += d);
-        child.on("error", reject);
-        child.on("close", code => {
-          if (code !== 0) reject(this._translateOpenclawError(new Error(`openclaw 退出 code=${code}: ${err.slice(-500)}`)));
-          else resolve(out);
-        });
-      });
-      const j = JSON.parse(stdout);
-      if (j.status && j.status !== "ok") throw new Error(`[皮皮虾] OpenClaw 执行状态异常 (status=${j.status})`);
-      const payloads = j?.result?.payloads || [];
-      const content = payloads.map(p => p?.text || "").filter(Boolean).join("\n");
-      if (!content) {
-        const alt = j?.result?.meta?.finalAssistantVisibleText;
-        if (alt) return { content: alt, usage: null };
-        throw new Error("OpenClaw 返回空内容 (runId=" + (j.runId ?? "?") + ")");
-      }
-      return { content, usage: null, meta: { engine: "openclaw", runId: j.runId } };
-    } finally {
-      try { fs.rmSync(tmp, { force: true }); } catch {}
-    }
-  }
-
-  // ===== DeepSeek Harness 后端 (dsh headless 一次性运行器) ====
-  // 两种形态:
-  //   built: dsh npm 包已安装 (dshRoot/lib/bin.js) — 零构建, 直接跑, 优先
-  //   src:   dsh 源码树 (dshRoot/apps/cli/src/bin.ts + node_modules/tsx) — 内嵌 .deps 形态
-  _dshResolveBin() {
-    const built = path.join(this.dshRoot, "lib", "bin.js");
-    if (fs.existsSync(built)) return { kind: "built", bin: built };
-    const src = path.join(this.dshRoot, "apps", "cli", "src", "bin.ts");
-    if (fs.existsSync(src)) return { kind: "src", bin: src };
-    return null;
-  }
-
-  _dshReadyOrThrow() {
-    const r = this._dshResolveBin();
-    if (!r) {
-      throw new Error("[皮皮虾] dsh 未就绪: " + this.dshRoot + " 下找不到 lib/bin.js (已安装 dsh npm 包) 或 apps/cli/src/bin.ts (dsh 源码)。\n请设置 PPX_DSH_ROOT 指向 dsh 安装目录，或 clone deepseek-harness 到 .deps/deepseek-harness 后运行 npm run dsh:install。");
-    }
-    if (r.kind === "src" && !fs.existsSync(path.join(this.dshRoot, "node_modules", "tsx"))) {
-      throw new Error("[皮皮虾] dsh 源码形态依赖未安装: " + this.dshRoot + "/node_modules/tsx 不存在。\n请先运行 npm run dsh:install（等价于 cd .deps/deepseek-harness && pnpm install），或将 PPX_DSH_ROOT 指向已安装的 dsh npm 包目录。");
-    }
-  }
-
-  // 驱动 `node <dsh bin> --profile headless "<task>"`,
-  // stdout = 最终助手文本, exit 0 = turn 完成, 1 = 出错(stderr 带错误)
-  async _dshChatAsync(messages) {
-    this._dshReadyOrThrow();
-    const lastUser = [...messages].reverse().find(m => m && m.role === "user");
-    const text = lastUser?.content || "";
-    const r = this._dshResolveBin();
-    const args = r.kind === "built"
-      ? [r.bin, "--profile", "headless", text]
-      : ["--import", "tsx/esm", "apps/cli/src/bin.ts", "--profile", "headless", text];
-    const stdout = await new Promise((resolve, reject) => {
-      const child = spawn(process.execPath, args, { cwd: this.dshRoot, stdio: ["ignore", "pipe", "pipe"] });
-      let out = "", err = "";
-      child.stdout.on("data", d => out += d);
-      child.stderr.on("data", d => err += d);
-      child.on("error", reject);
-      child.on("close", code => {
-        if (code !== 0) reject(new Error(`dsh 退出 code=${code}: ${err.slice(-500)}`));
-        else resolve(out);
-      });
-    });
-    const content = stdout.trim();
-    if (!content) throw new Error("dsh 返回空内容");
-    return { content, usage: null, meta: { engine: "deepseek-harness" } };
   }
 
   // 原生 chat (无工具)
   // timeoutMs/retryMax: 可选覆盖 provider 默认 (辅助调用传短超时+禁重试快速失败, 见 AUX_TIMEOUT_MS)
   async chat(messages, { temperature = 0.7, maxTokens = 2048, timeoutMs, retryMax } = {}) {
-    if (this.backend === "openclaw") {
-      const r = await this._openclawChatAsync(messages);
-      return { content: r.content, usage: r.usage };
-    }
-    if (this.backend === "deepseek") {
-      const r = await this._dshChatAsync(messages);
-      return { content: r.content, usage: r.usage };
-    }
     const data = await this._request("/chat/completions", { model: this.model, messages, temperature, max_tokens: maxTokens }, { timeoutMs, retryMax });
     const m1 = data?.choices?.[0]?.message;
     let content = m1?.content;
@@ -162,19 +39,6 @@ export class LLMClient {
 
   // API chat (支持工具调用), 返回完整 message (含 tool_calls)
   async apiChat(messages, { tools = [], temperature = 0.7, maxTokens = 4096, toolRunner = null, timeoutMs, retryMax } = {}) {
-    if (this.backend === "openclaw") {
-      // OpenClaw 引擎是外部进程, 无法直接调用 PPX 内部工具。
-      // 若提供 toolRunner, 走围栏代理循环: 引擎以纯 LLM 输出工具意图, PPX 解析执行。
-      // 否则退化纯 LLM (引擎自带工具循环, 只回最终文本)。
-      if (toolRunner && tools.length) return this._proxyChat(messages, { tools, toolRunner, engine: "openclaw" });
-      const r = await this._openclawChatAsync(messages);
-      return { message: { role: "assistant", content: r.content, tool_calls: null }, usage: r.usage };
-    }
-    if (this.backend === "deepseek") {
-      if (toolRunner && tools.length) return this._proxyChat(messages, { tools, toolRunner, engine: "deepseek" });
-      const r = await this._dshChatAsync(messages);
-      return { message: { role: "assistant", content: r.content, tool_calls: null }, usage: r.usage };
-    }
     const body = { model: this.model, messages, temperature, max_tokens: maxTokens };
     if (tools.length) body.tools = tools;
     const data = await this._request("/chat/completions", body, { timeoutMs, retryMax });
@@ -187,7 +51,7 @@ export class LLMClient {
       content = "[思考] " + message.reasoning_content;
       toolCalls = null;
     }
-    // 纯文本工具调用修复 (吸收 OpenClaw tool-call-repair):
+    // 纯文本工具调用修复 (自研围栏 ⟪tool⟫ / DSML 解析):
     // 部分模型(本地/DSML)返回文本工具意图而非原生 tool_calls, 从文本恢复
     if (tools.length && (!toolCalls || !toolCalls.length) && typeof content === "string" && content) {
       const parsed = parseToolCalls(content);
@@ -208,74 +72,6 @@ export class LLMClient {
       },
       usage: data?.usage,
     };
-  }
-
-  // 围栏代理循环: 把工具清单注入, 引擎以纯 LLM 输出工具意图, PPX 执行 [P0#1]
-  // 围栏上下文 token 预算 (v0.6.6 优化: 替代固定 800/400 字符截断)
-  // 按 token 预算动态分配: persona 优先 40%, 历史按"最新优先 + 信息量"分配剩余 60%
-  static get FENCE_CTX_TOKEN_BUDGET() { return 2400; }
-  static get FENCE_PERSONA_RATIO() { return 0.4; }
-  static get FENCE_HIST_BUDGET() { return 2400 * 0.6; }
-  // 信息量启发: 含指令/数字/路径/结论的轮次更该保留
-  static _histPriority(m) {
-    const s = String(m?.content || "");
-    let p = 0;
-    if (/[查|算|写|建|改|创建|删除|修复|总结|分析|配置|执行|运行|启动|停止|提交|部署|安装|生成|编译|测试]/.test(s)) p += 2;
-    if (/[0-9]{2,}/.test(s)) p += 1;
-    if (/\.(js|py|md|json|txt|ts|go)\b|[:\\\/][A-Za-z]/.test(s)) p += 2;
-    if (/失败|错误|报错|异常|成功|完成|结果|结论|决定|方案/.test(s)) p += 2;
-    if (/^(你好|hi|hello|在吗|谢谢|好的|嗯|是的|对|收到|再见)/i.test(s.trim())) p -= 3;
-    return p;
-  }
-  async _proxyChat(messages, { tools, toolRunner, engine }) {
-    const fencePrompt = buildFencePrompt(tools);
-    // 保留 system/persona 设定 + 最近历史, 避免外部引擎只见"当前问题" [复审 P2]
-    const systemMsg = messages.find((m) => m && m.role === "system");
-    const nonSys = messages.filter((m) => m && m.role !== "system");
-    // person 预算: 固定 40%, 截断到预算内
-    const persona = systemMsg?.content
-      ? "角色设定:\n" + truncateByTokens(systemMsg.content, LLMClient.FENCE_CTX_TOKEN_BUDGET * LLMClient.FENCE_PERSONA_RATIO)
-      : null;
-    // 历史预算: 剩余 60% 按"最新优先 + 信息量"分配
-    const histBudget = LLMClient.FENCE_HIST_BUDGET;
-    let histLines = [], used = 0;
-    // 1) 最新 6 条按时间倒序, 优先保留(信息量高或最新)
-    const recent = nonSys.slice(-6);
-    for (let i = recent.length - 1; i >= 0; i--) {
-      const m = recent[i];
-      const line = (m.role === "user" ? "用户" : "助手") + ": " + String(m.content || "");
-      const t = estimateTokens(line);
-      if (used + t > histBudget) continue; // 超预算跳过(不截断硬塞)
-      histLines.push(line); used += t;
-    }
-    // 2) 若预算还有余量, 补更早的高信息量轮次
-    const older = nonSys.slice(0, Math.max(0, nonSys.length - 6));
-    for (let i = older.length - 1; i >= 0; i--) {
-      const m = older[i];
-      if (LLMClient._histPriority(m) < 2) continue; // 只补高信息量
-      const line = (m.role === "user" ? "用户" : "助手") + ": " + String(m.content || "");
-      const t = estimateTokens(line);
-      if (used + t > histBudget) break;
-      histLines.push(line); used += t;
-    }
-    histLines.reverse(); // 恢复时间正序
-    const ctx = [persona, histLines.length ? histLines.join("\n") : null].filter(Boolean).join("\n\n");
-    const combined = fencePrompt + "\n\n[上下文]\n" + ctx;
-    const finalText = await proxyToolLoop(
-      async (context) => {
-        // 每条消息: 围栏协议 + 任务 + 累积工具结果
-        const msg = context ? combined + "\n\n" + context : combined;
-        if (engine === "openclaw") {
-          const r = await this._openclawChatAsync([{ role: "user", content: msg }]);
-          return r.content;
-        }
-        const r = await this._dshChatAsync([{ role: "user", content: msg }]);
-        return r.content;
-      },
-      toolRunner,
-      { maxRounds: 8 }
-    );
-    return { message: { role: "assistant", content: finalText, tool_calls: null }, usage: null };
   }
 
   // 辅助 LLM 调用短超时 (毫秒): 压缩/提炼/扩展/经验 等非主对话调用, 快速失败降级, 避免 120s 卡死
@@ -313,56 +109,14 @@ export class LLMClient {
     return withRetry(doFetch, { maxRetries });
   }
 
-  // 是否支持逐字流式: 仅直连 HTTP API 后端 (openclaw/deepseek 为外部进程, 一次性返回) [复审 P2]
-  get supportsStream() { return this.backend !== "openclaw" && this.backend !== "deepseek"; }
+  // 自研 http 底座: 支持逐字流式 (SSE)
+  get supportsStream() { return true; }
 
-  // 是否支持原生 tool_calls: 仅 http 后端 (OpenAI 兼容 API)。
-  // openclaw 是完整 agent 运行时, 拒绝 PPX 的围栏协议(视为伪协议); dsh 走文本围栏。
-  // 工具类任务应优先路由到支持原生 tool_calls 的后端 (实测 LM Studio 原生 tool_calls 全链路通过)。
-  get supportsNativeToolCalls() { return this.backend === "http"; }
+  // 自研 http 底座: 支持原生 tool_calls (OpenAI 兼容 API)
+  get supportsNativeToolCalls() { return true; }
 
-  // openclaw 后端: 启动前校验 Node 版本, 不满足则抛中文引导错误 (而非原始报错)
-  _openclawReadyOrThrow() {
-    if (!nodeVersionOk(process.versions.node)) {
-      throw new Error("[皮皮虾] 当前 Node v" + process.versions.node + " 不满足 OpenClaw 引擎要求。\n请升级 Node 至 >=22.22.3 (推荐 26.x)；注意 Node 23 与 24.0-24.14 不支持。\n或改用 http 后端配置 API key 直连。");
-    }
-    if (!this.mjs || !fs.existsSync(this.mjs)) {
-      throw new Error("[皮皮虾] OpenClaw 引擎未就绪: mjs 路径不存在 (" + this.mjs + ")。\n请设置环境变量 PPX_OPENCLAW_MJS 指向 openclaw.mjs，或在 config/ppx.json 的 openclaw provider 里填 mjs 字段。");
-    }
-  }
-
-  // 翻译 openclaw CLI 的版本类报错为中文引导
-  _translateOpenclawError(e) {
-    const msg = String((e && e.message) || e);
-    if (/Node\.js >= \d+\.\d+\.\d+/.test(msg) || /engines|不满足引擎要求/.test(msg)) {
-      return new Error("[皮皮虾] OpenClaw 引擎要求更高的 Node 版本，请升级 Node 至 >=22.22.3 (推荐 26.x) 后重试。原始信息: " + msg.slice(0, 200));
-    }
-    return e;
-  }
-  // ===== Provider 健康探测 (Harness 化: 并发探测可用性, 支持快速失败) =====
-  // openclaw 后端: 校验本地 Node 版本是否满足引擎要求 (>=22.22.3 / >=24.15 / >=25.9)
-  // http 后端: 快速探测 /models (3s 超时), 不发完整请求
+  // Provider 健康探测: 快速探测 /models (3s 超时), 不发完整请求
   async health() {
-    if (this.backend === "openclaw") {
-      const okNode = nodeVersionOk(process.versions.node);
-      const okMjs = !!this.mjs && fs.existsSync(this.mjs);
-      const ok = okNode && okMjs;
-      if (!okNode) info("[health] openclaw 不可用: Node v" + process.versions.node + " 不满足引擎要求");
-      if (okNode && !okMjs) info("[health] openclaw 不可用: mjs 路径不存在 (" + this.mjs + ")，请设置 PPX_OPENCLAW_MJS");
-      return ok;
-    }
-    if (this.backend === "deepseek") {
-      const r = this._dshResolveBin();
-      if (!r) {
-        info("[health] deepseek 不可用: dsh 未就绪 " + this.dshRoot + " (缺 lib/bin.js 或 apps/cli/src/bin.ts)");
-        return false;
-      }
-      if (r.kind === "src" && !fs.existsSync(path.join(this.dshRoot, "node_modules", "tsx"))) {
-        info("[health] deepseek 不可用: dsh 源码形态依赖未安装 (请运行 npm run dsh:install 或设 PPX_DSH_ROOT)");
-        return false;
-      }
-      return nodeVersionOk(process.versions.node);
-    }
     if (!this.apiKey) return false;
     try {
       const ctrl = new AbortController();
@@ -379,22 +133,9 @@ export class LLMClient {
     }
   }
 
-
   // 流式 chat: 逐块回调 (SSE), 返回累积文本
   // onDelta(content) 每次增量, onDone(full) 结束
   async streamChat(messages, { temperature = 0.7, maxTokens = 4096, onDelta, signal } = {}) {
-    if (this.backend === "openclaw") {
-      // OpenClaw CLI 非流式: 一次性返回全文 (先可用, 后续可切 SSE)
-      const r = await this._openclawChatAsync(messages);
-      if (onDelta) onDelta(r.content);
-      return r.content;
-    }
-    if (this.backend === "deepseek") {
-      // dsh headless 非流式: 一次性返回全文
-      const r = await this._dshChatAsync(messages);
-      if (onDelta) onDelta(r.content);
-      return r.content;
-    }
     if (!this.apiKey) throw new Error(`[皮皮虾] LLM 缺少 API key`);
     const url = `${this.baseUrl}/chat/completions`;
     const ctrl = new AbortController();
