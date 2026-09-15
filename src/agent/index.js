@@ -14,65 +14,35 @@ import { EventTracer, runWithTrace } from "../core/trace.js";
 import { MemoryService } from "../services/memory-service.js";
 import { LearningService } from "../services/learning-service.js";
 export { isOverflowError as _isOverflowError, trimToolResult, toToolContent } from "../core/policy.js";
-import { imageFileToDataUrl } from "../tools/builtin.js";
 import { logicalDay } from "../utils/store.js";
-import { estimateTokens } from "../utils/text.js";
 import { loadConfig } from "../config/index.js";
 import { info, warn, error } from "../utils/logger.js";
 import { Context, compose, loadPlugins } from "../plugin/index.js";
 import { builtinPlugins, resolveLLM, resolveAllLLMs } from "../plugin/builtin.js";
 import { registerMcpTools } from "../mcp/index.js";
-import { buildCompactionMessages, transcriptToText } from "../memory/compaction.js";
-import { buildDsmlPrompt } from "../llm/dsml.js";
 import { Auditor } from "../audit/verifier.js";
 // ANS 独立模块 (可更换): 价值对齐 / 自主任务生成 / 生命周期
 import { Lifecycle } from "../ans/lifecycle.js";
-import { valuesPrompt } from "../ans/values.js";
 import { suggestProactive, markTaskDone } from "../ans/proactive.js";
-import { record as rewardRecord, context as rewardContext, status as rewardStatus } from "../ans/reward.js";
+import { record as rewardRecord, status as rewardStatus } from "../ans/reward.js";
 import { scan as evictionScan, status as evictionStatus } from "../ans/eviction.js";
 import { installGuard, guardStatus } from "../ans/guard.js";
 import { SkillLoader } from "../skills/loader.js";
 import { EvolutionEngine } from "../selfheal/evolve.js";
+// 重构 (2026-09-15): 历史/上下文管理 + 提示词构建从 PPXAgent 类抽出为 mixin
+// (context.js: 历史裁剪/token 预算/会话压缩; prompts.js: 技能清单/核心价值/DSML/画像/多模态)
+import { contextMethods } from "./context.js";
+import { promptMethods } from "./prompts.js";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
-// 辅助 LLM 调用短超时 (压缩/提炼/查询扩展/经验技能提炼等非主对话调用):
-// 模型不可用/网络不通时快速失败降级, 避免阻塞主对话 (主对话仍走 provider 默认长超时)
-const AUX_LLM_TIMEOUT_MS = 10000;
 // 会话历史条数/token 预算已迁到 config.memory (max_history_items / history_token_budget)
-
-// 上下文窗口感知 (第九轮 review P1): 当 provider 上下文太小、或本地模型真溢出时,
-// 压缩依赖 LLM 摘要帮不上忙。这里用 provider 的 context_window 反推一个
-// 「历史 token 预算硬上限」, 且提供不依赖 LLM 的硬裁剪兜底 + 溢出检测降档重试。
-const DEFAULT_CONTEXT_WINDOW = 8192; // 未知窗口时的保守默认 (绝不放大历史)
-const DEFAULT_CONTEXT_RATIO = 0.6;   // 历史+工具结果占用窗口的安全比例上限
+// (上下文窗口常量 DEFAULT_CONTEXT_WINDOW / DEFAULT_CONTEXT_RATIO 与辅助 LLM 超时 AUX_LLM_TIMEOUT_MS
+//  已随历史管理迁至 src/agent/context.js)
 // (工具循环阈值 DEFAULT_MAX_TOOL_ROUNDS / EXPLORE_TOOLS 等已迁至 src/core/policy.js)
 
 // (工具结果裁剪 trimToolResult / 溢出判定 isOverflowError / LLM 失败提示 LLM_FAILED_HINT
 //  已迁至 src/core/policy.js, 本文件经 re-export 保持兼容)
-
-// 多模态: 提取 user 消息中的图片路径并同步读图, 注入为 OpenAI 视觉格式的 content 数组。
-// 仅当当前 LLM 是 http 后端且 provider 标记 vision=true 时生效 (openclaw/dsh 走文本围栏不传图)。
-// 返回 string (无图/不支持) 或 [{type:text}, {type:image_url}...]
-function _visionUserContent(llm, root, userMsg) {
-  const text = String(userMsg);
-  if (!llm || llm.backend !== "http" || !llm.vision) return text;
-  const paths = [];
-  for (const m of text.matchAll(/[^\s"'`，。；;：:,，()（）]+\.(?:png|jpe?g|gif|webp|bmp)/gi)) {
-    paths.push(m[0]);
-  }
-  if (!paths.length) return text;
-  const content = [{ type: "text", text }];
-  for (const p of [...new Set(paths)].slice(0, 4)) {
-    try {
-      const dataUrl = imageFileToDataUrl(root, p);
-      content.push({ type: "image_url", image_url: { url: dataUrl } });
-    } catch { /* 读图失败静默跳过, 保留纯文本 */ }
-  }
-  return content.length > 1 ? content : text;
-}
-
-
+// (多模态视觉 content 注入 visionUserContent 已迁至 src/agent/prompts.js)
 
 export class PPXAgent {
   constructor({ root = ROOT, configFile = null, plugins = [], dataDir = null, globalDataDir = null } = {}) {
@@ -253,247 +223,8 @@ export class PPXAgent {
     return this.memorySvc.query(q, { limit, scope });
   }
 
-  // ---- 多轮会话历史 (吸收 dsh "会话即事实源") ----
-  // 历史从事件日志投影, 再按预算裁剪 (裁剪只发生在投影层, 日志本身不可变)
-  // v0.6.6 优化: 信息量感知裁剪 (学自 Claude Code Microcompact 思路)
-  //   旧版: 纯按条数硬截 + 尾部 token 预算, 可能裁掉关键决策/工具结果轮次
-  //   新版: 优先保留"含关键信息"的轮次(指令/数字/路径/结论/工具结果), 纯寒暄让位
-  _historyPriority(m) {
-    const s = String(m?.content || "");
-    if (!s) return 0;
-    let p = 0;
-    // 长消息(含工具结果/详细决策)权重高
-    if (s.length > 120) p += 2;
-    // 含指令/结论/数字/路径/文件等关键信号
-    if (/[查|算|计算|写|建|改|创建|删除|修复|总结|分析|设置|配置|执行|运行|启动|停止|提交|部署|安装|生成|编译|测试]/.test(s)) p += 2;
-    if (/[0-9]{2,}|[%.¥$元%]|[:：][0-9]/.test(s)) p += 1;
-    if (/[A-Za-z]:[\\\/]|\.(js|py|md|json|txt|ts|go|rs|cpp|java|log)\b/.test(s)) p += 2;
-    if (/失败|错误|报错|异常|成功|完成|结果|结论|决定|方案|建议/.test(s)) p += 2;
-    // 纯寒暄/简短确认权重低
-    if (/^(你好|hi|hello|在吗|谢谢|好的|ok|嗯|是的|对|收到|知道|了解|再见|拜拜)/i.test(s.trim())) p -= 3;
-    return p;
-  }
-  // provider 上下文窗口 -> 历史 token 预算硬上限:
-  // 用 llm.context_window(未配置回退 config.memory.context_window) * 安全比例, 与显式预算取小。
-  // 目的: 本地小上下文模型即使没配 history_token_budget, 也不会把历史塞爆窗口。
-  _histTokenCap() {
-    const window = Number(this.llm?.context_window) || Number(this.config?.memory?.context_window) || DEFAULT_CONTEXT_WINDOW;
-    const ratio = Number(this.config?.memory?.context_window_ratio) || DEFAULT_CONTEXT_RATIO;
-    return Math.max(200, Math.floor(window * ratio));
-  }
-
-  // 会话历史裁剪 (中心函数): 条数上限 + token 预算, 信息量感知, 必保最近一条。
-  // opts.budget / opts.maxItems 可覆盖 (溢出降档重试时传更紧预算)。
-  // token 预算 = min(显式 history_token_budget, 窗口硬上限), 两者都收紧, 取小者。
-  _trimHistory(hist, opts = {}) {
-    let h = [...hist];
-    const maxItems = opts.maxItems != null ? opts.maxItems : (Number(this.config.memory?.max_history_items) || 40);
-    const cfgBudget = Number(this.config.memory?.history_token_budget) || 4000;
-    const tokenBudget = opts.budget != null ? opts.budget : Math.min(cfgBudget, this._histTokenCap());
-    // 1) 条数上限: 超限时按信息量淘汰 (低信息量优先, 从旧到新)
-    if (h.length > maxItems) {
-      const scored = h.map((m, i) => ({ m, i, p: this._historyPriority(m) }));
-      scored.sort((a, b) => (a.p - b.p) || (a.i - b.i));
-      const drop = scored.length - maxItems;
-      const dropped = new Set(scored.slice(0, drop).map((x) => x.i));
-      scored.sort((a, b) => a.i - b.i);
-      h = scored.filter((x) => !dropped.has(x.i)).map((x) => x.m);
-    }
-    // 2) token 预算: 信息量感知裁剪 (替代旧版"丢最旧前缀")
-    //    必保最近一条, 其余按信息量从高到低补足, 低信息量轮次让位
-    let total = h.reduce((a, m) => a + estimateTokens(m.content), 0);
-    if (total > tokenBudget) {
-      const keep = new Set();
-      let used = 0;
-      const lastIdx = h.length - 1;
-      keep.add(lastIdx); used += estimateTokens(h[lastIdx].content);
-      const rest = h.slice(0, lastIdx)
-        .map((m, i) => ({ m, i, p: this._historyPriority(m) }))
-        .sort((a, b) => (b.p - a.p) || (a.i - b.i));
-      for (const { m, i } of rest) {
-        const t = estimateTokens(m.content);
-        if (used + t > tokenBudget) continue;
-        keep.add(i); used += t;
-      }
-      h = h.filter((_, i) => keep.has(i));
-    }
-    return h;
-  }
-
-  // 绝对硬裁剪兜底 (第九轮 review P1: 不依赖 LLM 也能保证历史放得下):
-  // 在 _trimHistory 基础上再加一道绝对底线 — 超条数则保留最近 N 轮,
-  // 超 token 则从最新向前贪心保留到预算内 (最近信息优先, 必保最后一条)。
-  // 即便 config 异常 (预算极大/极小的模型), 注入的历史也不会超过窗口安全比例。
-  _ensureContextFit(hist, { budget = this._histTokenCap(), maxItems } = {}) {
-    let h = [...hist];
-    const itemCap = maxItems != null ? maxItems : (Number(this.config.memory?.max_history_items) || 40);
-    // 环节 1: 条数绝对兜底 — 超上限只留最近 itemCap 条
-    if (h.length > itemCap) h = h.slice(-itemCap);
-    // 环节 2: token 绝对兜底 — 最近优先贪心直到塞满预算 (必保最后一条)
-    let total = h.reduce((a, m) => a + estimateTokens(m.content), 0);
-    if (total > budget && h.length) {
-      const keep = [];
-      let used = 0;
-      for (let i = h.length - 1; i >= 0; i--) {
-        const t = estimateTokens(h[i].content);
-        // 至少保留最后一条 (当前对话), 其余超预算跳过
-        if (keep.length === 0 || used + t <= budget) {
-          keep.unshift(h[i]); used += t;
-        }
-      }
-      h = keep;
-    }
-    return h;
-  }
-
-  // 溢出降档: 把已组好的消息数组按「更紧历史预算」重建 (消息完整性安全版)。
-  //  - 保留全部 system (角色/记忆/经验)
-  //  - 自最后一条 user 起的一切消息原样保留 (含 in-flight 的 assistant tool_calls + tool 配对,
-  //    绝不剪切成"孤立的 tool 消息"导致 API 400)
-  //  - 只对最后一条 user 之前的旧历史做最近优先硬裁剪到 budget 内
-  _shrinkMessagesForOverflow(messages, budget) {
-    let i = 0;
-    while (i < messages.length && messages[i] && messages[i].role === "system") i++;
-    const systems = messages.slice(0, i);
-    const rest = messages.slice(i);
-    if (!rest.length) return messages; // 只有 system, 无裁剪空间, 原样返回
-    // 从后向前找最后一条 user 作为「进行中单元」起点 (含其后的 tool 配对)
-    let lastUser = rest.length - 1;
-    while (lastUser > 0 && rest[lastUser].role !== "user") lastUser--;
-    const tail = rest.slice(lastUser);          // 完整保留 (结束于 user 或 in-flight 工具单元)
-    const mid = rest.slice(0, lastUser);        // 仅剪这里的历史
-    const itemCap = Math.max(2, Number(this.config.memory?.max_history_items) || 40);
-    const trimmed = this._ensureContextFit(mid, { budget, maxItems: itemCap });
-    return [...systems, ...trimmed, ...tail];
-  }
-
-  _getSession(sessionKey) {
-    // 先信息量感知裁剪, 再 + 绝对硬兜底: 即便 config 异常/压缩失败, 历史也放得下
-    const raw = this.sessionStore.deriveCompacted(sessionKey || "default");
-    return this._ensureContextFit(this._trimHistory(raw));
-  }
-
-  // 追加一轮对话为不可变事件 (append-only, 永不重写日志)
-  // v1.1.1: user+assistant 一次批量落盘 (skipFlush), 一轮对话只写一次磁盘而非两次
-  _pushTurn(sessionKey, userMsg, assistant) {
-    const k = sessionKey || "default";
-    this.sessionStore.append(k, "user/message", { content: String(userMsg) }, Date.now(), { skipFlush: true });
-    if (assistant) this.sessionStore.append(k, "assistant/message", { content: String(assistant) }, Date.now(), { skipFlush: true });
-    this.sessionStore.flush(k);
-  }
-
-  // 加载历史: 先尝试结构化压缩(超阈值), 再按预算裁剪
-  async _loadHistory(sessionKey) {
-    const k = sessionKey || "default";
-    await this._maybeCompact(k);
-    return this._getSession(k).map((m) => ({ ...m }));
-  }
-
-  // 会话压缩: 未压缩部分超 token 阈值时, 把最旧一半压成结构化摘要并持久化到日志
-  // (吸收 OpenClaw compaction: 摘要替换被压缩区间, 日志本身不可变)
-  async _maybeCompact(sessionKey) {
-    if (!this.llm) return;
-    if (!(await this._auxLlmReady())) return; // 模型不可用时跳过压缩 (交给 _trimHistory 硬裁剪)
-    const events = this.sessionStore.replay(sessionKey);
-    let upToSeq = 0;
-    for (const e of events) if (e.type === "compaction/summary") upToSeq = e.data?.upToSeq || 0;
-    const tail = events.filter((e) => e.seq > upToSeq && (e.type === "user/message" || e.type === "assistant/message"));
-    if (!tail.length) return;
-    const tokenBudget = Number(this.config.memory?.history_token_budget) || 4000;
-    const total = tail.reduce((a, e) => a + estimateTokens(e.data?.content), 0);
-    if (total <= tokenBudget * 1.5) return; // 未超阈值不压缩
-    const split = Math.floor(tail.length / 2);
-    const old = tail.slice(0, split);
-    if (old.length < 2) return; // 太少不值得压
-    const lastSeq = old[old.length - 1].seq;
-    const transcript = transcriptToText(old.map((e) => ({ role: e.type === "user/message" ? "user" : "assistant", content: e.data?.content })));
-    try {
-      const r = await this.llm.chat(buildCompactionMessages(transcript), { timeoutMs: AUX_LLM_TIMEOUT_MS, retryMax: 0 });
-      const summary = r?.content;
-      if (summary) this.sessionStore.append(sessionKey, "compaction/summary", { summary, upToSeq: lastSeq });
-    } catch {
-      // 压缩失败静默降级, 交给 _trimHistory 硬裁剪
-    }
-  }
-
   // 重置某会话历史 (新会话): 删除事件日志
   resetSession(sessionKey) { this.sessionStore.delete(sessionKey || "default"); }
-
-  // 组装记忆上下文
-  // 差异化视角 (_perspective): 多 agent 场景下由委派方注入子 agent 的专属视角,
-  // 对抗同质失败 (Anthropic: 同模型+同上下文 → 一个错全错), 生命周期由调用方控制
-  // 方法技能清单注入: 让 LLM 知道有哪些方法论技能可用, 面对任务时主动 load_skill
-  // (Superpowers 吸收: 技能不自动生效, 需要触发才读取全文, 省 token)
-  _skillsPrompt() {
-    try {
-      if (!this.skills) return "";
-      const list = this.skills.list().filter((s) => s && s.description);
-      if (!list.length) return "";
-      return "【可用技能】面对对应任务时用 load_skill 读取全文再执行:\n"
-        + list.map((s) => `- ${s.id}: ${s.description}`).join("\n");
-    } catch { return ""; }
-  }
-
-  _context(userMsg) {
-    const base = this.persona.systemPrompt(this.userName) + "\n\n" + this.memory.context(userMsg) + "\n\n" + this.experience.context() + this._l3Context();
-    // 核心价值 (ANS 价值对齐): 注入最前, 独立于 prompt, 不可被后续指令违背
-    const values = this._valuesPrompt();
-    // 引用规则 + 额外 system 内容均可配置 (agent.citation_rule / agent.system_extra)
-    const citation = this.config.agent?.citation_rule || "";
-    const extra = this.config.agent?.system_extra || "";
-    const perspective = this._perspective ? `【任务视角】${this._perspective}` : "";
-    const active = this.scenes.activeContext(userMsg || "");
-    const baseCtx = active ? base + "\n\n" + active : base;
-    const skills = this._skillsPrompt();
-    // DSML 原生文本模型 opt-in (provider.dsml=true): 注入工具协议, 让模型能稳定输出 DSML 结构做工具调用
-    const dsml = this._dsmlPrompt();
-    const rewardCtx = rewardContext(this); // ⑦ 低可靠性工具提醒 (Reward 闭环注入)
-    return [values, baseCtx, skills, citation, perspective, extra, dsml, rewardCtx].filter(Boolean).join("\n\n");
-  }
-
-  // DSML 工具调用协议注入 (v1.1.1 接线): 修复 buildDsmlPrompt 过去从未注入的缺口。
-  // 仅当激活的 http provider 显式 dsml=true 且工具启用时注入; 默认所有 provider 不注入(零回归)。
-  _dsmlPrompt() {
-    try {
-      if (!(this.llm && this.llm.dsml === true)) return "";
-      if (!this.toolsEnabled || !this.tools) return "";
-      const tools = this.tools.toOpenAI();
-      return buildDsmlPrompt(tools);
-    } catch { return ""; }
-  }
-
-  // 核心价值文本 (委托 ans/values 模块): 数组 → 固定格式注入 (无值时不注入, 向后兼容)
-  _valuesPrompt() {
-    return valuesPrompt(this.config.agent?.values);
-  }
-
-  // L3 画像注入: 已生成的用户画像 + agent 自我画像 (未生成返回 "")
-  _l3Context() {
-    try {
-      const parts = [];
-      const u = this.personaStore.userPersona();
-      const a = this.personaStore.agentPersona();
-      if (u) parts.push(u);
-      if (a) parts.push(a);
-      return parts.length ? "\n\n" + parts.join("\n\n") : "";
-    } catch { return ""; }
-  }
-
-  // L3 画像刷新: 跨天触发 (实现已迁 memory-service, 此处分发; 日期标记在 service 内部)
-  _maybeRefreshPersona() {
-    return this.memorySvc.refreshPersona();
-  }
-
-  // 找视觉 provider: 当前 LLM 若是 vision 直接用, 否则从 allProviders 找第一个 vision
-  _visionLLM() {
-    if (this.llm && this.llm.vision) return this.llm;
-    return (this.allProviders || []).find((p) => p.vision) || null;
-  }
-
-  // 多模态 user 消息内容: 有图且存在 vision provider 时返回 content 数组, 否则纯文本
-  _userContent(userMsg) {
-    return _visionUserContent(this._visionLLM(), this.root, userMsg);
-  }
 
   // 对话主入口 (含工具调用循环)
   async chat(userMsg, { persist = true, sessionKey = "default", mode = null } = {}) {
@@ -626,7 +357,7 @@ export class PPXAgent {
   // 多 provider 回退: 依次尝试, 失败切下一个
   // 多 provider 并发健康探测 + 回退: 只对可用 provider 调用, 避免串行等待 180s 超时
   async _llmWithFallback(seedMessages) {
-    let clients = this.allProviders.length ? this.allProviders : [this.llm];
+    let clients = (this.allProviders || []).length ? this.allProviders : [this.llm];
     // 多模态路由: 消息含图片 (image_url 块) 时, 优先 vision provider, 避免图片发到文本后端浪费
     const hasImage = seedMessages.some((m) => Array.isArray(m.content) && m.content.some((c) => c && c.type === "image_url"));
     if (hasImage) {
@@ -960,6 +691,10 @@ export class PPXAgent {
     this.healer.markClean();
   }
 }
+
+// 重构 (2026-09-15): 历史/上下文管理 + 提示词构建以 mixin 方式挂回 prototype
+// (行为与拆前完全一致, 实例方法与调用方不受影响; 测试走 agent._xxx 不感知拆分)
+Object.assign(PPXAgent.prototype, contextMethods, promptMethods);
 
 ensureUTF8Console();
 if (process.argv[1] && process.argv[1].endsWith("src/agent/index.js")) {
