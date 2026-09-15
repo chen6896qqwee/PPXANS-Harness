@@ -1,5 +1,28 @@
 # CHANGELOG
 
+## v2.0.0 (2026-09-15) - 合并版: ppx-agent v1.6.0 + ppx-v2 v0.4.0
+
+> **定性**: 以 `ppx-agent v1.6.0` 为基座, 吸收 `ppx-v2 v0.4.0` 的审计哈希链与记忆治理能力, 合并为统一项目。
+> 合并范围与取舍详见 [MERGE-REPORT.md](MERGE-REPORT.md); 第三方来源见 [references/THIRD-PARTY-SOURCES.md](references/THIRD-PARTY-SOURCES.md)。
+
+### 吸收自 ppx-v2 的能力
+- **SHA-256 审计哈希链**: 工具调用 append-only 账本 + 链式防篡改, 篡改/删行可定位到具体行, 支持隔离损坏段重建 (`npm run audit:verify`)
+- **记忆治理**: 软删可回滚 (forget/restore) + 版本链 (update 留痕) + TTL 自动归档 + 按层清理 + 导出/导入迁移
+- **L4 程序性记忆**: 技能/流程记忆层, 衰减率仅为 L1 的 1/4
+- **10 个治理运维工具**: memory_forget/restore/export/import/clear_layer/list_deleted、audit_verify、persona_build/read、selfheal_run
+
+### 基座新增 (v1.6.0 至合并前)
+- 工具超时预算 (全局默认 30s + Promise.race 双层兑底 + 超时 trace 事件)
+- 工具循环策略抽离 `src/core/policy.js` / 事件流 `src/core/trace.js` / 服务化 `src/services/*`
+- DeepSeek Harness 底座接入 (dsh 优先, 未安装自动回退 http/cloud)
+
+### 验证
+- 全量测试: 597 pass / 0 fail / 6 skip
+- 自愈基准: 7/7 (100%)
+
+> ⚠️ 历史说明: 原 ppx-agent / ppx-v2 的独立 git 历史未能保留 (GitHub 旧仓库已重定向合并), 当前仓库仅含 v2.0.0 一个提交。
+> CHANGELOG 中 v1.6.0 提到的回滚点 `bf72a59` 在现仓库不可达, 仅作设计记录。
+
 ## v1.6.0 (2026-09-14) - FEATURE: 工具超时预算 (首个功能增量, 前三刀 dev 归入此版)
 
 > **定性**: 这是四刀里第一个功能增量, 非等价重构。前三刀 (抽 policy / trace 事件流 / 服务化) 是等价重构归入 v1.6.0-dev;

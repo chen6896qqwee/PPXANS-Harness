@@ -24,6 +24,12 @@ jobs:
       - name: Run full test suite
         run: npm test
         timeout-minutes: 15
+      - name: Self-heal benchmark
+        run: node scripts/selfheal-bench.js
+        timeout-minutes: 5
+      - name: Audit chain verify
+        run: node scripts/audit-verify.js
+        timeout-minutes: 5
 
   web:
     runs-on: ubuntu-latest

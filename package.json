@@ -17,7 +17,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/chen6896qqwee/ppx-agent.git"
+    "url": "git+https://github.com/chen6896qqwee/PPXANS-Harness.git"
+  },
+  "homepage": "https://github.com/chen6896qqwee/PPXANS-Harness",
+  "bugs": {
+    "url": "https://github.com/chen6896qqwee/PPXANS-Harness/issues"
   },
   "scripts": {
     "start": "node src/agent/index.js",

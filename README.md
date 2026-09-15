@@ -59,11 +59,13 @@
 皮皮虾是**独立自包含的 agent**：默认用 `src/llm/router.js` 在本地/HTTP、内嵌 dsh 引擎、云端 OpenAI 兼容 API 之间自动回退（OpenAI/DeepSeek/火山/通义/本地），多 provider 自动回退 + 瞬态错误重试。
 
 - 默认：本地/HTTP 直连优先（router 按 local → dsh 引擎 → cloud 顺序回退，配 API key 即可跑）
-- **DeepSeek Harness 底座（已内嵌源码）**：`deepseek-harness` 全部架构与源码已吸收到 `.deps/deepseek-harness`，且 `dsh` 已加入 `providers` 首位（default_id=dsh）；`dsh` 后端会自动定位该目录，无需再设 `PPX_DSH_ROOT`。未安装 dsh 依赖时健康检查会把它判为不可用并自动回退 http/cloud；安装后即作为底座生效。
+- **DeepSeek Harness 底座（可选，需手动安装）**：`.deps/deepseek-harness` 为**可选底座，不随仓库分发**（见 .gitignore），需先 `npm run dsh:install` + `npm run dsh:build` 才可用；`dsh` 已加入 `providers` 首位（default_id=dsh）。未安装时健康检查自动判不可用并回退 http/cloud，不受影响。
 - 可选引擎：`openclaw` / `dsh` 后端代码保留（`backend: "openclaw"` / `"deepseek"`），需自行在 config 加 provider 或用环境变量 `PPX_OPENCLAW_MJS` / `PPX_DSH_ROOT` 指定引擎位置
 - 保留：皮皮虾四层记忆 / 自愈 / 方法Skill / 工具 / web 壳 全部保留
 
-### DeepSeek Harness 内嵌底座（dsh）
+### DeepSeek Harness 可选底座（dsh，需手动安装）
+
+> `.deps/` 在 .gitignore 中，clone 后目录为空。若要用 dsh 底座，需先按下面步骤安装：
 
 ```bash
 # 首次安装/构建内嵌 dsh（需要网络安装依赖）
@@ -74,7 +76,7 @@ npm run dsh:build
 npm run dsh -- web
 ```
 
-- 源码位置：`.deps/deepseek-harness/`（完整保留 deepseek-harness 的 packages/apps/docs/scripts/vendor 等）
+- 源码位置（安装后）：`.deps/deepseek-harness/`（完整保留 deepseek-harness 的 packages/apps/docs/scripts/vendor 等）
 - **构建形态优先（v1.5.1+）**：`dshRoot` 存在 `lib/bin.js`（已安装的 dsh npm 包，如 `npm i -g @deepseek-ai/dsh`）时直接零构建运行；否则回退源码形态（`apps/cli/src/bin.ts` + `node_modules/tsx`）
 - 定位优先级：`PPX_DSH_ROOT` 环境变量 > provider 的 `dsh_root` 配置 > 内嵌 `.deps/deepseek-harness` 默认目录
 - 未安装/构建 dsh 时，健康检查判不可用并自动回退 http/cloud，不受影响
