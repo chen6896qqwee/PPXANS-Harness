@@ -5,17 +5,18 @@ description: >
   沉淀轨迹、形成数据飞轮，并落地到 Qwen / DeepSeek 模型的 SFT / DPO / GRPO / RL 训练，
   实现行为层（经验/技能/记忆）与模型层（参数）的双重进化。
   当用户提到 Agent 训练 / 进化 / 自我改进 / 数据飞轮 / 轨迹学习 / 反思闭环 / 让智能体变聪明 /
-  微调 Qwen / 微调 DeepSeek / R1 复现 / GRPO 训练 / DeepSeek-V4 / V4 训练架构 / V4.1 /
-  工具调用微调 / 记忆系统 / 在线策略蒸馏 / 让 Agent 变强 时使用。
+  记忆系统 / 教训沉淀 / 技能固化 / 工具调用改进 / 让 Agent 变强 时使用。
+  （模型训练：微调 Qwen / DeepSeek / R1 复现 / GRPO / V4 / V4.1 训练架构属于可选高级阶段 L3，见 6/7 节。）
   涵盖：闭环五步运行规程、四层记忆、轨迹数据格式与校验器、数据飞轮流水线、
   Qwen 官方训练配方（LLaMA-Factory SFT/LoRA/QLoRA）、DeepSeek-R1 纯 RL 与蒸馏管线、
-  DeepSeek-V4 两阶段后训练架构（领域专家培养 + 在线策略蒸馏）与全栈训练基础设施、
-  GRPO/verl 复现栈、GitHub 与 HF Mirror 权威资源、评估指标、自检清单与安全边界。
+  DeepSeek-V4 两阶段后训练架构（领域专家培养 + 在线策略蒸馏）、V4.1 数据管线自动合成（CED / CSA2 / Engram / 连续推理强度）与全栈训练基础设施、
+  GRPO/verl 复现栈、NexRL / Nex-N2.5 智能体后训练框架（7.6）、GitHub 与 HF Mirror 权威资源、评估指标、自检清单与安全边界。
 ---
 
 # Agent 专业训练规程（Universal Agent Training Playbook）
 
-> 一句话：把「训练 Agent 变聪明」从一次性微调，变成**任何 Agent 自身就能跑起来的持续进化系统**。
+> 一句话：让 Agent **在干活中自己变强**——感知、记忆、推理、行动、反思闭环跑起来，经验沉淀成技能，
+> 轨迹积累成数据飞轮；模型训练（SFT/DPO/GRPO）只是把积累变现的**可选**手段，不是本技能的主线。
 > 本文件是一套**通用操作规程**——任何 Agent（无论品牌、框架、宿主）加载后，都能：
 > 1. 按「感知—记忆—推理—行动—反思」闭环执行任务并沉淀轨迹；
 > 2. 用统一格式积累训练数据，形成数据飞轮；
@@ -31,20 +32,22 @@ description: >
 - **定期**：每攒够 50–100 条轨迹跑一次第 5 节流水线（验证→过滤→生成偏好对→训练→回归）。
 - **升级**：模型训练需要 GPU + 训练栈；无 GPU 时只做行为层进化（记忆/技能/经验），同样有效。
 
-### 0.2 三层进化模型（先分清你在哪一层）
-| 层 | 机制 | 硬件需求 | 见效速度 |
-| --- | --- | --- | --- |
-| L1 行为层 | 教训沉淀（lessons）、技能固化、反思闭环 | 无 | 立即 |
-| L2 数据层 | 轨迹积累、偏好对、评估集 | 无 | 1–2 周 |
-| L3 模型层 | SFT / DPO / GRPO 训练更新参数 | GPU（≥11GB 可 QLoRA） | 数周–数月 |
+### 0.2 三层进化模型（本技能的主线是 L1/L2，L3 是可选终点）
+| 层 | 机制 | 硬件需求 | 见效速度 | 定位 |
+| --- | --- | --- | --- | --- |
+| L1 行为层 | 教训沉淀（lessons）、技能固化、反思闭环 | 无 | 立即 | **主线**：Agent 自身变强 |
+| L2 数据层 | 轨迹积累、偏好对、评估集 | 无 | 1–2 周 | **主线**：变强的证据与燃料 |
+| L3 模型层 | SFT / DPO / GRPO 训练更新参数 | GPU（≥11GB 可 QLoRA） | 数周–数月 | **可选**：把 L2 数据变现 |
 
-**铁律**：L1/L2 是 L3 的前提。轨迹和评估集没攒够前不要训练；训练后必须回归（第 9 节）。
+**铁律**：
+1. **本技能的主战场是 L1/L2**——没有 GPU、不训练模型，Agent 照样持续变强；L3 只是数据攒够后的加分项。
+2. L1/L2 是 L3 的前提。轨迹和评估集没攒够前不要训练；训练后必须回归（第 9 节）。
 
 ### 0.3 自我验证（加载后先确认）
 - [ ] 我能说出闭环五步是哪五步
 - [ ] 我知道轨迹 JSON 的 8 个必填字段
 - [ ] 我知道「奖励必须可验证」为什么是铁律
-- [ ] 我知道本机有没有 GPU、能不能跑 L3（`nvidia-smi` / 训练栈检查）
+- [ ] 我知道本机有没有 GPU——没有也不影响主线（L1/L2 照跑），只是暂时到不了 L3（`nvidia-smi` 检查）
 
 ---
 
@@ -52,7 +55,11 @@ description: >
 
 **Agent 智能 = 基座能力 × 记忆质量 × 工具使用 × 规划能力 × 反馈闭环 × 安全边界**
 
-训练重点不是只微调模型，而是训练「策略」：
+**关键认知：六个因子里，五个是 Agent 自己在运行时就能改进的**（记忆、工具使用、规划、反馈闭环、安全边界）；
+只有「基座能力」需要靠模型训练（L3，可选）。所以 **Agent 变强 ≠ 训练模型**——先把运行时可改进的五个因子做到极致，
+基座能力再用积累的数据变现。
+
+训练「策略」而不是只调参数：
 观察 → 思考 → 行动 → 得到结果 → 反思 → 写入记忆 → 下次改进。
 
 三个铁律（来自 DeepSeek-R1 与数据飞轮实践）：
@@ -65,7 +72,8 @@ description: >
 
 ## 2. 闭环五步运行规程（Agent 每次任务的默认工作方式）
 
-加载本技能后，Agent 处理任何任务都按下面 5 步执行，并在**第 5 步强制写轨迹**：
+**这是本技能的主引擎。** 加载本技能后，Agent 处理任何任务都按下面 5 步执行，并在**第 5 步强制写轨迹**：
+每跑一轮，Agent 就比上一轮多一条经验；跑得越多，行为越稳、坑记得越牢——这就是「干活中变强」的具体机制。
 
 ```
 ┌─────────┐   ┌─────────┐   ┌─────────┐   ┌─────────┐   ┌─────────┐
@@ -97,7 +105,7 @@ description: >
 
 记忆训练要点：检索正确性、写入策略（什么值得记）、遗忘策略（旧/错记忆降权）、长上下文压缩。
 
-**业界前沿参考**：DeepSeek 2026-01 的 `Engram`（Conditional Memory via Scalable Lookup）把「可扩展查找的条件记忆」当作稀疏性的新维度，是记忆层从「向量检索」走向「模型内置可寻址记忆」的候选方向（见第 12 节）。
+**业界前沿参考（已进生产）**：DeepSeek 2026-01 的 `Engram`（Conditional Memory via Scalable Lookup）把「可扩展查找的条件记忆」当作稀疏性的新维度；**V4.1-Flash 已内置 196B 参数的 Engram 条件记忆，经 token 查找稀疏访问**（见 7.5）——「模型内置可寻址记忆」从候选方向变成了量产架构，记忆层训练可关注「哪些记忆值得写入模型参数」的新课题。
 
 ---
 
@@ -145,6 +153,9 @@ def validate(traj):
 
 ## 5. 数据飞轮流水线（让 Agent 持续变强的引擎）
 
+**没 GPU 时飞轮照转**：收集轨迹 → 验证器打分 → 过滤 → 生成偏好对 → **沉淀为行为改进**（更新技能/教训/最佳实践）→ 回归评估 → 继续运行。
+「训练」一环是可选的——有 GPU 才替换成 SFT/DPO/GRPO（L3）；没 GPU 时这一环换成「把高价值轨迹变成技能/教训回写行为层」，飞轮照样闭环。
+
 ```
 运行 Agent（在线/离线跑任务）
    ↓ 收集轨迹（第 2 节格式）
@@ -152,13 +163,15 @@ def validate(traj):
    ↓
 过滤 / 去重 / 生成偏好对（成功 vs 失败）
    ↓
-训练（按场景选一个或多个）：
-   ├─ 模仿学习 SFT      —— 专家轨迹：状态、观察、思考、行动、结果、反思
-   ├─ 工具调用微调      —— 多轮函数调用、错误恢复、参数校验
-   ├─ 偏好优化 DPO/ORPO —— 成功轨迹 vs 失败轨迹
-   └─ 强化学习 GRPO/PPO —— 奖励 = 任务成功 + 工具正确 + 效率 − 成本 − 安全违规
+变现（二选一）：
+   ├─ 行为层变现（无 GPU，主线）——高价值轨迹 → 新技能 / 教训 / 最佳实践，回写记忆与技能库
+   └─ 模型训练（有 GPU，可选 L3）——
+       ├─ 模仿学习 SFT      —— 专家轨迹：状态、观察、思考、行动、结果、反思
+       ├─ 工具调用微调      —— 多轮函数调用、错误恢复、参数校验
+       ├─ 偏好优化 DPO/ORPO —— 成功轨迹 vs 失败轨迹
+       └─ 强化学习 GRPO/PPO —— 奖励 = 任务成功 + 工具正确 + 效率 − 成本 − 安全违规
    ↓
-回归评估（CI 评估集，每次训练后必跑，防退化）
+回归评估（CI 评估集，每次改进/训练后必跑，防退化）
    ↓
 上线（灰度 → 全量）→ 继续运行 → 回到顶部（新一轮收集）
 ```
@@ -189,10 +202,13 @@ def validate(traj):
 
 **进阶范式（DeepSeek-V4 两阶段后训练，见 7.4）**：数据规模足够时，把训练拆成「领域专家独立培养（SFT + 领域奖励 GRPO，每个领域一个专家）→ 在线策略蒸馏统一（OPD，full-vocabulary reverse KL 合并）」两步——与本流水线同构但更适合多领域并行与防灾难性遗忘。**注意关键差异**：不必全部依赖规则验证器；难验证任务可用「评分细则 rubric + 生成式奖励模型（GRM，让模型自己当评委）」，大幅降低人工标注量。
 
+**V4.1 再验证（2026-09，官方口径）**：V4.1-Flash 的后训练「SFT → RL → OPD **无任何算法改动**，全部实质收益来自数据管线——大规模自动合成 agent 任务与环境，数据 / 任务 / rollout 渐进式扩量」（见 7.5）。结论：飞轮的主战场是**数据管线的自动化与规模化**，不是换算法；先把「自动合成任务 → 环境 → 采集 → 验证」的供给端做厚。
+
 ---
 
-## 6. Qwen（通义千问）训练方法 —— GitHub 官方实测
+## 6. 【可选 · L3】Qwen（通义千问）训练方法 —— GitHub 官方实测
 
+> ⚠️ 本节与「Agent 自身变强」无关，**仅当**满足全部条件才需要读：① 有 GPU（≥11GB 可 QLoRA）；② 轨迹 ≥ 50 条且含失败样本；③ 行为层已到瓶颈、确实需要参数级提升。不满足就跳过，主线（L1/L2）不受任何影响。
 > 数据来源：QwenLM/Qwen3 官方仓库（Qwen2.5 仓库已重定向至此）+ 官方 LLaMA-Factory 示例。许可：Apache 2.0。
 
 ### 6.1 官方推荐的训练栈
@@ -255,8 +271,9 @@ text = tokenizer.apply_chat_template([{"role": "user", "content": "..."}],
 
 ---
 
-## 7. DeepSeek 训练方法 —— GitHub 官方实测 + 社区复现
+## 7. 【可选 · L3】DeepSeek 训练方法 —— GitHub 官方实测 + 社区复现
 
+> ⚠️ 本节属于 L3 模型训练（可选）。没 GPU / 轨迹没攒够时**不必读**——它不会让 Agent 变强，只会分散注意力；V4 / V4.1 部分当「行业情报」了解即可，不必照做。
 > 数据来源：deepseek-ai/DeepSeek-R1 与 deepseek-ai/DeepSeek-V3 官方 README（均已核实）。
 > 注意：官方曾发布的 DeepSeek-R1-GRPO / DeepSeekMath / DeepSeek-DataEngine 仓库当前在 GitHub 已 404（官方移除），GRPO 方法改由社区复现栈承载（见 7.3）。
 
@@ -388,7 +405,7 @@ text = tokenizer.apply_chat_template([{"role": "user", "content": "..."}],
 - **Agentic 是最大系统性差距项**（Terminal Bench 2.0 落后最佳闭源约 7 分），但 **MCPAtlas（工具选择与组合）与 SWE Multilingual 基本追平**；官方自评知识能力落后前沿约 3–6 个月。
 - 长上下文是强项：MRCR 1M 83.5、CorpusQA 1M 62.0（领先同场闭源对照）。V4-Pro-Max 为当前开源 SOTA，Codeforces 估算 Elo 达 3206 量级。
 
-**V4.1（2026-09-10 发布，最新一代结构）**：V4.1-Flash 为 **552B MoE**，采用全新 **Causal-Encoder-Decoder 非对称结构**（输入激活 8B / 输出激活 16B），原生多模态视觉理解；KV cache 需求再降（HBM 降至上一代 **1/4**、SSD 降至 **1/8**，相对初代 KV cache 累计缩小 **437×**）；在基准上超越 V4-Pro，API 名 `deepseek-flash`，旧 `deepseek-v4-flash` / `-vision-exp` 已下线并临时路由至此。
+**V4.1（2026-09-10 发布，最新一代结构）**：V4.1-Flash 为 **552B MoE**，采用全新 **Causal-Encoder-Decoder 非对称结构**（输入激活 8B / 输出激活 16B），原生多模态视觉理解；KV cache 需求再降（HBM 降至上一代 **1/4**、SSD 降至 **1/8**，相对初代 KV cache 累计缩小 **437×**）；在基准上超越 V4-Pro，API 名 `deepseek-flash`，旧 `deepseek-v4-flash` / `-vision-exp` 已下线并临时路由至此。训练方法要点见 **7.5**。
 
 **GitHub 配套实现（全部 github.com/deepseek-ai/）**
 
@@ -410,6 +427,105 @@ text = tokenizer.apply_chat_template([{"role": "user", "content": "..."}],
 
 **给本技能的含义**：V4 的两阶段后训练 = 数据飞轮的「并行专家 + 蒸馏合并」进阶版，且**全面替代了前代的混合 RL**。小规模 Agent 团队可照抄其「领域 SFT → GRPO（领域奖励）→ 多专家 → OPD 合并」范式；难验证任务改用 **rubric + GRM** 少标注；工具调用改用 **XML + 特殊 token** 降解析失败；跨轮保留 ` thinking` 做长周期 Agent；其「**轨迹日志 + 沙箱 + 可抢占恢复 + WAL**」正是飞轮基础设施的工程标杆，与第 2/4/5 节一一对应。
 
+### 7.5 DeepSeek-V4.1-Flash 训练方法要点（2026-09-10 发布）
+
+> 数据来源：官方模型卡 https://hf-mirror.com/deepseek-ai/DeepSeek-V4.1-Flash + 技术报告 `DeepSeek_V41_Tech_Report.pdf`（MIT 许可）。V4.1 是 V4 的**数据管线大改版**，不是新算法版。
+
+**一句话**：V4.1-Flash 的后训练范式与 V4 完全一致（SFT → RL → OPD），**官方明确没有算法改动**；全部实质提升来自数据管线——**大规模自动合成 agent 任务与环境，并渐进式扩量（数据 / 任务 / rollout 三个维度同步放大）**。这是对数据飞轮路线的最高级别背书：改进的主战场在数据供给端。
+
+**模型概况**：552B MoE 多模态模型（原生图像 + 文本），40 层 Transformer 采用 **Causal-Encoder-Decoder（CED）** 非对称结构（20 层因果编码器 + 20 层解码器），解码器全局 KV 由编码器末层隐状态投影而来——**prefill 只激活 8B 参数、decode 激活 16B**，输入密集型 agentic 负载的成本效率大幅提升。每 MoE 层 1 共享 + 384 路由专家，每 token 激活 6 个。
+
+**预训练**：45T 多模态语料从头训练；稀疏注意力在 64K 序列长度上训练，**34T tokens 时扩展到 1M 上下文**（长上下文后置延展的实操样本）。
+
+**后训练数据管线（本技能最该抄的部分）**：
+1. **自动合成 agent 任务与环境**：不是靠人工攒数据，而是程序化/自举批量生成「任务 + 环境 + 验证信号」，覆盖 Agent 的感知、规划、工具调用、纠错全链路。
+2. **渐进式扩量**：数据量、任务复杂度、rollout 轮次三个维度**按阶段同步放大**（课程学习的数据飞轮版），避免一上来全量跑导致样本分布失衡。
+3. **连续推理强度控制**：V4 的三档（Non-think / Think High / Think Max）升级为**连续整数 1–100** 的 `reasoning_effort`，训练时用长度惩罚 + 上下文窗口差异区分档位。→ 训练与评估必须固定档位，否则分数不可比。
+
+**架构效率要点（理解 V4.1 为什么便宜，不必照抄）**：
+- **CSA2（Compressed Sparse Attention 2）**：每层静态分配 Full / Reindex / Reuse 三种模式之一，跨层共享主 KV 与 indexer K、复用 Top-K 稀疏索引；解码器用**分层稀疏 indexer**（只在前置 Full 层构建的候选池内检索），索引成本与上下文长度解耦。
+- **FP4 主 KV 缓存**（E2M1 格式，每 16 通道 1 个 E4M3 缩放因子）→ 全局 KV 降至 **890 字节 / token**，约 V4-Flash 的 **1/4**。
+- **SWA Bounded Replay**：只重放最近 `n_win` 个 token 重建缺失的 SWA KV 状态，**不用把 SWA KV 落 SSD**，持久 KV 缓存降至 V4-Flash 的约 **1/8**。
+- **Engram 条件记忆**：196B 参数，经 token 查找稀疏访问——记忆层「模型内置可寻址记忆」正式量产（对应本技能第 3 节）。
+- **DSpark 投机解码**（semi-autoregressive 草稿 + confidence-scheduled 验证）沿用。
+
+**评测方法论（第 9 节直接升级）**：
+- **同一模型换 scaffold，分数差异显著**（官方数据，V4.1-Flash）：DeepSWE v1.1 —— mini-SWE 74.2 vs DSH Minimal 72.6 vs Claude Code 69.8 vs Codex 65.6；Terminal-Bench 2.1 —— DSH Minimal 90.6 vs mini-SWE 90.3 vs Claude Code 88.0 vs Codex 84.1。**对比 agentic 能力必须固定 harness + 采样设置**，否则分数毫无可比性。
+- 官方 agentic 评测设置：N=8（DeepSWE）/ N=3（TB2.1）、max_steps=500、temperature 1.0、top_p 0.95、1M 上下文、Linux 容器（TB2.1 断网）；视觉 agent（Chartography / BabyVision / ZeroBench）用 Claude Code harness + 512K 上下文；DeepSWE 用 mini-SWE harness、SEC-Bench Pro 用 Claude Code harness。
+- 基座能力（Base，EM）：MMLU-Pro 74.1、HumanEval 79.4、GSM8K 93.0、BigCodeBench 60.6。
+
+**Agentic 表现（max reasoning_effort，与闭源同场对比）**：Terminal-Bench 2.1 **90.6（全场最高，超 Opus-5.0 89.1 / GPT-5.6 88.8）**、DeepSWE v1.1 **74.2（追平 Opus-5.0 74.0）**、CyberGym 88.1、SEC-Bench Pro 62.8、AutomationBench 54.8、Agent's Last Exam 31.8、HLE w/ tools 63.9、Codeforces 3471。→ 开源 agentic 能力已到闭源第一梯队，「数据飞轮 + 开源基座」路线被验证可行。
+
+**工程注意点**：
+- **采样参数别套 R1 的**：V4.1 官方推荐 temperature 1.0、top_p 0.95（或 1.0）、max_tokens ≥ 256K——与 R1 的 0.6 完全不同。
+- **无 Jinja chat template**：V4.1 同 V4，不随模型发布 Jinja 模板；用仓库内 `encoding.py` 参考实现或 `deepseek-recipe`（Rust + Python 绑定，协议级维护）编码 prompt（含多轮、工具调用、thinking、数值 reasoning_effort、中途 system 消息、交错图像）。
+
+**给本技能的含义**：V4.1 证明——当训练范式收敛（SFT → RL → OPD）后，**下一个杠杆是数据管线的自动合成与渐进扩量**；本技能第 5 节飞轮应把「任务/环境自动合成器」列为最高优先级建设项，其次才是训练与评估。
+
+### 7.6 NexRL / Nex-N2.5：智能体后训练框架（2026-09 开源，Agent RL 的现成落地栈）
+
+> 数据来源：github.com/nex-agi/NexRL（Apache 2.0）+ github.com/nex-agi/Nex-N2.5 + Nex-N2.5 系列模型卡（2026-09-08 发布，均已在 GitHub/HF 核实）。许可：NexRL=Apache 2.0；模型权重将开源。
+
+**一句话**：NexRL 是 Nex-AGI 官方的**超松耦合分布式 LLM 后训练框架**，把「Agent 干活 → 环境反馈 → 强化」流水线化；Nex-N2.5（2026-09 开源的智能体模型家族：mini / Pro / Max）就是它的产出物。与本技能直接对应：NexRL 的 RolloutWorker / TrajectoryPool 就是第 4/5 节「轨迹 + 数据飞轮」的生产级实现——**想跑 L3 Agent RL 时，它是最直接的落地栈。**
+
+**Nex-N2.5 模型家族（基座选择参考，均为智能体后训练产物）**
+- **mini / Pro**：Qwen3.5 系列多模态底座，强化电脑操作/网页浏览/视觉辅助 Agent 能力；Pro = Qwen3.5-397B-A17B，mini = Qwen3.5-35B-A3B-Base
+- **Max**：DeepSeek-V4-Pro-Base，1.6T 参数纯文本 MoE，首次万亿参数规模完整后训练
+- 训练主线 = **智能体后训练**：海量 Agent 任务 + 多样化环境反馈（与第 5 节飞轮同构）；官方配套评估框架 NexAU、NexCUA（后者即将开源）
+
+**NexRL 五组件（与本技能映射）**
+
+| NexRL 组件 | 职责 | 对应本技能 |
+| --- | --- | --- |
+| DataLoader | 训练数据供给（自定义数据集） | 第 5 节数据端 |
+| RolloutWorker | 环境交互（Agent 跑这里） | 第 2 节「行动」 |
+| TrajectoryPool | 轨迹收集与批处理 | 第 4 节轨迹库 |
+| Trainer | 算法逻辑（GRPO 等） | 第 5 节「变现」 |
+| WeightSyncController | 训练/推理权重同步 | L3 训练工程 |
+
+服务层：Inference Service（统一 OpenAI API，SGLang/vLLM/TGI 可插拔）、Train Service（FSDP/Megatron 可插拔）、**Agent Service（Agent 直接推轨迹进池，零 RL 代码改造）**。
+
+**两种运行模式**
+1. **self-hosted（自托管）**：本地 K8s 集群全栈跑（Python 3.12+ / CUDA 12.8+ / K8s + Volcano 调度器 / 共享存储 NFS·GPFS / GPU）。命令：`nexrl -m self-hosted -c recipe/my_task/my_task.yaml --run-nexrl`
+2. **training-service（训练即服务）**：接 Weaver / Tinker 云端训练 API，本地只写配置 + evaluator，**零 GPU 也能训**（NexAU Agent 零代码训练就是这模式）。命令：`nexrl -m training-service -c recipe/.../tinker.yaml --run-nexrl`
+
+**最小 recipe（直接抄）**：
+```
+recipe/my_task/
+├── my_task.yaml                  # 主配置：defaults 引 self_hosted_nexau_common；data_files；rollout_worker(type: nexau)；trainer(type: self_hosted_grpo)
+└── agent_workspace/
+    ├── agent_config.yaml         # Agent 定义：system_prompt / tools(可选) / llm_config / tracers(InMemoryTracer)
+    └── evaluator.py              # ★ 奖励函数：GRPO 强化信号全在这，写好坏决定 Agent 变强方向（对应 5.1 验证器）
+```
+evaluator 核心：
+```python
+from nexrl.rollout_worker import Evaluator, BaseEvaluationTarget, EvaluationRunResult
+class MyEvaluator(Evaluator):
+    def evaluate(self, data, evaluation_target):
+        reward = 1.0 if evaluation_target.final_answer == data["answer"] else 0.0  # 可验证奖励
+        return EvaluationRunResult(reward=reward)
+```
+
+**关键洞见（与本技能互证）**
+- 变强的杠杆在 **evaluator（奖励必须可验证，第 1 节铁律 3）+ 任务数据质量**，不在框架本身——框架只是流水线。
+- 无 K8s/GPU 两条路：① training-service 云端模式（本地零 GPU）；② FSDP 后端本身抄自 verl（volcengine/verl），单机小规模可平替。
+- 训练后端可插拔（FSDP/Megatron）、推理引擎可插拔（SGLang/vLLM/TGI），换栈不改 Agent 代码。
+
+**给本技能的含义**：有 GPU/集群想跑 Agent RL 时，NexRL 是「轨迹 → GRPO 训练」最直接的落地栈；其 recipe 配置与 evaluator 写法可直接并入第 5 节飞轮的 L3 变现环节。注意其最小环与本节相同：**先窄后宽，一个场景跑通再扩**。
+
+**行为层落地（把 NexRL 思想翻译回 L1/L2 主线——本技能真正的主战场，无 GPU 照用）**
+
+| NexRL 机制 | 翻译成本技能可执行的 L1/L2 动作 | 对应节 |
+| --- | --- | --- |
+| Evaluator（奖励必须可验证） | 每次反思时给任务打分：结构完整/可验证信号/反思质量，这就是本地版 evaluator | 2·5 步 + 5.1 |
+| TrajectoryPool（轨迹池） | 第 4 节轨迹 JSON 就是本地轨迹池；攒够 50 条离线生成偏好对 | 4 |
+| 环境反馈（RL 信号） | 每次工具调用后把「结果是否达到预期」写进 `result.ok`——环境信号不依赖 GPU | 2·4 步 |
+| Agent Service（零 RL 代码） | Agent 正常干活 + 第 5 步强制写轨迹 = 边干边训，无需任何训练代码 | 0.2 |
+| 领域专家独立培养（OPD） | 程序记忆按任务类型分目录沉淀最佳实践，每个目录一个「专家」 | 3 |
+| 任务/环境自动合成（V4.1） | 每周用自动合成器生成新场景测试自己，找薄弱环节 | 5 |
+
+**一句话**：NexRL 是「模型层」把这套飞轮跑在 GPU 上的版本；本技能是把它跑在 Agent 行为上的版本——**框架可以没有，闭环不能停**。
+
 ---
 
 ## 8. 模型下载（HF Mirror 国内镜像 + 原站）
@@ -421,6 +537,7 @@ HF Mirror（https://hf-mirror.com）是 HuggingFace 的国内镜像站，用于*
 - DeepSeek-V4-Pro / V4-Flash（MIT，1M 上下文）：https://hf-mirror.com/deepseek-ai/DeepSeek-V4-Pro 、https://hf-mirror.com/deepseek-ai/DeepSeek-V4-Flash
 - V4 家族其他成员：`DeepSeek-V4-Pro-Base` / `V4-Flash-Base`（FP8 基座）、`V4-Flash-0731`（0731 重后训练版）、`V4-Pro-DSpark` / `V4-Flash-DSpark`（**非新模型**，同 checkpoint 外挂投机解码模块）、`V4-Flash-Vision-Exp`（视觉实验版，已下线）、`V4.1-Flash`（2026-09-10 最新）——全部在 `hf-mirror.com/deepseek-ai`
 - 官方模型集合（V4 全家桶）：https://hf-mirror.com/collections/deepseek-ai/deepseek-v4
+- **V4.1-Flash 模型卡（训练方法一手来源）**：https://hf-mirror.com/deepseek-ai/DeepSeek-V4.1-Flash （含技术报告 `DeepSeek_V41_Tech_Report.pdf`）
 - 更多 Qwen：`hf-mirror.com/Qwen`；DeepSeek 系列：`hf-mirror.com/deepseek-ai`
 
 > 实测提示：hf-mirror 会检测 IP 归属——**非中国大陆 IP 会被自动跳转到 HuggingFace 原站**；国内网络下镜像直连正常。若在境外环境调试脚本，用 `huggingface.co` 即可。
@@ -446,7 +563,18 @@ wget https://hf-mirror.com/hfd/hfd.sh && chmod a+x hfd.sh
 
 ---
 
-## 9. 评估指标与回归（每次训练后的必测项）
+## 9. 评估指标与回归（每次改进/训练后的必测项）
+
+### 9.0 行为层自检（无 GPU 也能量化的变强指标，每次反思后对照）
+| 维度 | 怎么观察自己变强了 |
+| --- | --- |
+| 踩坑率 | 同一类错误第二次出现的间隔变长 / 不再出现（教训生效） |
+| 任务成功率 | 同类任务首次尝试成功率上升（技能固化生效） |
+| 检索命中 | 需要问用户 / 重新查资料的次数下降（记忆层生效） |
+| 反思质量 | 反思从「这次做完了」变成「下次 X 场景要先做 Y」（从描述到策略） |
+| 复用率 | 沉淀的技能/模板被后续任务直接调用的比例上升（程序记忆生效） |
+
+**行为层指标先达标，再谈 L3 模型训练**——否则训练只是在给烂数据提效。
 
 | 维度 | 指标 | 基准 |
 | --- | --- | --- |
@@ -460,6 +588,8 @@ wget https://hf-mirror.com/hfd/hfd.sh && chmod a+x hfd.sh
 **必须自建 CI 评估集**：每次训练后回归测试（防灾难性遗忘与退化），通过才上线。
 
 **推理档位要单独评估**：同一模型在 Non-think / Think High / Think Max 下的分数差异极大（V4-Flash 的 LiveCodeBench 从 55.2 → 88.4 → 91.6），回归时必须固定 `reasoning_effort` 与思考预算，否则分数不可比。
+
+**Agentic 评测必须固定 scaffold + 采样设置**：同一模型换 harness 分数差异显著（V4.1-Flash：DeepSWE v1.1 上 mini-SWE 74.2 vs Claude Code 69.8 vs Codex 65.6；TB2.1 上 DSH Minimal 90.6 vs Codex 84.1，见 7.5）。跨模型对比时，harness、N 采样数、max_steps、temperature、上下文窗口、是否断网都要写进报告；V4.1 官方 agentic 采样参考 temperature 1.0 / top_p 0.95 / max_steps 500（与 R1 的 0.6 不同）。
 
 ---
 
@@ -506,22 +636,26 @@ wget https://hf-mirror.com/hfd/hfd.sh && chmod a+x hfd.sh
 **HF / HF Mirror（模型卡 + 下载）**
 - HF Mirror 主站：https://hf-mirror.com ；Qwen3-8B：https://hf-mirror.com/Qwen/Qwen3-8B ；DeepSeek-R1：https://hf-mirror.com/deepseek-ai/DeepSeek-R1
 - DeepSeek-V4 系列：https://hf-mirror.com/deepseek-ai/DeepSeek-V4-Pro 、https://hf-mirror.com/deepseek-ai/DeepSeek-V4-Flash ，集合页 https://hf-mirror.com/collections/deepseek-ai/deepseek-v4
+- DeepSeek-V4.1-Flash（2026-09-10，训练方法要点见 7.5）：https://hf-mirror.com/deepseek-ai/DeepSeek-V4.1-Flash
 - 原站等价地址：https://huggingface.co/collections/deepseek-ai/deepseek-v4 （含 Base / DSpark / V4.1-Flash）
 
 ---
 
 ## 13. Agent 操作要点（速查）
 
-- 用户要「让 Agent 变强/自我进化」→ 按第 2 节闭环规程执行 + 第 5 节飞轮流水线；先跑通「轨迹→SFT→回归」最小环。
+- 用户要「让 Agent 变强/自我进化」→ 按第 2 节闭环规程执行 + 第 5 节飞轮流水线；**先跑通「轨迹→验证→行为改进」最小环（无 GPU 即可）**，有 GPU 且轨迹够 50 条再升级到「轨迹→SFT→回归」。
 - 用户要「微调 Qwen」→ 第 6 节：LLaMA-Factory 配方（LoRA 起步，20GB 显存），数据按 sharegpt 格式。
 - 用户要「复现 DeepSeek-R1 / 做 GRPO」→ 第 7 节：verl + TinyZero/DAPO；先可验证任务（数学/代码），奖励用规则验证器。
 - 用户问「DeepSeek-V4 怎么训练的 / V4 架构」→ 第 7.4 节：论文 arXiv:2606.19348（CSA+HCA 混合注意力、mHC 流形约束超连接、Muon、32T+ 预训练、MegaMoE、两阶段后训练 = 领域专家 SFT+GRPO → 全词表 reverse KL 在线策略蒸馏 OPD）；配套代码看 DeepSelect / deepseek-recipe / DeepGEMM。
+- 用户问「V4.1 / 最新一代怎么训练的」→ 第 7.5 节：后训练零算法改动、收益全在数据管线（agent 任务/环境自动合成 + 渐进扩量）、连续 reasoning_effort 1–100、CED（prefill 8B / decode 16B）+ CSA2 + Engram 记忆量产；模型卡 https://hf-mirror.com/deepseek-ai/DeepSeek-V4.1-Flash
 - 用户问「Agent 轨迹/沙箱怎么搭」→ 第 7.4 节 DSec：四档执行基质统一接口（Function Call / Container / microVM / fullVM）+ 3FS 分层存储 + 全序轨迹日志 + 抢占安全恢复。
 - 用户问「工具调用老解析失败」→ 用 XML + 专属边界 token 的 DSML 格式（7.4 阶段一），参数标 `string="true/false"`。
 - 用户问「长周期 Agent 怎么保持连贯」→ 交织思考（工具轮次保留 ` thinking`，不跨用户消息清空）+ 1M 上下文（7.4）。
 - 用户在国内下载模型 → 第 8 节：`HF_ENDPOINT=https://hf-mirror.com`（注意非大陆 IP 会跳原站）。
 - 用户问「训练后怎么知道变强没有」→ 第 9 节：CI 评估集回归对比，固定 reasoning 档位，不许只看 loss。
 - 用户问「没 GPU 能不能变强」→ 能：L1 行为层（教训/技能/反思）立即可用；L2 数据层持续积累；L3 训练层等硬件到位再跑。
+- 用户要「用 NexRL / Nex-N2.5 方式训练 Agent」→ 第 7.6 节：NexRL 两种模式（self-hosted 需 K8s+Volcano+共享存储 / training-service 云端零 GPU 只写配置+evaluator）；五组件 = DataLoader→RolloutWorker→TrajectoryPool→Trainer→WeightSyncController；**reward 全靠 evaluator.py，可验证是铁律**；没集群用 VeRL 平替。
+- 用户要「让曙光/本 Agent 按 NexRL 思想变强」→ 7.6 行为层落地表：把 Evaluator→反思打分、TrajectoryPool→轨迹库、环境反馈→result.ok、专家独立培养→按任务类型分目录沉淀，**闭环不停，不依赖 GPU**。
 
 ---
 
@@ -542,3 +676,4 @@ wget https://hf-mirror.com/hfd/hfd.sh && chmod a+x hfd.sh
 
 *本文件是活文档。任何 Agent 使用后发现的坑、新验证过的方法、环境差异，都应回写本文件（新增小节或修订），让它对下一个 Agent 更有用。*
 *通用化改写：2026-09-11。基于 Agent Data Flywheel 原版（2026-09-10）实测两轮（闭环跑通、DPO 偏好对生成验证通过）。*
+*定位修订：2026-09-12。主线 = Agent 行为层进化（L1/L2，无 GPU 照跑）；模型训练降级为可选高级阶段（L3），6/7 节标注「可选」。*

@@ -38,6 +38,9 @@
 | ✅ 错误自愈 | 工具错误统一语义, 自动重试修正 |
 | ✅ 方法型Skill | humanize去AI味 / write_article分阶段写作 / clarify需求澄清 / brainstorm审批门禁 / plan精确计划 / verify验证优先 / debug五步调试 |
 | 🔌 **MCP 客户端** | 零依赖 MCP 客户端 (stdio + HTTP Streamable), 接入 9600+ MCP 工具服务器 |
+| 🛰️ **MCP 服务器** | 标准 MCP 服务端点 `POST /mcp` (Streamable HTTP, 双 era: 现代 2026-07-28 + legacy initialize 握手), 暴露全部 43+ 工具 / 记忆·轨迹·统计·会话资源 / 方法型技能 prompts / 对话工具 ppx.chat.* |
+| 🎛️ **MCP 管理工具** | 会话/提供方/设置/任务面板 全部经标准 MCP 工具暴露 (ppx.sessions.* / ppx.providers.* / ppx.settings.* / ppx.task.*), web 产品壳已全面切换, REST /api/* 退役 |
+| ✅ **任务面板** | MCP 任务工具 + web UI 模块: 任务队列 (进行中/待处理/完成/失败) + 步骤状态推进 + 结果回填, 持久化 data/tasks.json |
 | ✅ 可观测 | 工具调用轨迹JSONL + 失败率/慢工具统计 + **结构化事件流**(traceId 经 AsyncLocalStorage 贯穿) |
 | ✅ LLM真摘要 | 长对话自动LLM语义摘要, 非堆叠 |
 | ✅ 场景系统 | 灵魂文件式场景(手动设定/历史提炼), 命中自动切换行为 |
@@ -119,7 +122,19 @@ npm run chat
 # 4. 启动 HTTP 服务
 node src/server.js   # http://127.0.0.1:8899
 
-# 5. 跑测试
+# 5. MCP 标准端点 (Streamable HTTP)
+# POST http://127.0.0.1:8899/mcp  (同 Bearer token 鉴权)
+# 任何 MCP 客户端 (Claude Desktop / Cursor / MCP Inspector 等) 可直接接入:
+#   - server/discover + tools/list + tools/call (43+ 内置工具全量暴露)
+#   - resources: memory://facts, traces://recent, stats://overview, sessions://list
+#   - prompts: humanize / plan / debug / verify / write_article (方法型技能)
+#   - ppx.chat.send / ppx.chat.stream (对话工具, 驱动完整工具循环)
+#   - ppx.sessions.* / ppx.providers.* / ppx.settings.* / ppx.task.* (管理工具, web 壳在用)
+# 配置: config/ppx.json → channels.http.mcp { enabled, path, legacy_rest }
+#   enabled 默认开; path 默认 /mcp; legacy_rest 默认 true (保留旧 REST 兼容), 设 false 彻底退役 /api/* 与 /message*
+#     (设 false 后这些 REST 端点返回 410 并引导 /mcp)
+
+# 6. 跑测试
 npm run test
 ```
 

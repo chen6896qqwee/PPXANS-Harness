@@ -50,6 +50,63 @@ function parseHttpBody(text, contentType) {
   } catch { return []; }
 }
 
+// ---- x-mcp-header 标注解析 (MCP 2026-07-28) ----
+// 从工具 inputSchema 提取 x-mcp-header 标注: 参数路径 (纯 properties 链) -> header 名。
+// 约束校验 (违反任一 → 返回 null 表示该工具定义非法, 应排除):
+//   - header 值非空, 匹配 HTTP token 语法 (RFC 9110 1*tchar)
+//   - header 名在 schema 内大小写不敏感唯一
+//   - 只允许 primitive 类型 (integer/string/boolean; number 不允许)
+//   - 静态可达: 路径只能经过 properties, 不得穿过 items/composition/conditional/$ref
+//   - 未经数组/组合/条件/$ref 嵌套的纯 properties 链
+const HTTP_TOKEN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+
+function parseXMcpHeaders(toolName, schema) {
+  const found = []; // { path, header }
+  const seen = new Set(); // header (小写去重)
+  const walk = (node, path, depth) => {
+    if (!node || typeof node !== "object" || depth > 8) return;
+    // 检查当前属性是否有 x-mcp-header
+    if (node["x-mcp-header"] !== undefined) {
+      const hv = String(node["x-mcp-header"]);
+      // 校验: 非空 + HTTP token
+      if (!hv || !HTTP_TOKEN.test(hv)) throw new Error(`header 非法: ${JSON.stringify(hv)}`);
+      // 校验: 大小写不敏感唯一
+      const lk = hv.toLowerCase();
+      if (seen.has(lk)) throw new Error(`header 重复: ${hv}`);
+      seen.add(lk);
+      // 校验: 类型必须 primitive 且非 number
+      const type = node.type;
+      if (!["integer", "string", "boolean"].includes(type)) throw new Error(`类型不允许: ${type || "(无)"}`);
+      found.push({ path: [...path], header: hv });
+    }
+    // 递归 properties (纯链)
+    if (node.properties && typeof node.properties === "object") {
+      for (const [k, v] of Object.entries(node.properties)) {
+        if (v && typeof v === "object") walk(v, [...path, k], depth + 1);
+      }
+    }
+    // 非法穿透: items/oneOf/anyOf/allOf/not/if/then/else/$ref → x-mcp-header 出现在其中 = 非法
+    for (const bad of ["items", "oneOf", "anyOf", "allOf", "not", "if", "then", "else", "$ref"]) {
+      if (node[bad] !== undefined && hasXMcpHeader(node[bad])) {
+        throw new Error(`x-mcp-header 出现在 ${bad} 内 (非法)`);
+      }
+    }
+  };
+  try {
+    walk(schema, [], 0);
+    return found;
+  } catch (e) {
+    warn(`[mcp] 工具 ${toolName} x-mcp-header 标注非法: ${e.message}`);
+    return null;
+  }
+}
+
+function hasXMcpHeader(node) {
+  if (!node || typeof node !== "object") return false;
+  if (node["x-mcp-header"] !== undefined) return true;
+  return Object.values(node).some((v) => v && typeof v === "object" && hasXMcpHeader(v));
+}
+
 // ---- stdio 传输 ----
 // 启动本地服务器子进程, 从 stdout 读换行分隔 JSON, 请求写 stdin。
 class StdioTransport {
@@ -144,11 +201,12 @@ class HttpTransport {
 
   async start() { /* 单次 POST 流即可, 无需预开连接 */ }
 
-  async send(msg) {
+  async send(msg, extraHeaders = {}) {
     const headers = {
       "content-type": "application/json",
       "accept": "application/json, text/event-stream",
       ...this.headers,
+      ...extraHeaders,
     };
     if (this.sessionId) headers["mcp-session-id"] = this.sessionId;
 
@@ -234,7 +292,23 @@ export class McpClient {
 
   async listTools() {
     const r = await this._request("tools/list", {});
-    return (r && r.tools) || [];
+    const tools = (r && r.tools) || [];
+    // v2.6.0: x-mcp-header 客户端支持 — 解析每把工具的 inputSchema 里的 x-mcp-header 标注,
+    // 存为 { 参数路径 -> headerName }; 非法标注 (约束见 MCP 2026-07-28 规范) 的工具整体排除
+    this._toolHeaders = new Map(); // toolName -> [{ path: string[], header: string }]
+    const kept = [];
+    for (const t of tools) {
+      if (!t || !t.name || !t.inputSchema) { kept.push(t); continue; }
+      const parsed = parseXMcpHeaders(t.name, t.inputSchema);
+      if (parsed === null) {
+        // 非法标注: 排除该工具 (规范: 单个坏工具不影响其他有效工具)
+        warn(`[mcp] 工具 ${t.name} 的 x-mcp-header 标注非法, 已排除`);
+        continue;
+      }
+      if (parsed.length) this._toolHeaders.set(t.name, parsed);
+      kept.push(t);
+    }
+    return kept;
   }
 
   // 调用工具 -> 提取纯文本结果 (向后兼容)
@@ -244,7 +318,33 @@ export class McpClient {
 
   // 调用工具 -> 返回原始 result (含 content/isError, 供上层判断)
   async callToolRaw(name, args = {}) {
-    return this._request("tools/call", { name, arguments: args });
+    const msg = { name, arguments: args };
+    // x-mcp-header 镜像: 工具定义里有标注时, 把参数值转成 Mcp-Param-* 头 (仅 HTTP 传输生效)
+    const extraHeaders = this._resolveParamHeaders(name, args);
+    return this._request("tools/call", msg, extraHeaders);
+  }
+
+  // 解析工具参数 -> Mcp-Param-{Header} HTTP 头 (x-mcp-header 标注)
+  // 按规范: 仅 primitive (string/integer/boolean) 且静态可达路径 (纯 properties 链) 可镜像
+  _resolveParamHeaders(name, args) {
+    const out = {};
+    const anns = this._toolHeaders && this._toolHeaders.get(name);
+    if (!anns || !args || typeof args !== "object") return out;
+    for (const { path, header } of anns) {
+      let v = args;
+      for (const seg of path) {
+        if (v == null || typeof v !== "object") { v = undefined; break; }
+        v = v[seg];
+      }
+      if (v === undefined) continue; // 参数未提供 -> 省略该头
+      let sv;
+      if (typeof v === "string") sv = v;
+      else if (typeof v === "number" && Number.isInteger(v)) sv = String(v);
+      else if (typeof v === "boolean") sv = v ? "true" : "false";
+      else continue; // 非 primitive 不镜像
+      out[`Mcp-Param-${header}`] = sv;
+    }
+    return out;
   }
 
   async listResources() {
@@ -275,7 +375,7 @@ export class McpClient {
   }
 
   // ---- 内部 ----
-  _request(method, params = {}) {
+  _request(method, params = {}, extraHeaders = {}) {
     if (this._dead) return Promise.reject(new Error("MCP 连接已关闭"));
     const id = ++this._nextId;
     const msg = { jsonrpc: "2.0", id, method, params };
@@ -286,7 +386,7 @@ export class McpClient {
       }, this.timeout);
       this._pending.set(id, { resolve, reject, timer });
       Promise.resolve()
-        .then(() => this.transport.send(msg))
+        .then(() => this.transport.send(msg, extraHeaders))
         .catch((e) => this._settle(id, null, e));
     });
   }
@@ -373,3 +473,5 @@ export function extractResourceText(result) {
   if (typeof result === "string") return result;
   return JSON.stringify(result);
 }
+
+export { parseXMcpHeaders, hasXMcpHeader };

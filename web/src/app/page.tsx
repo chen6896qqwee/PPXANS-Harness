@@ -1,7 +1,8 @@
 ﻿"use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { listProviders, getSettings, getAuthToken, type Provider } from "../lib/api";
+import { getApiBase, getAuthToken } from "../lib/api";
+import { mcpTool, mcpResource } from "../lib/mcp";
 
 type Msg = { role: "user" | "agent"; content: string };
 type Scene = { id: string; name: string; mode: string; description: string; canHelp: string; facts: number; lastUpdated: string };
@@ -9,6 +10,10 @@ type Trace = { tool: string; ok: boolean; durationMs: number; args: string };
 type Fact = { content: string; score: number; type: string };
 type ToolEv = { tool: string; status: "start" | "done"; args?: unknown; ok?: boolean; durationMs?: number };
 type Session = { key: string; count: number; lastTs: number; title: string };
+type Provider = { id: string; base_url?: string; model?: string; vision?: boolean; api_key_set?: boolean; mjs?: string; dsh_root?: string };
+type TaskStep = { title: string; status: "pending" | "running" | "done" | "failed"; detail?: string };
+type Task = { id: string; title: string; description: string; status: "todo" | "running" | "done" | "failed"; steps: TaskStep[]; result?: string; createdAt: number; updatedAt: number };
+type TaskList = { tasks: Task[]; counts: { todo: number; running: number; done: number; failed: number } };
 
 const DEFAULT_SESSION = "default";
 
@@ -18,11 +23,16 @@ export default function Home() {
   const [busy, setBusy] = useState(false);
   const [busyInfo, setBusyInfo] = useState(""); // 推理轮次/工具调用状态提示
   const [tools, setTools] = useState<ToolEv[]>([]); // 本轮工具调用卡片
-  const [tab, setTab] = useState<"sessions" | "scenes" | "memory" | "traces" | "stats">("sessions");
+  const [tab, setTab] = useState<"sessions" | "scenes" | "memory" | "traces" | "stats" | "tasks">("sessions");
   const [scenes, setScenes] = useState<Scene[]>([]);
   const [facts, setFacts] = useState<Fact[]>([]);
   const [traces, setTraces] = useState<Trace[]>([]);
   const [stats, setStats] = useState<any>(null);
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [taskCounts, setTaskCounts] = useState({ todo: 0, running: 0, done: 0, failed: 0 });
+  const [taskModal, setTaskModal] = useState(false);
+  const [taskForm, setTaskForm] = useState({ title: "", desc: "", steps: "", templateId: "" });
+  const [taskTemplates, setTaskTemplates] = useState<{ id: string; label: string; steps: string[] }[]>([]);
   const [snum, setSnum] = useState(-1);
   const [providers, setProviders] = useState<Provider[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -33,21 +43,13 @@ export default function Home() {
 
   useEffect(() => { endRef.current?.scrollIntoView(); }, [msgs, tools]);
 
-  // 带鉴权的相对路径请求 (经 Next.js 代理到内核; /message/* 与 /sessions/* 均已配 rewrites)
-  const authedFetch = useCallback((url: string, opts: RequestInit = {}) => {
-    const tok = getAuthToken();
-    const headers: Record<string, string> = { ...(opts.headers as Record<string, string>) };
-    if (tok) headers["Authorization"] = `Bearer ${tok}`;
-    return fetch(url, { ...opts, headers });
-  }, []);
-
   // 首启检测: 模型未配 / MCP 未连 时显示对应引导 (可分别关闭)
   const [dismissed, setDismissed] = useState<string[]>([]);
   const [mcpConfigured, setMcpConfigured] = useState(false);
   useEffect(() => {
-    listProviders().then((r) => setProviders(r.providers)).catch(() => {});
-    // MCP 是否已配置 (settings.mcp.servers 非空)
-    getSettings().then((r) => setMcpConfigured((r.settings.mcp?.servers?.length || 0) > 0)).catch(() => {});
+    // v2.6.0: 全部走 MCP 协议 (替代旧 REST /api/*)
+    mcpTool<any>("ppx.providers.list").then((r) => setProviders(r.providers || [])).catch(() => {});
+    mcpTool<any>("ppx.settings.get").then((r) => setMcpConfigured((r.settings?.mcp?.servers?.length || 0) > 0)).catch(() => {});
   }, []);
   const hasReady = providers.some((p) => p.api_key_set || p.mjs || p.dsh_root);
 
@@ -60,23 +62,19 @@ export default function Home() {
   }
   const activeGuide = guides[0] || null;
 
-  // ---- 会话管理 ----
+  // ---- 会话管理 (MCP) ----
   async function loadSessions() {
     try {
-      const r = await authedFetch("/sessions");
-      if (!r.ok) return;
-      const j = await r.json();
-      setSessions((j.sessions || []).map((s: Session) => s));
+      const j = await mcpTool<Session[]>("ppx.sessions.list");
+      setSessions(j || []);
     } catch { /* 内核未启动时静默 */ }
   }
   const loadHistory = useCallback(async (key: string) => {
     try {
-      const r = await authedFetch("/sessions/" + encodeURIComponent(key) + "/history");
-      if (!r.ok) { setMsgs([]); return; }
-      const j = await r.json();
-      setMsgs((j.messages || []).map((m: Msg) => m));
+      const j = await mcpTool<Msg[]>("ppx.sessions.history", { key });
+      setMsgs(j || []);
     } catch { setMsgs([]); }
-  }, [authedFetch]);
+  }, []);
   async function switchSession(key: string) {
     setCurrentKey(key);
     setTools([]);
@@ -95,7 +93,7 @@ export default function Home() {
     const to = key === DEFAULT_SESSION ? name : (name.replace(/[^\w.-]/g, "_"));
     if (to === key) return;
     try {
-      await authedFetch("/sessions/rename", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ from: key, to }) });
+      await mcpTool("ppx.sessions.rename", { from: key, to });
       if (key === currentKey) setCurrentKey(to);
       await loadSessions();
     } catch { /* 目标已存在等错误静默 */ }
@@ -103,24 +101,40 @@ export default function Home() {
   async function deleteSession(key: string) {
     if (!confirm("删除会话「" + (sessions.find((s) => s.key === key)?.title || key) + "」? 该会话历史将不可恢复。")) return;
     try {
-      await authedFetch("/sessions/delete", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key }) });
+      await mcpTool("ppx.sessions.delete", { key });
       if (key === currentKey) { setCurrentKey(DEFAULT_SESSION); await loadHistory(DEFAULT_SESSION); }
       await loadSessions();
     } catch { /* 静默 */ }
   }
 
-  useEffect(() => { loadSessions(); }, [authedFetch]);
+  useEffect(() => { loadSessions(); }, []);
 
   async function send() {
     const t = input.trim(); if (!t || busy) return;
     setMsgs((m) => [...m, { role: "user", content: t }]);
     setInput(""); setBusy(true); setBusyInfo(""); setTools([]);
+    // 占位 agent 消息, delta 往里追加 (打字机效果)
+    setMsgs((m) => [...m, { role: "agent", content: "" }]);
+    const updateAgent = (text: string) => setMsgs((m) => { const c = [...m]; c[c.length - 1] = { role: "agent", content: text }; return c; });
     try {
-      const r = await authedFetch("/message/stream", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: t, sessionId: currentKey }) });
+      // v2.6.0: 对话走 MCP 工具 ppx.chat.stream — SSE 流式: progress 通知承载 delta, message 通知承载工具/轮次事件
+      const base = getApiBase();
+      const tok = getAuthToken();
+      const body = JSON.stringify({
+        jsonrpc: "2.0", id: Date.now(), method: "tools/call",
+        params: {
+          name: "ppx.chat.stream", arguments: { message: t, sessionId: currentKey },
+          _meta: {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": { name: "ppx-web", version: "2.6.0" },
+            "io.modelcontextprotocol/clientCapabilities": {},
+          },
+        },
+      });
+      const headers: Record<string, string> = { "Content-Type": "application/json", "Accept": "text/event-stream, application/json", "MCP-Protocol-Version": "2026-07-28" };
+      if (tok) headers["Authorization"] = `Bearer ${tok}`;
+      const r = await fetch(base + "/mcp", { method: "POST", headers, body });
       if (!r.ok || !r.body) throw new Error("HTTP " + r.status);
-      // 占位 agent 消息, delta 往里追加
-      setMsgs((m) => [...m, { role: "agent", content: "" }]);
-      const updateAgent = (text: string) => setMsgs((m) => { const c = [...m]; c[c.length - 1] = { role: "agent", content: text }; return c; });
       const reader = r.body.getReader();
       const decoder = new TextDecoder();
       let buf = "", agentText = "";
@@ -134,18 +148,34 @@ export default function Home() {
           const dataLine = chunk.split("\n").find((l) => l.startsWith("data:"));
           if (!dataLine) continue;
           let ev: any; try { ev = JSON.parse(dataLine.slice(5).trim()); } catch { continue; }
-          if (ev.type === "delta") { agentText += ev.content || ""; updateAgent(agentText); }
-          else if (ev.type === "step") { setBusyInfo(`推理中 · 第 ${(ev.round || 0) + 1}/${ev.maxRounds || 0} 轮`); }
-          else if (ev.type === "tool") {
-            // 工具调用卡片: start→占位, done→更新状态/耗时/结果
-            if (ev.status === "start") { setTools((ts) => [...ts, { tool: ev.tool, status: "start", args: ev.args }]); }
-            else { setTools((ts) => [...ts, { tool: ev.tool, status: "done", ok: ev.ok, durationMs: ev.durationMs }]); }
-            setBusyInfo(ev.status === "start" ? `调用工具 ${ev.tool}` : `工具完成 ${ev.tool}${ev.durationMs ? " · " + ev.durationMs + "ms" : ""}`);
+          // progress 通知 -> delta 文本
+          if (ev.method === "notifications/progress") {
+            const m = ev.params?.message;
+            if (typeof m === "string") { agentText += m; updateAgent(agentText); }
           }
-          else if (ev.type === "done") { if (ev.content && ev.content !== agentText) updateAgent(ev.content); setBusyInfo(""); }
+          // message 通知 -> 结构化工具/轮次事件 (data 为对象时)
+          else if (ev.method === "notifications/message") {
+            const d = ev.params?.data;
+            if (d && typeof d === "object") {
+              if (d.type === "tool") {
+                if (d.status === "start") { setTools((ts) => [...ts, { tool: d.tool, status: "start", args: d.args }]); }
+                else { setTools((ts) => [...ts, { tool: d.tool, status: "done", ok: d.ok, durationMs: d.durationMs }]); }
+                setBusyInfo(d.status === "start" ? `调用工具 ${d.tool}` : `工具完成 ${d.tool}${d.durationMs ? " · " + d.durationMs + "ms" : ""}`);
+              } else if (d.type === "step") {
+                setBusyInfo(`推理中 · 第 ${(d.round || 0) + 1}/${d.maxRounds || 0} 轮`);
+              }
+            }
+          }
+          // 最终 JSON-RPC 响应
+          else if (ev.id != null && ev.result) {
+            const text = (ev.result.content || []).filter((c: any) => c?.type === "text").map((c: any) => c.text).join("");
+            if (text && text !== agentText) { agentText = text; updateAgent(agentText); }
+            setBusyInfo("");
+          }
+          else if (ev.error) { throw new Error(ev.error.message || "MCP 错误"); }
         }
       }
-      await loadSessions(); // 会话列表更新 (新会话条目/时间)
+      await loadSessions(); // 会话列表更新
     } catch (e: any) {
       setMsgs((m) => [...m, { role: "agent", content: "请求失败: " + e.message }]);
       setBusyInfo("");
@@ -154,27 +184,67 @@ export default function Home() {
   }
 
   async function loadScene() {
-    const r = await authedFetch("/api/memory"); const j = await r.json();
-    setScenes(j.scenes || []); setFacts(j.facts || []);
+    const j = await mcpResource("memory://scenes");
+    setScenes(Array.isArray(j) ? j : []);
+    const f = await mcpResource("memory://facts");
+    setFacts(Array.isArray(f) ? f : []);
   }
   async function loadTraces() {
-    const r = await authedFetch("/api/traces?limit=50"); setTraces(await r.json());
+    const j = await mcpResource("traces://recent");
+    setTraces(Array.isArray(j) ? j : []);
   }
   async function loadStats() {
-    const r = await authedFetch("/api/stats"); setStats(await r.json());
+    const j = await mcpResource("stats://overview");
+    setStats(j || null);
+  }
+  async function loadTasks() {
+    try {
+      const j = await mcpTool<TaskList>("ppx.task.list");
+      setTasks(j.tasks || []);
+      setTaskCounts(j.counts || { todo: 0, running: 0, done: 0, failed: 0 });
+    } catch { /* 内核未启动时静默 */ }
   }
   useEffect(() => { loadScene(); }, []);
-  useEffect(() => { if (tab === "traces") loadTraces(); if (tab === "stats") loadStats(); }, [tab, snum]);
+  useEffect(() => { if (tab === "traces") loadTraces(); if (tab === "stats") loadStats(); if (tab === "tasks") loadTasks(); }, [tab, snum]);
 
   // 场景新建: modal 表单 (替代 prompt, 对齐 v0.4.3)
   async function createScene() {
     const { name, desc, canHelp } = sceneForm;
     if (!name || !desc || !canHelp) return;
     try {
-      await authedFetch("/message", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: `用 scene_create 创建场景: 名称=${name}, 介绍=${desc}, 能帮=${canHelp}`, sessionId: currentKey }) });
+      await mcpTool("ppx.chat.send", { message: `用 scene_create 创建场景: 名称=${name}, 介绍=${desc}, 能帮=${canHelp}`, sessionId: currentKey });
     } catch { /* 静默 */ }
     setSceneModal(false); setSceneForm({ name: "", desc: "", canHelp: "" });
     loadScene();
+  }
+
+  // ---- 任务面板 (MCP ppx.task.*) ----
+  useEffect(() => {
+    mcpTool<any>("ppx.task.templates").then((r) => setTaskTemplates(Array.isArray(r) ? r : [])).catch(() => {});
+  }, []);
+  async function createTask() {
+    const { title, desc, steps, templateId } = taskForm;
+    if (!title.trim()) return;
+    try {
+      const stepArr = steps.split(/\n/).map((s) => s.trim()).filter(Boolean);
+      const args: Record<string, unknown> = { title: title.trim(), description: desc.trim() };
+      if (templateId) args.template_id = templateId;
+      else if (stepArr.length) args.steps = stepArr;
+      await mcpTool("ppx.task.create", args);
+    } catch (e: any) { alert("创建任务失败: " + e.message); }
+    setTaskModal(false); setTaskForm({ title: "", desc: "", steps: "", templateId: "" });
+    loadTasks();
+  }
+  async function runTask(id: string) {
+    try {
+      await mcpTool("ppx.task.run", { id });
+    } catch (e: any) { alert("运行任务失败: " + e.message); }
+    loadTasks();
+  }
+  async function deleteTask(id: string) {
+    if (!confirm("删除任务?")) return;
+    try { await mcpTool("ppx.task.delete", { id }); } catch { /* 静默 */ }
+    loadTasks();
   }
 
   // 工具调用卡片渲染 (本轮)
@@ -247,9 +317,9 @@ export default function Home() {
       {/* 右侧面板 */}
       <aside className="flex w-[380px] flex-col">
         <div className="flex border-b border-neutral-800 text-[13px]">
-          {(["sessions","scenes","memory","traces","stats"] as const).map((t) => (
+          {(["sessions","scenes","memory","traces","stats","tasks"] as const).map((t) => (
             <button key={t} onClick={() => setTab(t)} className={`flex-1 py-3 transition-colors hover:text-neutral-200 ${tab === t ? "border-b-2 border-[#4da3ff] bg-[#16202b] text-[#4da3ff]" : "text-neutral-500"}`}>
-              {t === "sessions" ? "会话" : t === "scenes" ? "场景" : t === "memory" ? "记忆" : t === "traces" ? "轨迹" : "统计"}
+              {t === "sessions" ? "会话" : t === "scenes" ? "场景" : t === "memory" ? "记忆" : t === "traces" ? "轨迹" : t === "stats" ? "统计" : "任务"}
             </button>
           ))}
         </div>
@@ -315,6 +385,53 @@ export default function Home() {
               </div>
             </div>
           )}
+          {tab === "tasks" && (
+            <div>
+              <button onClick={() => setTaskModal(true)} className="mb-3 w-full rounded-xl bg-[#1d5cff] py-2.5 text-sm font-medium text-white hover:bg-[#1a4fd8]">+ 新建任务</button>
+              <div className="mb-3 flex gap-2 text-[11px]">
+                <span className="rounded-full bg-neutral-800 px-2 py-0.5 text-neutral-400">进行中 {taskCounts.running}</span>
+                <span className="rounded-full bg-neutral-800 px-2 py-0.5 text-neutral-400">待处理 {taskCounts.todo}</span>
+                <span className="rounded-full bg-[#0f3d24] px-2 py-0.5 text-[#3ddc84]">完成 {taskCounts.done}</span>
+                <span className="rounded-full bg-[#3d1d1d] px-2 py-0.5 text-[#ff6b6b]">失败 {taskCounts.failed}</span>
+              </div>
+              {tasks.map((t) => (
+                <div key={t.id} className="mb-3 rounded-xl border border-[#26292f] bg-neutral-900/70 p-3.5 shadow-sm transition-colors hover:border-[#2f3440]">
+                  <div className="flex items-center gap-2">
+                    <span className={`h-2 w-2 shrink-0 rounded-full ${t.status === "running" ? "animate-pulse bg-[#f0b429]" : t.status === "done" ? "bg-[#3ddc84]" : t.status === "failed" ? "bg-[#ff6b6b]" : "bg-neutral-600"}`} />
+                    <span className="flex-1 truncate text-sm font-medium">{t.title}</span>
+                    <span className={`rounded-full px-2 py-0.5 text-[10px] ${t.status === "running" ? "bg-[#3d2f1d] text-[#f0b429]" : t.status === "done" ? "bg-[#0f3d24] text-[#3ddc84]" : t.status === "failed" ? "bg-[#3d1d1d] text-[#ff6b6b]" : "bg-neutral-800 text-neutral-400"}`}>
+                      {t.status === "running" ? "进行中" : t.status === "done" ? "已完成" : t.status === "failed" ? "失败" : "待处理"}
+                    </span>
+                  </div>
+                  {t.description && <p className="mt-2 text-[12px] text-neutral-400">{t.description}</p>}
+                  <ol className="mt-2.5 space-y-1.5">
+                    {t.steps.map((s, i) => (
+                      <li key={i} className="flex items-start gap-2 text-[12px]">
+                        <span className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[9px] ${s.status === "done" ? "bg-[#0f3d24] text-[#3ddc84]" : s.status === "running" ? "bg-[#3d2f1d] text-[#f0b429]" : s.status === "failed" ? "bg-[#3d1d1d] text-[#ff6b6b]" : "bg-neutral-800 text-neutral-500"}`}>
+                          {s.status === "done" ? "✓" : s.status === "failed" ? "✗" : i + 1}
+                        </span>
+                        <span className={s.status === "done" ? "text-neutral-500 line-through" : s.status === "running" ? "text-[#f0b429]" : "text-neutral-300"}>{s.title}</span>
+                        {s.detail && <span className="ml-auto truncate text-[10px] text-neutral-600">{s.detail}</span>}
+                      </li>
+                    ))}
+                  </ol>
+                  {t.result && (
+                    <details className="mt-2 rounded-lg border border-neutral-800 bg-[#12151a] p-2">
+                      <summary className="cursor-pointer text-[11px] text-neutral-500 hover:text-neutral-300">结果</summary>
+                      <pre className="mt-1.5 whitespace-pre-wrap text-[11px] text-neutral-400">{t.result}</pre>
+                    </details>
+                  )}
+                  <div className="mt-2.5 flex gap-2">
+                    <button onClick={() => runTask(t.id)} disabled={t.status === "running"} className="rounded-lg bg-[#1d5cff] px-3 py-1 text-[11px] font-medium text-white hover:bg-[#1a4fd8] disabled:opacity-40">
+                      {t.status === "running" ? "运行中…" : "▶ 运行"}
+                    </button>
+                    <button onClick={() => deleteTask(t.id)} className="rounded-lg border border-neutral-700 px-3 py-1 text-[11px] text-neutral-400 hover:border-[#ff6b6b] hover:text-[#ff6b6b]">删除</button>
+                  </div>
+                </div>
+              ))}
+              {tasks.length === 0 && <p className="text-center text-sm text-neutral-600">暂无任务, 点上方新建</p>}
+            </div>
+          )}
         </div>
       </aside>
 
@@ -329,6 +446,39 @@ export default function Home() {
             <div className="flex justify-end gap-2">
               <button onClick={() => setSceneModal(false)} className="rounded-xl border border-neutral-700 px-4 py-2 text-sm text-neutral-300 hover:bg-neutral-800">取消</button>
               <button onClick={createScene} disabled={!sceneForm.name || !sceneForm.desc || !sceneForm.canHelp} className="rounded-xl bg-[#1d5cff] px-4 py-2 text-sm font-medium text-white hover:bg-[#1a4fd8] disabled:opacity-50">创建</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 任务新建 modal */}
+      {taskModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => setTaskModal(false)}>
+          <div className="w-[460px] rounded-2xl border border-neutral-700 bg-[#15181d] p-5" onClick={(e) => e.stopPropagation()}>
+            <h2 className="mb-4 text-sm font-semibold">新建任务</h2>
+            <select
+              value={taskForm.templateId}
+              onChange={(e) => {
+                const tpl = taskTemplates.find((t) => t.id === e.target.value);
+                setTaskForm((f) => ({
+                  ...f,
+                  templateId: e.target.value,
+                  // 选模板自动填充标题/步骤 (可再改)
+                  title: tpl ? tpl.label.split(" (")[0] : f.title,
+                  steps: tpl ? tpl.steps.join("\n") : f.steps,
+                }));
+              }}
+              className="mb-3 w-full rounded-xl border border-neutral-700 bg-neutral-900 px-4 py-2.5 text-sm outline-none focus:border-[#1d5cff]"
+            >
+              <option value="">自定义任务 (手填步骤)</option>
+              {taskTemplates.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
+            </select>
+            <input value={taskForm.title} onChange={(e) => setTaskForm((f) => ({ ...f, title: e.target.value }))} placeholder="任务标题 (如: 技能/项目合规性评估)" className="mb-3 w-full rounded-xl border border-neutral-700 bg-neutral-900 px-4 py-2.5 text-sm outline-none focus:border-[#1d5cff]" />
+            <input value={taskForm.desc} onChange={(e) => setTaskForm((f) => ({ ...f, desc: e.target.value }))} placeholder="任务描述 (可选)" className="mb-3 w-full rounded-xl border border-neutral-700 bg-neutral-900 px-4 py-2.5 text-sm outline-none focus:border-[#1d5cff]" />
+            <textarea value={taskForm.steps} onChange={(e) => setTaskForm((f) => ({ ...f, steps: e.target.value }))} placeholder={"执行步骤 (每行一步, 可选)\n如:\n读取 README 与流程设计说明\n精读 SKILL.md 与全部 references\n检查安装脚本与目录结构规范性"} className="mb-4 h-32 w-full resize-none rounded-xl border border-neutral-700 bg-neutral-900 px-4 py-2.5 text-sm outline-none focus:border-[#1d5cff]" />
+            <div className="flex justify-end gap-2">
+              <button onClick={() => setTaskModal(false)} className="rounded-xl border border-neutral-700 px-4 py-2 text-sm text-neutral-300 hover:bg-neutral-800">取消</button>
+              <button onClick={createTask} disabled={!taskForm.title.trim()} className="rounded-xl bg-[#1d5cff] px-4 py-2 text-sm font-medium text-white hover:bg-[#1a4fd8] disabled:opacity-50">创建</button>
             </div>
           </div>
         </div>

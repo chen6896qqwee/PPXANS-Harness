@@ -11,6 +11,8 @@ import {
 import { getSettings, updateSettings } from "../config/settings.js";
 import { suggestProactive } from "../ans/proactive.js";
 import { ensureDir, atomicWrite, readText } from "../utils/store.js";
+import { createMcpEndpoint } from "../mcp/http.js";
+import { createAdminTools } from "../mcp/admin.js";
 
 const MAX_BODY = 1024 * 1024;          // 请求体上限 1MB
 const RATE_PER_MIN = 60;               // 每 IP 每分钟最大请求数 (令牌桶)
@@ -67,6 +69,36 @@ export class HttpChannel extends Channel {
     // 配置后仅放行白名单 origin, 其余跨域请求 403 (token 泄露时降低任意跨站读取风险)
     this.corsOrigins = this._corsFromConfig();
     this._inFlight = 0; // 当前处理中的对话请求数
+    // v2.6.0: MCP 标准端点 (Streamable HTTP) — 默认开启, 路径 /mcp
+    const mcpCfg = (this.agent?.config?.channels?.http?.mcp) || {};
+    this.mcpEnabled = mcpCfg.enabled !== false;
+    this.mcpPath = mcpCfg.path || "/mcp";
+    // v2.6.0: 产品壳已全部走 MCP (前端不再调用 REST)。服务端默认保留 REST 兼容 (旧脚本/测试不受影响);
+    // 想彻底退役可设 channels.http.mcp.legacy_rest=false → /api/* 与 /message* 返回 410 并引导 /mcp
+    this.mcpLegacyRest = mcpCfg.legacy_rest !== false;
+    if (this.mcpEnabled) {
+      // v2.6.0: admin 虚拟工具 (会话/提供方/设置/任务面板) 注入 MCP 端点, 供 web 前端替代 REST /api/*
+      const admin = createAdminTools(agent);
+      this.mcpAdmin = admin;
+      const { server: mcpServer, handler: mcpHandler } = createMcpEndpoint(agent, {
+        name: agent.config?.agent?.name || "ppxans-harness",
+        version: "2.5.0",
+        supportedVersions: mcpCfg.supported_versions,
+        extraTools: admin.tools,
+        authenticated: (req, res) => {
+          if (this._authed(req, res)) return true;
+          // _authed 只做判断不写响应, 这里补 401 (否则客户端永远挂等)
+          res.writeHead(401, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "unauthorized" }));
+          return false;
+        },
+        rateLimit: (req, res) => this._rateLimit(req, res),
+        // Origin 校验已由顶部统一 CORS 处理 (含白名单/默认 localhost), MCP handler 内不再二次拦截
+        skipOriginCheck: true,
+      });
+      this.mcpServer = mcpServer;
+      this.mcpHandler = mcpHandler;
+    }
   }
 
   // 简单并发护栏: 用计数信号量限制同时处理的对话请求, 超出立即 429
@@ -174,20 +206,12 @@ export class HttpChannel extends Channel {
   async connect() {
     this._ensureToken(); // 启动时确保有 token
     this.server = http.createServer(async (req, res) => {
-      // v1.0.8: webhook 路由分发 (feishu/wechat 等): 匹配路径交给对应通道, 不走主逻辑
-      const reqPath0 = (req.url || "/").split("?")[0];
-      const wh = this.webhookRoutes.get(reqPath0);
-      if (wh) {
-        try { await wh(req, res); } catch (e) {
-          try { if (!res.writableEnded) { res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: e.message })); } } catch {}
-        }
-        return;
-      }
-      // CORS (v1.0.7): 默认 * (兼容); 配置 cors_origin 白名单时校验浏览器来源 (无 Origin 的非浏览器请求不受 CORS 约束)
-      const origin = req.headers.origin;
+      // ---- 统一 CORS 响应头 (所有路由含 /mcp 共用) ----
+      // v1.0.7 语义: 默认 * (兼容); 配置 cors_origin 白名单时校验浏览器来源
+      const reqOrigin = req.headers.origin;
       let allowOrigin = "*";
       if (this.corsOrigins.length) {
-        allowOrigin = !origin ? "*" : (this.corsOrigins.includes(origin) ? origin : null);
+        allowOrigin = !reqOrigin ? "*" : (this.corsOrigins.includes(reqOrigin) ? reqOrigin : null);
       }
       if (!allowOrigin) {
         res.writeHead(403, { "Content-Type": "application/json" });
@@ -197,13 +221,39 @@ export class HttpChannel extends Channel {
       res.setHeader("Access-Control-Allow-Origin", allowOrigin);
       if (allowOrigin !== "*") res.setHeader("Vary", "Origin");
       res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
-      res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+      res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, MCP-Protocol-Version, Mcp-Method, Mcp-Name");
       if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
+
+      // v2.6.0: MCP 标准端点优先 (Streamable HTTP, 单端点 POST)
+      const reqPath0 = (req.url || "/").split("?")[0];
+      if (this.mcpEnabled && this.mcpHandler && req.method === "POST" && reqPath0 === this.mcpPath) {
+        try { await this.mcpHandler(req, res); } catch (e) {
+          try { if (!res.writableEnded) { res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: e.message })); } } catch {}
+        }
+        return;
+      }
+      // v1.0.8: webhook 路由分发 (feishu/wechat 等): 匹配路径交给对应通道, 不走主逻辑
+      const wh = this.webhookRoutes.get(reqPath0);
+      if (wh) {
+        try { await wh(req, res); } catch (e) {
+          try { if (!res.writableEnded) { res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: e.message })); } } catch {}
+        }
+        return;
+      }
+      // (后续路由的 CORS 已在顶部统一处理, 这里移除旧的重复设置)
 
       // 静态页面与 /health 不设限, 其余 API 限流
       const reqPath = (req.url || "/").split("?")[0];
       if (!(req.method === "GET" && (reqPath === "/" || reqPath === "/index.html" || reqPath === "/health"))) {
         if (!this._rateLimit(req, res)) return;
+      }
+
+      // v2.6.0 REST 退役开关: /message* /sessions* /reset 与 /api/* 同受 mcp.legacy_rest 控制
+      // (默认关闭: 全部走标准 MCP 端点 /mcp; 旧脚本可配置 legacy_rest: true 恢复)
+      if (!this.mcpLegacyRest && ["/message", "/message/stream", "/chat", "/sessions", "/reset"].some((p) => reqPath === p || reqPath.startsWith(p + "/"))) {
+        res.writeHead(410, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "REST 端点已退役, 请使用标准 MCP 端点 POST /mcp (channels.http.mcp.legacy_rest=true 可恢复)" }));
+        return;
       }
 
       if (req.method === "GET" && req.url === "/health") {
@@ -354,9 +404,18 @@ export class HttpChannel extends Channel {
         }
         return;
       }
-      // API 端点认证
+      // API 端点认证 + v2.6.0 REST 退役开关
+      // channels.http.mcp.legacy_rest = true 时保留旧 /api/* REST 端点 (兼容旧脚本/客户端);
+      // 默认 false: /api/* 返回 410 Gone, 引导使用标准 MCP 端点 /mcp
       const protectedApi = reqPath.startsWith("/api/");
-      if (protectedApi && !this._authed(req, res)) { res.writeHead(401, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "unauthorized" })); return; }
+      if (protectedApi) {
+        if (!this.mcpLegacyRest) {
+          res.writeHead(410, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "REST /api/* 已退役, 请使用标准 MCP 端点 POST /mcp (channels.http.mcp.legacy_rest=true 可恢复)" }));
+          return;
+        }
+        if (!this._authed(req, res)) { res.writeHead(401, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "unauthorized" })); return; }
+      }
       // 轨迹 API
       if (req.method === "GET" && reqPath === "/api/traces") {
         const limit = Number((req.url.split("limit=")[1] || "").split("&")[0] || 50);

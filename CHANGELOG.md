@@ -1,5 +1,57 @@
 # CHANGELOG
 
+## v2.6.0 (2026-09-15) - MCP 服务端 + web 壳全面切 MCP + 任务面板
+
+> **定性**: 皮皮虾从"MCP 客户端"升级为"MCP 客户端 + 服务端"双向。对外全部能力经标准 MCP 协议 (Streamable HTTP, `POST /mcp`) 暴露; web 产品壳全面切换, REST `/api/*` 从产品壳退役 (服务端保留兼容开关)。
+
+### 新增: MCP 服务端 (零依赖, 双 era)
+- `src/mcp/server.js`: 核心分发 — 现代 era `2026-07-28` (每请求 `_meta` 版本/身份/能力, 无握手, `server/discover`, 结果带 `resultType`) + legacy era `initialize` 握手兼容 (2025-06-18/2025-03-26/2024-11-05)
+- `src/mcp/http.js`: Streamable HTTP 传输 — 单端点 POST, `MCP-Protocol-Version` 头校验 (HeaderMismatch -32020), 通知 202, SSE 流式 (progress 通知, 关流=取消), Origin 防 DNS rebinding, 标准错误码 (-32021/-32022)
+- 暴露能力: 43+ 内置工具全量 (tools/list + tools/call, 走统一策略链) / 资源 (memory://facts, traces://recent, stats://overview, sessions://list, sessions://<key>/history) / prompts (humanize/plan/debug/verify/write_article) / 对话工具 (ppx.chat.send / ppx.chat.stream)
+- 错误语义: isError 兼容皮皮虾 `[工具错误]` 前缀 + 内部 `{"error":...}` JSON
+- 鉴权: 复用 HTTP 通道 Bearer token (自动生成/持久化/显式配置), 401 未授权响应
+
+### 新增: MCP 管理工具 + 任务面板
+- `src/mcp/admin.js`: 管理虚拟工具 (不进 catalog 不污染 LLM) — `ppx.sessions.*` (list/history/rename/delete/reset) / `ppx.providers.*` (list/add/update/delete/test/reorder) / `ppx.settings.get/update` / `ppx.task.*` (create/list/update/step/delete/run)
+- `src/mcp/tasks.js`: 任务面板存储 — 任务队列 (todo/running/done/failed) + 步骤状态 (pending/running/done/failed, 自动派生任务状态) + 结果回填, 持久化 `data/tasks.json` (原子写)
+- **任务模板库**: `TASK_TEMPLATES` 内置 6 套技能模板 (Agent 训练评估 / 会话重命名 / 回答深度提示词 / 代码审查 / MCP 合规 / 技能吸收), `ppx.task.templates` 列出, `ppx.task.create` 支持 `template_id` 一键套用步骤; web 新建任务 modal 加模板下拉
+- 修复: 空 root 时 `config/` 目录缺失导致 withFileLock 的 openSync(wx) 抛 ENOENT 被误判为"锁冲突"超时 → 写配置前 ensureDir
+
+### SSE 流式实测
+- `test/mcp-stream.test.js`: `ppx.chat.stream` 经 Streamable HTTP 的 SSE 响应流 — progress 通知分段推送长文本 (>4KB 完整) + 最终 JSON-RPC 响应 + 非流式 `ppx.chat.send` 单 JSON 对比
+- 结论: MCP 层 SSE 分帧正确 (LLM 逐字流式在 `tools.enabled=false` + `supportsStream` 后端生效; 工具模式走 `_llmWithTools` 一次性返回属预期产品行为)
+
+### x-mcp-header 客户端支持 (MCP 2026-07-28 规范)
+- `src/mcp/client.js`: `parseXMcpHeaders` 解析工具 inputSchema 的 x-mcp-header 标注 — 纯 properties 链静态可达 + 仅 primitive (string/integer/boolean, number 禁止) + HTTP token 语法 + 大小写不敏感唯一
+- 非法标注工具整体排除 (单个坏工具不影响其他有效工具, 符合规范); 合法标注在 `callToolRaw` 时镜像为 `Mcp-Param-*` HTTP 头 (仅 Streamable HTTP 传输生效)
+- 测试: 合法链解析 / number+重复头非法 / items+oneOf 内非法 / HTTP 端到端镜像 / 坏工具排除 (5 项)
+
+### web 前端流式打字机恢复
+- `web/src/app/page.tsx` send(): 切 `ppx.chat.stream`, 直读 SSE 流 — progress 通知逐字追加 agent 消息 (打字机效果), message 通知渲染工具卡片 (start/done) + 推理轮次进度, 最终 JSON-RPC 响应兜底
+- `src/mcp/http.js`: streamCtx 新增 `onTool`/`onStep` — 结构化事件经 notifications/message (data 为对象, type=tool/step) 透传
+- `src/mcp/server.js`: ppx.chat.stream 虚拟工具把 agent 的 onTool/onStep 接上 ctx.stream (替代原先压成字符串的 onMessage)
+- 测试: SSE 结构化事件透传 (step×1 + tool start/done×2 + delta×2 + 最终响应)
+
+### 变更: web 产品壳全面切 MCP
+- `web/src/lib/mcp.ts` (新增): 浏览器 JSON-RPC over Streamable HTTP 客户端 (mcpCall/mcpTool/mcpResource)
+- `web/src/lib/api.ts`: providers/settings 函数签名不变 (settings 页面零改动), 内部改走 MCP 工具; 仅 /health 保留 REST
+- `web/src/app/page.tsx`: 会话/场景/记忆/轨迹/统计全部从 REST `/api/*` 切到 MCP 工具/资源; 对话从 `/message/stream` 切到 `ppx.chat.send`; 新增任务面板 tab (任务列表/进度徽章/步骤推进/运行/删除/新建 modal)
+
+### 退役: REST /api/*
+- 产品壳不再调用任何 `/api/*` / `/message*` / `/sessions*` REST 端点
+- 服务端默认保留兼容 (legacy_rest 缺省=true, 旧脚本/测试不受影响); `channels.http.mcp.legacy_rest=false` 彻底退役 → `/api/*` 与 `/message*` 返回 410 并引导 `/mcp`
+
+### 真机运行发现并修复: CORS 头缺失 (浏览器跨域拦截)
+- **问题**: `/mcp` 响应不带 `Access-Control-Allow-Origin` 头 — web 前端 (localhost:3000) 直接 fetch 8899 会跨域被浏览器拦截, 产品壳实际用不了
+- **根因**: MCP 路由在 webhook 分发之前提前 return, 没走到原有的 CORS 头设置逻辑
+- **修复**: `src/channels/http.js` 把 CORS 响应头 (ACAO/Vary/Allow-Methods/Allow-Headers 含 MCP-Protocol-Version/Mcp-Method/Mcp-Name) 统一前置到 request handler 顶部, 全路由共用; OPTIONS 预检 204; MCP handler 内 Origin 校验改由顶部统一 (skipOriginCheck)
+- **验证**: 带 Origin POST 200 + ACAO 头, OPTIONS 204 + Allow-Headers 含 MCP 头; 真机 8/8 全链路通过 (discover/工具/对话/会话/任务/资源/SSE 流式)
+- 回归测试: `test/mcp-server.test.js` 新增 CORS 用例 (ACAO 头 + OPTIONS 预检)
+
+### 测试
+- 新增: `test/mcp-server.test.js` (21 项: 双 era/工具/资源/提示/错误码/HTTP 端到端/410 开关/CORS) + `test/mcp-admin.test.js` (12 项: 会话/提供方/设置/任务面板/模板) + `test/mcp-stream.test.js` (3 项: SSE 流式/结构化事件) + `test/mcp.test.js` 扩 5 项 (x-mcp-header)
+- 全量: **716 pass / 0 fail / 4 skip** (较 v2.5.0 净 +37)
+
 ## v2.5.0 (2026-09-15) - 独立底座: 移除全部外部引擎, 只保留自研基座
 
 > **定性**: 皮皮虾不再依赖任何第三方智能体底座 (OpenClaw / DeepSeek Harness)。LLM 直连全部走自研 http 底座 (纯 Node fetch, OpenAI 兼容 API)。

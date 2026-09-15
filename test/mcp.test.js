@@ -176,3 +176,98 @@ test("registerMcpTools 跳过无效配置", async () => {
   assert.equal(r.count, 0);
   r.close();
 });
+
+// ---- x-mcp-header 客户端支持 (MCP 2026-07-28) ----
+import { parseXMcpHeaders } from "../src/mcp/client.js";
+
+test("parseXMcpHeaders: 合法纯 properties 链", () => {
+  const schema = {
+    type: "object",
+    properties: {
+      region: { type: "string", "x-mcp-header": "Region" },
+      query: { type: "string" },
+      count: { type: "integer", "x-mcp-header": "Count" },
+      flag: { type: "boolean", "x-mcp-header": "Flag" },
+      nested: { type: "object", properties: { id: { type: "string", "x-mcp-header": "Nested-Id" } } },
+    },
+  };
+  const out = parseXMcpHeaders("execute_sql", schema);
+  assert.ok(Array.isArray(out));
+  assert.equal(out.length, 4);
+  assert.deepEqual(out[0], { path: ["region"], header: "Region" });
+  assert.deepEqual(out[3], { path: ["nested", "id"], header: "Nested-Id" });
+});
+
+test("parseXMcpHeaders: number 类型 + 重复 header → 非法返回 null", () => {
+  // number 不允许
+  assert.equal(parseXMcpHeaders("t", { type: "object", properties: { a: { type: "number", "x-mcp-header": "A" } } }), null);
+  // 大小写不敏感重复
+  assert.equal(parseXMcpHeaders("t", { type: "object", properties: { a: { type: "string", "x-mcp-header": "H" }, b: { type: "string", "x-mcp-header": "h" } } }), null);
+});
+
+test("parseXMcpHeaders: 出现在 items/组合/条件 → 非法", () => {
+  // items 内
+  assert.equal(parseXMcpHeaders("t", { type: "array", items: { type: "object", properties: { a: { type: "string", "x-mcp-header": "A" } } } }), null);
+  // oneOf 内
+  assert.equal(parseXMcpHeaders("t", { type: "object", oneOf: [{ properties: { a: { type: "string", "x-mcp-header": "A" } } }] }), null);
+});
+
+test("McpClient HTTP: 工具带 x-mcp-header 时 callToolRaw 镜像 Mcp-Param-* 头", async () => {
+  // 服务端: 校验 Mcp-Param-Region 头, 回显收到的头
+  const server = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      const msg = JSON.parse(body || "{}");
+      const send = (code, obj) => { res.writeHead(code, { "content-type": "application/json" }); res.end(JSON.stringify(obj)); };
+      if (msg.method === "initialize") send(200, { jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2025-03-26", serverInfo: { name: "x", version: "1" }, capabilities: { tools: {} } } });
+      else if (msg.method === "tools/list") {
+        send(200, { jsonrpc: "2.0", id: msg.id, result: { tools: [{ name: "execute_sql", description: "sql", inputSchema: { type: "object", properties: { region: { type: "string", "x-mcp-header": "Region" }, query: { type: "string" } }, required: ["region"] } }] } });
+      } else if (msg.method === "tools/call") {
+        send(200, { jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text: "header=" + (req.headers["mcp-param-region"] || "(none)") }] } });
+      } else send(200, { jsonrpc: "2.0", id: msg.id, result: {} });
+    });
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const client = new McpClient({ url: `http://127.0.0.1:${server.address().port}/mcp`, timeout: 5000 });
+  try {
+    await client.connect();
+    await client.listTools(); // 先列工具: 填充 _toolHeaders (x-mcp-header 解析)
+    const r = await client.callToolRaw("execute_sql", { region: "us-west1", query: "SELECT 1" });
+    const text = extractToolText(r);
+    assert.ok(text.includes("us-west1"), `应镜像 Mcp-Param-Region 头: ${text}`);
+  } finally {
+    client.close();
+    server.close();
+  }
+});
+
+test("McpClient HTTP: 非法 x-mcp-header 工具被排除 (number 类型)", async () => {
+  const server = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      const msg = JSON.parse(body || "{}");
+      const send = (code, obj) => { res.writeHead(code, { "content-type": "application/json" }); res.end(JSON.stringify(obj)); };
+      if (msg.method === "initialize") send(200, { jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2025-03-26", serverInfo: { name: "x", version: "1" }, capabilities: { tools: {} } } });
+      else if (msg.method === "tools/list") {
+        send(200, { jsonrpc: "2.0", id: msg.id, result: { tools: [
+          { name: "good", description: "ok", inputSchema: { type: "object", properties: {} } },
+          { name: "bad", description: "非法标注", inputSchema: { type: "object", properties: { p: { type: "number", "x-mcp-header": "P" } } } },
+        ] } });
+      } else send(200, { jsonrpc: "2.0", id: msg.id, result: {} });
+    });
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const client = new McpClient({ url: `http://127.0.0.1:${server.address().port}/mcp`, timeout: 5000 });
+  try {
+    await client.connect();
+    const tools = await client.listTools();
+    // 排除 bad 后: good 应仍在 (规范: 单个坏工具不影响其他), bad 不在
+    assert.ok(tools.some((t) => t.name === "good"));
+    assert.ok(!tools.some((t) => t.name === "bad"), "非法工具应被排除");
+  } finally {
+    client.close();
+    server.close();
+  }
+});
