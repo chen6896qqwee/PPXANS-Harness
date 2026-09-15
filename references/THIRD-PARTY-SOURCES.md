@@ -55,6 +55,29 @@ npm run dsh -- web    # 直接跑 dsh CLI
 
 ---
 
+## 5. P0 (2026-09-15) 借鉴登记 — Aegis / HookBus / dsh / ACE 设计思想
+
+> 仅借鉴**设计思想**，未复制任何源码；全部用皮皮虾自有结构重写。新增能力对应的实现文件见下表。
+
+| 借鉴来源 | 借鉴点 | 皮皮虾自研实现 |
+|---|---|---|
+| Aegis / HookBus（UK Patent GB2608069.7 论文描述） | Deny-Wins 策略合并：任一高优先级 deny 一票否决，安全策略不可被低优先级 allow 投票覆盖 | `src/tools/catalog.js` 的 `addPolicySubscriber()` + `consolidateDecisions()` |
+| Aegis / HookBus | 订阅者熔断器三态（Closed/Open/Half-Open），防故障订阅者拖垮工具链 | `src/bus/circuit-breaker.js`（新增，基础设施层，区别于 agent 探索熔断） |
+| deepseek-harness / dsh | seam 三分法注册表：Service Definition / Provider / Consumer，一行换实现 | `src/seam/registry.js`（新增，与既有 `src/seam/shell.js`、`src/tools/seam.js` 互补） |
+| dsh | 事件源事实（model-visible = logged）：会话日志是模型可见内容的唯一事实源 | `src/utils/trace.js` 新增 turn/step 边界事件 + `verifyReplay()` 不变量断言 |
+| MERGE-REPORT 遗留 P2 | guard 免疫闸门空转（工具走 catalog 不走总线） | `src/ans/guard.js` 新增 `installGuardOnCatalog()`，guard 接入 ToolCatalog 策略链，与总线版共享状态 |
+| ACE（ICLR 2026，agentic-context-engineering） | 语境即 Playbook：bullets + Generator/Reflector/Curator + 增量 delta 合并 + grow-and-refine | `src/evolve/playbook.js`（applyDelta / growAndRefine / createGate / renderBullets） |
+| HanaAgent（openhanako） | 记忆管线健康监控（healthy/degraded + 分步失败计数 + 降级） | `src/services/memory-health.js`（MemoryHealthMonitor） |
+| ReLoop / Vial / Aegis | 故障记忆：结构化失败 episode + 相似检索 + 元学习命中 | `src/memory/failure-episode.js`（FailureEpisodeStore） |
+| Hermes 生产数据（51 工具 MCP 服务器工具名碰撞） | MCP 命名空间隔离：serverName__toolName 前缀 + 精确匹配短路 | `src/mcp/index.js` 的 `serverLabel()` / `namespacedMcpName()`，描述清洗增危险 flag 剔除 |
+| TencentDB-Agent-Memory | 符号画布记忆：任务状态画成 Mermaid 图，node_id 全链路追踪（上层结构、下层证据） | `src/memory/canvas.js`（buildCanvasFromEvents / toMermaid / CanvasStore） |
+| HanaAgent（openhanako） | 会话 fork 基线：子代理带记忆快照，结束 merge/discard | `src/memory/fork.js`（exportMemorySnapshot / mergeSnapshotBack） |
+| HanaAgent（openhanako） | 插件两级权限：restricted / full-access | `src/plugin/context.js` 的 SENSITIVE_SERVICES + `src/plugin/index.js` 的 compose 权限装配 |
+| LangGraph supervisor 拓扑 / OpenAI Agents SDK handoff | supervisor 模式：监督者分解→派发→评审→修正循环 | `src/orchestrator/supervisor.js`（runSupervisor / findDisagreement / judgeRound） |
+| TencentDB-Agent-Memory | 记忆资产中枢：资产登记 + 可见性 + 装备（loadout）+ 使用计数 | `src/memory/asset-hub.js`（AssetHub） |
+
+---
+
 ## 4. 未吸收的重复副本
 
 | 目录 | 判定 | 证据 |

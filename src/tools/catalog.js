@@ -1,13 +1,34 @@
 ﻿// src/tools/catalog.js - 工具注册表 (参考 openhanako tool-catalog + deepseek Capability Seam)
 // 升级: 能力缝三分法(Definition元数据/Provider实现/Consumer策略) + 热挂载(enable/disable/unregister) + 元数据枚举
+// P0 (2026-09-15): 策略订阅者链 + deny-wins 合并 (吸收 Aegis/HookBus 治理语义) ——
+//   安全策略 (命令守卫/免疫闸门/防注入) 挂到工具执行唯一收口, 成为架构不变量而非可选行为
 import { info } from "../utils/logger.js";
 import { normalizeMeta, runWithPolicy, toDescriptor, TOOL_ERROR_PREFIX } from "./seam.js";
 
 export { TOOL_ERROR_PREFIX };
 
+// ---- Deny-Wins 决策合并 (HookBus consolidate 语义) ----
+// 多个策略订阅者对同一工具调用给出冲突决策时:
+//   任一 deny 一票否决 (取最高优先级 reason); 否则任一 ask → ask; 否则 allow
+// 保证安全策略不能被低优先级 allow 投票覆盖 (纵深防御: 治理/合规/预算可叠加互不干扰)
+export function consolidateDecisions(decisions) {
+  const denies = decisions.filter((d) => d && d.decision === "deny");
+  if (denies.length > 0) {
+    const top = denies.reduce((a, b) => ((a.priority || 0) >= (b.priority || 0) ? a : b));
+    return { decision: "deny", reason: top.reason || "策略拒绝", priority: top.priority || 0 };
+  }
+  const asks = decisions.filter((d) => d && d.decision === "ask");
+  if (asks.length > 0) {
+    const top = asks.reduce((a, b) => ((a.priority || 0) >= (b.priority || 0) ? a : b));
+    return { decision: "ask", reason: top.reason || "需要审批", priority: top.priority || 0 };
+  }
+  return { decision: "allow", reason: null, priority: 0 };
+}
+
 export class ToolCatalog {
   constructor() {
     this.tools = new Map(); // name -> meta (Definition + Provider)
+    this.policySubscribers = []; // 策略订阅者: { fn(name,args,ctx)->Decision|null, priority, name }
   }
 
   // ---- Definition + Provider 注册 ----
@@ -60,6 +81,36 @@ export class ToolCatalog {
     return this;
   }
 
+  // ---- 策略订阅者 (P0): 工具执行唯一收口上的安全策略链 ----
+  // fn(name, args, ctx) -> Promise<{decision:'allow'|'deny'|'ask', reason?, priority?}> | null (null/undefined = 弃权)
+  // priority: 高者优先 (合并冲突决策时取高优先级 reason); 默认 0
+  // 订阅者异常不拖垮工具执行: 记日志并视同弃权 (fail-open), 但可被上层熔断器保护 (见 src/bus/circuit-breaker.js)
+  addPolicySubscriber(fn, { priority = 0, name = "" } = {}) {
+    if (typeof fn !== "function") throw new Error("策略订阅者需为函数");
+    const sub = { fn, priority: Number(priority) || 0, name: name || `policy-${this.policySubscribers.length + 1}` };
+    this.policySubscribers.push(sub);
+    return () => {
+      const i = this.policySubscribers.indexOf(sub);
+      if (i >= 0) this.policySubscribers.splice(i, 1);
+    };
+  }
+
+  // 未注入策略订阅者时零开销 (空数组循环天然跳过)
+  async _runPolicyChain(name, args, ctx) {
+    if (!this.policySubscribers.length) return { decision: "allow", reason: null, priority: 0 };
+    const results = await Promise.all(this.policySubscribers.map(async (sub) => {
+      try {
+        const d = await sub.fn(name, args, ctx);
+        if (!d || !d.decision) return null;
+        return { decision: d.decision, reason: d.reason || null, priority: d.priority ?? sub.priority };
+      } catch (e) {
+        info(`[policy] 订阅者 ${sub.name} 异常, 视同弃权: ${e?.message || e}`);
+        return null;
+      }
+    }));
+    return consolidateDecisions(results.filter(Boolean));
+  }
+
   // ---- Consumer: 统一策略执行 ----
   async call(name, args, ctx = {}) {
     const meta = this.tools.get(name);
@@ -67,6 +118,14 @@ export class ToolCatalog {
       return `${TOOL_ERROR_PREFIX} 未知工具: ${name}`;
     }
     info(`tool: ${name}(${JSON.stringify(args)})`);
+    // P0: 策略链先行 (deny-wins) —— 免疫闸门/命令守卫/防注入在此拦截, 不可被旁路
+    const policy = await this._runPolicyChain(name, args, ctx);
+    if (policy.decision === "deny") {
+      return `${TOOL_ERROR_PREFIX} ${name}: 策略拦截: ${policy.reason || "未授权"}`;
+    }
+    if (policy.decision === "ask") {
+      return `${TOOL_ERROR_PREFIX} ${name}: 需要人工审批: ${policy.reason || "敏感操作"}`;
+    }
     if (!this.audit) return runWithPolicy(meta, args, ctx);
     const t0 = Date.now();
     try {

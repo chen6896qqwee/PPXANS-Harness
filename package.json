@@ -1,7 +1,7 @@
 {
   "name": "ppxans-harness",
-  "version": "2.0.0",
-  "description": "PPXANS-Harness - 皮皮虾神经系 (ANS) + Harness 一体化智能体内核. 零运行时依赖纯Node. 自愈 + 自学习 + 四层记忆 + SHA-256 审计哈希链 + 多 Agent 军团. Agent Nervous System harness in pure Node, zero runtime dependencies.",
+  "version": "2.4.0",
+  "description": "PPXANS-Harness - 皮皮虾神经系 (ANS) + Harness 一体化智能体内核. 零运行时依赖纯Node. 自愈 + 自学习 + 五层记忆 + SHA-256 审计哈希链 + 多 Agent 军团 + 治理内核(deny-wins/熔断/seam) + 进化内核(Playbook/故障记忆) + 符号画布 + supervisor. Agent Nervous System harness in pure Node, zero runtime dependencies.",
   "type": "module",
   "license": "Apache-2.0",
   "author": "chen6896qqwee <chen6896qqwee@users.noreply.github.com>",

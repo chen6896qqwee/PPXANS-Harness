@@ -1,5 +1,139 @@
 # CHANGELOG
 
+## v2.4.0 (2026-09-15) - 正式发布: P0-P3 全部落地
+
+> **定性**: v3.0 框架四阶段全部完成, 从 v2.0.0 基线 597 测试增至 699 (+102 全绿)。
+> 框架设计见 `docs/ppxans-harness-v3-framework.md` (已标记落地状态)。
+
+### 发布门禁验证
+- 全量测试: **699 pass / 0 fail / 6 skip**
+- 自愈基准: **7/7 (100%)**
+- 审计链校验: **完整 (audit:verify 通过)**
+- 本地能力评测: **7/7 (eval)**
+- 零运行时依赖: package.json dependencies 仍为空, engines.node >= 20 不变
+
+### v2.4.0 新增 (P3)
+- `src/orchestrator/supervisor.js`: supervisor 编排模式 (分解→派发→评审→修正循环, 分歧检测)
+- `src/memory/asset-hub.js`: 记忆资产中枢 (登记/软删/装备/可见性/使用计数)
+
+### 里程碑回顾
+- v2.1.0 (P0 治理内核): guard 收口 + deny-wins + 事件源 + seam 注册表 + 熔断器 (+32)
+- v2.2.0 (P1 进化内核): Playbook + 记忆健康 + 故障记忆 + MCP 命名空间 (+33)
+- v2.3.0 (P2 记忆增强): 符号画布 + fork 基线 + 插件两级权限 (+21)
+- v2.4.0 (P3 编排资产): supervisor + 记忆资产中枢 (+16)
+
+## v2.3.0-dev (2026-09-15) - P2 记忆画布 + fork 基线 + 插件权限
+
+> **定位**: 框架设计文档 `docs/ppxans-harness-v3-framework.md` 的 P3 阶段落地 —— 最后一个阶段。
+> 吸收 LangGraph supervisor 拓扑 + TencentDB-Agent-Memory 记忆资产思想 (仅思想, 无源码复制)。
+
+### P3⑨ supervisor 编排模式
+- 新增 `src/orchestrator/supervisor.js`: 监督者分解→派发→收集→评审→修正循环 (构建在现有 Legion 之上)
+  - `findDisagreement()`: 词法相似度聚类识别分歧 (中文 bigram, 与 playbook 同策略) + 一致率
+  - `buildRevisionPrompt()`: 监督者反馈驱动子 agent 修正
+  - `runSupervisor()`: 多轮修正循环 (maxRounds 默认 3), 分歧低于阈值自动打回重派
+  - `judgeRound()` / `finalizeRound()`: 监督者 LLM 评审/定稿 (失败降级拼接不阻塞)
+  - 与 delegate.js 的 arbitrate (一次性聚合) 互补: 本模块是完整编排循环
+
+### P3⑩ 记忆资产中枢
+- 新增 `src/memory/asset-hub.js`: 资产 = 带 scope 的 facts + 元数据登记
+  - register / remove(软删) / restore / equip(使用计数) / list / availableFor(可见性过滤)
+  - 可见性规范化 (team/private, 大小写兼容); renderAvailable 注入上下文 (空则零 token)
+  - 与 ingest_document (文档入库) 衔接: 入库的 scope 可登记为资产
+
+### 装配
+- `src/plugin/builtin.js` evolvePlugin: +assets (AssetHub)
+
+### 验证
+- 新增 2 个测试文件 16 项: supervisor(8) + asset-hub(8)
+- 全量测试: 699 pass / 0 fail / 6 skip (原 683 → 699)
+- 修复: 资产可见性 key 大小写映射 (VISIBILITY["team"] 原为 undefined 回退 private); 分歧检测中文 bigram
+
+## v2.3.0-dev (2026-09-15) - P2 记忆画布 + fork 基线 + 插件权限
+
+> **定位**: 框架设计文档 `docs/ppxans-harness-v3-framework.md` 的 P2 阶段落地。
+> 吸收 TencentDB-Agent-Memory (符号画布) / HanaAgent (fork baseline + 插件两级权限) 设计思想 (仅思想, 无源码复制)。
+
+### P2⑥ 符号画布记忆 (TencentDB 思想)
+- 新增 `src/memory/canvas.js`: 长任务上下文只放轻量 Mermaid 状态图, 细节按 node_id 从事件日志取
+  - `buildCanvasFromEvents()`: 从 trace 事件流 (turn/step/tool) 纯代码归纳状态图 (边界/步骤/工具/失败节点)
+  - `toMermaid()` 渲染 + `renderCanvasContext()` 注入片段 (只含画布+最近节点, 省 token)
+  - `CanvasStore.captureFromEvents()`: 步骤数达标才保存 (默认 8, 防过度设计)
+
+### P2⑦ 会话 fork 基线 (HanaAgent fork baseline 思想)
+- 新增 `src/memory/fork.js`: 子代理 spawn 携带记忆快照, 结束按结果 merge/discard
+  - `exportMemorySnapshot()`: L1 facts (top N) + L3 persona + 经验精选 → 子 dataDir
+  - `mergeSnapshotBack()`: 词法相似度精确去重 (BM25 分数不可靠: 短查询常命中不相关事实) + dryRun 预演
+  - `hasSnapshot()` 快照标记
+
+### P2⑧ 插件两级权限 (HanaAgent restricted/full-access 思想)
+- `src/plugin/context.js`: `SENSITIVE_SERVICES` (routes/lifecycle/tools/shell/pages/providers/extensions) 仅 full-access 可注册
+  - `withAccess()` 返回共享存储的权限包装 (原型继承, restricted 插件服务仍全局可见, 仅敏感 key 被拒)
+- `src/plugin/index.js`: `compose()` 按插件声明权限装配 (函数属性/导出对象 access 字段), 违规注册隔离不中断
+- `src/agent/index.js`: 顶层 ctx 为 full-access 基座 (内置插件可信), 用户插件默认 restricted
+- `src/plugin/builtin.js`: toolsPlugin 标记 full-access (函数外赋值, 修复 compose 调用前读权限的时序 bug)
+
+### 验证
+- 新增 3 个测试文件 21 项: canvas(8) + fork(6) + plugin-access(7)
+- 全量测试: 683 pass / 0 fail / 6 skip (原 662 → 683)
+- 修复: canvas endedAt 无兜底; withAccess 不共享存储致父 consume 失效; fork merge 误判重复
+
+## v2.2.0-dev (2026-09-15) - P1 进化内核: Playbook 引擎 + 记忆健康 + 故障记忆 + MCP 命名空间
+
+> **定位**: 框架设计文档 `docs/ppxans-harness-v3-framework.md` 的 P1 阶段落地。
+> 吸收 ACE (ICLR 2026) / HanaAgent / ReLoop / Vial / Hermes 设计思想 (仅思想, 无源码复制)。
+
+### P1④ 语境 Playbook 引擎 (ACE 思想)
+- 新增 `src/evolve/playbook.js`: 语境即 Playbook (静态基底 + 动态 bullets)
+  - `applyDelta()` 增量合并 (ADD/UPDATE/REMOVE, 非 LLM 确定性应用, 防语境塌缩)
+  - `growAndRefine()` 语义去重 (lexicalSimilarity, 中文 CJK bigram 支持) + harmful 裁剪
+  - `createGate()` 门禁 commit: 回归基准不过自动回滚不落盘 (model proposes, code guarantees)
+  - `renderBullets()` 空时返回空串 (零 token 成本)
+
+### P1⑤ 记忆管线健康监控 (HanaAgent 思想)
+- 新增 `src/services/memory-health.js`: healthy/degraded 两态 + 分步失败计数 + 滑动窗口
+  - `wrap()` 包装原方法自动统计成败; degraded 时 `advice()` 给"只写不压"降级建议
+
+### P1⑥ 故障记忆 (ReLoop/Vial 思想)
+- 新增 `src/memory/failure-episode.js`: 故障即知识
+  - 结构化 episode (错误类型/根因/修复/置信度/类别) + 容量保护
+  - `search()` 相似故障检索 (同工具强信号 + 错误文本词法相似) + 命中计数 (元学习)
+
+### P1⑦ MCP 命名空间隔离 (防工具名碰撞)
+- `src/mcp/index.js`: 强制 `serverName__toolName` 前缀 (serverLabel 取 name>包名>command>url 二级域), 显式 prefix 可覆盖
+- `sanitizeMcpDescription` 额外剔除危险 flag (--system/--dangerously 等命令行注入惯用手法)
+
+### 装配
+- `src/plugin/builtin.js`: 新增 `evolvePlugin` 提供 playbook / memoryHealth / failures 三服务 (tools 之后, 依赖 dataDir)
+
+### 验证
+- 新增 4 个测试文件 33 项: playbook(12) + memory-health(9) + failure-episode(7) + mcp-namespace(6)
+- 全量测试: 662 pass / 0 fail / 6 skip (原 629 → 662)
+
+## v2.1.0-dev (2026-09-15) - P0 治理内核: guard 收口 + deny-wins + 熔断器 + seam 注册表
+
+> **定位**: 框架设计文档 `docs/ppxans-harness-v3-framework.md` 的 P0 阶段落地。
+> 吸收 Aegis/HookBus/dsh/ACE 的设计思想 (仅思想, 无源码复制, 见 references/THIRD-PARTY-SOURCES.md §5)。
+
+### P0① 免疫闸门接入工具收口 (修 MERGE-REPORT 遗留 P2)
+- `src/tools/catalog.js`: 新增 `addPolicySubscriber()` 策略订阅者链 + `consolidateDecisions()` deny-wins 合并 (任一 deny 一票否决, 安全策略不可被低优先级 allow 投票覆盖)
+- `src/ans/guard.js`: 新增 `installGuardOnCatalog()` —— 同一闸门状态挂到工具执行唯一收口, 与总线版共享 allowList/计数; `approveGuard` 一次授权同时作用于总线命令 + 工具调用
+- `src/agent/index.js`: 装配时接线, guard 从"只盖总线"升级为"盖住所有工具调用"
+- 顺带修复 `src/utils/pii.js` 真实漏洞: `inline_secret` 正则漏检 JSON 序列化形式 ("key":"value" 的 key 后闭合引号), 已兼容 key=value / key: value / "key":"value" 三种形式
+
+### P0② 事件源事实 (model-visible = logged)
+- `src/utils/trace.js`: 新增 turn/start · turn/end · step/start · step/end 边界事件落盘 (PII 脱敏) + `verifyReplay()` 不变量断言 (配对完整性 / 顺序性 / 重复 round / 坏行定位)
+
+### P0③ seam 注册表骨架
+- 新增 `src/seam/registry.js`: 通用能力缝注册表 (define/provide/resolve/require/swap/status), 一行换实现消费方跟着切; 与既有 shell.js / tools/seam.js 互补
+
+### P0④ 订阅者熔断器
+- 新增 `src/bus/circuit-breaker.js`: Closed/Open/Half-Open 三态 + 滑动窗口 + fail-open/fail-closed 策略 + wrap 包装器; 基础设施层, 与 agent 探索熔断互补
+
+### 验证
+- 新增 4 个测试文件 32 项: catalog-guard(9) + trace-replay(7) + seam-registry(7) + circuit-breaker-util(9)
+- 全量测试: 629 pass / 0 fail / 6 skip (原 597 → 629)
+
 ## v2.0.1-dev (2026-09-15) - 工程规范 + 上帝文件拆解
 
 > **定性**: v2.0.0 合并后的第一轮工程打磨, 非功能增量。修复真实缺陷 + 拆解上帝文件 + 修正仓库元数据。

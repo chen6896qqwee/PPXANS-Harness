@@ -17,6 +17,15 @@ import { registerDelegateTools } from "../tools/delegate.js";
 import { Traces } from "../utils/trace.js";
 import { AuditLog } from "../audit/audit-chain.js";
 import { RuntimeBus } from "../bus/runtime-bus.js";
+import { PlaybookStore } from "../evolve/playbook.js";
+import { MemoryHealthMonitor } from "../services/memory-health.js";
+import { FailureEpisodeStore } from "../memory/failure-episode.js";
+import { CanvasStore } from "../memory/canvas.js";
+import { AssetHub } from "../memory/asset-hub.js";
+import { exportMemorySnapshot, mergeSnapshotBack, hasSnapshot } from "../memory/fork.js";
+
+// fork 工具 (供 ctx.consume("fork") 取用)
+const forkTools = { exportMemorySnapshot, mergeSnapshotBack, hasSnapshot };
 export { isUsableProvider, resolveLLM, resolveAllLLMs } from "../llm/router.js";
 import { ModeRegistry, registerDefaultModes } from "../mode/index.js";
 import { planExecExecutor } from "../mode/plan-exec.js";
@@ -167,6 +176,23 @@ export const modePlugin = (ctx) => {
   ctx.provide("modes", registry);
 };
 
+// P2⑧: 内置插件权限位 (函数外赋值, compose 调用前即可读)
+//   tools/shell 属敏感服务 (SENSITIVE_SERVICES), 需 full-access
+toolsPlugin.access = "full-access";
+
+export const evolvePlugin = (ctx) => {
+  // P1④⑤⑥: 进化系插件 —— Playbook 引擎 / 记忆健康监控 / 故障记忆
+  // P2⑥⑦: 符号画布 / 会话 fork 基线
+  // 提供服务, 消费方按需取用; 未接线时零开销 (不强制)。
+  const dataDir = ctx.consume("dataDir");
+  ctx.provide("playbook", new PlaybookStore(dataDir));
+  ctx.provide("memoryHealth", new MemoryHealthMonitor());
+  ctx.provide("failures", new FailureEpisodeStore(dataDir));
+  ctx.provide("canvas", new CanvasStore(dataDir));
+  ctx.provide("fork", forkTools);
+  ctx.provide("assets", new AssetHub(dataDir)); // P3⑩: 记忆资产中枢
+};
+
 // 默认内置插件装配顺序 (依赖在前)
 export const builtinPlugins = [
   busPlugin, // ②循环系: 全局总线必须最先 (依赖在前)
@@ -181,5 +207,6 @@ export const builtinPlugins = [
   tracesPlugin,
   auditPlugin, // 审计哈希链 (toolsPlugin 依赖它注入 catalog, 必须在前)
   toolsPlugin,
+  evolvePlugin, // P1: playbook / memoryHealth / failures (tools 之后, 依赖 dataDir)
   modePlugin,
 ];

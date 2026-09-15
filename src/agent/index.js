@@ -26,7 +26,7 @@ import { Lifecycle } from "../ans/lifecycle.js";
 import { suggestProactive, markTaskDone } from "../ans/proactive.js";
 import { record as rewardRecord, status as rewardStatus } from "../ans/reward.js";
 import { scan as evictionScan, status as evictionStatus } from "../ans/eviction.js";
-import { installGuard, guardStatus } from "../ans/guard.js";
+import { installGuard, guardStatus, installGuardOnCatalog } from "../ans/guard.js";
 import { SkillLoader } from "../skills/loader.js";
 import { EvolutionEngine } from "../selfheal/evolve.js";
 // 重构 (2026-09-15): 历史/上下文管理 + 提示词构建从 PPXAgent 类抽出为 mixin
@@ -56,7 +56,8 @@ export class PPXAgent {
     this.userName = this.config.user?.name || "兄弟";
 
     // 插件装配: ctx 预置基础服务, 按顺序装配内置 + 用户插件 (一切皆插件)
-    this.ctx = new Context();
+    // P2⑧: 顶层 ctx 为 full-access 基座 (内置插件可信), 用户插件默认 restricted
+    this.ctx = new Context(null, { access: "full-access" });
     this.ctx.provide("root", root);
     this.ctx.provide("dataDir", this.dataDir);
     this.ctx.provide("globalDataDir", this.globalDataDir);
@@ -92,6 +93,13 @@ export class PPXAgent {
       if (name) { try { rewardRecord(this, { tool: name, ok: !!ok }); } catch {} }
     });
     this.tools = this.ctx.consume("tools");
+    // P0 (2026-09-15): 免疫闸门接入工具执行收口 (修 MERGE-REPORT 遗留 P2 —— guard 之前只盖总线命令,
+    // 工具走 catalog 绕过全局闸门)。共享同一 state: approveGuard 一次授权同时作用于总线+工具。
+    try {
+      this.__guardOnCatalog = installGuardOnCatalog(this.tools, this.__guard);
+    } catch (e) {
+      warn(`[guard] 工具收口接入失败: ${e.message}`);
+    }
     this.scheduler = this.ctx.consume("scheduler");
     // ⑤排泄自治: 每日扫描长期记忆做冗余识别/冷热分层 (幂等注册, 不重复)
     try {

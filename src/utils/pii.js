@@ -2,7 +2,9 @@
 const HARD_PATTERNS = [
   { name: "api_key", regex: /\b(sk-[a-zA-Z0-9]{20,}|AKIA[A-Z0-9]{16}|gsk_[a-zA-Z0-9]{20,}|ghp_[a-zA-Z0-9]{36}|glpat-[a-zA-Z0-9_-]{20,}|xoxb-[a-zA-Z0-9-]+)\b/g },
   // v1.0.8: 放宽 inline_secret 值域 (含 :/# 等) + 8 位起, 短密钥不漏检 (原 16+ 位且不含 :#)
-  { name: "inline_secret", regex: /\b(api[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token|password|bearer)\s*[:=]\s*["']?([a-zA-Z0-9_/+=\-.:#]{8,})["']?/gi },
+  // P0 (2026-09-15): key 后允许可选闭合引号 —— 原版只匹配 key=value / key: value,
+  //   JSON 序列化形式 "key":"value" (key 后先有闭合引号) 完全漏检, 已修。
+  { name: "inline_secret", regex: /\b(api[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token|password|bearer)["']?\s*[:=]\s*["']?([a-zA-Z0-9_/+=\-.:#]{8,})["']?/gi },
   { name: "private_key", regex: /-----BEGIN\s+(RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----/g },
   { name: "credit_card", regex: /\b(?:\d{4}[- ]?){3}\d{4}\b/g },
   { name: "id_card", regex: /\b\d{6}(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[\dXx]\b/g },
