@@ -1,5 +1,29 @@
 # CHANGELOG
 
+## v2.0.1-dev (2026-09-15) - 工程规范 + 上帝文件拆解
+
+> **定性**: v2.0.0 合并后的第一轮工程打磨, 非功能增量。修复真实缺陷 + 拆解上帝文件 + 修正仓库元数据。
+
+### 真实缺陷修复 (bench 压测发现)
+- `_llmWithFallback`: `this.allProviders.length` 在 allProviders 未初始化 (stub/轻量实例) 时崩溃, 已加 `|| []` 防御 — 此前压测一直带病运行, 每次辅助调用报错被吞
+
+### 上帝文件拆解 (agent/index.js 892 → 646 行)
+- 新增 `src/agent/context.js`: 历史裁剪/token 预算/会话压缩 (`_historyPriority/_trimHistory/_ensureContextFit/_shrinkMessagesForOverflow/_getSession/_pushTurn/_loadHistory/_maybeCompact`)
+- 新增 `src/agent/prompts.js`: 技能清单/核心价值/DSML/画像/多模态注入 (`_skillsPrompt/_context/_dsmlPrompt/_valuesPrompt/_l3Context/_visionLLM/_userContent`)
+- mixin 方式挂回 prototype, 实例行为完全不变; 测试走 agent._xxx 不感知拆分
+
+### 工程元数据
+- package.json: repository 指向 PPXANS-Harness, 补 homepage/bugs
+- CHANGELOG: 补 v2.0.0 合并条目 (含 bf72a59 不可达说明)
+- README: 修正 .deps 表述为「可选底座, 需手动安装」
+- CI: test job 补 selfheal bench + audit chain verify 门禁
+- git tag v2.0.0 已打
+
+### 验证
+- 全量测试: 597 pass / 0 fail / 6 skip
+- eval 7/7 | 自愈基准 7/7 (100%) | audit verify 通过
+- 压测: 200 轮 0 失败, 8.3ms/轮 (修复后无报错噪音)
+
 ## v2.0.0 (2026-09-15) - 合并版: ppx-agent v1.6.0 + ppx-v2 v0.4.0
 
 > **定性**: 以 `ppx-agent v1.6.0` 为基座, 吸收 `ppx-v2 v0.4.0` 的审计哈希链与记忆治理能力, 合并为统一项目。
