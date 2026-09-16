@@ -106,36 +106,61 @@ ppx-serve     # 启动 HTTP 服务
 ppx-channels  # 通道 CLI
 ```
 
-### 本地开发
+### 本地开发 · 一键起 Web 应用 (推荐)
 
 ```bash
 # 1. 配置模型 (config/ppx.json)
-#    设置环境变量: OPENAI_API_KEY / DEEPSEEK_API_KEY / VOLCENGINE_API_KEY ...
+#    设置环境变量: OPENAI_API_KEY / DEEPSEEK_API_KEY / DASHSCOPE_API_KEY ...
 
-# 2. 启动自愈体检
-# 3. 启动产品壳 (Next.js, 需先启动内核): cd web && npm run dev # http://localhost:3000
+# 2. 一条命令起整个 Web 应用 (内核 + 界面同进程同端口, 自动开浏览器)
+npm start                        # → http://127.0.0.1:8899
+# 等价: node bin/ppx-web.js [--port 9000] [--host 0.0.0.0] [--no-open] [--root D:/ws]
+
+# 3. 启动自愈体检
 npm run selfheal
+```
 
-# 3. 启动对话 (CLI)
-npm run chat
+**Windows 双击即用** (无需开终端，对齐 dsh 的启动体验):
 
-# 4. 启动 HTTP 服务
-node src/server.js   # http://127.0.0.1:8899
+| 入口 | 作用 |
+|---|---|
+| `启动皮皮虾.vbs` | 静默启动 (无控制台窗口, 内核自动开浏览器) —— **推荐** |
+| `启动皮皮虾.bat` | 带窗口启动 (可见启动日志, 便于排查) |
+| `停止皮皮虾.bat` | 按端口精准停服 |
+| `高级菜单.bat` | CLI / 仅接口 / 体检 / 测试 / 旧版 Next.js 界面 |
 
-# 5. MCP 标准端点 (Streamable HTTP)
-# POST http://127.0.0.1:8899/mcp  (同 Bearer token 鉴权)
-# 任何 MCP 客户端 (Claude Desktop / Cursor / MCP Inspector 等) 可直接接入:
-#   - server/discover + tools/list + tools/call (45+ 内置工具全量暴露)
-#   - resources: memory://facts, traces://recent, stats://overview, sessions://list
-#   - prompts: humanize / plan / debug / verify / write_article (方法型技能)
-#   - ppx.chat.send / ppx.chat.stream (对话工具, 驱动完整工具循环)
-#   - ppx.sessions.* / ppx.providers.* / ppx.settings.* / ppx.task.* (管理工具, web 壳在用)
-# 配置: config/ppx.json → channels.http.mcp { enabled, path, legacy_rest }
-#   enabled 默认开; path 默认 /mcp; legacy_rest 默认 true (保留旧 REST 兼容), 设 false 彻底退役 /api/* 与 /message*
-#     (设 false 后这些 REST 端点返回 410 并引导 /mcp)
+启动器会自动清理上一次遗留的监听进程，然后单进程起服务并轮询就绪，就绪后打开浏览器并退出。
 
-# 6. 跑测试
-npm run test
+### 其他启动方式
+
+```bash
+npm run chat          # 终端对话 CLI
+npm run serve         # 仅 HTTP 接口 (无界面): http://127.0.0.1:8899
+npm run web:next      # 旧版 Next.js 界面 (双进程 8899+3000, 需先 npm run web:build)
+npm run web:check     # 界面静态自检 (图标/DOM id/静态资源引用)
+```
+
+### MCP 标准端点 (Streamable HTTP)
+
+`POST http://127.0.0.1:8899/mcp`（同 Bearer token 鉴权）。任何 MCP 客户端
+(Claude Desktop / Cursor / MCP Inspector 等) 可直接接入:
+
+- `server/discover` + `tools/list` + `tools/call`（45+ 内置工具全量暴露）
+- resources: `memory://facts`, `traces://recent`, `stats://overview`, `sessions://list`
+- prompts: `humanize` / `plan` / `debug` / `verify` / `write_article`（方法型技能）
+- `ppx.chat.send` / `ppx.chat.stream`（对话工具，驱动完整工具循环）
+- `ppx.sessions.*` / `ppx.providers.*` / `ppx.settings.*` / `ppx.task.*`（管理工具，Web 界面在用）
+
+配置: `config/ppx.json` → `channels.http.mcp { enabled, path, legacy_rest }`。
+`enabled` 默认开；`path` 默认 `/mcp`；`legacy_rest` 默认 `true`（保留旧 REST 兼容），
+设 `false` 彻底退役 `/api/*` 与 `/message*`（这些端点将返回 410 并引导到 `/mcp`）。
+
+更多: 启动入口 / 所需配置 / 页面布局方案见 **[docs/web-launch.md](docs/web-launch.md)**。
+
+### 跑测试
+
+```bash
+npm test
 ```
 
 ## 🧪 评测与 CI

@@ -1,355 +1,199 @@
 ﻿<!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
 <title>皮皮虾 · PPX Agent</title>
-<style>
-  :root {
-    --bg:#0f1115; --panel:#1a1e26; --card:#1a1e26; --border:#2a3140; --border-soft:#1f242e;
-    --fg:#e6e6e6; --muted:#888; --accent:#1d5cff; --accent-fg:#fff;
-    --agent-bg:#1f242e; --code-bg:#0d0f13; --err-bg:#3a1d1d; --err-border:#5c2a2a;
-    --ok-bg:#0f3d24; --ok-fg:#3ddc84; --bad-bg:#3d1d1d; --bad-fg:#ff6b6b;
-  }
-  /* 跟随系统浅色主题 */
-  @media (prefers-color-scheme: light) {
-    :root {
-      --bg:#f5f6f8; --panel:#fff; --card:#fff; --border:#e2e5ea; --border-soft:#e8eaee;
-      --fg:#1f2328; --muted:#6b7280; --accent:#2563eb; --accent-fg:#fff;
-      --agent-bg:#fff; --code-bg:#f6f8fa; --err-bg:#fdecec; --err-border:#f5c2c2;
-      --ok-bg:#e6f7ee; --ok-fg:#0e9f5a; --bad-bg:#fdecec; --bad-fg:#dc2626;
-    }
-  }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--fg); height:100vh; }
-  .app { display:flex; height:100vh; }
-  .chat { flex:1; display:flex; flex-direction:column; border-right:1px solid var(--border-soft); min-width:0; }
-  .chat-head { padding:14px 20px; border-bottom:1px solid var(--border-soft); display:flex; align-items:center; gap:10px; }
-  .chat-head h1 { font-size:16px; font-weight:600; }
-  .badge { font-size:11px; background:var(--panel); color:var(--accent); padding:2px 8px; border-radius:10px; border:1px solid var(--border); }
-  #msgs { flex:1; overflow-y:auto; padding:20px; display:flex; flex-direction:column; gap:12px; }
-  .msg { max-width:78%; padding:10px 14px; border-radius:10px; line-height:1.5; font-size:14px; white-space:pre-wrap; word-break:break-word; }
-  .msg.user { align-self:flex-end; background:var(--accent); color:var(--accent-fg); }
-  .msg.agent { align-self:flex-start; background:var(--agent-bg); border:1px solid var(--border); }
-  .msg.agent pre { background:var(--code-bg); border:1px solid var(--border); border-radius:6px; padding:10px; overflow-x:auto; margin:8px 0; }
-  .msg.agent code { background:var(--code-bg); padding:1px 5px; border-radius:4px; font-family:Consolas,monospace; font-size:12.5px; }
-  .msg.agent pre code { padding:0; background:none; }
-  .msg.agent p { margin:6px 0; }
-  .msg.agent ul,.msg.agent ol { margin:6px 0 6px 20px; }
-  .msg.agent a { color:var(--accent); }
-  .msg.err { background:var(--err-bg); border:1px solid var(--err-border); color:var(--bad-fg); }
-  .input-bar { padding:14px; border-top:1px solid var(--border-soft); display:flex; gap:10px; }
-  .input-bar input { flex:1; padding:12px 14px; border-radius:8px; border:1px solid var(--border); background:var(--panel); color:var(--fg); font-size:14px; outline:none; }
-  .input-bar input:focus { border-color:var(--accent); }
-  .input-bar button { padding:12px 22px; border-radius:8px; border:none; background:var(--accent); color:var(--accent-fg); font-size:14px; cursor:pointer; }
-  .input-bar button:disabled { opacity:.5; cursor:not-allowed; }
-  .side { width:360px; display:flex; flex-direction:column; }
-  .tabs { display:flex; border-bottom:1px solid var(--border-soft); }
-  .tab { flex:1; padding:12px; text-align:center; font-size:13px; cursor:pointer; color:var(--muted); border-bottom:2px solid transparent; }
-  .tab.active { color:var(--accent); border-bottom-color:var(--accent); }
-  .panel { flex:1; overflow-y:auto; padding:16px; display:none; }
-  .panel.active { display:block; }
-  .card { background:var(--card); border:1px solid var(--border); border-radius:8px; padding:12px; margin-bottom:10px; }
-  .card .t { font-size:12px; color:var(--muted); margin-bottom:4px; }
-  .card .c { font-size:13px; line-height:1.5; }
-  .pill { display:inline-block; font-size:11px; padding:1px 8px; border-radius:8px; margin-left:6px; }
-  .pill.ok { background:var(--ok-bg); color:var(--ok-fg); }
-  .pill.bad { background:var(--bad-bg); color:var(--bad-fg); }
-  .stat-row { display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid var(--border-soft); font-size:13px; }
-  .stat-row .v { color:var(--accent); font-weight:600; }
-  .empty { color:var(--muted); font-size:13px; text-align:center; padding:30px 0; }
-  .btn { padding:9px; border-radius:8px; border:1px solid var(--border); background:var(--accent); color:var(--accent-fg); cursor:pointer; font-size:13px; }
-  /* 场景新建 modal */
-  .modal-mask { display:none; position:fixed; inset:0; background:rgba(0,0,0,.5); z-index:100; align-items:center; justify-content:center; }
-  .modal-mask.show { display:flex; }
-  .modal { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:20px; width:min(420px,90vw); }
-  .modal h3 { margin-bottom:14px; font-size:16px; }
-  .modal label { display:block; font-size:12px; color:var(--muted); margin:10px 0 4px; }
-  .modal input,.modal textarea { width:100%; padding:9px 11px; border-radius:8px; border:1px solid var(--border); background:var(--bg); color:var(--fg); font-size:13px; outline:none; }
-  .modal input:focus,.modal textarea:focus { border-color:var(--accent); }
-  .modal textarea { min-height:60px; resize:vertical; }
-  .modal-actions { display:flex; gap:10px; justify-content:flex-end; margin-top:16px; }
-  .modal button { padding:9px 18px; border-radius:8px; border:none; cursor:pointer; font-size:13px; }
-  .modal .primary { background:var(--accent); color:var(--accent-fg); }
-  .modal .cancel { background:var(--bg); color:var(--muted); border:1px solid var(--border); }
-  /* 移动端响应式: 窄屏侧栏变抽屉 */
-  @media (max-width:768px){
-    .side { position:fixed; right:0; top:0; bottom:0; width:min(320px,85vw); background:var(--bg); border-left:1px solid var(--border); transform:translateX(100%); transition:transform .25s; z-index:50; box-shadow:-4px 0 20px rgba(0,0,0,.3); }
-    .side.open { transform:translateX(0); }
-    .side-toggle { display:block; }
-    .msg { max-width:92%; }
-  }
-  @media (min-width:769px){ .side-toggle { display:none; } }
-  .side-toggle { background:var(--panel); color:var(--muted); border:1px solid var(--border); border-radius:8px; padding:6px 12px; cursor:pointer; font-size:12px; white-space:nowrap; }
-  .sess-item { display:flex; align-items:center; gap:8px; padding:9px 11px; border:1px solid var(--border); border-radius:8px; margin-bottom:8px; cursor:pointer; background:var(--card); }
-  .sess-item:hover { border-color:var(--accent); }
-  .sess-item.active { border-color:var(--accent); background:var(--agent-bg); }
-  .sess-item .sess-title { flex:1; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .sess-item .sess-meta { font-size:11px; color:var(--muted); }
-  .sess-item .sess-del { font-size:11px; color:var(--muted); cursor:pointer; padding:2px 6px; border-radius:4px; border:none; background:none; }
-  .sess-item .sess-del:hover { color:var(--bad-fg); background:var(--bad-bg); }
-  .sess-item .sess-ren { font-size:11px; color:var(--muted); cursor:pointer; padding:2px 6px; border-radius:4px; border:none; background:none; }
-  .sess-item .sess-ren:hover { color:var(--accent); }
-  /* 工具调用卡片 (P1#7) */
-  .tool-card { align-self:flex-start; max-width:78%; font-size:12px; border:1px solid var(--border); border-radius:8px; padding:8px 12px; background:var(--card); }
-  .tool-card .tc-name { font-weight:600; color:var(--accent); }
-  .tool-card .tc-args { color:var(--muted); margin-top:3px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .tool-card .tc-meta { color:var(--muted); margin-top:3px; font-size:11px; }
-  .tool-card .tc-status { font-size:11px; font-weight:600; }
-  .tool-card .tc-status.wait { color:var(--muted); }
-  .tool-card .tc-status.ok { color:var(--ok-fg); }
-  .tool-card .tc-status.fail { color:var(--bad-fg); }
-  .side-toggle.active { color:var(--accent); border-color:var(--accent); }
-
-/* ===== 皮皮虾 UI 质感增强 (2026-08-21) ===== */
-/* 消息进场动画 */
-@keyframes msgIn { from { opacity:0; transform:translateY(8px) scale(.98); } to { opacity:1; transform:translateY(0) scale(1); } }
-.msg, .tool-card { animation: msgIn .22s ease-out both; }
-
-/* 消息气泡: 更柔圆角 + 阴影 */
-.msg { border-radius:14px !important; box-shadow:0 1px 4px rgba(0,0,0,.15); }
-.msg.user { background:linear-gradient(135deg,#1d5cff,#2563eb) !important; }
-.msg.agent { border-radius:14px !important; }
-
-/* 输入聚焦光晕 */
-.input-bar input { transition:border-color .15s, box-shadow .15s; }
-.input-bar input:focus { border-color:var(--accent); box-shadow:0 0 0 3px rgba(77,163,255,.18); }
-
-/* 发送按钮渐变 + 按压缩放 */
-.input-bar button { background:linear-gradient(135deg,#1d5cff,#2563eb) !important; box-shadow:0 2px 8px rgba(29,92,255,.25); transition:transform .08s,opacity .15s; }
-.input-bar button:active { transform:scale(.97); }
-
-/* 会话/卡片阴影微提 */
-.card, .sess-item { box-shadow:0 1px 3px rgba(0,0,0,.12); transition:border-color .15s, transform .1s; }
-.sess-item:active { transform:scale(.99); }
-
-/* 细滚动条 */
-::-webkit-scrollbar { width:8px; height:8px; }
-::-webkit-scrollbar-track { background:transparent; }
-::-webkit-scrollbar-thumb { background:#2c3038; border-radius:6px; }
-::-webkit-scrollbar-thumb:hover { background:#3a3f4a; }
-* { scrollbar-width:thin; scrollbar-color:#2c3038 transparent; }
-
-/* tab 动效 */
-.tab { transition:color .15s; }
-/* 侧栏抽屉过渡 */
-.side, .side-toggle { transition:transform .25s ease, color .15s; }
-
-/* 按钮统一 hover 提亮 */
-.btn:hover, .modal .primary:hover, .input-bar button:hover { filter:brightness(1.08); }
-.btn, .modal button, .side-toggle { transition:filter .15s, transform .1s, background-color .15s; cursor:pointer; }
-
-/* 轻色下适配输入框 */
-@media (prefers-color-scheme: light){
-  .msg.user { background:linear-gradient(135deg,#2563eb,#3b82f6) !important; }
-  ::-webkit-scrollbar-thumb { background:#d0d4da; }
-}
-
-</style>
+<link rel="icon" href="/favicon.svg">
+<link rel="stylesheet" href="/app.css">
 </head>
 <body>
+
+<!-- ===== 图标集 (内联 sprite, 零外部请求) ===== -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+<g id="i-mark"><path d="M12 3.2 4.6 12 12 20.8 19.4 12z"/><circle cx="12" cy="12" r="2.3"/></g>
+<g id="i-plus"><path d="M12 5v14M5 12h14"/></g>
+<g id="i-search"><circle cx="11" cy="11" r="6.2"/><path d="m20 20-3.6-3.6"/></g>
+<g id="i-refresh"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 5v6h-6"/></g>
+<g id="i-collapse"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M10 4v16"/></g>
+<g id="i-panel"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M15 4v16"/></g>
+<g id="i-settings"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-2.7 1.1v.2a2 2 0 1 1-4 0v-.1a1.6 1.6 0 0 0-2.8-1.1l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.6 1.6 0 0 0 3.6 15H3.4a2 2 0 1 1 0-4h.2A1.6 1.6 0 0 0 4.7 8.3l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3h.1a1.6 1.6 0 0 0 1-1.5v-.2a2 2 0 1 1 4 0v.2a1.6 1.6 0 0 0 2.7 1.1l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8v.1a1.6 1.6 0 0 0 1.5 1h.2a2 2 0 1 1 0 4h-.2a1.6 1.6 0 0 0-1.5 1z"/></g>
+<g id="i-send"><path d="M12 19V5"/><path d="m5.5 11.5 6.5-6.5 6.5 6.5"/></g>
+<g id="i-stop"><rect x="7" y="7" width="10" height="10" rx="1.6" fill="currentColor" stroke="none"/></g>
+<g id="i-mic"><rect x="9" y="3" width="6" height="10" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0"/><path d="M12 18v3"/></g>
+<g id="i-folder"><path d="M3.5 7.5A2 2 0 0 1 5.5 5.5h3.4l2 2.2h7.6a2 2 0 0 1 2 2v7.8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></g>
+<g id="i-file"><path d="M6 3.5h7l5 5v12H6z"/><path d="M13 3.5v5h5"/></g>
+<g id="i-chev-d"><path d="m6 9 6 6 6-6"/></g>
+<g id="i-chev-r"><path d="m9 6 6 6-6 6"/></g>
+<g id="i-close"><path d="M6 6l12 12M18 6L6 18"/></g>
+<g id="i-edit"><path d="M4 20h4L19 9a2.1 2.1 0 0 0-3-3L5 17z"/><path d="M14.5 6.5 17.5 9.5"/></g>
+<g id="i-trash"><path d="M4 7h16"/><path d="M9 7V5h6v2"/><path d="M6 7l1 13h10l1-13"/></g>
+<g id="i-check"><path d="m5 13 4.5 4.5L19 7"/></g>
+<g id="i-sliders"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></g>
+<g id="i-cube"><path d="M12 3.2 20 7.6v8.8L12 20.8 4 16.4V7.6z"/><path d="M4 7.6 12 12l8-4.4M12 12v8.8"/></g>
+<g id="i-plug"><path d="M9 3v5M15 3v5"/><path d="M6.5 8h11v3.5a5.5 5.5 0 0 1-11 0z"/><path d="M12 17v4"/></g>
+<g id="i-bot"><rect x="4" y="7" width="16" height="12" rx="3"/><path d="M12 3v4"/><circle cx="9.2" cy="13" r="1.2" fill="currentColor" stroke="none"/><circle cx="14.8" cy="13" r="1.2" fill="currentColor" stroke="none"/></g>
+<g id="i-info"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5.5"/><circle cx="12" cy="8" r="1" fill="currentColor" stroke="none"/></g>
+<g id="i-sun"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4"/></g>
+<g id="i-moon"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/></g>
+<g id="i-monitor"><rect x="3" y="4.5" width="18" height="12.5" rx="2"/><path d="M9 21h6M12 17v4"/></g>
+<g id="i-brain"><path d="M12 5.5a3 3 0 0 0-3 3v.4A2.8 2.8 0 0 0 7 11.5c0 .9.4 1.6 1 2.1v.4a3 3 0 0 0 4 2.8V5.5z"/><path d="M12 5.5a3 3 0 0 1 3 3v.4a2.8 2.8 0 0 1 2 2.6c0 .9-.4 1.6-1 2.1v.4a3 3 0 0 1-4 2.8"/></g>
+<g id="i-activity"><path d="M3 12h4l2.5-6 4 12L16 12h5"/></g>
+<g id="i-bars"><path d="M5 20V11M12 20V5M19 20v-6"/></g>
+<g id="i-list"><path d="M8 6.5h12M8 12h12M8 17.5h12"/><circle cx="4.4" cy="6.5" r="1.1" fill="currentColor" stroke="none"/><circle cx="4.4" cy="12" r="1.1" fill="currentColor" stroke="none"/><circle cx="4.4" cy="17.5" r="1.1" fill="currentColor" stroke="none"/></g>
+<g id="i-folder-open"><path d="M3.5 8.5h17l-2 10h-13z"/><path d="M3.5 8.5V6a1.5 1.5 0 0 1 1.5-1.5h3.6l1.8 2h5.1A1.5 1.5 0 0 1 17 8"/></g>
+<g id="i-stop-dot"><circle cx="12" cy="12" r="8.5"/><rect x="9.4" y="9.4" width="5.2" height="5.2" rx="1" fill="currentColor" stroke="none"/></g>
+</defs></svg>
+
 <div class="app">
-  <div class="chat">
-    <div class="chat-head">
-      <h1>皮皮虾</h1><span class="badge">PPX Agent</span>
-      <button class="side-toggle" id="sideToggle">面板</button>
-      <button onclick="resetSession()" style="margin-left:auto;padding:6px 12px;border-radius:8px;border:1px solid var(--border);background:var(--panel);color:var(--muted);cursor:pointer;font-size:12px;white-space:nowrap">清空会话</button>
+  <!-- ================= 侧栏 ================= -->
+  <aside class="side" id="side">
+    <div class="brand">
+      <span class="mark"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><use href="#i-mark"/></svg></span>
+      <span class="bname">皮皮虾</span>
+      <span class="btag" id="brandTag">PPX</span>
+      <button class="icobtn" id="btnCollapse" title="收起侧栏"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-collapse"/></svg></button>
     </div>
-    <div id="msgs"><div class="empty">和皮皮虾聊聊吧</div></div>
-    <div class="input-bar">
-      <input id="inp" placeholder="输入消息，Enter 发送" autofocus>
-      <button id="btn">发送</button>
+
+    <button class="newchat" id="btnNew">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-plus"/></svg>
+      新会话
+    </button>
+
+    <div class="side-scroll">
+      <div class="group">
+        <div class="ghead">
+          <span class="lab">会话</span>
+          <span class="gacts">
+            <button class="icobtn sm" id="btnSessSearch" title="搜索会话"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-search"/></svg></button>
+            <button class="icobtn sm" id="btnSessRefresh" title="刷新"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-refresh"/></svg></button>
+          </span>
+        </div>
+        <div class="gbody" id="sessList"></div>
+      </div>
+
+      <div class="group">
+        <div class="ghead">
+          <span class="lab">工作区</span>
+          <span class="gacts">
+            <button class="icobtn sm" id="btnWsRoot" title="切换工作区目录"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-folder-open"/></svg></button>
+            <button class="icobtn sm" id="btnWsRefresh" title="刷新"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-refresh"/></svg></button>
+          </span>
+        </div>
+        <div class="gbody" id="wsList"></div>
+      </div>
     </div>
-  </div>
-  <div class="side" id="side">
-    <div class="tabs">
-      <div class="tab active" data-t="sessions">会话</div>
-      <div class="tab" data-t="memory">记忆</div>
-      <div class="tab" data-t="traces">轨迹</div>
-      <div class="tab" data-t="stats">统计</div>
+
+    <div class="side-foot">
+      <button class="nav" id="btnSettings">
+        <span class="ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><use href="#i-settings"/></svg></span>
+        <span class="lab">设置</span>
+      </button>
+      <div class="conn" id="conn"><i class="dot"></i><span class="txt">连接中…</span></div>
     </div>
-    <div id="panel-sessions" class="panel active"></div>
-    <div id="panel-memory" class="panel"></div>
-    <div id="panel-traces" class="panel"></div>
-    <div id="panel-stats" class="panel"></div>
+  </aside>
+
+  <!-- ================= 主区 ================= -->
+  <main class="main">
+    <header class="topbar">
+      <button class="icobtn" id="btnSide" title="侧栏" hidden><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><use href="#i-collapse"/></svg></button>
+      <div class="tb-title" id="tbTitle">新会话</div>
+      <div class="tb-right">
+        <button class="icobtn" id="btnDrawer" title="面板"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><use href="#i-panel"/></svg></button>
+        <button class="icobtn" id="btnSettings2" title="设置"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><use href="#i-settings"/></svg></button>
+      </div>
+    </header>
+
+    <div class="stage">
+      <section class="hero" id="hero">
+        <span class="mark"><svg width="42" height="42" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><use href="#i-mark"/></svg></span>
+        <h1>探索未至之境<span class="badge" id="heroVer">…</span></h1>
+        <div class="sub" id="heroSub">零依赖智能体内核 · 记忆 / 工具 / 军团 / 自愈</div>
+        <div class="quick" id="quick"></div>
+      </section>
+      <div class="stream" id="stream" hidden><div class="col" id="col"></div></div>
+    </div>
+
+    <footer class="foot-wrap">
+      <div class="composer" id="composer">
+        <div class="chips">
+          <button class="chip" id="chipWs"><span class="cv"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><use href="#i-folder"/></svg></span><span id="wsLabel">工作区</span></button>
+          <button class="chip" id="chipPerm"><span id="permLabel">标准模式</span><span class="cv"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><use href="#i-chev-d"/></svg></span></button>
+        </div>
+        <div class="inrow">
+          <textarea id="inp" rows="1" placeholder="描述你想要构建的内容 / 提问 / 输入指令…（@ 引用文件）"></textarea>
+        </div>
+        <div class="cfoot">
+          <button class="icobtn ring" id="btnPlus" title="更多"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-plus"/></svg></button>
+          <button class="chip mini" id="chipTools"><span class="cv"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><use href="#i-plug"/></svg></span><span id="toolsLabel">工具</span></button>
+          <div class="grow"></div>
+          <button class="chip mini" id="chipModel"><span id="modelLabel">模型</span><span class="cv"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><use href="#i-chev-d"/></svg></span></button>
+          <button class="send" id="btnSend" disabled title="发送 (Enter)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-send"/></svg></button>
+        </div>
+      </div>
+      <div class="foot-note" id="footNote">Enter 发送 · Shift+Enter 换行 · Esc 停止生成</div>
+    </footer>
+
+    <!-- 右侧面板抽屉 -->
+    <aside class="drawer" id="drawer">
+      <div class="dhead">
+        <div class="dtabs">
+          <button class="dtab active" data-p="memory">记忆</button>
+          <button class="dtab" data-p="traces">轨迹</button>
+          <button class="dtab" data-p="stats">统计</button>
+          <button class="dtab" data-p="tasks">定时任务</button>
+          <button class="dtab" data-p="env">环境</button>
+        </div>
+        <button class="icobtn" id="btnDrawerClose" title="关闭"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-close"/></svg></button>
+      </div>
+      <div class="dbody" id="drawerBody"></div>
+    </aside>
+  </main>
+</div>
+
+<!-- ================= 设置 ================= -->
+<div class="mask" id="setMask">
+  <div class="modal">
+    <nav class="mset">
+      <div class="mtitle">设置</div>
+      <button class="mrow active" data-s="general"><span class="ico"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-sliders"/></svg></span>通用设置</button>
+      <button class="mrow" data-s="model"><span class="ico"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><use href="#i-cube"/></svg></span>模型</button>
+      <button class="mrow" data-s="plugin"><span class="ico"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-plug"/></svg></span>插件</button>
+      <button class="mrow" data-s="agent"><span class="ico"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><use href="#i-bot"/></svg></span>Agent 预设</button>
+      <button class="mrow" data-s="about"><span class="ico"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-info"/></svg></span>关于 / 体检</button>
+    </nav>
+    <section class="mbody">
+      <div class="mhead">
+        <span class="t" id="setTitle">通用设置</span>
+        <div class="grow"></div>
+        <button class="ghost" id="btnOpenCfg">打开配置文件</button>
+        <button class="icobtn" id="btnSetClose" title="关闭"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-close"/></svg></button>
+      </div>
+      <div class="mcontent" id="setBody"></div>
+    </section>
   </div>
 </div>
 
-<!-- 场景新建 modal (替代 prompt()) -->
-<div class="modal-mask" id="sceneMask">
-  <div class="modal">
-    <h3>新建场景</h3>
-    <label>场景名称</label><input id="sName" placeholder="如: A股交易助手">
-    <label>场景介绍 (这个场景是干嘛的)</label><textarea id="sDesc" placeholder="这个场景用来……"></textarea>
-    <label>能帮用户干什么 (能力清单)</label><textarea id="sHelp" placeholder="盯盘、资金流分析、选股……"></textarea>
-    <div class="modal-actions">
-      <button class="cancel" onclick="closeScene()">取消</button>
-      <button class="primary" onclick="submitScene()">创建</button>
+<!-- ================= 通用表单弹窗 ================= -->
+<div class="mask" id="formMask">
+  <div class="modal narrow">
+    <div class="mhead">
+      <span class="t" id="formTitle">编辑</span>
+      <div class="grow"></div>
+      <button class="icobtn" id="btnFormClose" title="关闭"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-close"/></svg></button>
+    </div>
+    <div class="mcontent" id="formBody"></div>
+    <div class="mhead" style="border-top:1px solid var(--line);border-bottom:none;justify-content:flex-end">
+      <button class="ghost" id="btnFormCancel">取消</button>
+      <button class="ghost primary" id="btnFormOk">确定</button>
     </div>
   </div>
 </div>
+
+<div class="toasts" id="toasts"></div>
 
 <script src="/vendor/marked.min.js"></script>
-<script>
-const msgs=document.getElementById("msgs"), inp=document.getElementById("inp"), btn=document.getElementById("btn");
-let sessionId = localStorage.getItem("ppx_sid") || ("s_" + Math.random().toString(36).slice(2,10));
-localStorage.setItem("ppx_sid", sessionId);
-function esc(s){ return String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
-function renderMd(t){ try{ return window.marked ? marked.parse(String(t||"")) : esc(t); }catch(e){ return esc(t); } }
-function addMsg(role, text, isMd){
-  msgs.querySelector(".empty")?.remove();
-  const d=document.createElement("div"); d.className="msg "+role;
-  if(role==="agent" && isMd){ d.innerHTML=renderMd(text); }
-  else { d.textContent=text; }
-  msgs.appendChild(d); msgs.scrollTop=msgs.scrollHeight;
-  return d;
-}
-async function send(){
-  const t=inp.value.trim(); if(!t) return;
-  addMsg("user", t); inp.value=""; btn.disabled=true;
-  const agentEl=addMsg("agent","…",false);
-  let full="";
-  try{
-    const r=await fetch("/message/stream",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({message:t, sessionId})});
-    if(!r.ok || !r.body){ const j=await r.json().catch(()=>null); addMsg("err", j?.error || "请求失败"+(r.status===401?" (未授权)":"")); btn.disabled=false; return; }
-    const reader=r.body.getReader(); const dec=new TextDecoder(); let buf="";
-    while(true){
-      const {done,value}=await reader.read(); if(done) break;
-      buf+=dec.decode(value,{stream:true});
-      let idx;
-      while((idx=buf.indexOf("\n\n"))!==-1){
-        const chunk=buf.slice(0,idx); buf=buf.slice(idx+2);
-        for(const line of chunk.split("\n")){
-          if(!line.startsWith("data:")) continue;
-          try{
-            const j=JSON.parse(line.slice(5).trim());
-            if(j.type==="delta"){ full+=j.content; agentEl.innerHTML=renderMd(full); msgs.scrollTop=msgs.scrollHeight; }
-            else if(j.type==="done"){ full=j.content; agentEl.innerHTML=renderMd(full); msgs.scrollTop=msgs.scrollHeight; }
-            else if(j.type==="tool"){ handleToolEvent(j); }
-            else if(j.type==="error"){ addMsg("err", j.error); }
-          }catch{}
-        }
-      }
-    }
-  }catch(e){ addMsg("err","请求失败: "+e.message); }
-  btn.disabled=false;
-}
-// ===== 工具调用可视化 (P1#7) =====
-const toolCards = {};
-function handleToolEvent(ev){
-  if(ev.type==="start"){
-    const card=document.createElement("div"); card.className="tool-card";
-    card.innerHTML=`<div class="tc-status wait">⏳ 调用中…</div><div class="tc-name">${esc(ev.tool)}</div><div class="tc-args">${esc(JSON.stringify(ev.args||{})).slice(0,120)}</div>`;
-    msgs.querySelector(".empty")?.remove();
-    msgs.appendChild(card); msgs.scrollTop=msgs.scrollHeight;
-    toolCards[ev.tool]=card;
-  } else if(ev.type==="done" && toolCards[ev.tool]){
-    toolCards[ev.tool].innerHTML=`<div class="tc-status ${ev.ok?"ok":"fail"}">${ev.ok?"✓ 完成":"✗ 失败"}</div><div class="tc-name">${esc(ev.tool)}</div><div class="tc-args">${esc(JSON.stringify(ev.args||{})).slice(0,120)}</div><div class="tc-meta">${ev.durationMs}ms${ev.result?(" · "+esc(ev.result).slice(0,80)):""}</div>`;
-    delete toolCards[ev.tool]; msgs.scrollTop=msgs.scrollHeight;
-  }
-}
-function resetSession(){
-  if(!confirm("清空当前会话历史?")) return;
-  sessionId="s_"+Math.random().toString(36).slice(2,10); localStorage.setItem("ppx_sid",sessionId);
-  fetch("/reset",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({sessionId})});
-  msgs.innerHTML='<div class="empty">新会话已开始</div>';
-}
-btn.onclick=send; inp.onkeydown=e=>{ if(e.key==="Enter") send(); };
-
-// 移动端侧栏抽屉
-const side=document.getElementById("side"), st=document.getElementById("sideToggle");
-st.onclick=()=>{ const open=side.classList.toggle("open"); st.classList.toggle("active",open); };
-
-// Tabs
-document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>{
-  document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active"));
-  document.querySelectorAll(".panel").forEach(x=>x.classList.remove("active"));
-  t.classList.add("active");
-  document.getElementById("panel-"+t.dataset.t).classList.add("active");
-  load(t.dataset.t);
-});
-
-async function load(which){
-  const el=document.getElementById("panel-"+which);
-  if(which==="sessions") return loadSessions(el);
-  if(which==="memory") el.innerHTML="<div class=empty>加载中…</div>";
-  try{
-    if(which==="memory"){
-      const r=await fetch("/api/memory"); const j=await r.json();
-      el.innerHTML='<button class="btn" style="width:100%;margin-bottom:10px" onclick="openScene()">+ 新建场景</button>';
-      el.innerHTML+=`<div class=card><div class=t>场景 (${(j.scenes||[]).length})</div>`+
-        (j.scenes||[]).map(s=>`<div class=card style=margin:8px 0><div style="font-size:13px;font-weight:600">${esc(s.name)} <span class="pill ${s.mode==="manual"?"ok":"bad"}">${s.mode==="manual"?"自定义":"自动"}</span></div>`+
-          `<div class=c style=margin-top:4px>${esc(s.description||"")}</div>`+
-          `<div class=c style="margin-top:4px;color:var(--accent)">能帮: ${esc(s.canHelp||"")}</div>`+
-          `<div class=t style=margin-top:4px>${s.facts}条记忆 · 更新 ${esc(s.lastUpdated||"")}</div></div>`).join("")+'</div>';
-      el.innerHTML+="<div class=card><div class=t>关键事实</div>"+((j.facts||[]).map(f=>`<div class=c>${esc(f.content)}</div>`).join("")||"<div class=empty>暂无事实</div>")+"</div>";
-    }else if(which==="traces"){
-      const r=await fetch("/api/traces?limit=50"); const j=await r.json();
-      el.innerHTML=(j.length?j.map(t=>`<div class=card><div class=t>${esc(t.tool)} <span class=pill ${t.ok?"ok":"bad"}>${t.ok?"OK":"FAIL"}</span> ${t.durationMs}ms</div><div class=c>${esc(t.args).slice(0,120)}</div></div>`).join(""):'<div class=empty>暂无轨迹</div>');
-    }else if(which==="stats"){
-      const r=await fetch("/api/stats"); const j=await r.json();
-      el.innerHTML=`<div class=card><div class=c>调用 ${j.count} 次 · 失败 ${j.failed} (<span class=pill ${Number(j.failRate)>10?"bad":"ok"}>${esc(j.failRate)}</span>)</div></div>`+
-        "<div class=card><div class=t>慢工具 Top</div>"+((j.slowTools||[]).map(s=>`<div class=stat-row><span>${esc(s.tool)}</span><span class=v>${s.avgMs}ms</span></div>`).join("")||"<div class=empty>暂无</div>")+'</div>';
-    }
-  }catch(e){ el.innerHTML='<div class=empty>加载失败: '+esc(e.message)+'</div>'; }
-}
-
-// 场景 modal (替代 prompt())
-const mask=document.getElementById("sceneMask");
-function openScene(){ mask.classList.add("show"); document.getElementById("sName").focus(); }
-function closeScene(){ mask.classList.remove("show"); }
-async function submitScene(){
-  const n=document.getElementById("sName").value.trim(), d=document.getElementById("sDesc").value.trim(), h=document.getElementById("sHelp").value.trim();
-  if(n&&d&&h){
-    await fetch("/message",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({message:`用 scene_create 创建场景: 名称=${n}, 介绍=${d}, 能帮=${h}`})}).then(r=>r.json()).catch(()=>{});
-    closeScene(); // ===== 会话管理 (P1#6) =====
-function fmtTs(ts){ if(!ts) return ""; const d=new Date(ts); return (d.getMonth()+1)+"-"+d.getDate()+" "+String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0"); }
-async function loadSessions(el){
-  el.innerHTML='<button class="btn" style="width:100%;margin-bottom:10px" onclick="newSession()">+ 新建会话</button><div class=empty>加载中…</div>';
-  try{
-    const r=await fetch("/sessions"); const j=await r.json();
-    const list=j.sessions||[];
-    el.innerHTML='<button class="btn" style="width:100%;margin-bottom:10px" onclick="newSession()">+ 新建会话</button>';
-    if(!list.length){ el.innerHTML+='<div class=empty>暂无会话</div>'; return; }
-    el.innerHTML+=list.map(s=>`<div class="sess-item ${s.key===sessionId?"active":""}" onclick="switchSession('${s.key}')">
-      <div style="flex:1;min-width:0">
-        <div class="sess-title" style="font-weight:600">${esc(s.title)}</div>
-        <div class="sess-meta">${s.count}条 · ${fmtTs(s.lastTs)}</div>
-      </div>
-      <button class="sess-ren" title="重命名" onclick="event.stopPropagation();renameSession('${s.key}')">✎</button>
-      <button class="sess-del" title="删除" onclick="event.stopPropagation();delSession('${s.key}')">✕</button>
-    </div>`).join("");
-  }catch(e){ el.innerHTML='<div class=empty>加载失败: '+esc(e.message)+'</div>'; }
-}
-function newSession(){
-  sessionId="s_"+Math.random().toString(36).slice(2,10); localStorage.setItem("ppx_sid",sessionId);
-  msgs.innerHTML='<div class="empty">新会话已开始</div>'; loadSessions(document.getElementById("panel-sessions"));
-}
-function switchSession(key){
-  sessionId=key; localStorage.setItem("ppx_sid",key);
-  msgs.innerHTML='<div class="empty">切换中…</div>'; loadSessions(document.getElementById("panel-sessions"));
-}
-async function delSession(key){
-  if(!confirm("删除会话 "+key+"?")) return;
-  await fetch("/sessions/delete",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key})});
-  if(sessionId===key){ sessionId="s_"+Math.random().toString(36).slice(2,10); localStorage.setItem("ppx_sid",sessionId); msgs.innerHTML='<div class="empty">新会话已开始</div>'; }
-  loadSessions(document.getElementById("panel-sessions"));
-}
-function renameSession(key){
-  const n=prompt("重命名会话 (新 key):", key); if(!n||n===key) return;
-  fetch("/sessions/rename",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({from:key,to:n})}).then(r=>r.json()).then(()=>{
-    if(sessionId===key){ sessionId=n; localStorage.setItem("ppx_sid",n); }
-    loadSessions(document.getElementById("panel-sessions"));
-  }).catch(()=>alert("重命名失败"));
-}
-
-load("memory");
-  } else alert("请填写完整: 名称/介绍/能力");
-}
-mask.addEventListener("click",e=>{ if(e.target===mask) closeScene(); });
-document.addEventListener("keydown",e=>{ if(e.key==="Escape" && mask.classList.contains("show")) closeScene(); });
-
-load("memory");
-</script>
+<script src="/app.js"></script>
 </body>
 </html>

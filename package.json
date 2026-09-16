@@ -12,6 +12,7 @@
   "bin": {
     "ppx": "bin/ppx.js",
     "ppxans": "bin/ppx.js",
+    "ppx-web": "bin/ppx-web.js",
     "ppx-serve": "bin/ppx-serve.js",
     "ppx-channels": "bin/ppx-channels.js"
   },
@@ -24,10 +25,13 @@
     "url": "https://github.com/chen6896qqwee/PPXANS-Harness/issues"
   },
   "scripts": {
-    "start": "node src/agent/index.js",
+    "start": "node bin/ppx-web.js",
+    "web": "node bin/ppx-web.js",
+    "web:noopen": "node bin/ppx-web.js --no-open",
+    "web:check": "node scripts/check-web.mjs",
+    "web:next": "node scripts/start-web.js",
     "chat": "node src/cli.js",
     "serve": "node src/server.js",
-    "web": "node scripts/start-web.js",
     "web:build": "npm run build --prefix web",
     "release": "node scripts/release.js",
     "eval": "node scripts/eval.js",

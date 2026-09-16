@@ -1,6 +1,8 @@
 #!/usr/bin/env node
-// scripts/start-web.js - 一条命令同时起内核(8899) + Web UI(3000)
-// 用法: 先 npm run web:build 构建前端, 再 npm run web 启动
+// scripts/start-web.js - 【旧版路径】一条命令同时起内核(8899) + Next.js Web UI(3000)
+// 用法: 先 npm run web:build 构建前端, 再 npm run web:next 启动
+// 注意: 现行推荐入口是 `npm start` / node bin/ppx-web.js —— 单进程单端口零构建,
+//       本脚本仅保留给仍在用 web/ (Next.js) 的深度定制场景。
 import { ensureUTF8Console } from "../src/utils/winutf8.js";
 import { spawn } from "node:child_process";
 import fs from "node:fs";

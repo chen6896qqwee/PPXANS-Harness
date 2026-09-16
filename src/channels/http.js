@@ -1,4 +1,4 @@
-// src/channels/http.js - HTTP 通道 (零依赖)
+﻿// src/channels/http.js - HTTP 通道 (零依赖)
 // 起一个本地 HTTP server, 接收 POST /message 消息, 调 agent 回复
 import http from "node:http";
 import fs from "node:fs";
@@ -130,6 +130,58 @@ export class HttpChannel extends Channel {
     return [];
   }
 
+  // 判断请求是否来自本机回环 (127.0.0.1/::1) —— 只有本机才允许把 token 注入首页
+  // 安全边界: 服务默认只绑 127.0.0.1; 即使绑到 0.0.0.0, 局域网访问者拿不到注入的 token,
+  // 前端会退化为"手填 token"形态, 而恶意网页因 CORS 读不到首页响应, 无法窃取 token。
+  _isLoopback(req) {
+    const a = (req.socket && req.socket.remoteAddress) || "";
+    return a === "127.0.0.1" || a === "::1" || a === "::ffff:127.0.0.1";
+  }
+
+  // 版本号取自 package.json (不硬编码, 与 McpServer 同源策略)
+  _pkgVersion() {
+    try {
+      const p = path.join(this.agent.root, "package.json");
+      if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, "utf8")).version || "0.0.0";
+    } catch { /* 读不到就用占位 */ }
+    return "0.0.0";
+  }
+
+  // Web 前端引导数据 (注入首页 <head>, 本地零配置可用)
+  // authToken 仅在回环请求时下发; 非回环只给 token_required 标志
+  bootstrapPayload(req) {
+    const loopback = this._isLoopback(req);
+    return {
+      app: "ppxans-harness",
+      version: this._pkgVersion(),
+      agent: (this.agent?.config?.agent?.name) || "皮皮虾",
+      user: (this.agent?.config?.user?.name) || "",
+      port: this.port,
+      host: this.host,
+      base: `http://${this.host === "0.0.0.0" ? "127.0.0.1" : this.host}:${this.port}`,
+      authToken: loopback ? (this.authToken || "") : "",
+      tokenLoopback: loopback,
+      tokenRequired: Boolean(this.authToken),
+      mcpPath: this.mcpPath,
+      legacyRest: this.mcpLegacyRest,
+      time: new Date().toISOString(),
+    };
+  }
+
+  // 读取首页 HTML 并注入 window.__PPX_BOOTSTRAP__ (找不到文件返回 null)
+  renderIndex(req) {
+    const htmlPath = path.join(this.publicDir, "index.html");
+    if (!fs.existsSync(htmlPath)) return null;
+    let html = fs.readFileSync(htmlPath, "utf8");
+    const cfg = JSON.stringify(this.bootstrapPayload(req)).replace(/</g, "\\u003c");
+    const tag = `<script>window.__PPX_BOOTSTRAP__=${cfg};</script>`;
+    // 优先插在 </head> 前; 模板没有 head 就退化为插到 </body> 前
+    if (html.includes("</head>")) html = html.replace("</head>", `${tag}\n</head>`);
+    else if (html.includes("</body>")) html = html.replace("</body>", `${tag}\n</body>`);
+    else html = tag + html;
+    return html;
+  }
+
   _tokenFromConfig() {
     try {
       const p = path.join(this.agent.root, "config", "ppx.json");
@@ -250,7 +302,7 @@ export class HttpChannel extends Channel {
 
       // v2.6.0 REST 退役开关: /message* /sessions* /reset 与 /api/* 同受 mcp.legacy_rest 控制
       // (默认关闭: 全部走标准 MCP 端点 /mcp; 旧脚本可配置 legacy_rest: true 恢复)
-      if (!this.mcpLegacyRest && ["/message", "/message/stream", "/chat", "/sessions", "/reset"].some((p) => reqPath === p || reqPath.startsWith(p + "/"))) {
+      if (!this.mcpLegacyRest && ["/message", "/message/stream", "/chat", "/sessions", "/reset", "/interrupt"].some((p) => reqPath === p || reqPath.startsWith(p + "/"))) {
         res.writeHead(410, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "REST 端点已退役, 请使用标准 MCP 端点 POST /mcp (channels.http.mcp.legacy_rest=true 可恢复)" }));
         return;
@@ -258,7 +310,15 @@ export class HttpChannel extends Channel {
 
       if (req.method === "GET" && req.url === "/health") {
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ status: "ok", agent: this.agent.config.agent?.name || "ppx" }));
+        res.end(JSON.stringify({
+          status: "ok",
+          agent: this.agent.config.agent?.name || "ppx",
+          app: "ppxans-harness",
+          version: this._pkgVersion(),
+          web: "/",
+          mcp: this.mcpEnabled ? this.mcpPath : null,
+          uptime_ms: Math.round(process.uptime() * 1000),
+        }));
         return;
       }
 
@@ -378,30 +438,45 @@ export class HttpChannel extends Channel {
         return;
       }
 
+      // 中断当前 Agent 响应 (配合 Web 前端「停止生成」)
+      if (req.method === "POST" && req.url === "/interrupt") {
+        if (!this._authed(req, res)) { res.writeHead(401, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "unauthorized" })); return; }
+        const body = await this._readBody(req, res);
+        if (body === null) return;
+        try {
+          const data = JSON.parse(body || "{}");
+          const sessionId = data.sessionId || "default";
+          if (typeof this.agent.interrupt === "function") this.agent.interrupt();
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true, interrupted: true, sessionId }));
+        } catch (e) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: e.message }));
+        }
+        return;
+      }
       // ---- 静态界面 + 可观测 API ----
+      // 首页: 服务端注入 window.__PPX_BOOTSTRAP__ (本机回环请求附带 auth token) → 单进程免配置可用
+      if (req.method === "GET" && (reqPath === "/" || reqPath === "/index.html")) {
+        const html = this.renderIndex(req);
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+        res.end(html !== null ? html : "<!DOCTYPE html><meta charset=utf-8><p>皮皮虾服务已启动, 但 public/index.html 未找到。</p>");
+        return;
+      }
       // 通用静态文件服务 (public/ 下任意文件, 含 vendor/ 资源, 防路径穿越)
-      if (req.method === "GET" && !reqPath.startsWith("/api/") && !["/message","/message/stream","/chat","/reset"].some(p=>reqPath===p)) {
-        const rel = reqPath === "/" ? "index.html" : reqPath.replace(/^\//, "");
-        const file = path.resolve(this.publicDir, rel);
+      if (req.method === "GET" && !reqPath.startsWith("/api/") && !["/message","/message/stream","/chat","/reset","/interrupt"].some(p=>reqPath===p)) {
+        const file = path.resolve(this.publicDir, reqPath.replace(/^\//, ""));
         if (file.startsWith(this.publicDir + path.sep) && fs.existsSync(file) && fs.statSync(file).isFile()) {
           const ext = path.extname(file).toLowerCase();
-          const mime = { ".html":"text/html; charset=utf-8", ".js":"text/javascript", ".css":"text/css", ".json":"application/json", ".png":"image/png", ".jpg":"image/jpeg", ".svg":"image/svg+xml", ".ico":"image/x-icon" }[ext] || "application/octet-stream";
-          res.writeHead(200, { "Content-Type": mime });
+          const mime = { ".html":"text/html; charset=utf-8", ".js":"text/javascript; charset=utf-8", ".mjs":"text/javascript; charset=utf-8", ".css":"text/css; charset=utf-8", ".json":"application/json; charset=utf-8", ".png":"image/png", ".jpg":"image/jpeg", ".jpeg":"image/jpeg", ".webp":"image/webp", ".gif":"image/gif", ".svg":"image/svg+xml", ".ico":"image/x-icon", ".woff2":"font/woff2", ".map":"application/json" }[ext] || "application/octet-stream";
+          const headers = { "Content-Type": mime };
+          if ([".html", ".js", ".mjs", ".css"].includes(ext)) headers["Cache-Control"] = "no-cache";
+          res.writeHead(200, headers);
           res.end(fs.readFileSync(file));
           return;
         }
-        if (reqPath !== "/") { res.writeHead(404); res.end("not found"); return; }
-      }
-      // 静态页面
-      if (req.method === "GET" && (reqPath === "/" || reqPath === "/index.html")) {
-        const html = path.join(this.publicDir, "index.html");
-        if (fs.existsSync(html)) {
-          res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-          res.end(fs.readFileSync(html, "utf8"));
-        } else {
-          res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
-          res.end("皮皮虾服务已启动。public/index.html 未找到。");
-        }
+        res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+        res.end("not found");
         return;
       }
       // API 端点认证 + v2.6.0 REST 退役开关
@@ -414,7 +489,15 @@ export class HttpChannel extends Channel {
           res.end(JSON.stringify({ error: "REST /api/* 已退役, 请使用标准 MCP 端点 POST /mcp (channels.http.mcp.legacy_rest=true 可恢复)" }));
           return;
         }
-        if (!this._authed(req, res)) { res.writeHead(401, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "unauthorized" })); return; }
+        // /api/bootstrap 例外: 它本身就是"取 token"的入口, 本机回环请求免鉴权放行
+        const bootstrapLoopback = reqPath === "/api/bootstrap" && this._isLoopback(req);
+        if (!bootstrapLoopback && !this._authed(req, res)) { res.writeHead(401, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "unauthorized" })); return; }
+      }
+      // 引导信息 API (前端启动时刷新用): 版本/端口/token(仅回环)/能力开关
+      if (req.method === "GET" && reqPath === "/api/bootstrap") {
+        res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+        res.end(JSON.stringify(this.bootstrapPayload(req)));
+        return;
       }
       // 轨迹 API
       if (req.method === "GET" && reqPath === "/api/traces") {
@@ -619,6 +702,83 @@ export class HttpChannel extends Channel {
         return;
       }
 
+      // 工作区文件树 + 读取 (Web UI 项目文件引用) [新增]
+      if (req.method === "GET" && reqPath === "/api/workspace/tree") {
+        if (!this._authed(req, res)) { res.writeHead(401, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "unauthorized" })); return; }
+        try {
+          const u = new URL(req.url, "http://127.0.0.1");
+          const rootArg = (u.searchParams.get("root") || "").replace(/^\/+|\/+$/g, "");
+          const maxDepth = Math.min(Math.max(Number(u.searchParams.get("maxDepth") || 3) || 3, 1), 8);
+          const wsRoot = path.resolve(this.agent.root);
+          const baseDir = rootArg ? path.resolve(wsRoot, rootArg) : wsRoot;
+          if (baseDir !== wsRoot && !baseDir.startsWith(wsRoot + path.sep)) throw new Error("root 越界");
+          const skips = new Set([".git", "node_modules", "dist", ".next", ".cache", ".tmp", "data"]);
+          let count = 0;
+          const MAX_NODES = 2000;
+          const buildTree = (dir, rel, depth) => {
+            if (count >= MAX_NODES) return null;
+            let st;
+            try { st = fs.statSync(dir, { throwIfNoEntry: false }); } catch { return null; }
+            if (!st) return null;
+            const node = { name: path.basename(dir) || "/", path: rel, type: "dir", children: [] };
+            if (depth >= maxDepth) return node;
+            let entries = [];
+            try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return node; }
+            entries.sort((a, b) => {
+              if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? -1 : 1;
+              return a.name.localeCompare(b.name);
+            });
+            for (const ent of entries) {
+              if (count >= MAX_NODES) break;
+              const childRel = rel ? rel + "/" + ent.name : ent.name;
+              const childPath = path.join(dir, ent.name);
+              try {
+                if (ent.isDirectory()) {
+                  if (skips.has(ent.name) || ent.name.startsWith(".")) continue;
+                  count++;
+                  const child = buildTree(childPath, childRel, depth + 1);
+                  if (child) node.children.push(child);
+                } else if (ent.isFile()) {
+                  if (ent.name.startsWith(".")) continue;
+                  const sz = fs.statSync(childPath).size;
+                  node.children.push({ name: ent.name, path: childRel, type: "file", size: sz });
+                  count++;
+                }
+              } catch { /* 单个节点失败忽略 */ }
+            }
+            return node;
+          };
+          const tree = buildTree(baseDir, rootArg, 0);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true, root: wsRoot, dir: baseDir, maxDepth, truncated: count >= MAX_NODES, tree: tree || { name: "", path: "", type: "dir", children: [] } }));
+        } catch (e) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: e.message }));
+        }
+        return;
+      }
+      if (req.method === "GET" && reqPath === "/api/workspace/read") {
+        if (!this._authed(req, res)) { res.writeHead(401, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "unauthorized" })); return; }
+        try {
+          const u = new URL(req.url, "http://127.0.0.1");
+          const rel = u.searchParams.get("path") || "";
+          const wsRoot = path.resolve(this.agent.root);
+          const file = path.resolve(wsRoot, rel);
+          if (file !== wsRoot && !file.startsWith(wsRoot + path.sep)) throw new Error("路径越界");
+          const st = fs.statSync(file, { throwIfNoEntry: false });
+          if (!st || !st.isFile()) throw new Error("文件不存在");
+          const MAX_READ = 256 * 1024;
+          let buf = fs.readFileSync(file);
+          const truncated = buf.length > MAX_READ;
+          if (truncated) buf = buf.subarray(0, MAX_READ);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true, path: rel, size: st.size, truncated, content: buf.toString("utf8") }));
+        } catch (e) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: e.message }));
+        }
+        return;
+      }
       res.writeHead(404); res.end("not found");
 
     });
@@ -649,3 +809,5 @@ export class HttpChannel extends Channel {
     this.connected = false;
   }
 }
+
+

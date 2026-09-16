@@ -36,6 +36,9 @@ exports/
 # --- 测试残留 ---
 __nonexistent__/
 
+# --- 本次运行的临时产物 (启动日志 / 探针 / 截图) ---
+tmp/
+
 # --- 系统 ---
 .DS_Store
 Thumbs.db
