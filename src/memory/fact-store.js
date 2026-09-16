@@ -42,6 +42,7 @@ export class FactStore {
     // 可插拔 embedder (dense 语义检索, 默认 null = 纯 BM25); _embedCache 内存缓存不落盘
     this.embedder = null;
     this._embedCache = new Map();
+    this._embedCacheMax = 1000; // LRU 上限: 超过淘汰最旧插入项, 防长跑会话内存无界增长
     for (const fact of this.facts) this._indexFact(fact);
     this.save();
   }
@@ -400,6 +401,11 @@ export class FactStore {
         this._embedCache.set(f.id, ev);
       }
       if (ev) dense.push({ ...f, dense: this._cosine(qv, ev) });
+      // LRU 淘汰: Map 迭代序 = 插入序, 超限删最旧
+      if (this._embedCache.size > this._embedCacheMax) {
+        const oldest = this._embedCache.keys().next();
+        if (!oldest.done) this._embedCache.delete(oldest.value);
+      }
     }
     dense.sort((a, b) => b.dense - a.dense);
     // dense 与 BM25 双路 RRF 融合

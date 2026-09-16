@@ -42,3 +42,6 @@ Thumbs.db
 
 # --- 运行时使用计数 ---
 skills/.usage.json
+
+# --- 本地配置 (不入库, 模板见 config/ppx.json.example) ---
+config/ppx.json

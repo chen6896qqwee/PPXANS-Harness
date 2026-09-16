@@ -16,7 +16,7 @@
     }
   },
   "user": {
-    "name": "兄弟"
+    "name": "用户"
   },
   "providers": [
     {
@@ -56,7 +56,7 @@
       "id": "lmstudio",
       "base_url": "http://127.0.0.1:1234/v1",
       "api_key": "lm-studio",
-      "model": "gemma-4-e2b-uncensored-hauhaucs-aggressive-q8_k_p",
+      "model": "YOUR_LOCAL_MODEL_NAME",
       "vision": false,
       "timeout_ms": 180000
     },
@@ -64,7 +64,7 @@
       "id": "zhipu",
       "base_url": "https://open.bigmodel.cn/api/paas/v4",
       "api_key_env": "ZHIPU_API_KEY",
-      "model": "glm-5v-turbo",
+      "model": "glm-4v-flash",
       "vision": true,
       "timeout_ms": 180000,
       "context_window": 65536
@@ -82,7 +82,7 @@
   },
   "audit": {
     "enabled": true,
-    "_note": "工具调用审计哈希链 (吸收自 ppx-v2)。append-only + SHA-256 链式防篡改, 落 data/logs/audit.ndjson。设 false 可关闭 (性能敏感场景)。校验: ppx 对话里调 audit_verify 工具, 或 npm run audit:verify。"
+    "_note": "工具调用审计哈希链。append-only + SHA-256 链式防篡改, 落 data/logs/audit.ndjson。设 false 可关闭 (性能敏感场景)。校验: ppx 对话里调 audit_verify 工具, 或 npm run audit:verify。"
   },
   "embedding": {
     "base_url": "http://127.0.0.1:1234/v1",
