@@ -3,6 +3,10 @@
 // 零依赖: 用关键词聚类 + 时间窗聚合
 import path from "node:path";
 import { ensureDir, readJson, writeJson, logicalDay, withFileLock } from "../utils/store.js";
+import { migrateData, writeSchema } from "../utils/schema.js";
+
+// scenes.json 当前 schema 版本 (纯数组基线 = 1); 未来数据结构变更时 +1 并注册迁移
+export const SCENES_SCHEMA_VERSION = 1;
 
 // 中文简单分词: 提取有意义的词 (2字以上连续片段 + 已知高频概念)
 const STOP = new Set(["这个","那个","我们","你们","他们","什么","怎么","可以","一个","就是","知道","没有","如果","因为","所以","但是","然后","现在","今天","昨天","明天","已经","还有","所有","这样","那样","自己","的时候","一下","一点","一些","这些","那些","东西","事情","问题","觉得","应该","需要","开始","继续","大家","真的","只是","可能","不是","都是","一直","非常","其实","最后","主要","联系","关系"]);
@@ -20,6 +24,14 @@ export class SceneStore {
     ensureDir(this.dir);
     this.file = path.join(this.dir, "scenes.json");
     this.scenes = readJson(this.file, []);
+    // schema 版本迁移 (旁挂 .schema 文件; 数据文件保持纯数组)
+    const mig = migrateData({
+      file: this.file,
+      name: "scenes",
+      data: this.scenes,
+      currentVersion: SCENES_SCHEMA_VERSION,
+    });
+    this.scenes = mig.data;
   }
 
   // 把一条事实归入最匹配的场景 (或新建)
@@ -59,6 +71,7 @@ export class SceneStore {
     // v1.0.9: 写盘加文件锁 (防军团多进程共享 dataDir 时写交错)
     return withFileLock(this.file, () => {
       writeJson(this.file, this.scenes);
+      writeSchema(this.file, "scenes", SCENES_SCHEMA_VERSION);
       return best;
     });
   }
@@ -127,5 +140,8 @@ export class SceneStore {
   count() { return this.scenes.length; }
 
   // v1.0.9: _save 加锁 (create/scene_describe 等写盘路径)
-  _save() { withFileLock(this.file, () => writeJson(this.file, this.scenes)); }
+  _save() { withFileLock(this.file, () => {
+    writeJson(this.file, this.scenes);
+    writeSchema(this.file, "scenes", SCENES_SCHEMA_VERSION);
+  }); }
 }

@@ -1,5 +1,45 @@
 # CHANGELOG
 
+
+
+## v2.7.0 (2026-09-16) - 记忆存储加固: schema 版本迁移 + WAL 增量落盘
+
+> **定性**: 针对外部体检报告的记忆存储建议，补两块硬能力：数据文件 schema 版本号 + 迁移钩子（版本兼容与迁移），以及 facts 增量落盘（WAL，减少高频写场景的全量写放大）。数据文件（facts.json / scenes.json）保持纯数组格式不变，现有读取者无感。
+
+### 新增: 数据文件 schema 版本 + 迁移钩子
+- `src/utils/schema.js`: 版本号写在旁挂 `<file>.schema` 小文件（原子写），数据文件本身保持纯数组，healer / 外部读取者 / 现有测试全部无感
+- `registerMigration(name, from, to, fn)` 注册迁移链：不允许跳级、不允许覆盖冲突；无迁移函数时安全跳过（版本标记到目标，数据不动）
+- `migrateData()` 启动自动迁移：读当前版本 → 沿链逐级推进 → 原子写回 + 更新版本；迁移中断重跑幂等
+- `FactStore` / `SceneStore` 构造时接入：`FACTS_SCHEMA_VERSION` / `SCENES_SCHEMA_VERSION` 常量导出，未来数据结构变更时 +1 并注册迁移
+
+### 新增: facts 增量落盘 (WAL, 可选默认关闭)
+- `src/utils/wal.js`: 追加式变更日志——`appendWal`（单行 JSON 原子追加）/ `readWal`（尾部半行崩溃丢弃）/ `truncateWal`
+- `FactStore({ wal: true, walThreshold: N })` 开启：变更走追加日志（upsert/remove/replace 事件），达阈值自动 compact 全量写，默认 50 条触发
+- 崩溃安全：主文件 = 最后一次 flush 快照，WAL = 快照后增量；启动重放恢复，重放幂等（按 id upsert/remove，重复应用无害）
+- 多进程安全：变更与 flush 同用文件锁，flush 时合并磁盘快照 + WAL + 内存（内存优先），防丢其他进程增量事件
+- 锁内重读改用 `_reload()`：WAL 模式下磁盘快照 + 重放 WAL 才是完整状态，修复原 add/update 等锁内重读导致的内存回退丢未 flush 变更
+
+### 修复
+- `importAll(mode: "replace")`: 旧版只保留 id/content 字段，lastAccess/importance 缺失导致衰减/recency 计算 NaN，检索永远返回空——补全与 merge 分支一致的全部字段
+- `_flushLocked()`: 非 WAL 模式直接写内存（内存即真相），避免合并逻辑把磁盘上已删条目合回
+
+### 测试
+- `test/schema-migration.test.js` (8 项): 基线兼容 / 版本读写 / 迁移链推进 / 无迁移安全跳过 / 幂等 / 冲突拒绝 / FactStore+SceneStore 文件保持数组格式
+- `test/fact-wal.test.js` (9 项): 默认关闭兼容 / 延迟落盘 / 阈值 compact / 崩溃恢复重放 / 半行丢弃 / 重放幂等 / 软删更新重放 / importAll 重放 / 批量一致
+- 全量 745 项测试通过 (741 pass / 0 fail / 4 skip)
+
+
+### Web UI: Codex 桌面版风格界面 (2026-09-16)
+- 全局 UI 令牌化重构 (`web/src/app/globals.css`): 全部硬编码色收敛为 `--ppx-*` CSS 变量, Codex 浅色单主题 (白底 + 灰阶, 移除蓝绿品牌色)
+- 布局对齐 Codex 桌面版: 左侧导航栏 (新对话/技能请求/已安排/轨迹/插件) + 会话列表 + 底部「开始使用」折叠区块
+- 顶部菜单栏真下拉: 文件/编辑/视图/帮助, 菜单项可执行 (新对话/清空输入/复制最后回复/面板显隐/切右侧 tab)
+- 中央空态: 「我们要构建什么?」+ 4 张建议卡片, 点击直接发送 (真 Codex 行为)
+- 底部输入框前挂「选择会话」下拉 (绑定真实会话切换)
+- 全局快捷键: ⌘/Ctrl+N 新建对话 · ⌘/Ctrl+K 聚焦输入框 · ⌘/Ctrl+1-5 切右侧面板 · Esc 关闭全部弹窗
+- 新增 modal: 技能请求 (提交走 refineSkill) / 快速开始 / 关于皮皮虾
+- settings 5 页硬编码色全部变量化 (一次性脚本 `web/scripts/themeify-settings.ps1`)
+- 验证: web tsc 0 错 + next build 8 页预渲染全绿 + dev 冒烟 HTTP 200
+
 ## v2.6.0 (2026-09-15) - MCP 服务端 + web 壳全面切 MCP + 任务面板
 
 > **定性**: 皮皮虾从"MCP 客户端"升级为"MCP 客户端 + 服务端"双向。对外全部能力经标准 MCP 协议 (Streamable HTTP, `POST /mcp`) 暴露; web 产品壳全面切换, REST `/api/*` 从产品壳退役 (服务端保留兼容开关)。

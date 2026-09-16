@@ -3,6 +3,8 @@
 import path from "node:path";
 import crypto from "node:crypto";
 import { ensureDir, readJson, writeJson, nowISO, logicalDay, withFileLock } from "../utils/store.js";
+import { migrateData, writeSchema } from "../utils/schema.js";
+import { walFileOf, appendWal, readWal, truncateWal } from "../utils/wal.js";
 
 // 记忆动词前缀: 去重时剔除, 让"记住：X"与"X"视为同一条 (防 LLM 提炼版与原文冗余)
 const MEMORY_VERB_PREFIXES = [
@@ -14,6 +16,8 @@ const MEMORY_VERB_PREFIXES = [
 export const L4_DECAY_PER_DAY = 0.005;
 export const LAYER_L1 = 1;
 export const LAYER_L4 = 4;
+// facts.json 当前 schema 版本 (纯数组基线 = 1); 未来数据结构变更时 +1 并注册迁移 (见 src/utils/schema.js)
+export const FACTS_SCHEMA_VERSION = 1;
 
 export class FactStore {
   constructor(dataDir, opts = {}) {
@@ -35,7 +39,22 @@ export class FactStore {
       maxFacts: 1000,      // L1 事实总量上限, 超限按「衰减分×重要性」裁剪最弱 (0/负数=不裁剪)
       ...normOpts,
     };
+    // WAL 增量落盘: 默认关闭 (= 旧行为每次变更全量原子写); 开启后变更走追加日志 (facts.json.wal),
+    // 达阈值 (walThreshold) 才 compact 全量写, 高频写场景显著减少磁盘写放大。
+    // 数据文件本身保持纯数组格式, 读取方无感; 崩溃时启动重放 WAL 恢复。
+    this.wal = !!this.opts.wal;
+    this.walThreshold = Math.max(1, Number(this.opts.walThreshold) || 50);
+    this.walFile = walFileOf(this.file);
+    this._walPending = 0;
     this.facts = readJson(this.file, []);
+    // schema 版本迁移 (旁挂 .schema 文件; 数据文件保持纯数组, healer/外部读取者无感)
+    const mig = migrateData({
+      file: this.file,
+      name: "facts",
+      data: this.facts,
+      currentVersion: FACTS_SCHEMA_VERSION,
+    });
+    this.facts = mig.data;
     // 倒排索引: token -> Set<factId>, 检索 O(n) -> O(候选)
     this._index = new Map();
     // BM25 作用域统计缓存 (facts 内容不可变, add 时失效即可), 避免每查询 O(N) 重算
@@ -45,11 +64,107 @@ export class FactStore {
     this._embedCache = new Map();
     this._embedCacheMax = 1000; // LRU 上限: 超过淘汰最旧插入项, 防长跑会话内存无界增长
     for (const fact of this.facts) this._indexFact(fact);
+    if (this.wal) this._replayWal(); // 重放 WAL 增量 (崩溃恢复: 快照 + 追加日志 = 完整状态)
     this.save();
   }
 
+  // 全量落盘。非 WAL 模式: 直接原子写 (兼容旧行为, 调用方通常在锁内)。
+  // WAL 模式: 加锁 flush (全量写 + 清 WAL), 与追加互斥防丢事件。
   save() {
+    if (!this.wal) {
+      writeJson(this.file, this.facts);
+      writeSchema(this.file, "facts", FACTS_SCHEMA_VERSION);
+      return;
+    }
+    this.flush();
+  }
+
+  // 公开 flush: 加锁全量落盘 + 清 WAL (外部显式落盘点)
+  flush() {
+    withFileLock(this.file, () => this._flushLocked());
+  }
+
+  // 锁内重读最新状态。WAL 模式下磁盘快照滞后, 必须重放 WAL 增量才是完整状态
+  // (非 WAL 模式: 每次变更已落盘, 磁盘即最新, 保持旧行为)
+  _reload() {
+    this.facts = readJson(this.file, []);
+    if (this.wal) this.facts = this._applyWalTo(this.facts);
+    this.rebuildIndex();
+    return this.facts;
+  }
+
+  // 把 WAL 增量事件按序应用到磁盘快照 (幂等: upsert 按 id 覆盖, remove 删 id, replace 整体替换)
+  _applyWalTo(diskFacts) {
+    const events = readWal(this.walFile);
+    if (!events.length) return diskFacts;
+    const byId = new Map(diskFacts.map((f) => [f.id, f]));
+    for (const evt of events) {
+      if (evt.op === "upsert" && evt.fact && evt.fact.id) byId.set(evt.fact.id, evt.fact);
+      else if (evt.op === "replace" && Array.isArray(evt.facts)) { byId.clear(); for (const f of evt.facts) byId.set(f.id, f); }
+      else if (evt.op === "remove" && Array.isArray(evt.ids)) for (const id of evt.ids) byId.delete(id);
+    }
+    return [...byId.values()];
+  }
+
+  // 锁内全量落盘 (调用方必须已持有文件锁)。
+  // 非 WAL 模式: 内存即真相, 直接原子写 (每次变更已落盘, 无滞后快照可合并)。
+  // WAL 模式: 合并磁盘快照+WAL+内存 (内存优先) 后原子写 + 清 WAL, 防丢其他进程的增量事件。
+  _flushLocked() {
+    if (!this.wal) {
+      writeJson(this.file, this.facts);
+      writeSchema(this.file, "facts", FACTS_SCHEMA_VERSION);
+      return;
+    }
+    const disk = readJson(this.file, []);
+    const merged = this._applyWalTo(disk);
+    const byId = new Map(merged.map((f) => [f.id, f]));
+    for (const f of this.facts) byId.set(f.id, f); // 内存优先: 本进程全部变更
+    this.facts = [...byId.values()];
+    this.rebuildIndex(); // facts 可能被合并变更, 同步重建索引
     writeJson(this.file, this.facts);
+    truncateWal(this.walFile);
+    this._walPending = 0;
+    writeSchema(this.file, "facts", FACTS_SCHEMA_VERSION);
+  }
+
+  // 单条事件变更记录 (调用方必须已持有文件锁):
+  //   非 WAL: 立即全量落盘 (旧行为); WAL: 追加事件, 达阈值自动 compact
+  _change(evt) {
+    if (!this.wal) { this._flushLocked(); return; }
+    appendWal(this.walFile, evt);
+    this._walPending += 1;
+    if (this._walPending >= this.walThreshold) this._flushLocked();
+  }
+
+  // upsert 变体 (携带完整对象快照, 重放幂等)
+  _markMutated(...facts) {
+    if (!this.wal) { this._flushLocked(); return; }
+    for (const f of facts) appendWal(this.walFile, { op: "upsert", fact: f });
+    this._walPending += facts.length;
+    if (this._walPending >= this.walThreshold) this._flushLocked();
+  }
+
+  // remove 变体 (批量删除 id)
+  _markRemoved(ids) {
+    if (!this.wal) { this._flushLocked(); return; }
+    appendWal(this.walFile, { op: "remove", ids });
+    this._walPending += 1;
+    if (this._walPending >= this.walThreshold) this._flushLocked();
+  }
+
+  // replace 变体 (整体替换, 供 importAll replace)
+  _markReplace(facts) {
+    if (!this.wal) { this._flushLocked(); return; }
+    appendWal(this.walFile, { op: "replace", facts });
+    this._walPending += 1;
+    if (this._walPending >= this.walThreshold) this._flushLocked();
+  }
+
+  // 启动重放: WAL 增量按序应用到内存 (幂等); 磁盘落盘由构造末尾 save() 统一完成
+  _replayWal() {
+    this.facts = this._applyWalTo(this.facts);
+    this.rebuildIndex();
+    this._walPending = 0;
   }
 
   // 高斯衰减: score = score * exp(-lambda * t^2), t = days since last access
@@ -98,9 +213,8 @@ export class FactStore {
     // 跨进程/多 agent 共享 dataDir 时的写保护: 锁内读-改-写, 防并发覆盖丢更新 (与 Experience 对称)
     // add 是唯一写入口, 锁内重读磁盘最新 facts (防基于过期内存操作), 操作后落盘
     return withFileLock(this.file, () => {
-      // 锁内重读: 拿最新磁盘状态再操作 (多进程共享 dataDir 时不丢别的进程刚写入的事实)
-      this.facts = readJson(this.file, []);
-      this.rebuildIndex();
+      // 锁内重读: 拿最新状态再操作 (WAL 模式 = 磁盘快照 + 重放 WAL, 防内存回退丢未 flush 变更)
+      this._reload();
       const now = nowISO();
       if (dedupe) {
         // 内容去重: 归一化后相同 (含"记住："等前缀差异) 已存在则命中加分, 不新增
@@ -111,7 +225,7 @@ export class FactStore {
           existing.hits += 1;
           existing.lastAccess = now;
           existing.score += this.opts.hitBonus;
-          this.save();
+          this._markMutated(existing);
           return existing;
         }
         // 语义相似去重: similarThreshold>0 时, 与现有事实相似度达标则命中加分
@@ -123,7 +237,7 @@ export class FactStore {
             similar.hits += 1;
             similar.lastAccess = now;
             similar.score += this.opts.hitBonus;
-            this.save();
+            this._markMutated(similar);
             return similar;
           }
         }
@@ -149,9 +263,10 @@ export class FactStore {
       this.facts.push(fact);
       this._indexFact(fact);
       this._statsCache.clear(); // 新增事实 -> 作用域统计失效
-      // 总量裁剪: 超 maxFacts 时删除最弱事实 (防记忆膨胀); 未裁剪时正常落盘
-      const pruned = this._prune();
-      if (!pruned) this.save();
+      // 总量裁剪: 超 maxFacts 时删除最弱事实 (防记忆膨胀)
+      this._prune();
+      // 新增永远记录 (upsert 幂等, 与裁剪的 remove 事件共存无害; 防只记 remove 丢新增)
+      this._markMutated(fact);
       return fact;
     });
   }
@@ -171,11 +286,11 @@ export class FactStore {
     });
     scored.sort((a, b) => b.key - a.key);
     const keep = new Set(scored.slice(0, max).map((x) => x.id));
-    const before = this.facts.length;
+    const removedIds = this.facts.filter((f) => !keep.has(f.id)).map((f) => f.id);
     this.facts = this.facts.filter((f) => keep.has(f.id));
     this.rebuildIndex(); // 重建倒排索引 (内部已清 _statsCache)
-    this.save();
-    return before - this.facts.length;
+    if (removedIds.length) this._markRemoved(removedIds);
+    return removedIds.length;
   }
 
   // 字符级索引 key: 中文拆单字 + 英文按 token (对中文检索才有效)
@@ -416,14 +531,13 @@ export class FactStore {
 
   hit(id) {
     return withFileLock(this.file, () => {
-      this.facts = readJson(this.file, []);
-      this.rebuildIndex();
+      this._reload();
       const f = this.facts.find((x) => x.id === id);
       if (!f) return;
       f.hits += 1;
       f.lastAccess = nowISO();
       f.score += this.opts.hitBonus;
-      this.save();
+      this._markMutated(f);
       return f;
     });
   }
@@ -466,8 +580,7 @@ export class FactStore {
   // 软删: 标记 status='deleted' 并记录删除时间/原因, 数据保留可回滚
   forget(idOrContent, { reason = null } = {}) {
     return withFileLock(this.file, () => {
-      this.facts = readJson(this.file, []);
-      this.rebuildIndex();
+      this._reload();
       const key = String(idOrContent || "");
       // 先按 id 命中; 未命中再按内容匹配 —— 内容匹配不过滤 status, 保证重复 forget 幂等
       const f = this.facts.find((x) => x.id === key)
@@ -478,7 +591,7 @@ export class FactStore {
       f.deletedAt = nowISO();
       f.deleteReason = reason ? String(reason).slice(0, 200) : null;
       this.rebuildIndex();
-      this.save();
+      this._markMutated(f);
       return f;
     });
   }
@@ -486,8 +599,7 @@ export class FactStore {
   // 回滚软删
   restore(id) {
     return withFileLock(this.file, () => {
-      this.facts = readJson(this.file, []);
-      this.rebuildIndex();
+      this._reload();
       const f = this.facts.find((x) => x.id === String(id || ""));
       if (!f) return null;
       if (f.status !== "deleted") return f; // 已是活跃, 幂等
@@ -496,7 +608,7 @@ export class FactStore {
       delete f.deleteReason;
       f.lastAccess = nowISO(); // 恢复视作一次访问, 避免恢复即被衰减清空
       this.rebuildIndex();
-      this.save();
+      this._markMutated(f);
       return f;
     });
   }
@@ -509,8 +621,7 @@ export class FactStore {
   // 更新内容: 保留旧版为 prevId 版本链 (记忆演化可追溯), 新条继承 id/分数
   update(id, content, { importance, layer, source } = {}) {
     return withFileLock(this.file, () => {
-      this.facts = readJson(this.file, []);
-      this.rebuildIndex();
+      this._reload();
       const f = this.facts.find((x) => x.id === String(id || ""));
       if (!f) return null;
       const norm = this._norm(content);
@@ -531,7 +642,7 @@ export class FactStore {
       if (source != null) f.source = source;
       this.facts.push(archived);
       this.rebuildIndex();
-      this.save();
+      this._markMutated(archived, f);
       return f;
     });
   }
@@ -551,8 +662,8 @@ export class FactStore {
     }
     if (dryRun || !targets.length) return { swept: targets.length, ids: targets, dryRun: !!dryRun };
     return withFileLock(this.file, () => {
-      this.facts = readJson(this.file, []);
-      this.rebuildIndex();
+      this._reload();
+      const touched = [];
       let n = 0;
       for (const id of targets) {
         const f = this.facts.find((x) => x.id === id);
@@ -561,10 +672,11 @@ export class FactStore {
           f.deletedAt = nowISO();
           f.deleteReason = `TTL ${ttlDays} 天未访问自动归档`;
           n++;
+          touched.push(f);
         }
       }
       this.rebuildIndex();
-      this.save();
+      this._markMutated(...touched);
       return { swept: n, ids: targets, dryRun: false };
     });
   }
@@ -572,11 +684,13 @@ export class FactStore {
   // 按层清空 (L4 程序性记忆 / L1 事实), 默认软删, hard=true 才真删
   clearLayer(layer = LAYER_L1, { hard = false } = {}) {
     return withFileLock(this.file, () => {
-      this.facts = readJson(this.file, []);
-      this.rebuildIndex();
+      this._reload();
       const target = Number(layer);
       const hits = this.facts.filter((f) => Number(f.layer || LAYER_L1) === target);
+      let removedIds = [];
+      const touched = [];
       if (hard) {
+        removedIds = hits.map((f) => f.id);
         this.facts = this.facts.filter((f) => Number(f.layer || LAYER_L1) !== target);
       } else {
         for (const f of hits) {
@@ -584,10 +698,11 @@ export class FactStore {
           f.status = "deleted";
           f.deletedAt = nowISO();
           f.deleteReason = `clearLayer(${target})`;
+          touched.push(f);
         }
       }
       this.rebuildIndex();
-      this.save();
+      if (hard) this._markRemoved(removedIds); else this._markMutated(...touched);
       return { layer: target, affected: hits.length, hard: !!hard };
     });
   }
@@ -608,20 +723,39 @@ export class FactStore {
     const items = Array.isArray(payload) ? payload : (payload && Array.isArray(payload.items) ? payload.items : null);
     if (!items) return { ok: false, reason: "导入数据格式非法 (需数组或 {items:[]})" };
     return withFileLock(this.file, () => {
-      this.facts = readJson(this.file, []);
-      this.rebuildIndex();
+      this._reload();
       if (mode === "replace") {
-        this.facts = items.map((it) => ({
-          ...it,
-          id: it.id || cryptoRandomId(),
-          content: this._norm(it.content),
-        })).filter((f) => f.content);
+        // v2.7.0: 补全对象字段 (与 merge 分支一致) —— 旧版只留 id/content,
+        // lastAccess/importance 缺失导致衰减/recency 计算 NaN, 检索永远返回空
+        this.facts = items.map((it) => {
+          const norm = this._norm(it.content);
+          if (!norm) return null;
+          const now = nowISO();
+          return {
+            id: it.id || cryptoRandomId(),
+            content: norm,
+            type: it.type || "general",
+            source: it.source || "import",
+            importance: it.importance ?? this.opts.baseImportance,
+            score: it.score ?? (it.importance ?? this.opts.baseImportance),
+            created: it.created || now,
+            lastAccess: it.lastAccess || now,
+            hits: it.hits || 0,
+            scope: it.scope ?? null,
+            layer: Number(it.layer) === LAYER_L4 ? LAYER_L4 : LAYER_L1,
+            status: it.status === "deleted" ? "deleted" : "active",
+            prevId: it.prevId ?? null,
+            ...(it.ttlDays ? { ttlDays: Number(it.ttlDays) } : {}),
+            ...(it.meta ? { meta: it.meta } : {}),
+          };
+        }).filter(Boolean);
         this.rebuildIndex();
-        this.save();
+        this._markReplace(this.facts);
         return { ok: true, mode, imported: this.facts.length, skipped: 0 };
       }
       let imported = 0, skipped = 0;
       const seen = new Set(this.facts.map((f) => this._normKey(f.content)));
+      const added = [];
       for (const it of items) {
         const norm = this._norm(it.content);
         if (!norm) { skipped++; continue; }
@@ -629,7 +763,7 @@ export class FactStore {
         if (seen.has(k)) { skipped++; continue; }
         seen.add(k);
         const now = nowISO();
-        this.facts.push({
+        const factObj = {
           id: it.id || cryptoRandomId(),
           content: norm,
           type: it.type || "general",
@@ -645,11 +779,13 @@ export class FactStore {
           prevId: it.prevId ?? null,
           ...(it.ttlDays ? { ttlDays: Number(it.ttlDays) } : {}),
           ...(it.meta ? { meta: it.meta } : {}),
-        });
+        };
+        this.facts.push(factObj);
         imported++;
+        added.push(factObj);
       }
       this.rebuildIndex();
-      this.save();
+      this._markMutated(...added);
       return { ok: true, mode, imported, skipped };
     });
   }

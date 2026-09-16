@@ -1,13 +1,6 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
   /* 系统字体栈 (无网络依赖, 本地渲染) */
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
     "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", "Helvetica Neue",
@@ -16,33 +9,47 @@
     "Courier New", monospace;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+/* ===== 皮皮虾 UI 设计令牌 v2 (2026-09-16) — Codex 单主题 =====
+ * 浅色 Codex 桌面版风格, 直接挂 :root, 无主题切换
+ */
+:root {
+  --ppx-accent: #0d0d0d;
+  --ppx-accent-deep: #0d0d0d;
+  --ppx-accent-hover: #333333;
+  --ppx-accent-text: #ffffff;
+  --ppx-teal: #0d0d0d;
+  --ppx-bg: #ffffff;
+  --ppx-panel: #ffffff;
+  --ppx-sidebar: #f7f7f8;
+  --ppx-card: #ffffff;
+  --ppx-card-soft: #f7f7f8;
+  --ppx-card-2: #ececec;
+  --ppx-input: #ffffff;
+  --ppx-border: #e5e5e5;
+  --ppx-border-soft: #d9d9d9;
+  --ppx-text: #1f1f1f;
+  --ppx-text-2: #5f5f5f;
+  --ppx-text-3: #8f8f8f;
+  --ppx-ok: #0f9d58;   --ppx-ok-bg: #e6f4ee;
+  --ppx-warn: #b45309; --ppx-warn-bg: #fdf3e7;
+  --ppx-err: #d93025;  --ppx-err-bg: #fdecea;
+  --ppx-tab-active: #ececec;
+  --ppx-badge-bg: #ececec;
+  --ppx-guide-bg: #fdecea;
+  --ppx-guide-text: #b3261e;
+  --ppx-brand-grad: linear-gradient(135deg, #1f1f1f, #3a3a3a);
+  --ppx-user-grad: linear-gradient(135deg, #f0f0f0, #e8e8e8);
+  --ppx-user-text: #1f1f1f;
+  --ppx-shadow: rgba(0, 0, 0, 0.08);
+  --ppx-overlay: rgba(0, 0, 0, 0.35);
+  --ppx-scroll: #d4d4d4;
+  --ppx-code-bg: #f4f4f5;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
+  background: var(--ppx-bg);
+  color: var(--ppx-text);
   font-family: var(--font-sans);
-}
-
-/* ===== 皮皮虾 UI 设计令牌 (2026-08-21) ===== */
-:root {
-  /* 品牌/主色调 (蓝紫渐变系, 替代散落的硬编码色) */
-  --ppx-accent: #4da3ff;        /* 主蓝 (tab 选中/链接/强调) */
-  --ppx-accent-deep: #1d5cff;   /* 主按钮蓝 */
-  --ppx-accent-hover: #1a4fd8;  /* 按钮 hover */
-  --ppx-teal: #28b894;          /* 品牌绿 */
-  --ppx-bg: #0f1115;            /* 页面底 */
-  --ppx-panel: #15181d;         /* 面板底 */
-  --ppx-border: #26292f;        /* 边框 */
-  --ppx-ok: #3ddc84;            /* 成功绿 */
-  --ppx-warn: #f0b429;          /* 进行中黄 */
-  --ppx-err: #ff6b6b;           /* 失败红 */
-  --ppx-text-dim: #8b93a3;      /* 次级文字 */
 }
 
 /* 消息进场动画 (气泡/工具卡用 .msg-in) */
@@ -59,21 +66,21 @@ body {
   -webkit-backdrop-filter: blur(12px);
 }
 
-/* 细滚动条 (暗色系, 尽量隐身不抢视觉) */
+/* 细滚动条 (尽量隐身不抢视觉) */
 *::-webkit-scrollbar { width: 8px; height: 8px; }
 *::-webkit-scrollbar-track { background: transparent; }
-*::-webkit-scrollbar-thumb { background: #2c3038; border-radius: 6px; }
-*::-webkit-scrollbar-thumb:hover { background: #3a3f4a; }
-* { scrollbar-width: thin; scrollbar-color: #2c3038 transparent; }
+*::-webkit-scrollbar-thumb { background: var(--ppx-scroll); border-radius: 6px; }
+*::-webkit-scrollbar-thumb:hover { background: var(--ppx-scroll); filter: brightness(1.2); }
+* { scrollbar-width: thin; scrollbar-color: var(--ppx-scroll) transparent; }
 
-/* 文本选中色: 品牌蓝半透明 */
-::selection { background: rgba(77, 163, 255, 0.3); }
+/* 文本选中色: 品牌色半透明 */
+::selection { background: color-mix(in srgb, var(--ppx-accent) 30%, transparent); }
 
-/* 输入框聚焦光晕 (统一, 替代各处零散 focus:border) */
+/* 输入框聚焦光晕 (统一) */
 .field { transition: border-color 0.15s, box-shadow 0.15s; }
 .field:focus {
   border-color: var(--ppx-accent);
-  box-shadow: 0 0 0 3px rgba(77, 163, 255, 0.15);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ppx-accent) 15%, transparent);
   outline: none;
 }
 
