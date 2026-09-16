@@ -112,36 +112,16 @@ ppx-channels remove <name>            # 移除配置（恢复默认）
 
 > 配置写在 `config/ppx.json` 的 `channels` 段，改完重启 `ppx-serve` 生效。主动提醒（`agent.proactive.enabled`）默认关闭，开启后定时把待办提醒广播到所有已启用通道。
 
-## 6. 引擎底座（DeepSeek Harness 已内嵌，OpenClaw 可选）
+## 6. 引擎底座（v2.5.0 起仅自研 http 底座）
 
-`config/ppx.json` 的 `providers` 首位已是 dsh（`default_id=dsh`）：
+皮皮虾**不再内置/依赖任何外部引擎**（DeepSeek Harness / OpenClaw 已全部移除）。模型接入 = 在 `config/ppx.json` 的 `providers` 配多个 **http provider**（OpenAI / DeepSeek / 火山 / 通义 / 智谱 / 本地 lmstudio / ollama / vLLM），router 按配置顺序回退：
 
 ```json
-{ "id": "dsh", "backend": "deepseek", "dsh_root": ".deps/deepseek-harness", "timeout_ms": 180000 }
+{ "id": "deepseek", "base_url": "https://api.deepseek.com/v1", "api_key_env": "DEEPSEEK_API_KEY", "model": "deepseek-chat" }
 ```
 
-首次使用需安装/构建内嵌 dsh：
-
-```bash
-npm run dsh:install
-npm run dsh:build
-```
-
-未安装/构建时，健康检查会把 dsh 判为不可用，皮皮虾自动回退到本地/HTTP/云端，不影响使用。
-
-OpenClaw 仍是可选引擎：要把 `_optional_engines.openclaw` 移入 `providers` 数组，并设置环境变量：
-
-```bash
-# OpenClaw 引擎（需先 npm i -g openclaw，找到 openclaw.mjs）
-export PPX_OPENCLAW_MJS="/path/to/openclaw/openclaw.mjs"
-```
-
-dsh 路径默认自动定位内嵌源码；也可用 `PPX_DSH_ROOT` 覆盖到其它 deepseek-harness clone。
+多厂商自由叠加、互不冲突：配了哪个 key 就走哪个，全没配且本地服务在跑则回退本地模型。
 
 ## 7. 常见问题
 
-- **`OpenClaw 引擎未就绪: mjs 路径不存在`** → 设 `PPX_OPENCLAW_MJS`，或改用 HTTP 模型。
-- **`dsh 源码未就绪`** → 检查 `.deps/deepseek-harness` 是否存在；**`dsh 依赖未安装`** → 运行 `npm run dsh:install`。
-- **端口被占** → 内核端口用 `PPX_PORT` 改；Web UI 端口在 `web/package.json` 的 `start` 里加 `-p`。
-- **数据存哪** → 运行数据（记忆/会话/经验）默认在 `data/`（源码运行时）或 `~/.ppx`（npm 全局安装时自动外置，防卸载丢数据）；可用 `PPX_DATA_DIR` 显式指定。
-- **LLM 报错** → 检查 `config/ppx.json` 的 `providers` 是否配置了可用的 API key（`export XXX_API_KEY=...`），或 `ppx-channels` 无关；可先跑 `ppx-serve` 看启动日志确认模型加载。
+- **LLM 报错** → 检查 `config/ppx.json` 的 `providers` 是否配置了可用的 API key（`export XXX_API_KEY=...`）；本地模型（lmstudio）是否在运行；可先跑 `ppx-serve` 看启动日志确认模型加载。

@@ -630,10 +630,8 @@ export class PPXAgent {
     return r.count;
   }
 
-  // 热重载提供方: 从 config/ppx.json 重建 LLM 客户端列表
-  // 用法: HTTP API 增删改提供方后调用, 立即生效无需重启
-  // provider 可用性解析复用 plugin/builtin.js (只此一份, 不重复实现)
-  // 发布首启引导: 若未配置任何云端大模型 API key, 明确提示按 README 配置 (不阻断运行)
+  // 发布首启引导: 未配置任何可用模型时明确提示 (不阻断运行)
+  // 默认本地优先 (agent.model_preference=local), 有本地模型或云端 key 即不告警
   _warnMissingCloudApi() {
     const provs = (this.config && this.config.providers) || [];
     const isLocal = (p) => /127\.0\.0\.1|localhost|lm-studio|ollama/i.test(p.base_url || "");

@@ -1,6 +1,7 @@
 // src/memory/fact-store.js - 记忆存储 (高斯衰减遗忘)
 // 架构参考 openhanako: 每条记忆有 importance, 高斯衰减, 命中加分
 import path from "node:path";
+import crypto from "node:crypto";
 import { ensureDir, readJson, writeJson, nowISO, logicalDay, withFileLock } from "../utils/store.js";
 
 // 记忆动词前缀: 去重时剔除, 让"记住：X"与"X"视为同一条 (防 LLM 提炼版与原文冗余)
@@ -683,7 +684,9 @@ export class FactStore {
 }
 
 function cryptoRandomId() {
-  return "f_" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+  // v2.6.1: Math.random() 名实不符且非加密安全 (碰撞风险随条目数增长)
+  // 改用 Node 内置 crypto.randomUUID() (UUID v4, 加密安全随机源)
+  return "f_" + crypto.randomUUID();
 }
 
 // RRF (Reciprocal Rank Fusion): 融合多个排序列表 (每项按 rank 倒数加权求和)。

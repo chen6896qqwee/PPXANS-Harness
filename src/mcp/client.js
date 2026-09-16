@@ -4,7 +4,13 @@
 // 能力: initialize 握手 / tools/list / tools/call / resources/list / resources/read。
 // 可靠性: 请求超时 + 断连时拒绝所有 pending 请求 (不再永久挂起)。
 import { spawn, spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { warn } from "../utils/logger.js";
+
+const require = createRequire(import.meta.url);
+// 客户端版本随包走, 不硬编码 (外部体检: 曾写死 0.1.0 与 package.json 漂移, server.js 已修, 此处补齐)
+let PKG_VERSION = "0.0.0";
+try { PKG_VERSION = require("../../package.json").version || "0.0.0"; } catch {}
 
 const PROTOCOL_VERSION = "2024-11-05";      // stdio 本地服务器广泛兼容的版本
 const HTTP_PROTOCOL_VERSION = "2025-03-26"; // Streamable HTTP 传输对应的协议版本
@@ -282,7 +288,7 @@ export class McpClient {
     const init = await this._request("initialize", {
       protocolVersion: this.protocolVersion,
       capabilities: {},
-      clientInfo: { name: "ppx-agent", version: "0.1.0" },
+      clientInfo: { name: "ppx-agent", version: PKG_VERSION },
     });
     if (init && init.protocolVersion) this.protocolVersion = init.protocolVersion;
     this.capabilities = (init && init.capabilities) || {};

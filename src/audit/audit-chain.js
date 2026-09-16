@@ -15,6 +15,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { ensureDir } from "../utils/store.js";
+import { warn } from "../utils/logger.js";
 
 export const AUDIT_SEQ_FILE = "audit.seq";
 export const AUDIT_FILE = "audit.ndjson";
@@ -88,14 +89,28 @@ export class AuditLog {
       prevHash,
     };
     entry.hash = this._hash(entry);
+    this.totalWrites = (this.totalWrites || 0) + 1;
     try {
       fs.appendFileSync(this.file, JSON.stringify(entry) + "\n", "utf8");
       this._seq = seq;
       fs.writeFileSync(this._seqFile, String(seq), "utf8");
-    } catch {
-      // 审计写入失败不阻断主流程 (可观测性降级不阻塞 agent, 与 core/trace.js 同策略)
+    } catch (e) {
+      // 审计写入失败不阻断主流程 (可观测性降级不阻塞 agent, 与 core/trace.js 同策略),
+      // 但不静默吞: 计数 + warn, 供 audit.health() 暴露写入健康度 (审计承诺不能被悄悄破坏)。
+      this.writeFailures = (this.writeFailures || 0) + 1;
+      warn(`[audit] 审计写入失败 (${tool}): ${e?.message || e}`);
     }
     return entry;
+  }
+
+  // 审计健康度: 写入失败次数 / 总写入数, 供 Web 面板/监控展示 (外部体检建议)
+  health() {
+    return {
+      ok: !this.writeFailures,
+      writeFailures: this.writeFailures || 0,
+      totalWrites: this.totalWrites || 0,
+      file: this.file,
+    };
   }
 
   // 读最后一条 hash (链头)

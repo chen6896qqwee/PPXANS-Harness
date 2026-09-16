@@ -1,5 +1,8 @@
 ﻿import test from "node:test";
 import assert from "node:assert";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { PPXAgent } from "../src/agent/index.js";
 import { LLMClient } from "../src/llm/client.js";
 
@@ -7,8 +10,9 @@ import { LLMClient } from "../src/llm/client.js";
 // 直接调真实路径, 不注入 mock 绕过 (上一轮复审核实的约定)
 
 function fakeAgent() {
-  // 只构造一个不落盘的轻量实例, 直接测 _trimHistory
-  const a = new PPXAgent({ root: "__nonexistent__", configFile: null });
+  // 临时根目录构造轻量实例 (不落盘到仓库, 不再使用 __nonexistent__ 残留目录)
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ppx-ctx-opt-"));
+  const a = new PPXAgent({ root, configFile: null });
   return a;
 }
 

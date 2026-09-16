@@ -1,6 +1,6 @@
 # 架构说明
 
-皮皮虾是一个**独立自包含的纯 Node agent**（零运行时依赖）。默认用 http 后端直连 OpenAI 兼容 API，同时吸收 OpenClaw 与 DeepSeek Harness 的架构精华；DeepSeek Harness 全部源码已内嵌到 `.deps/deepseek-harness`，作为可选的 dsh 底座。
+皮皮虾是一个**独立自包含的纯 Node agent**（零运行时依赖）。v2.5.0 起仅保留自研 http 底座直连 OpenAI 兼容 API（OpenAI/DeepSeek/火山/通义/智谱/本地 lmstudio/ollama/vLLM）；OpenClaw / DeepSeek Harness 等外部引擎已全部移除（源码曾内嵌 `.deps/deepseek-harness` 作为可选底座，v2.5.0 删除）。架构理念上仍吸收其记忆分层、自愈内核、工具系统的精华，但实现完全自研。
 
 ## 整体架构
 
@@ -22,7 +22,7 @@
 │ 一切皆插件   │ │ 模式注册表 │ │ 军团编排    │
 │ Context +   │ │ ModeReg-  │ │ Legion +   │
 │ builtinPlu- │ │ istry (7) │ │ DAG (多进程)│
-│ gins (11个) │ │           │ │            │
+│ gins (14个) │ │            │ │            │
 └─────────────┘ └───────────┘ └────────────┘
 ```
 
@@ -30,7 +30,7 @@
 
 ### 1. 一切皆插件（吸收 dsh Cordis 理念）
 
-`src/plugin/context.js` 提供轻量容器：`provide(key, value)` 注册、`consume(key)` 消费（父子查找）、`onDispose` 可逆效果。`src/plugin/builtin.js` 的 11 个内置插件按「依赖在前」的顺序装配，任何模块都可被用户插件替换。
+`src/plugin/context.js` 提供轻量容器：`provide(key, value)` 注册、`consume(key)` 消费（父子查找）、`onDispose` 可逆效果。`src/plugin/builtin.js` 的 14 个内置插件（bus/healer/persona/facts/experience/session/memory/llm/memoryLayers/traces/audit/tools/evolve/mode）按「依赖在前」的顺序装配，任何模块都可被用户插件替换。
 
 ### 2. 会话即唯一事实源（吸收 dsh「Model-visible ⟺ logged」）
 
@@ -39,12 +39,13 @@
 - `deriveCompacted()` 投影压缩后的历史（compaction 事件替换被压缩区间）
 - `fork()` 从边界派生新会话，`replay()` 回放完整事件流
 
-### 3. 四层记忆（L0 → L3）
+### 3. 五层记忆（L0 → L4）
 
 ```
-对话 → L0 原始对话(事件日志) → L1 原子记忆(fact-store, 高斯衰减) → L2 场景(聚类) → L3 画像(persona)
+对话 → L0 原始对话(事件日志) → L1 原子记忆(fact-store, 高斯衰减) → L2 场景(聚类) → L3 画像(persona) → L4 程序性记忆(技能/流程, 慢衰减)
 ```
 - L1 检索用**倒排索引**（O(n) 全遍历 → O(候选)），可选 embedding 切 dense+BM25 RRF
+- L4 程序性记忆（技能/流程/方法论）衰减率为 L1 的 1/4，长期留存
 - 会话压缩层 `src/memory/compaction.js`：超阈值时用 LLM 把旧对话压成结构化摘要（目标/进展/关键决策/待办/关键上下文）
 
 ### 4. 能力 seam（吸收 dsh Service|Provider|Consumer）
@@ -55,10 +56,9 @@
 
 ### 5. LLM 客户端 + 重试内核
 
-`src/llm/router.js` **模型路由中枢**（2026-08-21 新增）：占位死配置过滤 + 云端真key优先 + 本地零配置兜底 + 健康排序。`src/llm/client.js` 多后端：`http`（默认直连）/ `openclaw` / `deepseek`（已内嵌引擎，源码在 `.deps/deepseek-harness`，已在 `providers` 首位，`DEFAULT_DSH_ROOT` 自动指向该目录）。
+`src/llm/router.js` **模型路由中枢**（2026-08-21 新增）：占位死配置过滤 + 云端真key优先 + 本地零配置兜底 + 健康排序。`src/llm/client.js` 单后端 `http`（v2.5.0 起唯一后端，直连任意 OpenAI 兼容 API；openclaw/deepseek 引擎已移除）。
 - `src/llm/retry.js`：瞬态分类重试（429/5xx/timeout + Retry-After + 可取消指数退避）
-- `src/llm/fence.js`：纯文本工具围栏协议（openclaw/dsh 后端工具代理）
-- 纯文本工具调用修复：http 后端返回文本工具意图时自动恢复为原生 tool_calls
+- `src/llm/fence.js`：纯文本工具围栏协议（文本工具调用修复：http 后端返回文本工具意图时自动恢复为原生 tool_calls）
 
 ### 6. 编排模式
 
@@ -95,9 +95,9 @@ src/
 ├── core/        核心纯逻辑（policy.js 工具循环策略 / trace.js 事件流 traceId 贯穿）
 ├── services/    业务服务（memory-service 记忆协调 / learning-service 自我学习，agent 薄委托）
 ├── agent/       Agent 引擎（编排薄委托 + 多模型回退；工具循环/记忆/学习已抽 core/services）
-├── ans/         ANS 模块（values 价值对齐 / proactive 主动任务 / lifecycle 生命周期，可更换）
-├── plugin/      插件装配（Context + 内置插件）
-├── memory/      四层记忆存储 + 会话事件日志 + 压缩层
+├── ans/         ANS 模块（values 价值对齐 / proactive 主动任务 / lifecycle 生命周期 / guard 免疫闸门，可更换）
+├── plugin/      插件装配（Context + 14 个内置插件）
+├── memory/      五层记忆存储 + 会话事件日志 + 压缩层
 ├── tools/       工具系统（catalog + seam + builtin/advanced/methods/selfmod/document/ocr）
 ├── seam/        服务层能力 seam（shell 等）
 ├── llm/         LLM 客户端（router 路由中枢 + client + retry + fence + dsml + embedder）

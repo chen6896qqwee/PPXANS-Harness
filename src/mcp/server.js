@@ -9,6 +9,15 @@ import { TOOL_ERROR_PREFIX } from "../tools/catalog.js";
 import { warn } from "../utils/logger.js";
 import { sanitizeMcpName } from "./index.js";
 
+// 版本号统一读 package.json, 避免与发布版本漂移 (外部体检: 硬编码 2.5.0 导致 serverInfo 落后真实版本)
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
+let PKG_VERSION = "0.0.0";
+try {
+  PKG_VERSION = JSON.parse(readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "package.json"), "utf8")).version || "0.0.0";
+} catch {} // 非标准安装位置时降级, 不影响启动
+
 // 协议版本常量 (与官方 schema/2026-07-28 对齐)
 export const MODERN_PROTOCOL_VERSION = "2026-07-28";  // 现代 era (每请求 _meta)
 export const LEGACY_PROTOCOL_VERSION = "2025-06-18";  // legacy era (initialize 握手) 最高支持版本
@@ -70,7 +79,7 @@ export class McpServer {
     this.agent = agent;
     this.serverInfo = {
       name: opts.name || agent?.config?.agent?.name || "ppxans-harness",
-      version: opts.version || "2.5.0",
+      version: opts.version || PKG_VERSION,
     };
     this.supportedVersions = opts.supportedVersions || SUPPORTED_VERSIONS;
     // 对话虚拟工具 (MCP 客户端驱动 agent 对话的入口, 不进 catalog 避免污染 LLM 工具列表)

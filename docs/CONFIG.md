@@ -18,18 +18,16 @@ npm run chat
 | 字段 | 说明 |
 |------|------|
 | `id` | 唯一标识（如 `openai`） |
-| `backend` | 后端类型：`http`（直连 OpenAI 兼容 API，默认）/ `openclaw` / `deepseek`（可选引擎） |
-| `base_url` | API 端点（http 后端） |
+| `backend` | ~~`openclaw` / `deepseek`（可选引擎）~~ —— v2.5.0 起已移除，仅 `http`（直连 OpenAI 兼容 API，默认） |
+| `base_url` | API 端点 |
 | `api_key` / `api_key_env` | 直接填 key，或填环境变量名 |
 | `model` | 模型名 |
 | `vision` | `true` 标记为视觉模型（多模态读图时路由到此） |
 | `timeout_ms` | 超时（毫秒，默认 120000） |
 | `retry_max` | 单次调用内瞬态错误重试次数（默认 3） |
 | `context_window` | 上下文窗口（token）。agent 据此收紧会话历史预算，防本地小模型溢出（未配置回退 memory.context_window） |
-| `mjs` | openclaw 引擎的 openclaw.mjs 路径（可留空走 `PPX_OPENCLAW_MJS` 环境变量） |
-| `dsh_root` | DeepSeek Harness 源码根（留空自动用内嵌 `.deps/deepseek-harness`，也可用 `PPX_DSH_ROOT` 覆盖） |
 
-**引擎底座**：`dsh` 已在 `providers` 首位（`backend: "deepseek"`，源码内嵌 `.deps/deepseek-harness`）；OpenClaw 作为 `_optional_engines.openclaw` 注释配置保留，要用时把对应对象移入 `providers` 数组（见 `docs/QUICKSTART.md` 第 6 节）。
+> **引擎底座（v2.5.0 起）**：仅自研 http 底座，`openclaw` / `deepseek` / `dsh_root` / `mjs` / `.deps/` 相关字段与配置已全部移除。多厂商接入 = 配多个 http provider（OpenAI/DeepSeek/火山/通义/智谱/本地 lmstudio/ollama/vLLM），router 按 key 顺序回退。
 
 ## agent（智能体）
 
@@ -134,8 +132,6 @@ npm run chat
 | `PPX_AGENT_GLOBAL_DATA_DIR` | 全局共享数据目录（跨 agent 经验库，默认同 dataDir） |
 | `PPX_AUTH_TOKEN` | HTTP 认证 token |
 | `PPX_PORT` | HTTP 端口 |
-| `PPX_OPENCLAW_MJS` | openclaw 引擎路径 |
-| `PPX_DSH_ROOT` | DeepSeek Harness 源码根 |
 | `PPX_AGENT_DATA_DIR` | 军团 worker 的独立数据目录 |
 
 ## 数据目录

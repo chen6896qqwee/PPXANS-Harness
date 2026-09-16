@@ -17,7 +17,8 @@ function pickProvider(config) {
   const p = provs.find((p) => {
     const key = p.api_key || process.env[p.api_key_env];
     const isLocal = /127\.0\.0\.1|localhost|lm-studio|ollama/i.test(p.base_url || "");
-    return p.backend !== "openclaw" && p.backend !== "deepseek" && !!(key || isLocal);
+    // v2.5.0 起仅 http 后端 (openclaw/deepseek 引擎已移除), 不再需要 backend 过滤
+    return !!(key || isLocal);
   });
   if (!p) return null;
   return new LLMClient(p);

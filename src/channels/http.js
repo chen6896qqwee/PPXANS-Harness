@@ -82,7 +82,7 @@ export class HttpChannel extends Channel {
       this.mcpAdmin = admin;
       const { server: mcpServer, handler: mcpHandler } = createMcpEndpoint(agent, {
         name: agent.config?.agent?.name || "ppxans-harness",
-        version: "2.5.0",
+        // 版本由 createMcpEndpoint -> McpServer 默认读 package.json (不再硬编码)
         supportedVersions: mcpCfg.supported_versions,
         extraTools: admin.tools,
         authenticated: (req, res) => {
