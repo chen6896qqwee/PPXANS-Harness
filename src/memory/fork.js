@@ -27,12 +27,20 @@ export function exportMemorySnapshot({ agent, toDataDir, factsLimit = 50, experi
     }
   } catch {}
 
-  // L3 persona: 主 agent 画像
+  // L3 persona: 主 agent 画像 (用户画像 + agent 人格)
+  // 修复 (2026-09-17): 原调用 agent.personaStore.read() —— PersonaStore 并不存在 read(),
+  //   真实 API 是 userPersona() / agentPersona()。虽有 typeof 守卫不致崩, 但分支永不进入,
+  //   persona.md 从未生成 (静默降级)。此处改用真实方法, 并把两份画像一并导出。
   try {
-    if (agent.personaStore && typeof agent.personaStore.read === "function") {
-      const p = agent.personaStore.read();
-      if (p) {
-        writeText(path.join(snapDir, "persona.md"), String(p));
+    const ps = agent.personaStore;
+    if (ps && typeof ps.userPersona === "function") {
+      const parts = [];
+      const u = typeof ps.userPersona === "function" ? ps.userPersona() : "";
+      const a = typeof ps.agentPersona === "function" ? ps.agentPersona() : "";
+      if (u) parts.push(String(u).trim());
+      if (a) parts.push(String(a).trim());
+      if (parts.length) {
+        writeText(path.join(snapDir, "persona.md"), `# L3 画像快照 (fork 基线)\n\n${parts.join("\n\n---\n\n")}\n`);
         wrote.persona = true;
       }
     }

@@ -2,6 +2,9 @@
 // 吸收 deepseek-harness 的 "Service Definition / Service Provider / Consumer" 三分法 + dsh 的 "一个 provider 换整个产品"。
 // 与 src/tools/seam.js (工具级能力缝) 互补: 这里管"服务级可替换能力" (shell/fs/embedder/...),
 //   工具级管"单个工具的 Definition/Provider/Consumer"。
+// ⚠ 接线状态 (2026-09-17 核对): 本模块在 src/ 内**当前无消费者** —— 属主动预留的能力骨架,
+//   已实现且有单测覆盖, 但产品链路未接入 (服务级替换能力现由 plugin/context 的服务定位器承担)。
+//   启用前请先确认消费方, 勿假设已生效。
 // 零依赖, 纯 Node 原生。用法:
 //   const reg = createSeamRegistry();
 //   reg.define("shell", { def: "命令执行接口", impl: LocalShellProvider, consumers: ["run_command", "code_act"] });

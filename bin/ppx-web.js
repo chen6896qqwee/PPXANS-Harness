@@ -13,6 +13,7 @@
 //
 // 环境变量: PPX_PORT / PPX_HOST / PPX_NO_OPEN=1
 import { ensureUTF8Console } from "../src/utils/winutf8.js";
+import { installCrashGuard } from "../src/utils/crashguard.js";
 import { startServer } from "../src/server.js";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
@@ -20,6 +21,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 ensureUTF8Console();
+
+// 全局异常兜底: 桌面形态下"带伤继续"优于"窗口里服务静默消失"
+// (需要传统行为可设 PPX_EXIT_ON_UNCAUGHT=1)
+installCrashGuard({ tag: "ppx-web", logger: { warn: (...a) => console.warn(...a), error: (...a) => console.error(...a) } });
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ROOT = path.join(HERE, "..");

@@ -1,5 +1,16 @@
 # DeepSeek Harness 吸收与底座切换说明
 
+> 🚫 **已废弃（v2.5.0 起，2026-09-16）**
+>
+> 本文记录的是历史上把 `deepseek-harness` 作为**可选后端底座**接入的方案。该方案**已整体移除**：
+> `openclaw` / `dsh` 后端代码、`_optional_engines` 配置、`.deps/` 内嵌目录、`dsh` npm 脚本、
+> `openclaw-smoke.js` 全部删除；皮皮虾现在只有自研 http 底座（`src/llm/client.js` 直连任意
+> OpenAI 兼容 API）。
+>
+> **本文中的 `npm run dsh:install` / `dsh:build` / `npm run dsh` 等命令已不存在，不可执行。**
+> 仅作为决策沿革留档。当前模型接入方式见 [CONFIG.md](CONFIG.md) 与
+> [PROJECT-OVERVIEW.md](PROJECT-OVERVIEW.md) 第 5 章。
+
 本文件记录 ppx-agent 对 `deepseek-harness` 的完整吸收与整合结果。
 
 ## 1. 吸收内容

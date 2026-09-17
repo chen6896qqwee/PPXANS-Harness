@@ -120,3 +120,66 @@ test("catalog: 移除策略订阅者后恢复 (热卸载)", async () => {
   const ok = await catalog.call("read_file", {});
   assert.equal(ok, "file-content");
 });
+
+// ---- 策略订阅者熔断 (2026-09-17 接线 src/bus/circuit-breaker.js) ----
+test("catalog: 故障订阅者连续异常达阈值后熔断, 不再被调用", async () => {
+  const catalog = makeCatalog();
+  let calls = 0;
+  catalog.addPolicySubscriber(async () => { calls++; throw new Error("boom"); },
+    { name: "broken", breaker: { threshold: 3, windowMs: 60000, cooldownMs: 60000 } });
+
+  // 前 3 次真实调用并抛错 → 触发熔断
+  for (let i = 0; i < 3; i++) {
+    const r = await catalog.call("read_file", {});
+    assert.equal(r, "file-content", "订阅者异常仍不拖垮工具");
+  }
+  assert.equal(calls, 3, "阈值内被调用 3 次");
+
+  // 熔断后: 不再调用订阅者, 但工具照常执行 (弃权语义)
+  const r4 = await catalog.call("read_file", {});
+  assert.equal(r4, "file-content", "熔断期工具仍执行");
+  assert.equal(calls, 3, "熔断期跳过订阅者, 调用计数不再增长");
+
+  const st = catalog.policyStatus().find((s) => s.name === "broken");
+  assert.equal(st.state, "open", "熔断器状态为 open");
+  assert.equal(st.opens, 1, "熔断一次");
+});
+
+test("catalog: 熔断不影响其他订阅者的 deny 决策", async () => {
+  const catalog = makeCatalog();
+  catalog.addPolicySubscriber(async () => { throw new Error("boom"); },
+    { name: "broken", breaker: { threshold: 1, windowMs: 60000, cooldownMs: 60000 } });
+  catalog.addPolicySubscriber(async (name) => (name === "echo" ? { decision: "deny", reason: "高层禁止", priority: 100 } : null),
+    { priority: 100, name: "high-deny" });
+
+  // 第一次调用让 broken 熔断
+  await catalog.call("read_file", {});
+  const st = catalog.policyStatus().find((s) => s.name === "broken");
+  assert.equal(st.state, "open", "broken 已熔断");
+
+  // 熔断期: 高优先级 deny 仍生效
+  const denied = await catalog.call("echo", {});
+  assert.ok(denied.includes("高层禁止"), "熔断期其他订阅者决策不受影响");
+});
+
+test("catalog: 冷却后半开探测, 成功即恢复闭合", async () => {
+  const catalog = makeCatalog();
+  let calls = 0;
+  let failMode = true;
+  catalog.addPolicySubscriber(async (name) => {
+    calls++;
+    if (failMode) throw new Error("boom");
+    return name === "echo" ? { decision: "deny", reason: "恢复后生效", priority: 10 } : null;
+  }, { name: "flaky", breaker: { threshold: 2, windowMs: 60000, cooldownMs: 0 } });
+
+  await catalog.call("read_file", {});
+  await catalog.call("read_file", {});
+  assert.equal(catalog.policyStatus().find((s) => s.name === "flaky").state, "open", "达阈值熔断");
+
+  // cooldownMs=0 → 下次调用进入半开并放行探测
+  failMode = false;
+  const denied = await catalog.call("echo", {});
+  assert.ok(denied.includes("恢复后生效"), "半开探测放行, 订阅者恢复生效");
+  assert.equal(catalog.policyStatus().find((s) => s.name === "flaky").state, "closed", "探测成功回到闭合");
+  assert.ok(calls > 2, "探测确实调用了订阅者");
+});

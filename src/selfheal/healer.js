@@ -8,9 +8,15 @@ import { ensureDir, readJson } from "../utils/store.js";
 import { info, warn, error } from "../utils/logger.js";
 
 export class Healer {
-  constructor(rootDir) {
+  // dataDir 可选: 显式传入真实数据目录 (PPX_DATA_DIR 可能指向非默认位置)。
+  // v1.0.8 修复 (P1-2): 原实现把 dataDir 硬编码为 path.join(rootDir, "data"),
+  //   而调用方 builtin.js 传进来的是 root 而非数据目录 —— 一旦 PPX_DATA_DIR 改到别处,
+  //   自愈就会在错误的目录里创建 memory/experience/logs、写 integrity.json、清理 .tmp,
+  //   形成"数据目录 / 自愈目录"分叉: 真实数据目录永不被体检, 空目录反而被反复重建。
+  //   默认值保留 rootDir/data, 让既有 15 处 `new Healer(root)` 调用点行为不变 (向后兼容)。
+  constructor(rootDir, dataDir = null) {
     this.root = rootDir;
-    this.dataDir = path.join(rootDir, "data");
+    this.dataDir = dataDir || path.join(rootDir, "data");
     this.integrity = path.join(this.dataDir, "integrity.json");
   }
 
@@ -147,21 +153,26 @@ walk(this.dataDir);
   }
   
   // 完整自愈入口
+  // 2026-09-17 体检修复: 原实现把"崩溃残留已清理, 状态置回 clean"打在"修复 N 项"与
+  //   "检测到崩溃残留 -> ..."之前, 日志里表现为「先说痊愈、再说发现崩溃」的因果颠倒,
+  //   使用者会怀疑自愈到底有没有生效。现按"先报问题 → 再报处置 → 最后报结果"的顺序输出。
   heal() {
-    const fixes = this.runStartupChecks();
+    // 1) 先判定上次是否崩溃 (必须在 runStartupChecks 之前判定, 否则重建的目录会掩盖证据)
     const crash = this.checkCrash();
+    if (crash.crashed) warn(`selfheal: 检测到崩溃残留 -> ${crash.detail}`);
+    // 2) 启动体检 + 备份清理
+    const fixes = this.runStartupChecks();
     // 清理历史 corrupt 备份 (保留最近 2 个, 更早自动删除) — 之前漏调用导致 corrupt 持续累积
     const cleanedCorrupt = this.cleanupCorruptBackups(2);
     // 清理历史手动备份目录 (保留最近 2 个)
     const cleanedBackupDirs = this.cleanupStaleBackupDirs(2);
     // 清理历史 .bak-* 文件 (保留最近 2 个)
     const cleanedBakFiles = this.cleanupStaleBakFiles(2);
-    // 崩溃残留清理后主动翻回 clean: 自愈闭环 - 清了毒就要"宣布痊愈", 否则下次启动还误报崩溃
+    // 3) 处置回执: 崩溃残留清理后主动翻回 clean —— 自愈闭环, 清了毒就要"宣布痊愈",
+    //    否则下次启动还误报崩溃
     if (crash.crashed) { this.markClean(); info("selfheal: 崩溃残留已清理, 状态置回 clean"); }
-    const report = { fixes, crashed: crash.crashed, crashDetail: crash.detail, cleanedCorrupt, cleanedBackupDirs, cleanedBakFiles };
     if (fixes.length) info(`selfheal: 修复 ${fixes.length} 项: ${fixes.join("; ")}`);
     else info("selfheal: 无异常");
-    if (crash.crashed) warn(`selfheal: 检测到崩溃残留 -> ${crash.detail}`);
-    return report;
+    return { fixes, crashed: crash.crashed, crashDetail: crash.detail, cleanedCorrupt, cleanedBackupDirs, cleanedBakFiles };
   }
 }

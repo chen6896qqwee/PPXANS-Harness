@@ -3,6 +3,7 @@
 // 提供: /health, /message (HTTP通道), /feishu/webhook, /wechat/webhook
 // 通道统一走 ChannelManager 注册表: connect + webhook 挂载由各通道 mount() 完成
 import { ensureUTF8Console } from "./utils/winutf8.js";
+import { installCrashGuard } from "./utils/crashguard.js";
 import { PPXAgent } from "./agent/index.js";
 import { ChannelManager } from "./channels/index.js";
 
@@ -42,6 +43,8 @@ export async function startServer({ root = process.cwd(), port = 8899, host = "1
 
 // CLI 启动公共逻辑: 供 bin/ppx-serve 与 src/server.js 直接运行共用
 export async function runServer({ root = process.cwd(), port = Number(process.env.PPX_PORT || 8899) } = {}) {
+  // 全局异常兜底 (P1): 工具/通道里的意外异常不应让整个服务消失
+  installCrashGuard({ tag: "ppx-serve" });
   const { agent, server, manager } = await startServer({ root, port });
   console.log(`皮皮虾 服务已启动: http://127.0.0.1:${port}`);
   console.log(`  /health   健康检查`);

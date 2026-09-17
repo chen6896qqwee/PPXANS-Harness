@@ -18,6 +18,32 @@ const MAX_BODY = 1024 * 1024;          // 请求体上限 1MB
 const RATE_PER_MIN = 60;               // 每 IP 每分钟最大请求数 (令牌桶)
 const RATE_WINDOW_MS = 60_000;
 const MAX_INFLIGHT = 4;                // 同时处理的最大对话请求数 (超出立即 429, 防单 agent 被并发压垮)
+const BUCKET_SWEEP_AT = 512;           // 令牌桶数量超过此值触发一次过期回收 (防长期运行内存增长)
+
+// 恒定时间字符串比较 (2026-09-17 安全修复):
+// 直接 `a === b` 会在首个不同字节处提前返回, 理论上是可观测的计时侧信道。
+// 先把两侧都摘要成定长 32 字节再比对, 长度差异也被消除。
+// @param {string} a
+// @param {string} b
+// @returns {boolean}
+export function safeEqual(a, b) {
+  const ha = crypto.createHash("sha256").update(String(a ?? "")).digest();
+  const hb = crypto.createHash("sha256").update(String(b ?? "")).digest();
+  try { return crypto.timingSafeEqual(ha, hb); } catch { return false; }
+}
+
+// 面向客户端的错误文案净化: 只保留业务语义, 屏蔽 Node/流内部实现细节
+// (避免把 "Cannot write headers after they are sent to the client" 这类内部错误原文回给前端)
+const INTERNAL_ERR_RE = /ERR_HTTP_HEADERS_SENT|ERR_STREAM_|Cannot (write headers|call write after)|write after end|EPIPE|ECONNRESET/i;
+export function publicErrorMessage(e) {
+  // 兼容三种入参: Error 实例 / 字符串 / 任意对象 (对象且无 message 时不该退化成 "[object Object]")
+  const raw = (e && typeof e === "object" && typeof e.message === "string") ? e.message
+    : (typeof e === "string" ? e : "");
+  const msg = raw.trim();
+  if (!msg) return "服务内部错误";
+  if (INTERNAL_ERR_RE.test(msg)) return "连接状态异常, 请重试";
+  return msg.slice(0, 300);
+}
 
 // HTTP 鉴权 token 解析 / 生成 (v1.0.9 起持久化, 重启复用, 免去 Web 前端每次重贴 token)
 // 优先级: 1) 显式配置 (env/ppx.json 的 channels.http.auth_token) > 2) 数据目录持久化文件复用 > 3) 新生成并原子落盘
@@ -138,6 +164,31 @@ export class HttpChannel extends Channel {
     return a === "127.0.0.1" || a === "::1" || a === "::ffff:127.0.0.1";
   }
 
+  // 来源是否可信 (2026-09-17 安全修复, P0-1):
+  // 仅靠 remoteAddress 判断"本机"是不够的 —— 浏览器里任意网站发起的请求, 其源地址同样是 127.0.0.1。
+  // 配合默认 `Access-Control-Allow-Origin: *`, 恶意页面可以 fetch('http://127.0.0.1:8899/api/bootstrap')
+  // 并把响应体读走, 从而拿到本地 API token (实测可复现)。
+  // 因此对"下发 token"的路径追加两道浏览器侧的来源判据:
+  //   1) Origin 头存在时, 其 hostname 必须是本机回环 (同源导航不带 Origin → 放行)
+  //   2) Sec-Fetch-Site 为 cross-site → 一律拒绝 (现代浏览器的强信号)
+  _originTrusted(req) {
+    const sfs = String(req.headers["sec-fetch-site"] || "").toLowerCase();
+    if (sfs === "cross-site") return false;
+    const origin = req.headers["origin"];
+    if (!origin) return true; // 非浏览器请求 (curl/脚本) 或同源导航
+    try {
+      const host = new URL(origin).hostname.replace(/^\[|\]$/g, "");
+      return host === "127.0.0.1" || host === "localhost" || host === "::1";
+    } catch {
+      return false; // Origin 畸形 → 不予信任
+    }
+  }
+
+  // 可信本地请求 = 回环地址 + 可信来源 (下发 token 的唯一条件)
+  _isTrustedLocal(req) {
+    return this._isLoopback(req) && this._originTrusted(req);
+  }
+
   // 版本号取自 package.json (不硬编码, 与 McpServer 同源策略)
   _pkgVersion() {
     try {
@@ -148,9 +199,11 @@ export class HttpChannel extends Channel {
   }
 
   // Web 前端引导数据 (注入首页 <head>, 本地零配置可用)
-  // authToken 仅在回环请求时下发; 非回环只给 token_required 标志
+  // authToken 仅在"可信本地请求"时下发 (回环 + 来源可信, 见 _isTrustedLocal);
+  // 非回环 / 跨站来源只给 token_required 标志, 不下发任何凭据
   bootstrapPayload(req) {
     const loopback = this._isLoopback(req);
+    const trusted = this._isTrustedLocal(req);
     return {
       app: "ppxans-harness",
       version: this._pkgVersion(),
@@ -159,8 +212,9 @@ export class HttpChannel extends Channel {
       port: this.port,
       host: this.host,
       base: `http://${this.host === "0.0.0.0" ? "127.0.0.1" : this.host}:${this.port}`,
-      authToken: loopback ? (this.authToken || "") : "",
+      authToken: trusted ? (this.authToken || "") : "",
       tokenLoopback: loopback,
+      tokenTrusted: trusted,
       tokenRequired: Boolean(this.authToken),
       mcpPath: this.mcpPath,
       legacyRest: this.mcpLegacyRest,
@@ -215,15 +269,25 @@ export class HttpChannel extends Channel {
   _authed(req, res) {
     if (!this.authToken) return true; // 兼容旧调用: _ensureToken 在 connect 时已执行
     const h = req.headers["authorization"] || "";
-    return h === "Bearer " + this.authToken;
+    return safeEqual(h, "Bearer " + this.authToken);
   }
 
   // 简单令牌桶限流: 每 IP 60 req/min
+  // 2026-09-17: 桶表原本只增不减 —— 长期运行 + 多变源地址会持续吃内存。
+  // 超过 BUCKET_SWEEP_AT 时顺手回收已过期的桶 (摊还 O(1), 不做定时器)。
+  _sweepBuckets(now) {
+    if (this._buckets.size <= BUCKET_SWEEP_AT) return;
+    const stale = now - RATE_WINDOW_MS * 2;
+    for (const [ip, b] of this._buckets) {
+      if (b.last < stale) this._buckets.delete(ip);
+    }
+  }
   _rateLimit(req, res) {
     const ip = req.socket?.remoteAddress || "unknown";
     const now = Date.now();
     let b = this._buckets.get(ip);
     if (!b) {
+      this._sweepBuckets(now);
       b = { tokens: RATE_PER_MIN, last: now };
       this._buckets.set(ip, b);
     }
@@ -329,7 +393,7 @@ export class HttpChannel extends Channel {
         try {
           const data = JSON.parse(body);
           const text = data.message || data.text || "";
-          if (!text) { res.writeHead(400); res.end(JSON.stringify({ error: "missing message" })); return; }
+          if (!text) { res.writeHead(400, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "missing message" })); return; }
           const sessionKey = data.sessionId || "default";
           if (!this._acquire(res)) return;
           try {
@@ -352,30 +416,39 @@ export class HttpChannel extends Channel {
         try {
           const data = JSON.parse(body);
           const text = data.message || data.text || "";
-          if (!text) { res.writeHead(400); res.end(JSON.stringify({ error: "missing message" })); return; }
+          if (!text) { res.writeHead(400, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "missing message" })); return; }
           const sessionKey = data.sessionId || "default";
+          // 2026-09-17 修复 (P0-3 / P1-1):
+          //   ① 并发护栏必须在 writeHead(200) 之前判定 —— 原先先发 200 SSE 头再 _acquire,
+          //      超限时 _acquire 内的 writeHead(429) 抛 ERR_HTTP_HEADERS_SENT, 被外层 catch
+          //      转成一条 SSE error 事件, 客户端拿到 "HTTP 200 + text/event-stream" 却永远等不到
+          //      内容 (实测可复现), 同时把 Node 内部错误原文泄漏给了客户端。
+          //   ② 发完 200 后立刻 flushHeaders() —— 否则响应头要等到第一次 res.write 才下发,
+          //      LLM 慢首包时客户端迟迟收不到任何响应头 (实测 6s 无任何响应)。
+          if (!this._acquire(res)) return;
           res.writeHead(200, {
             "Content-Type": "text/event-stream",
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
           });
-          if (!this._acquire(res)) { try { res.end(); } catch {} return; }
+          if (typeof res.flushHeaders === "function") res.flushHeaders();
           try {
-            const send = (obj) => res.write("data: " + JSON.stringify(obj) + "\n\n");
+            const send = (obj) => { if (!res.writableEnded) res.write("data: " + JSON.stringify(obj) + "\n\n"); };
             let full = "";
             const reply = await this.agent.chatStream(String(text), {
               sessionKey,
               onDelta: (d) => { full += d; try { send({ type: "delta", content: d }); } catch {} },
-              onTool: (ev) => { try { send({ type: "tool", tool: ev.tool, status: ev.type, args: ev.args, ok: ev.ok, durationMs: ev.durationMs }); } catch {} }, // 工具调用可视化
+              onTool: (ev) => { try { send({ type: "tool", tool: ev.tool, id: ev.id, status: ev.type, args: ev.args, ok: ev.ok, durationMs: ev.durationMs }); } catch {} }, // 工具调用可视化
               onStep: (ev) => { try { send({ type: "step", round: ev.round, maxRounds: ev.maxRounds }); } catch {} }, // turn/step 推理轮次进度
             });
             const finalContent = full || reply;
             send({ type: "done", content: finalContent, sessionId: sessionKey });
-            res.end();
+            if (!res.writableEnded) res.end();
           } finally { this._release(); }
         } catch (e) {
-          try { res.write("data: " + JSON.stringify({ type: "error", error: e.message }) + "\n\n"); } catch {}
+          // 不外泄内部实现细节 (如 ERR_HTTP_HEADERS_SENT 之类)
+          try { res.write("data: " + JSON.stringify({ type: "error", error: publicErrorMessage(e) }) + "\n\n"); } catch {}
           try { res.end(); } catch {}
         }
         return;
@@ -489,9 +562,11 @@ export class HttpChannel extends Channel {
           res.end(JSON.stringify({ error: "REST /api/* 已退役, 请使用标准 MCP 端点 POST /mcp (channels.http.mcp.legacy_rest=true 可恢复)" }));
           return;
         }
-        // /api/bootstrap 例外: 它本身就是"取 token"的入口, 本机回环请求免鉴权放行
-        const bootstrapLoopback = reqPath === "/api/bootstrap" && this._isLoopback(req);
-        if (!bootstrapLoopback && !this._authed(req, res)) { res.writeHead(401, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "unauthorized" })); return; }
+        // /api/bootstrap 例外: 它本身就是"取 token"的入口, 可信本地请求免鉴权放行
+        // (必须用 _isTrustedLocal 而非 _isLoopback —— 否则浏览器里任意网站发来的跨源请求
+        //  源地址同样是 127.0.0.1, 会被误判为本机并拿到 token)
+        const bootstrapLocal = reqPath === "/api/bootstrap" && this._isTrustedLocal(req);
+        if (!bootstrapLocal && !this._authed(req, res)) { res.writeHead(401, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "unauthorized" })); return; }
       }
       // 引导信息 API (前端启动时刷新用): 版本/端口/token(仅回环)/能力开关
       if (req.method === "GET" && reqPath === "/api/bootstrap") {

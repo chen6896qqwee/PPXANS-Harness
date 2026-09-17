@@ -4,6 +4,8 @@
 //   S 综合/评审 → 决定: 接受最终答案 / 发现分歧 → 重新派发修正 / 升级人工。
 // 皮皮虾自研实现, 构建在现有 Legion (多进程) + delegate 仲裁之上。
 // 与 delegate.js 的 arbitrate (一次性聚合) 互补: supervisor 是完整编排循环 (可多轮修正)。
+// ⚠ 接线状态 (2026-09-17 核对): runSupervisor **无内置调用点** —— 尚无 mode/工具把它接成可用入口;
+//   spawn_agent 当前走 tools/delegate.js 自带的 review 循环。属"编排器就绪、未接线", 需显式调用才生效。
 
 // 带超时等待 (防子 agent 卡死) — 定时器必须清理
 export function withTimeout(p, ms, label) {

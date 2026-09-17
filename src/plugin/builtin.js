@@ -2,6 +2,7 @@
 // 借鉴 deepseek-harness 的 "everything is a plugin": 每个模块是一个插件, 通过 ctx.provide 注册服务。
 // 装配顺序即依赖顺序 (依赖在前), 任何插件都可被用户插件替换或扩展。
 import path from "node:path";
+import { info } from "../utils/logger.js";
 import { Healer } from "../selfheal/healer.js";
 import { Persona } from "../persona/index.js";
 import { FactStore, MemoryTicker, Experience, L0Recorder, SceneStore, PersonaStore } from "../memory/index.js";
@@ -54,7 +55,9 @@ export const busPlugin = (ctx) => {
 };
 
 export const healerPlugin = (ctx) => {
-  const healer = new Healer(ctx.consume("root"));
+  // v1.0.8 修复 (P1-2): 必须传真实数据目录, 否则自愈体检/崩溃标记会落到 root/data 硬编码路径,
+  // 在 PPX_DATA_DIR 自定义时与真实数据目录分叉 (详见 selfheal/healer.js 注释)。
+  const healer = new Healer(ctx.consume("root"), ctx.consume("dataDir"));
   healer.markDirty();
   const health = healer.heal();
   ctx.provide("healer", healer);
@@ -186,14 +189,19 @@ toolsPlugin.access = "full-access";
 export const evolvePlugin = (ctx) => {
   // P1④⑤⑥: 进化系插件 —— Playbook 引擎 / 记忆健康监控 / 故障记忆
   // P2⑥⑦: 符号画布 / 会话 fork 基线
-  // 提供服务, 消费方按需取用; 未接线时零开销 (不强制)。
+  //
+  // ⚠ 接线状态 (2026-09-17 核对): 本插件注册的 6 个服务在 src/ 内**当前均无消费方**
+  //   (grep consume("playbook"|"memoryHealth"|"failures"|"canvas"|"fork"|"assets") = 0 命中)。
+  //   即: 构造它们只有极小的初始化开销, 但没有任何链路在读写 —— 属"能力就绪、未接线"。
+  //   保留原因: 单测已覆盖, 且是后续进化的现成骨架。
+  //   提醒: 读到本插件的服务不等于功能已生效; 接入消费方 (写入 + 注入) 后才算真正启用。
   const dataDir = ctx.consume("dataDir");
-  ctx.provide("playbook", new PlaybookStore(dataDir));
-  ctx.provide("memoryHealth", new MemoryHealthMonitor());
-  ctx.provide("failures", new FailureEpisodeStore(dataDir));
-  ctx.provide("canvas", new CanvasStore(dataDir));
-  ctx.provide("fork", forkTools);
-  ctx.provide("assets", new AssetHub(dataDir)); // P3⑩: 记忆资产中枢
+  ctx.provide("playbook", new PlaybookStore(dataDir));          // 预留: 语境 bullets 引擎
+  ctx.provide("memoryHealth", new MemoryHealthMonitor());        // 预留: 记忆管线健康
+  ctx.provide("failures", new FailureEpisodeStore(dataDir));     // 预留: 故障病历
+  ctx.provide("canvas", new CanvasStore(dataDir));               // 预留: 符号画布
+  ctx.provide("fork", forkTools);                                // 预留: 会话 fork 基线 (函数集, 供 spawn 流程调用)
+  ctx.provide("assets", new AssetHub(dataDir));                  // P3⑩: 记忆资产中枢 (预留)
 };
 
 // 默认内置插件装配顺序 (依赖在前)

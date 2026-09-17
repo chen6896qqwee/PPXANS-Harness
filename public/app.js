@@ -67,8 +67,54 @@
     return (n / 1048576).toFixed(1) + "M";
   }
   function renderMd(t) {
-    try { return window.marked ? window.marked.parse(String(t || "")) : esc(t).replace(/\n/g, "<br>"); }
-    catch (e) { return esc(t).replace(/\n/g, "<br>"); }
+    var raw;
+    try { raw = window.marked ? window.marked.parse(String(t || "")) : esc(t).replace(/\n/g, "<br>"); }
+    catch (e) { raw = esc(t).replace(/\n/g, "<br>"); }
+    return sanitizeHtml(raw);
+  }
+
+  /* 渲染层净化 (2026-09-17 体检修复, UX-6):
+   * marked v12 对原始 HTML **原样透传**, 且不过滤 javascript: / data:text/html 链接
+   * (实测: `<img src=x onerror=alert(1)>` 会原样输出)。
+   * 而进入 renderMd 的文本来源不受控 —— 模型回复、read_file 读到的文件、
+   * fetch_page 抓回的网页、文档解析结果都会流到这里。
+   * 一旦执行脚本即可读取 localStorage.ppx_token 并调用本机 API。
+   * 这里在写入 innerHTML 之前做一次白名单净化: 去掉可执行标签 / 所有 on* 事件属性 /
+   * 危险协议 (http/https/mailto/tel/# 及相对路径之外一律摘除)。
+   */
+  var BAD_TAGS = ["script", "iframe", "frame", "frameset", "object", "embed", "applet",
+    "form", "input", "button", "textarea", "select", "link", "meta", "base", "style", "template", "svg", "math"];
+  var SAFE_URL = /^(https?:|mailto:|tel:|#|\/|\.\/|\.\.\/|data:image\/)/i;
+  function sanitizeHtml(html) {
+    try {
+      var doc = new DOMParser().parseFromString("<body>" + html + "</body>", "text/html");
+      var body = doc.body;
+      BAD_TAGS.forEach(function (tag) {
+        Array.prototype.slice.call(body.querySelectorAll(tag)).forEach(function (n) { n.remove(); });
+      });
+      Array.prototype.slice.call(body.querySelectorAll("*")).forEach(function (el) {
+        // ① 摘掉全部事件处理器属性 + 危险的 srcdoc/style 注入面
+        Array.prototype.slice.call(el.attributes).forEach(function (a) {
+          var n = a.name.toLowerCase();
+          if (n.indexOf("on") === 0) { el.removeAttribute(a.name); return; }
+          if (n === "srcdoc") { el.removeAttribute(a.name); return; }
+          // ② 链接与资源协议白名单
+          if (n === "href" || n === "src" || n === "xlink:href" || n === "formaction") {
+            var v = String(a.value || "").replace(/[\u0000-\u0020]/g, "");
+            if (!SAFE_URL.test(v)) el.removeAttribute(a.name);
+          }
+        });
+        // ③ 外链补 rel, 防被打开页反向控制本页
+        if (el.tagName === "A" && el.getAttribute("href") && /^https?:/i.test(el.getAttribute("href"))) {
+          var rel = el.getAttribute("rel") || "";
+          if (rel.indexOf("noopener") < 0) el.setAttribute("rel", (rel + " noopener noreferrer").trim());
+        }
+      });
+      return body.innerHTML;
+    } catch (e) {
+      // 净化失败时退回纯文本转义, 宁可丢排版也不执行脚本
+      return esc(String(html || ""));
+    }
   }
 
   /* ================= 网络 ================= */
@@ -82,7 +128,13 @@
     opts = opts || {};
     opts.headers = Object.assign(headers(opts.body != null), opts.headers || {});
     return fetch(S.base + path, opts).then(function (r) {
-      if (r.status === 401) throw new Error("鉴权失败 (401): token 不正确或已更换");
+      if (r.status === 401) {
+        // 2026-09-17 (UX-16): token 轮换后旧值会一直卡在 localStorage 里反复撞 401,
+        // 这里主动清掉, 让用户下次刷新能重新取到服务端下发的 token。
+        localStorage.removeItem("ppx_token");
+        S.token = "";
+        throw new Error("鉴权失败 (401): token 不正确或已更换");
+      }
       return r.json().catch(function () { return null; }).then(function (j) {
         if (!r.ok) throw new Error((j && (j.error || j.message)) || ("HTTP " + r.status));
         return j;
@@ -192,6 +244,36 @@
 
   // 通用表单弹窗: fields = [{k,label,type,value,placeholder,options,desc}]
   var formCtx = null;
+  // 弹窗焦点管理 (2026-09-17 无障碍修复): 打开时把焦点移入弹窗, 关闭时归还给触发元素,
+  // 并在弹窗内做 Tab 循环 —— 否则键盘用户 Tab 会跑到弹窗背后的页面上。
+  function focusInto(mask) {
+    var modal = mask.querySelector(".modal");
+    var first = modal && modal.querySelector("input,select,textarea,button");
+    if (first) { try { first.focus(); } catch (e) {} }
+    return modal;
+  }
+  var lastFocus = null;
+  function restoreFocus() {
+    if (lastFocus && lastFocus.focus) { try { lastFocus.focus(); } catch (e) {} }
+    lastFocus = null;
+  }
+  function trapTab(mask, e) {
+    if (e.key !== "Tab") return;
+    var modal = mask.querySelector(".modal");
+    if (!modal) return;
+    var items = Array.prototype.filter.call(
+      modal.querySelectorAll("button,input,select,textarea,[tabindex]:not([tabindex='-1']),a[href]"),
+      function (el) { return !el.disabled && el.offsetParent !== null; }
+    );
+    if (!items.length) return;
+    var first = items[0], last = items[items.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  }
+  ["setMask", "formMask"].forEach(function (id) {
+    $(id).addEventListener("keydown", function (e) { trapTab(this, e); });
+  });
+
   function openForm(title, fields, onOk) {
     $("formTitle").textContent = title;
     var b = $("formBody");
@@ -211,7 +293,9 @@
       sw.onclick = function () { sw.classList.toggle("on"); };
     });
     formCtx = { onOk: onOk };
+    lastFocus = document.activeElement;
     $("formMask").classList.add("show");
+    focusInto($("formMask"));
   }
   function formValues() {
     var out = {};
@@ -222,7 +306,7 @@
     });
     return out;
   }
-  function closeForm() { $("formMask").classList.remove("show"); formCtx = null; }
+  function closeForm() { $("formMask").classList.remove("show"); formCtx = null; restoreFocus(); }
   $("btnFormClose").onclick = closeForm;
   $("btnFormCancel").onclick = closeForm;
   $("btnFormOk").onclick = function () {
@@ -418,7 +502,9 @@
   }
   function addTool(ev) {
     ensureStream();
-    var id = ev.tool + "#" + (++toolSeq);
+    // 2026-09-17 修复 (UX-5): 优先用后端下发的唯一 callId 配对起止事件。
+    // 旧实现只能按"工具名"回填, 同一轮里出现两个同名工具 (如两次 read_file) 时结果会贴错卡片。
+    var id = ev.id || (ev.tool + "#" + (++toolSeq));
     var open = S.dense !== "dense";
     var d = document.createElement("details");
     d.className = "tool run";
@@ -433,15 +519,20 @@
     col.appendChild(d);
     toBottom(true);
     toolCards[id] = { el: d, tool: ev.tool, t0: Date.now() };
-    // 同工具并发时按工具名回填最后一个未完成的
     d.setAttribute("data-tool", ev.tool);
+    if (ev.id) d.setAttribute("data-callid", ev.id);
     return d;
   }
   function finishTool(ev) {
     var key = null;
-    Object.keys(toolCards).forEach(function (k) {
-      if (!key && toolCards[k].tool === ev.tool && toolCards[k].el.classList.contains("run")) key = k;
-    });
+    if (ev.id && toolCards[ev.id]) {
+      key = ev.id; // 精确配对 (首选)
+    } else {
+      // 兼容旧服务端: 无 id 时按工具名回填最后一个未完成的
+      Object.keys(toolCards).forEach(function (k) {
+        if (!key && toolCards[k].tool === ev.tool && toolCards[k].el.classList.contains("run")) key = k;
+      });
+    }
     if (!key) return;
     var c = toolCards[key];
     c.el.classList.remove("run");
@@ -568,18 +659,155 @@
     }).catch(function () { clearStream(); });
   }
 
+  /* ================= 侧栏折叠 ================= */
+  // 2026-09-17 体检修复 (P0-4): HTML 里有 #btnCollapse / #btnSide 两个按钮,
+  // CSS 里也有 .side.collapsed 规则, 但 app.js 从未绑定任何事件 —— 点"收起侧栏"毫无反应。
+  // 顺手补上状态持久化, 刷新后保持用户选择。
+  function setSide(collapsed) {
+    $("side").classList.toggle("collapsed", !!collapsed);
+    $("btnSide").hidden = !collapsed;
+    $("btnCollapse").setAttribute("aria-expanded", collapsed ? "false" : "true");
+    localStorage.setItem("ppx_side", collapsed ? "1" : "0");
+  }
+  $("btnCollapse").onclick = function () { setSide(true); };
+  $("btnSide").onclick = function () { setSide(false); };
+
   /* ================= 输入区 ================= */
   var inp = $("inp");
+
+  /* ================= @ 引用文件 ================= */
+  // 2026-09-17 体检修复 (UX-2): 输入框此前已经在 placeholder 里承诺"（@ 引用文件）",
+  // 但代码里根本没有 @ 解析 —— 用户按提示敲 @ 什么都不会发生。这里把它真正实现:
+  // 输入 @ 或 @前缀 时弹出工作区文件候选 (复用 /api/workspace/tree), 方向键选择, Enter 插入路径。
+  var mention = (function () {
+    var el = null, items = [], idx = 0, at = -1, seq = 0;
+    var INDEX_TTL = 15000; // 文件索引缓存 15s, 避免每次敲字都打接口
+    var index = null, indexAt = 0;
+
+    function flatten(node, out, prefix, depth) {
+      if (!node || depth > 6 || out.length > 800) return out;
+      var kids = node.children || [];
+      for (var i = 0; i < kids.length; i++) {
+        var n = kids[i];
+        var p = n.path || (prefix ? prefix + "/" + n.name : n.name);
+        if (n.type === "dir") flatten(n, out, p, depth + 1);
+        else out.push(p);
+      }
+      return out;
+    }
+    function loadIndex() {
+      var now = Date.now();
+      if (index && now - indexAt < INDEX_TTL) return Promise.resolve(index);
+      var q = "/api/workspace/tree?maxDepth=5" + (S.wsRoot ? "&root=" + encodeURIComponent(S.wsRoot) : "");
+      return get(q).then(function (j) {
+        index = flatten((j && j.tree) || { children: [] }, [], "", 0).sort();
+        indexAt = Date.now();
+        return index;
+      }).catch(function () { index = []; indexAt = Date.now(); return index; });
+    }
+    function currentQuery() {
+      var pos = inp.selectionStart;
+      if (pos == null) return null;
+      var before = inp.value.slice(0, pos);
+      // @ 片段: 行首或空白之后的 @ 到行尾 (不含空白/@), 字符类里不放括号, 保证圆括号配平
+      var m = before.match(/(?:^|\s)@([^\s@]*)$/);
+      return m ? { q: m[1], start: pos - m[1].length - 1 } : null;
+    }
+    function pos() {
+      var r = $("composer").getBoundingClientRect();
+      return {
+        left: Math.max(8, r.left + 12),
+        width: Math.max(260, Math.min(r.width - 24, 420)),
+        bottom: Math.max(8, innerHeight - r.top + 8),
+      };
+    }
+    function render() {
+      if (!el) return;
+      var p = pos();
+      el.style.left = p.left + "px";
+      el.style.width = p.width + "px";
+      el.style.bottom = p.bottom + "px";
+      el.style.top = "auto";
+      el.innerHTML = '<div class="mh">引用工作区文件</div>' + items.map(function (f, i) {
+        return '<button class="mi' + (i === idx ? " on" : "") + '" data-i="' + i + '">' +
+          '<span class="ico">' + ico("file", 14) + '</span><span class="lab">' + esc(f) + "</span></button>";
+      }).join("");
+      el.querySelectorAll(".mi").forEach(function (b) {
+        b.onmousedown = function (e) { e.preventDefault(); pick(Number(b.getAttribute("data-i"))); };
+      });
+      var on = el.querySelector(".mi.on");
+      if (on && on.scrollIntoView) on.scrollIntoView({ block: "nearest" });
+    }
+    function open(list, startPos) {
+      at = startPos;
+      items = list.slice(0, 14);
+      idx = 0;
+      if (!el) {
+        el = document.createElement("div");
+        el.className = "menu mention";
+        el.setAttribute("role", "listbox");
+        document.body.appendChild(el);
+      }
+      render();
+    }
+    function close() { if (el) { el.remove(); el = null; } items = []; at = -1; }
+    function isOpen() { return !!el; }
+    function pick(i) {
+      var f = items[i];
+      if (f == null) return;
+      var posn = inp.selectionStart;
+      var before = inp.value.slice(0, at);
+      var after = inp.value.slice(posn);
+      inp.value = before + f + " " + after;
+      var caret = before.length + f.length + 1;
+      inp.focus();
+      try { inp.setSelectionRange(caret, caret); } catch (e) {}
+      close();
+      autosize();
+      inp.dispatchEvent(new Event("input"));
+    }
+    function handleKey(e) {
+      if (!el) return false;
+      if (e.key === "ArrowDown") { e.preventDefault(); idx = (idx + 1) % items.length; render(); return true; }
+      if (e.key === "ArrowUp") { e.preventDefault(); idx = (idx - 1 + items.length) % items.length; render(); return true; }
+      if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); pick(idx); return true; }
+      if (e.key === "Escape") { e.preventDefault(); close(); return true; }
+      return false;
+    }
+    // 由 input 事件驱动: 判断当前是否处在 @ 片段里
+    function sync() {
+      var cur = currentQuery();
+      if (!cur) { close(); return; }
+      var mySeq = ++seq;
+      loadIndex().then(function (all) {
+        if (mySeq !== seq) return; // 已有更新的输入, 丢弃这次结果
+        var q = cur.q.toLowerCase();
+        var hits = q ? all.filter(function (f) { return f.toLowerCase().indexOf(q) >= 0; }) : all;
+        if (!hits.length) { close(); return; }
+        open(hits, cur.start);
+      });
+    }
+    window.addEventListener("resize", function () { if (el) render(); });
+    return { sync: sync, handleKey: handleKey, isOpen: isOpen, close: close };
+  })();
+  function syncMention() { try { mention.sync(); } catch (e) {} }
+
+  document.addEventListener("click", function (e) {
+    if (mention.isOpen() && !e.target.closest(".menu.mention")) mention.close();
+  });
+
   function autosize() {
     inp.style.height = "auto";
     inp.style.height = Math.min(inp.scrollHeight, 190) + "px";
   }
-  inp.addEventListener("input", function () { autosize(); if (!S.streaming) $("btnSend").disabled = !inp.value.trim(); });
+  inp.addEventListener("input", function () { autosize(); if (!S.streaming) $("btnSend").disabled = !inp.value.trim(); syncMention(); });
   inp.addEventListener("keydown", function (e) {
+    if (mention.handleKey(e)) return; // @ 引用文件菜单优先消费方向键/Enter/Esc
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
   });
   document.addEventListener("keydown", function (e) {
     if (e.key === "Escape") {
+      if (mention.isOpen()) { mention.close(); return; }
       if ($("formMask").classList.contains("show")) { closeForm(); return; }
       if ($("setMask").classList.contains("show")) { closeSet(); return; }
       if (menuEl) { closeMenu(); return; }
@@ -803,8 +1031,8 @@
 
   /* ================= 设置 ================= */
   var setTab = "general";
-  function openSet(tab) { setTab = tab || "general"; $("setMask").classList.add("show"); renderSet(); }
-  function closeSet() { $("setMask").classList.remove("show"); }
+  function openSet(tab) { setTab = tab || "general"; lastFocus = document.activeElement; $("setMask").classList.add("show"); renderSet(); focusInto($("setMask")); }
+  function closeSet() { $("setMask").classList.remove("show"); restoreFocus(); }
   $("btnSettings").onclick = function () { openSet("general"); };
   $("btnSettings2").onclick = function () { openSet("general"); };
   $("btnSetClose").onclick = closeSet;
@@ -1198,6 +1426,7 @@
   }
   function boot() {
     applyTheme();
+    setSide(localStorage.getItem("ppx_side") === "1"); // 恢复上次的侧栏折叠状态
     $("heroVer").textContent = "v" + S.version;
     $("permLabel").textContent = permLabel();
     $("brandTag").textContent = "v" + S.version;

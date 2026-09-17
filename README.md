@@ -1,7 +1,7 @@
 # 🦐 PPXANS-Harness
 
 > **PPXANS-Harness = 皮皮虾神经系 (ANS) + Harness 一体化智能体内核**，纯 Node.js 编写，**零运行时依赖**。
-> 45+ 内置工具 · L0–L4 五层记忆 · SHA-256 审计哈希链 · MCP 服务端+客户端 · 多模型路由 · 自愈 7/7 · **716 测试全绿**。
+> **43 内置工具** · L0–L4 五层记忆 · SHA-256 审计哈希链 · MCP 服务端+客户端 · 多模型路由 · 自愈 7/7 · **768 测试全绿**。
 >
 > 由 `ppx-agent v1.6.0`（合并基座）+ `ppx-v2 v0.4.0`（能力吸收）合并而成，v2.5.0 起移除全部外部引擎底座，v2.6.0 起 web 壳与外部接入全面切 MCP。合并范围与取舍见 [MERGE-REPORT.md](MERGE-REPORT.md)、第三方来源见 [references/THIRD-PARTY-SOURCES.md](references/THIRD-PARTY-SOURCES.md)。
 
@@ -24,7 +24,7 @@
 | 🧠 **五层记忆 L0–L4** | L0原始对话 → L1原子记忆(高斯衰减) → L2场景 → L3核心画像 → **L4程序性记忆**(技能/流程, 衰减仅为 L1 的 1/4) |
 | 🗂️ **记忆治理** | **软删可回滚**(forget/restore) + 版本链(update 留痕) + TTL 自动归档 + 按层清理 + 导出/导入迁移; 遗忘不再不可逆 |
 | 🔐 **审计哈希链** | 工具调用 append-only 账本 + SHA-256 链式防篡改, 篡改/删行可定位到具体行, 支持隔离损坏段重建 |
-| 🔧 **45+ 内置工具** | 文件/命令/搜索/HTTP/定时/记忆检索/读图/文档加载/文档入库/OCR/code_act/refine/refine_skill + **10个治理运维工具**(memory_forget/restore/export/import/clear_layer/list_deleted、audit_verify、persona_build/read、selfheal_run) |
+| 🔧 **43 内置工具** | 文件/命令/搜索/HTTP/定时/记忆检索/读图/文档加载/文档入库/OCR/code_act/refine/refine_skill + **10个治理运维工具**(memory_forget/restore/export/import/clear_layer/list_deleted、audit_verify、persona_build/read、selfheal_run) |
 | 🩺 **自我修复** | 启动体检、损坏JSON自动修复、崩溃恢复、残留清理 |
 | 📚 **自我学习** | 经验库 + 自动提炼用户画像/agent人格 + refine 失败轨迹闭环 + refineSkill 成功轨迹沉淀技能 |
 | 🤖 **多 Agent 军团** | 多进程并行 + DAG 编排 + legion 模式 (broadcast/dispatch/runDag) + spawn_agent 自主协作 (并行/差异化视角/仲裁聚合/SDD 审查循环) |
@@ -38,7 +38,7 @@
 | ✅ 错误自愈 | 工具错误统一语义, 自动重试修正 |
 | ✅ 方法型Skill | humanize去AI味 / write_article分阶段写作 / clarify需求澄清 / brainstorm审批门禁 / plan精确计划 / verify验证优先 / debug五步调试 |
 | 🔌 **MCP 客户端** | 零依赖 MCP 客户端 (stdio + HTTP Streamable), 接入 9600+ MCP 工具服务器 |
-| 🛰️ **MCP 服务器** | 标准 MCP 服务端点 `POST /mcp` (Streamable HTTP, 双 era: 现代 2026-07-28 + legacy initialize 握手), 暴露全部 45+ 工具 / 记忆·轨迹·统计·会话资源 / 方法型技能 prompts / 对话工具 ppx.chat.* (SSE 流式 + 结构化 tool/step 事件) / x-mcp-header 客户端支持 |
+| 🛰️ **MCP 服务器** | 标准 MCP 服务端点 `POST /mcp` (Streamable HTTP, 双 era: 现代 2026-07-28 + legacy initialize 握手), 暴露全部 43 工具 / 记忆·轨迹·统计·会话资源 / 方法型技能 prompts / 对话工具 ppx.chat.* (SSE 流式 + 结构化 tool/step 事件) / x-mcp-header 客户端支持 |
 | 🎛️ **MCP 管理工具** | 会话/提供方/设置/任务面板 全部经标准 MCP 工具暴露 (ppx.sessions.* / ppx.providers.* / ppx.settings.* / ppx.task.*), web 产品壳已全面切换, REST /api/* 退役 |
 | ✅ **任务面板** | MCP 任务工具 + web UI 模块: 任务队列 (进行中/待处理/完成/失败) + 步骤状态推进 + 结果回填, 持久化 data/tasks.json, 6 套技能模板 |
 | ✅ 可观测 | 工具调用轨迹JSONL + 失败率/慢工具统计 + **结构化事件流**(traceId 经 AsyncLocalStorage 贯穿) |
@@ -145,7 +145,7 @@ npm run web:check     # 界面静态自检 (图标/DOM id/静态资源引用)
 `POST http://127.0.0.1:8899/mcp`（同 Bearer token 鉴权）。任何 MCP 客户端
 (Claude Desktop / Cursor / MCP Inspector 等) 可直接接入:
 
-- `server/discover` + `tools/list` + `tools/call`（45+ 内置工具全量暴露）
+- `server/discover` + `tools/list` + `tools/call`（43 内置工具全量暴露）
 - resources: `memory://facts`, `traces://recent`, `stats://overview`, `sessions://list`
 - prompts: `humanize` / `plan` / `debug` / `verify` / `write_article`（方法型技能）
 - `ppx.chat.send` / `ppx.chat.stream`（对话工具，驱动完整工具循环）
@@ -263,14 +263,14 @@ PPXANS-Harness/
 │   ├── audit/      verifier 语义验证闸门 + audit-chain 防篡改哈希链
 │   ├── ans/        ANS 神经系 (values/lifecycle/proactive/reward/eviction/guard)
 │   ├── selfheal/   自愈引擎
-│   ├── tools/      工具系统 (45+ 个 + MCP 动态注册; governance.js 为治理工具)
+│   ├── tools/      工具系统 (43 个 + MCP 动态注册; governance.js 为治理工具)
 │   ├── channels/   通道 (http/feishu/wechat)
 │   ├── orchestrator/ 军团编排器 (多进程)
 │   ├── llm/        LLM 客户端
 │   └── utils/      基础设施
 ├── data/           运行时数据 (不进 git)
 ├── references/     第三方项目来源登记 (不含源码)
-├── test/           测试 (720 项 716 过 0 失败 4 跳过)
+├── test/           测试 (768 项 764 过 0 失败 4 跳过)
 └── docs/           文档
 ```
 

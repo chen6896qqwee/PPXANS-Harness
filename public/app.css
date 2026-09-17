@@ -483,3 +483,23 @@ textarea.ta:focus { outline: none; border-color: var(--accent); }
   .mtitle { display: none; }
   .mrow { white-space: nowrap; width: auto; }
 }
+
+/* ================= 无障碍: 可见焦点环 (2026-09-17 体检修复) =================
+   原样式只给 input/select/textarea 定义了 :focus(且 outline:none 换成淡边框),
+   按钮/导航/标签页等键盘可达元素完全没有焦点视觉反馈 —— 键盘用户不知道焦点在哪。
+   :focus-visible 只在键盘操作时出现, 不影响鼠标点击的手感。 */
+button:focus-visible, a:focus-visible, [tabindex]:focus-visible, summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+input.txt:focus-visible, select.sel:focus-visible, textarea.ta:focus-visible, #inp:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+/* 弹窗打开时也应有可见边界, 便于键盘用户定位 */
+.modal:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* @ 引用文件候选菜单: 紧贴输入框上方 */
+.menu.mention { max-height: 260px; }
+.menu.mention .mi .lab { font-family: var(--mono); font-size: 12px; }

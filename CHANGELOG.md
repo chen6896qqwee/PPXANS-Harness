@@ -2,6 +2,105 @@
 
 
 
+## 未发布 (2026-09-17) - 全面代码与架构体检轮: 安全 / 可用性 / 无障碍
+
+> **定性**: 一轮**覆盖全项目的代码 + 架构 + 用户体验三维体检**（源码 18,138 行 / 866 文件 / 五路并行模块通读 + 隔离根端到端实证），
+> 产出 `docs/AUDIT-2026-09-17.md`（含 4×P0 / 14×P1 / 18×P2 与优化路线图）。
+> 本轮落地其中 **4 个 P0 + 8 个 P1/UX** 修复；测试 768 → **780 项（+12 回归守卫）**，0 失败。
+> **综合评分 76/100** —— 内核扎实（ANS 六件套全部为真实实现，无桩代码），扣分集中在"产品外壳最后一公里"。
+
+### 安全（P0）
+
+- **任意网站可窃取本机 API token**: `/api/bootstrap` 对"回环请求"免鉴权以支持本地零配置启动，但**浏览器的源地址也是 127.0.0.1** —— 配合默认 `Access-Control-Allow-Origin: *`，用户访问任意恶意网页即可 `fetch('http://127.0.0.1:8899/api/bootstrap')` 读走 `authToken`，此后可调用全部 API（读写文件、执行命令）。**已实证复现**：`curl -H "Origin: https://evil.example.com" …/api/bootstrap` 返回 `200` + `ACAO: *` + 明文 token。处置：新增 `_originTrusted()`（`Origin` 存在时必须为本机回环；`Sec-Fetch-Site: cross-site` 一律拒绝）与 `_isTrustedLocal() = 回环 && 来源可信`，`bootstrapPayload` 与 `/api/bootstrap` 免鉴权分支统一改用后者；响应体新增 `tokenTrusted` 字段便于前端判断。修复后跨源与 cross-site 均返回 `401`，本机访问不受影响。
+- **`ppx-channels` 入口 100% 不可用**: `src/channels-cli.js:16` 的 `ensureUTF8Console();` 被误插进第 13 行 `import {` 语句内部，`node bin/ppx-channels.js` 直接 `SyntaxError: Identifier 'ensureUTF8Console' has already been declared`。`package.json` 声明的 5 个 bin 之一彻底失效、通道管理整块功能不可达。已把该调用移到 import 块之后。**用 grep 全库扫描确认无其他同类"调用混入 import"事故。**
+- **SSE 并发护栏失效**: `/message/stream` 先 `writeHead(200, SSE头)` 再 `_acquire()`，超限时 `_acquire` 内 `writeHead(429)` 抛 `ERR_HTTP_HEADERS_SENT`，被外层 catch 转成 SSE error 事件。**已实证复现**：占满 4 槽后第 5 个请求收到 `HTTP 200` + `text/event-stream` + 正文 `data: {"type":"error","error":"Cannot write headers after they are sent to the client"}`（**Node 内部错误原文直接泄漏**），前端表现为"空回复 + 永久转圈"而非 429 提示。已把 `_acquire` 提到 `writeHead` 之前，并新增 `publicErrorMessage()` 屏蔽内部实现细节。修复后稳定返回 `429` + `application/json` + `Retry-After: 5`。
+- **XSS（渲染层）**: `public/app.js` 的 `renderMd()` 直接 `innerHTML = marked.parse(text)`。实测 marked v12 对原始 HTML **原样透传**（`<img src=x onerror=alert(1)>` 不转义），且**不过滤 `javascript:` / `data:text/html` 链接**。而进入该函数的文本不受控 —— 模型回复、`read_file` 读到的文件、`fetch_page` 抓回的网页、文档解析结果都会流到这里，一旦执行即可读取 `localStorage.ppx_token` 并调用本机 API（与上一条形成叠加风险）。已新增 `sanitizeHtml()` 白名单净化（剔除可执行标签 / 全部 `on*` 事件属性 / `srcdoc` / 危险协议，外链补 `rel=noopener`），净化失败时退回纯文本转义。
+
+### 修复（P1 / 可用性）
+
+- **SSE 首包不 flush**: `writeHead(200)` 后无任何 `res.write` 或 `flushHeaders()`，响应头要等首个 delta 才下发。**已实证**：4 个已获槽位的请求 **6 秒内收不到任何响应头**。LLM 慢首包时前端完全无反馈，且经反向代理极易被判超时。已补 `res.flushHeaders()`；实测响应头 **23ms** 到达。
+- **token 比较非恒定时间**: `_authed()` 用 `h === "Bearer " + this.authToken`，首字节不同即提前返回。新增导出函数 `safeEqual()`（两侧先 SHA-256 摘要成定长 32 字节再 `crypto.timingSafeEqual`，长度差异一并消除）替代。
+- **无全局异常兜底**: 全项目仅有 SIGINT/SIGTERM 处理，**无 `uncaughtException` / `unhandledRejection`**。Node ≥15 下未处理的 Promise 拒绝直接终止进程 —— 对"双击即用"的桌面产品表现为服务突然消失、用户只看到"未连接"。新增 `src/utils/crashguard.js`：`createCrashReporter()`（栈指纹去重折叠，防日志风暴）+ `installCrashGuard()`（幂等安装，默认**记录后继续运行**；`PPX_EXIT_ON_UNCAUGHT=1` 可恢复"记录即退出"供外部守护托管）。已接入 `bin/ppx-web.js` 与 `src/server.js` 的 `runServer()`。
+- **限流令牌桶只增不减**: `_buckets` Map 每个新 IP 建桶且从不回收，长期运行 + 多变源地址会持续吃内存。新增 `_sweepBuckets()`，桶数超 512 时顺手回收 2 倍窗口外的过期桶（摊还 O(1)，不引入定时器）。
+- **自愈日志因果颠倒**: `heal()` 原本把"崩溃残留已清理, 状态置回 clean"打在"修复 N 项"与"检测到崩溃残留 -> …"之前，日志读起来是「先说痊愈、再说发现崩溃」，使用者无法判断自愈到底生效没有。已改为 `先判定崩溃 → 先报问题 → 再报处置 → 最后报结果`，并把 `checkCrash()` 提到 `runStartupChecks()` **之前**（否则重建的目录会掩盖证据）。
+- **工具卡片同名串卡**: Web UI 只能按"工具名"匹配 start/done 事件，同一轮出现两个 `read_file` 时后到的事件会回填到前一张卡片（旧代码注释里也自述了这个缺陷）。`PPXAgent._runTool()` 现为每次调用生成唯一 `callId`（`t<seq>-<ts36>`）并随 `tool/start`、`tool/done` 事件下发；`src/channels/http.js` 透传 `id`；前端 `addTool`/`finishTool` 改为按 `id` 精确配对（无 `id` 时保留旧的名字回填兜底）。
+- **侧栏"收起"按钮是死的（P0/UX）**: HTML 有 `#btnCollapse` / `#btnSide`，CSS 有 `.side.collapsed` 规则，**但 app.js 从未绑定任何事件** —— 点"收起侧栏"毫无反应。已补齐事件绑定 + `localStorage` 持久化 + `aria-expanded` 同步。
+- **输入框承诺的 `@ 引用文件` 不存在**: placeholder 写着"（@ 引用文件）"，代码里没有任何 `@` 解析。**没有选择把承诺删掉，而是把它做出来了**：输入 `@` / `@前缀` 弹出工作区文件候选（复用 `/api/workspace/tree`，索引缓存 15s、上限 800 条），支持 ↑↓ 选择、Enter/Tab 插入路径、Esc 取消，并带并发竞态保护（丢弃过期请求结果）。
+- **无障碍近乎空白**: `public/index.html` 全文 `aria-` 只出现 1 次（还是 sprite 的 `aria-hidden`）；弹窗无 `role="dialog"` / `aria-modal`、无焦点管理；CSS 只给 `input/select/textarea` 定义了 `:focus`（且 `outline:none`），按钮/导航/标签页**无可见焦点环**。已补：两个弹窗加 `role="dialog" aria-modal="true"` + 标签；对话流加 `role="log" aria-live="polite"`；输入框加 `aria-label`；图标按钮补 `aria-label`/`aria-controls`/`aria-expanded`；新增 `:focus-visible` 焦点环样式；弹窗实现**焦点移入 + Tab 循环陷阱 + 关闭归还焦点**。
+- **401 不清 token**: token 轮换后旧值一直卡在 `localStorage` 反复撞 401。`req()` 收到 401 时主动清除并重置内存态。
+
+### 文档
+
+- `docs/AUDIT-2026-09-17.md`（新增）: 结构化体检报告 —— 项目结构与架构 / 核心运行时 / 记忆系统 / ANS 神经系 / 编排与插件 / 接口与安全 / **用户体验专项** / 问题总表（P0·P1·P2）/ 三轮优化路线图。所有 P0 结论均附可复现实证输出，P1/P2 均附 `文件:行号`。
+- 更正 `src/channels/http.js` 中"产品壳已全部走 MCP（前端不再调用 REST）"的注释 —— 实测前端仍调用 **16 个 REST 端点**，该注释与实现不符（并因此埋着"一旦把 `legacy_rest` 设为 false，设置页/模型页/抽屉面板/工作区树整体失效"的隐患，已记入报告 P1）。
+
+### 测试
+
+- 新增 `test/audit-2026-09-17.test.js`（**12 项回归守卫**，每项对应一个"修复前会失败"的断言）：跨源 token 三例（含端到端）+ `ppx-channels` 可解析 + SSE 429 与首包时延 + `safeEqual` 语义 + `publicErrorMessage` 净化 + 异常上报器去重与监听真实增删 + 令牌桶回收 + 自愈日志顺序 + 工具事件唯一 id。
+- 全量 **780 项通过 (776 pass / 0 fail / 4 skip)**，5.6 秒；`npm run web:check` 全绿。
+- **未落地项已在报告中标注并给出设计方案**（不在本轮范围内）：会话状态按 `sessionId` 隔离（`_interrupted`/`_lastFallback` 目前是实例级共享，4 路并发时会串台）、工具在一轮内并行执行、记忆语义检索接线、记忆冲突消解、`legacy_rest=false` 时前端降级、收敛遗留的 `web/`（Next.js）子项目、两套 legion 合一、`spawn_agent` 真并发。
+
+
+## 未发布 (2026-09-17) - 用户实测轮: 记忆污染 / 自愈目录 / 交互泄漏 / 降级可见性 / 占位符 五修
+
+> **定性**: 一轮"**扮演用户端到端实测** → 逐项修复"的优化。实测覆盖启动、本地意图、真实 LLM 对话、工具循环、跨进程记忆、Web、MCP、安全闸门、自愈，产出 `docs/USER-TEST-REPORT.md`。
+> 共发现 2×P1 + 3×P2，**全部修复**；测试 754 → **768 项（+14 回归守卫）**，0 失败；自愈基准 7/7。
+> **有意未处理**: DeepSeek 401 —— 发布前主动删除 key 所致，非缺陷。
+
+### 修复
+
+- **P1 记忆污染（用户提问被当长期事实入库，实测污染率 40%）**: `src/memory/fact-store.js` 的 `addMemory()` 里，疑问/指令过滤器写成了 `if (clean.length <= 8 && /…/.test(clean)) return null;` —— **长度前置条件把整条正则架空了**，8 字以上的提问一律畅通。配合"无 LLM 提炼器时整段用户原话直喂 `addMemory()`"的兜底路径（`memory-ticker.js`），提问持续入库并喂回后续上下文。已拆掉长度条件，改为四道与长度无关的句式判据（问号/疑问助词/「来着」收尾 · 疑问词起手 · 句中强制疑问词 · 祈使句起手），并刻意**不收 `多少`** 这类可能出现在陈述句中的词，避免误杀「不管花多少钱都要做」。
+- **P1 自愈目录归属错误**: `src/selfheal/healer.js` 把 `dataDir` 硬编码为 `path.join(rootDir, "data")`，而唯一装配点 `src/plugin/builtin.js` 的 `healerPlugin` 传的却是 **`root`**（同文件 `factsPlugin` 等其余插件传的都是 `dataDir`）。后果：自定义 `PPX_DATA_DIR`（npm 安装形态走 `~/.ppx`）时，自愈去 `root/data` 建空目录、写 `integrity.json`、清 `.tmp`，**真实数据目录永不体检**。已给 `Healer` 增加可选 `dataDir` 参数（默认保持旧行为，15 处 `new Healer(root)` 调用点零改动），装配层改传真实目录。
+- **P2 本地意图回复泄漏内部标记与原始 JSON**: `src/agent/index.js` 的 `_localIntent()` 四个分支都是 `` return `[工具] ${await this.tools.call(...)}` ``，用户输入「记住: X」会收到 `[工具] {"ok":true,"id":"f_1a2b"}`。已新增 `_humanToolResult()` 做外向化（错误前缀 → 「没办成: …」；JSON → 抽载荷字段；数组 → 逐项罗列），并为各意图配自然话术。**该层只作用于直接回给用户的通道，模型侧工具结果保持原始保真。**
+- **P2 静默回退无提示**: 多 provider 回退功能正常（实测救场成功），但只在日志 `warn` 一句，用户端无从感知回答来自备用模型。已让 `_llmWithFallback()` 记录降级事实并广播 `llm/fallback` 总线事件，`chat()` 在**写入会话历史/记忆之后**才把提示拼到回复尾部。**关键约束**：`test/chaos.test.js` 锁死了 `_llmWithFallback` 成功时返回模型原文，故采用"旁路留痕 + 上层拼接"，不改其返回值；`_shortReason()` 把原始错误归一为「鉴权失败 / 限流 / 超时 / 连接失败」，避免整段 JSON 报错体喷给用户；`chatStream()` 写历史前用 `_stripFallbackNotice()` 剥掉提示。
+- **P2 占位符模型被选为主模型**: `resolveLLM()` 选出的主模型是配置模板里的 `YOUR_LOCAL_MODEL_NAME`（因 `base_url` 落在 `127.0.0.1` 被 `isLocal()` 判为"零配置可用"）。**根因不是漏了一种写法，而是同一语义有三份正则且各自漂移** —— `src/llm/router.js` / `src/config/index.js` / `src/config/providers.js` 三份都只认 endpoint / api_key 形态，**共同漏掉 `YOUR_*_MODEL`**。已抽出唯一真相源，三处共用；`isUsableProvider` 同时校验 `model` 与 `base_url`；`_warnMissingCloudApi` 原来自行手搓了一套"有本地/有云端 key"判定（既不看占位符也不看 model），现改为复用路由的可用判定，并明确指出哪些条目仍是占位符。
+
+### 新增
+
+- `src/config/placeholder.js`: 占位符判定唯一真相源（`PLACEHOLDER_RE` / `isPlaceholder` / `hasPlaceholderField`），消除三处正则漂移。
+- `test/user-test-fixes.test.js`: 14 项回归守卫，按 P1-1 / P1-2 / P2-1 / P2-2 / P2-3 分组，每项锁死一个实测发现。
+- `docs/USER-TEST-REPORT.md`: 用户视角实测报告（第一至六章为纯实测记录，第七章为修复记录与前后对比）。
+
+### 测试
+
+- 全量 **768 项通过 (764 pass / 0 fail / 4 skip)**，5.7 秒；自愈基准 **7/7 100%**（确认 `new Healer(root)` 单参路径未被破坏）。
+- 端到端验证：自定义 `dataDir` 启动后 `healer.dataDir == agent.dataDir` 且 `root/data` 未被创建；屏蔽真实 key 后 `resolveLLM(真实 config)` 返回 `null`（修复前返回 `lmstudio/YOUR_LOCAL_MODEL_NAME`）；强制主模型"健康通过但调用 401"后回复尾出现可见降级提示并广播事件。
+- ⚠ **复现问题请一律用 `npm test`**：诊断时手敲 `node --test test/*.test.js`（缺 `--test-force-exit`）会出现"跑到某个点再也不动"的假死，曾被误判为代码引入挂起。真实原因是遗留句柄的测试进程让父进程一直等待；补上该参数后同一套代码 5.7 秒跑完。
+
+
+## 未发布 (2026-09-17) - 优化轮 (第 1 轮): 修复 P0 启动崩溃 + 接入熔断器 + 文档校正
+
+> **定性**: 一轮"全量通读 → 逐项修复"的优化。共处理 7 项问题（1×P0 / 3×P1 / 3×P2），测试 745 → **754 项（+9 回归守卫）**，0 失败。新增项目说明文档 `docs/PROJECT-OVERVIEW.md`（v2.7.0 实测基线）。
+
+### 修复
+
+- **P0 内核启动崩溃**: `src/plugin/builtin.js` 的 `sessionPlugin` 调用 `info(...)` 但该文件从未导入 logger。该分支位于 `PPXAgent` **构造函数**的插件装配路径上，一旦触发 `ReferenceError` 会让**整个内核起不来**（Web/CLI/MCP 全线不可用）。触发条件为 `session_max_age_days`（默认 30）生效且存在超龄会话 —— 即**正常使用满 30 天必然踩中**。已补 logger 导入；并用全库静态扫描确认 `info/warn/error/debug/ok/fail` 这一族"用而未导入"已清零。
+- **P1 fork 快照静默降级**: `src/memory/fork.js` 调 `personaStore.read()` / `experience.list()`，两者在真实类上都不存在（有 `typeof` 守卫故不崩，但分支永不进入 → `persona.md` / `experience.md` 从未生成）。**根因是测试桩漂移**：`test/fork.test.js` 的手写桩凭空提供了这两个不存在的方法，于是测试一直在验证虚构接口。处置：① `Experience` 补 `list({limit,sort})` / `count()` 公开 API；② fork 改用真实 `userPersona()` + `agentPersona()` 并导出两份画像；③ **测试桩换成真实 `PersonaStore` / `Experience` 实例** + 新增接口同步守卫断言。
+- **P1 `unhealthy` 状态不可达**: `src/services/memory-health.js` 的 `status()` 三元两分支都返回 `HEALTHY`，三态退化为两态。改为按窗口内最差单步失败数分档（新增 `unhealthyAfter`，默认取 `degradeAfter` 两倍），`advice()` 增加 `severe` 标记，`status()` 补齐 `unhealthy` / `worstRecentFails` / `thresholds` / `totalFail` 可观测字段。
+- **P1 文档数字失真**: README 的「716 测试全绿」（3 处）、「45+ 内置工具」（4 处）、「720 项 716 过」统一校正为实测值。顺带核实「自愈 7/7」属实（`selfheal-bench` 实测 100%），未改动。
+
+### 新增
+
+- **熔断器接线** (`src/bus/circuit-breaker.js` 原为"完整实现但零消费者"的预留件): 接入 `ToolCatalog` 策略订阅者链 —— 每个订阅者持独立熔断器（默认 60s/3 次异常 → 熔断，冷却 10s），熔断期跳过该订阅者（**弃权而非放行**，与 deny-wins 语义自洽），冷却后半开探测、成功即恢复闭合。消除了"故障订阅者被反复调用 + 日志刷屏"的问题。新增 `ToolCatalog.policyStatus()`，并在 `PPXAgent.stats()` 增加 `policyGuard` 字段（只列非闭合项）实现可观测。
+- **未接线模块如实标注**: `seam/registry.js` / `memory/failure-episode.js` / `evolve/playbook.js` / `orchestrator/supervisor.js` 文件头加 ⚠ 标注；`plugin/builtin.js` 的 `evolvePlugin` 补全注释 —— **其注册的 6 个服务（playbook/memoryHealth/failures/canvas/fork/assets）当前全部零消费**，属"能力就绪、链路未接"，读到服务不等于功能已生效。
+- `docs/PROJECT-OVERVIEW.md`: 项目说明文档（项目概述 / 架构与目录 / 核心模块 / 关键实现逻辑 / 技术栈与配置 / 优化执行记录）。
+
+### 文档
+
+- `docs/ARCHITECTURE-ORGANISM.md`: 修正「client 多后端 http/openclaw/deepseek」为 v2.5.0 后的单 http 底座；文档头加时效说明（本文为 2026-08-21 快照）。
+- `docs/ABSORB-DEEPSEEK-HARNESS.md`: 加 🚫 已废弃标注 —— 文中 `npm run dsh:install` / `dsh:build` / `npm run dsh` 等命令**已不存在**，照做必然失败；保留作决策沿革。
+- `docs/EVALUATION-v1.1.1-全面评价.md`: 加 📌 历史归档标注（其中规模与能力描述为 v1.1.x 时期实况）。
+
+### 测试
+
+- 新增 9 项回归守卫: `fork.test.js` +1（接口同步 + 快照内容真实性）、`memory-health.test.js` +5（三态可达 / 默认阈值 / 恢复 / severe / 可观测）、`catalog-guard.test.js` +3(熔断达阈值不再被调用 / 熔断不影响其他订阅者 deny / 半开探测恢复)。
+- 全量 **754 项通过 (750 pass / 0 fail / 4 skip)**；自愈基准 7/7 100%。
+
+### 有意未处理
+
+- `fact-store._prune()` 超 `max_facts` 的硬删不落审计。当前分工清晰（`_prune` 管容量、治理管意愿），非缺陷；无实际痛点故不动。
+
+
 ## v2.7.0 (2026-09-16) - 记忆存储加固: schema 版本迁移 + WAL 增量落盘
 
 > **定性**: 针对外部体检报告的记忆存储建议，补两块硬能力：数据文件 schema 版本号 + 迁移钩子（版本兼容与迁移），以及 facts 增量落盘（WAL，减少高频写场景的全量写放大）。数据文件（facts.json / scenes.json）保持纯数组格式不变，现有读取者无感。

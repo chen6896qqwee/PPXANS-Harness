@@ -53,7 +53,7 @@
       <span class="mark"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><use href="#i-mark"/></svg></span>
       <span class="bname">皮皮虾</span>
       <span class="btag" id="brandTag">PPX</span>
-      <button class="icobtn" id="btnCollapse" title="收起侧栏"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-collapse"/></svg></button>
+      <button class="icobtn" id="btnCollapse" title="收起侧栏" aria-label="收起侧栏" aria-controls="side" aria-expanded="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-collapse"/></svg></button>
     </div>
 
     <button class="newchat" id="btnNew">
@@ -97,11 +97,11 @@
   <!-- ================= 主区 ================= -->
   <main class="main">
     <header class="topbar">
-      <button class="icobtn" id="btnSide" title="侧栏" hidden><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><use href="#i-collapse"/></svg></button>
+      <button class="icobtn" id="btnSide" title="展开侧栏" aria-label="展开侧栏" aria-controls="side" aria-expanded="false" hidden><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><use href="#i-collapse"/></svg></button>
       <div class="tb-title" id="tbTitle">新会话</div>
       <div class="tb-right">
-        <button class="icobtn" id="btnDrawer" title="面板"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><use href="#i-panel"/></svg></button>
-        <button class="icobtn" id="btnSettings2" title="设置"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><use href="#i-settings"/></svg></button>
+        <button class="icobtn" id="btnDrawer" title="面板" aria-label="打开右侧面板" aria-controls="drawer" aria-expanded="false"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><use href="#i-panel"/></svg></button>
+        <button class="icobtn" id="btnSettings2" title="设置" aria-label="打开设置"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><use href="#i-settings"/></svg></button>
       </div>
     </header>
 
@@ -112,7 +112,7 @@
         <div class="sub" id="heroSub">零依赖智能体内核 · 记忆 / 工具 / 军团 / 自愈</div>
         <div class="quick" id="quick"></div>
       </section>
-      <div class="stream" id="stream" hidden><div class="col" id="col"></div></div>
+      <div class="stream" id="stream" hidden><div class="col" id="col" role="log" aria-live="polite" aria-relevant="additions text" aria-label="对话内容"></div></div>
     </div>
 
     <footer class="foot-wrap">
@@ -122,7 +122,7 @@
           <button class="chip" id="chipPerm"><span id="permLabel">标准模式</span><span class="cv"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><use href="#i-chev-d"/></svg></span></button>
         </div>
         <div class="inrow">
-          <textarea id="inp" rows="1" placeholder="描述你想要构建的内容 / 提问 / 输入指令…（@ 引用文件）"></textarea>
+          <textarea id="inp" rows="1" aria-label="消息输入框" placeholder="描述你想要构建的内容 / 提问 / 输入指令…（@ 引用工作区文件）"></textarea>
         </div>
         <div class="cfoot">
           <button class="icobtn ring" id="btnPlus" title="更多"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-plus"/></svg></button>
@@ -154,7 +154,7 @@
 
 <!-- ================= 设置 ================= -->
 <div class="mask" id="setMask">
-  <div class="modal">
+  <div class="modal" role="dialog" aria-modal="true" aria-label="设置" tabindex="-1">
     <nav class="mset">
       <div class="mtitle">设置</div>
       <button class="mrow active" data-s="general"><span class="ico"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-sliders"/></svg></span>通用设置</button>
@@ -177,7 +177,7 @@
 
 <!-- ================= 通用表单弹窗 ================= -->
 <div class="mask" id="formMask">
-  <div class="modal narrow">
+  <div class="modal narrow" role="dialog" aria-modal="true" aria-labelledby="formTitle" tabindex="-1">
     <div class="mhead">
       <span class="t" id="formTitle">编辑</span>
       <div class="grow"></div>

@@ -6,6 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { readJson, readText } from "../utils/store.js";
 import { warn } from "../utils/logger.js";
+import { isPlaceholder } from "./placeholder.js";
 
 // ---- 默认配置 (用户未写的字段用这些兜底) ----
 // 所有可配置项集中在这里, 用户看这一处就知道能定制什么
@@ -183,10 +184,12 @@ export function validateConfig(config) {
       if (!p || typeof p !== "object") { warnings.push(`providers[${i}] 不是对象`); return; }
       if (!p.id && !p.backend) warnings.push(`providers[${i}] 缺少 id`);
       if (p.backend === "http" && !p.base_url) warnings.push(`providers[${i}] (http 后端) 缺少 base_url`);
-      // 占位符校验: 模板残留 (REPLACE_WITH_YOUR_ENDPOINT 等) 视为未配置, 启动即警告, 避免静默失败
+      // 占位符校验: 模板残留 (REPLACE_WITH_YOUR_ENDPOINT / YOUR_LOCAL_MODEL_NAME 等) 视为未配置,
+      // 启动即警告, 避免静默失败。v1.0.8 (P2-3): 正则收敛到 config/placeholder.js 唯一真相源 ——
+      // 原内联正则漏了 `YOUR_*_MODEL` 形态, 恰好放过模板里的 lmstudio。
       for (const field of ["model", "base_url", "api_key"]) {
         const v = p[field];
-        if (typeof v === "string" && /REPLACE_WITH_|your.?endpoint|your[_-]?api[_-]?key/i.test(v)) {
+        if (isPlaceholder(v)) {
           warnings.push(`providers[${i}].${field} 仍是占位符 (${v.slice(0,40)}), 该 provider 实际不可用`);
         }
       }

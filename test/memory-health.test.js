@@ -74,3 +74,57 @@ test("mh: status 含 lastError", () => {
   assert.equal(s.lastError, "LLM 超时");
   assert.equal(s.recentFails, 1);
 });
+
+// 回归守卫 (2026-09-17): unhealthy 原先不可达 (status() 三元两分支都返回 HEALTHY)
+test("mh: 持续失败达 unhealthy 阈值 → unhealthy 三态可达", () => {
+  const mh = new MemoryHealthMonitor({ degradeAfter: 2, unhealthyAfter: 4 });
+  mh.record("compact", { ok: false });
+  mh.record("compact", { ok: false });
+  assert.equal(mh.status().overall, HEALTH.DEGRADED, "2 次为 degraded");
+
+  mh.record("compact", { ok: false });
+  mh.record("compact", { ok: false });
+  assert.equal(mh.unhealthy, true, "4 次进入 unhealthy");
+  assert.equal(mh.status().overall, HEALTH.UNHEALTHY, "unhealthy 可达");
+});
+
+test("mh: unhealthyAfter 默认取 degradeAfter 两倍", () => {
+  const mh = new MemoryHealthMonitor({ degradeAfter: 3 });
+  assert.equal(mh.unhealthyAfter, 6);
+  for (let i = 0; i < 3; i++) mh.record("compact", { ok: false });
+  assert.equal(mh.status().overall, HEALTH.DEGRADED, "3 次仍为 degraded");
+  for (let i = 0; i < 3; i++) mh.record("compact", { ok: false });
+  assert.equal(mh.status().overall, HEALTH.UNHEALTHY, "6 次升为 unhealthy");
+});
+
+test("mh: unhealthy 后成功可恢复 healthy", () => {
+  const mh = new MemoryHealthMonitor({ degradeAfter: 1 });
+  mh.record("compact", { ok: false });
+  mh.record("compact", { ok: false });
+  assert.equal(mh.status().overall, HEALTH.UNHEALTHY);
+  mh.record("compact", { ok: true });
+  assert.equal(mh.status().overall, HEALTH.HEALTHY, "成功即恢复");
+  assert.equal(mh.unhealthy, false);
+});
+
+test("mh: unhealthy 时 advice 标记 severe 且 skip 不变", () => {
+  const mh = new MemoryHealthMonitor({ degradeAfter: 1 });
+  mh.record("compact", { ok: false });
+  assert.equal(mh.advice().severe, false, "单次失败是普通降级");
+  mh.record("compact", { ok: false });
+  const a = mh.advice();
+  assert.equal(a.action, "degrade");
+  assert.equal(a.severe, true, "重度降级标记");
+  assert.ok(a.skip.includes("compact") && a.skip.includes("extract"), "仍为只写不压");
+});
+
+test("mh: status 暴露阈值与最差计数 (可观测)", () => {
+  const mh = new MemoryHealthMonitor({ degradeAfter: 2, windowMs: 1000 });
+  mh.record("extract", { ok: false });
+  const st = mh.status();
+  assert.equal(st.worstRecentFails, 1);
+  assert.equal(st.thresholds.degradeAfter, 2);
+  assert.equal(st.thresholds.unhealthyAfter, 4);
+  assert.equal(st.thresholds.windowMs, 1000);
+  assert.equal(st.totalFail, 1);
+});

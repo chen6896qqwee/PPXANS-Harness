@@ -2,6 +2,10 @@
 
 > 版本：v1 梳理稿　|　配套规范：`docs/RC1-SPEC.md`　|　本文件回答：**现有代码到底长成什么有机体了，缺哪几块**
 > 依据：RC1 规范 §1 八大系统 / §2 动态行为层 / §3 生殖发育系统。所有对标以实测源码为准（2026-08-21 全量核对）。
+>
+> ⚠ **时效说明（2026-09-17 复核）**：本文是对 **2026-08-21 代码状态**的快照。此后有两处变化需注意：
+> ① **v2.5.0 已移除全部外部引擎底座**（openclaw / dsh），② 器官成熟度表中标注的 P0–P4 缺口当时已随文落地。
+> 判断当前状态请以 [PROJECT-OVERVIEW.md](PROJECT-OVERVIEW.md)（v2.7.0 实测）为准。
 
 ---
 
@@ -23,7 +27,7 @@
 | `src/core/` | `policy.js` 工具循环策略（循环驱动/探索熔断/重复检测/溢出降档/错误重试/超时重试）+ `trace.js` 事件流（AsyncLocalStorage traceId 贯穿 + events-*.jsonl） |
 | `src/services/` | `memory-service.js` 记忆协调（L1提炼/L2归档/L3画像/经验/检索 + afterTurn 升降级协调器）+ `learning-service.js` 自我学习（refine/refineSkill/upgradeSkill，验证闸门保留） |
 | `src/mode/` (7模式) | react(默认工具循环) / single / plan-exec / router / blackboard / graph / legion — 对应 RC1 ①的规划/决策/反思多形态 |
-| `src/llm/` | client(多后端http/openclaw/deepseek) + retry(瞬态分类重试) + fence(纯文本围栏) + dsml + embedder |
+| `src/llm/` | client(自研 http 单底座 —— v2.5.0 起已移除 openclaw/deepseek 外部引擎) + retry(瞬态分类重试) + fence(纯文本围栏) + dsml + embedder |
 | `src/ans/values.js` | 【核心价值·不可违背】注入 system prompt 最前 — 已实现 RC1 ⑦→① 的"价值注入" |
 | `src/ans/lifecycle.js` | 生命周期状态机 born→growing→mature(+evolving/reproducing 计数) — 已实现 RC1 §3 |
 | `src/ans/proactive.js` | 主动任务生成 pendingTasks() — 已实现 ⑦"主动程度"调节 |

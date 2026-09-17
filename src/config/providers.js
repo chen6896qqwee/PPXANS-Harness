@@ -9,6 +9,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { withFileLock } from "../utils/store.js";
 import { info, warn, error } from "../utils/logger.js";
+import { isPlaceholder } from "./placeholder.js";
 
 // 提供方字段白名单 (写入磁盘时的过滤)
 const PROVIDER_KEYS = [
@@ -74,10 +75,11 @@ export function validateProvider(p) {
   if (p.vision != null && typeof p.vision !== "boolean") return "vision 必须是布尔";
   if (p.dsml != null && typeof p.dsml !== "boolean") return "dsml 必须是布尔";
   if (p.timeout_ms != null && (!Number.isFinite(p.timeout_ms) || p.timeout_ms < 1000)) return "timeout_ms 至少 1000ms";
-  // 占位符校验: 模板残留 (如 REPLACE_WITH_YOUR_ENDPOINT) 视为未配置, 避免配了 key 却静默失败
+  // 占位符校验: 模板残留 (如 REPLACE_WITH_YOUR_ENDPOINT / YOUR_LOCAL_MODEL_NAME) 视为未配置,
+  // 避免配了 key 却静默失败。v1.0.8 (P2-3): 判定收敛到 config/placeholder.js 唯一真相源。
   for (const field of ["model", "base_url", "api_key"]) {
     const v = p[field];
-    if (typeof v === "string" && /REPLACE_WITH_|your_?endpoint|your[_-]?api[_-]?key/i.test(v)) {
+    if (isPlaceholder(v)) {
       return `${field} 仍是占位符 (${v.slice(0, 40)}), 请替换为真实值`;
     }
   }

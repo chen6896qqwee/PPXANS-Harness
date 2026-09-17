@@ -5,24 +5,36 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { FactStore } from "../src/memory/fact-store.js";
+import { PersonaStore } from "../src/memory/l3.js";
+import { Experience } from "../src/memory/experience.js";
 import { exportMemorySnapshot, mergeSnapshotBack, hasSnapshot } from "../src/memory/fork.js";
 
 function tmpDir() { return fs.mkdtempSync(path.join(os.tmpdir(), "ppx-fork-")); }
 
-// 造一个最小 agent 桩 (含 facts / experience / personaStore 形状)
+// 造一个最小 agent —— 用**真实** PersonaStore / Experience 实例, 不用手写桩。
+// 修复 (2026-09-17): 原桩写成 { personaStore: { read } , experience: { list } },
+//   但真实 PersonaStore 并没有 read() —— 桩与真实接口漂移, 导致 fork 快照静默降级
+//   (persona.md / experience.md 从未生成) 长期没被测出来。
+//   改为真实实例后, 接口再漂移会直接测失败。
 function makeAgentStub(dir) {
-  const facts = new FactStore(path.join(dir, "data"), {});
-  facts.add("用户喜欢量化投资", { source: "test" });
-  facts.add("止损线 5%", { source: "test" });
-  facts.add("Python 项目经验丰富", { source: "test" });
-  return {
-    dataDir: dir,
-    facts,
-    personaStore: { read: () => "# 画像\n- 风格: 直接务实\n" },
-    experience: {
-      list: () => [{ lesson: "失败先查审计链" }, { lesson: "验证优先于声称" }],
-    },
-  };
+  const dataDir = path.join(dir, "data");
+  const facts = new FactStore(dataDir, {});
+  facts.add("用户喜欢量化投资", { source: "manual" });
+  facts.add("止损线 5%", { source: "manual" });
+  facts.add("Python 项目经验丰富", { source: "manual" });
+
+  const personaStore = new PersonaStore(dataDir);
+  personaStore.buildUserPersona(facts.list(), { force: true });
+  personaStore.buildAgentPersona(
+    [{ lesson: "失败先查审计链" }, { lesson: "验证优先于声称" }],
+    { force: true }
+  );
+
+  const experience = new Experience(dataDir);
+  experience.learn({ task: "排查失败", outcome: "定位到审计链", lesson: "失败先查审计链" });
+  experience.learn({ task: "交付前", outcome: "先跑测试", lesson: "验证优先于声称" });
+
+  return { dataDir: dir, facts, personaStore, experience };
 }
 
 test("fork: 导出记忆快照到子 dataDir", () => {
@@ -46,6 +58,29 @@ test("fork: 快照文件内容可读", () => {
   exportMemorySnapshot({ agent, toDataDir: child });
   const text = fs.readFileSync(path.join(child, "memory", "snapshot", "facts.md"), "utf8");
   assert.ok(text.includes("量化投资"), "事实内容在快照里");
+});
+
+// 回归守卫 (2026-09-17): persona / experience 快照必须带**真实内容**,
+// 而不只是"文件存在" —— 原缺陷正是文件永不生成却无人察觉。
+test("fork: persona 与 experience 快照带真实内容 (接口同步回归)", () => {
+  const parent = tmpDir();
+  const child = tmpDir();
+  const agent = makeAgentStub(parent);
+  const { wrote } = exportMemorySnapshot({ agent, toDataDir: child, factsLimit: 10, experienceLimit: 10 });
+
+  assert.equal(wrote.persona, true, "画像已导出");
+  assert.equal(wrote.experience, 2, "经验已导出");
+
+  const persona = fs.readFileSync(path.join(child, "memory", "snapshot", "persona.md"), "utf8");
+  assert.ok(persona.includes("量化投资"), "persona.md 含真实用户画像内容");
+  assert.ok(persona.includes("失败先查审计链"), "persona.md 含真实 agent 人格内容");
+
+  const exp = fs.readFileSync(path.join(child, "memory", "snapshot", "experience.md"), "utf8");
+  assert.ok(exp.includes("失败先查审计链"), "experience.md 含真实经验内容");
+
+  // 接口同步守卫: fork 依赖的方法必须在真实类上存在
+  assert.equal(typeof agent.personaStore.userPersona, "function", "PersonaStore.userPersona 存在");
+  assert.equal(typeof agent.experience.list, "function", "Experience.list 存在");
 });
 
 test("fork: merge 回主记忆 (去重)", () => {

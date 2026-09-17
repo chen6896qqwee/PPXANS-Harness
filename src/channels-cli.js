@@ -13,11 +13,13 @@ import { ensureUTF8Console } from "./utils/winutf8.js";
 import path from "node:path";
 import readline from "node:readline/promises";
 import {
-ensureUTF8Console();
   CHANNEL_SCHEMAS, readChannels, listChannels,
   updateChannel, setChannelEnabled, removeChannel,
 } from "./config/channels.js";
 import { ChannelManager } from "./channels/index.js";
+
+// 必须在任何 console 输出之前完成代码页切换 (Windows 中文控制台)
+ensureUTF8Console();
 
 const args = process.argv.slice(2);
 let root = process.cwd();

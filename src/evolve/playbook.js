@@ -6,6 +6,9 @@
 //   - 门禁回滚: 任何进化必须过回归基准才 commit, 否则自动 rollback
 // 仅借鉴思想, 源码自研。核心合并/裁剪/门禁纯代码 (可测), LLM 提炼教训走可选 adapter (无 LLM 时跳过)。
 // 与 LearningService.refine (失败→经验库) 互补: refine 沉淀经验, playbook 反哺系统提示词 (零 token 成本时为空)。
+// ⚠ 接线状态 (2026-09-17 核对): 已由 evolvePlugin 装配为 ctx.provide("playbook"), 但**无内置消费方**
+//   —— 没有代码把 playbook bullets 注入 system prompt, 也没有代码在对话后产生 delta 操作。
+//   属"引擎就绪、链路未接"; 待接入 (注入 + delta 生成) 才算生效。
 import fs from "node:fs";
 import path from "node:path";
 import { ensureDir, readText, writeText } from "../utils/store.js";

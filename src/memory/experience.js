@@ -107,6 +107,24 @@ export class Experience {
     });
   }
 
+  // 经验清单 (公开读 API): 默认按命中次数降序, 同次数按时间新→旧
+  // 供 fork 快照 / 外部观测使用 (调用方无需触碰 this.lessons 内部数组)
+  list({ limit = 0, sort = "uses" } = {}) {
+    const all = [...this.lessons];
+    if (sort === "uses") {
+      all.sort((a, b) => (b.uses || 0) - (a.uses || 0) || new Date(b.ts || 0) - new Date(a.ts || 0));
+    } else if (sort === "ts") {
+      all.sort((a, b) => new Date(b.ts || 0) - new Date(a.ts || 0));
+    }
+    const n = Number(limit) || 0;
+    return n > 0 ? all.slice(0, n) : all;
+  }
+
+  // 条目数 (可观测)
+  count() {
+    return this.lessons.length;
+  }
+
   _prune() {
     // 最多保留 200 条
     if (this.lessons.length > 200) {

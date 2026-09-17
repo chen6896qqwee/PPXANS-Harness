@@ -18,7 +18,9 @@ import { logicalDay } from "../utils/store.js";
 import { loadConfig } from "../config/index.js";
 import { info, warn, error } from "../utils/logger.js";
 import { Context, compose, loadPlugins } from "../plugin/index.js";
-import { builtinPlugins, resolveLLM, resolveAllLLMs } from "../plugin/builtin.js";
+import { builtinPlugins, resolveLLM, resolveAllLLMs, isUsableProvider } from "../plugin/builtin.js";
+// P2-3: 占位符判定与路由共用唯一真相源, 避免"启动告警"和"实际选模型"两套口径漂移
+import { isPlaceholder, hasPlaceholderField } from "../config/placeholder.js";
 import { registerMcpTools } from "../mcp/index.js";
 import { Auditor } from "../audit/verifier.js";
 // ANS 独立模块 (可更换): 价值对齐 / 自主任务生成 / 生命周期
@@ -43,6 +45,9 @@ const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..")
 // (工具结果裁剪 trimToolResult / 溢出判定 isOverflowError / LLM 失败提示 LLM_FAILED_HINT
 //  已迁至 src/core/policy.js, 本文件经 re-export 保持兼容)
 // (多模态视觉 content 注入 visionUserContent 已迁至 src/agent/prompts.js)
+
+// P2-2 降级提示标记: 追加在用户可见回复末尾的哨兵串 (历史/记忆写入前按它剥离)
+const FALLBACK_NOTICE_TAG = "\n\n> ⚠ "; 
 
 export class PPXAgent {
   constructor({ root = ROOT, configFile = null, plugins = [], dataDir = null, globalDataDir = null } = {}) {
@@ -114,8 +119,10 @@ export class PPXAgent {
     // 主动通知 + 中断状态
     this._notifyCb = null;
     this._onToolEvent = null; // 工具事件回调
+    this._toolCallSeq = 0; // 工具调用序号: 给 start/done 事件生成唯一 id, 供 UI 精确配对
     this._interrupted = false;
     this._lastTurnUsedTools = false;
+    this._lastFallback = null; // P2-2: 最近一次 provider 降级事实 (在本轮内有效, 用完即清)
     this._mcp = null; // MCP 连接句柄 (connectMcp 后赋值)
     this._proactiveTimer = null; // 主动任务生成定时器
     // 生命周期 (ANS 独立模块): born → growing → mature → evolving / reproducing
@@ -240,6 +247,7 @@ export class PPXAgent {
     return runWithTrace(async () => {
     this.clearInterrupt(); // 新一轮对话开始, 复位上一轮的中断状态
     this.bus?.emit("chat/user", { userMsg, sessionKey }, { source: "agent.chat" });
+    this._lastFallback = null; // P2-2: 只关心"本轮"是否降级, 先清上次残留
     let reply;
     // 内核自主决策: 高置信简单指令本地处理, 不调 LLM
     const local = (this.config.agent?.localIntent !== false) ? await this._localIntent(userMsg) : null;
@@ -271,10 +279,17 @@ export class PPXAgent {
         this.bus?.emit("chat/reply", { reply }, { source: "agent.chat" });
     this._lifecycleTick();
     this.evolve && this.evolve.tick();
+    // P2-2: 本轮若发生过 provider 降级, 在回复末尾附可见提示
+    //   (放在 persist 之后 —— 写入会话历史/记忆的始终是模型原文, 提示只对当轮用户可见)
+    if (this._lastFallback) {
+      const fb = this._lastFallback;
+      this._lastFallback = null;
+      reply = String(reply ?? "") + this._fallbackNotice(fb);
+      this.notify(`[降级] ${fb.from} → ${fb.to}`);
+    }
     return reply;
     }, { sessionKey, channel: "chat", userMsg: String(userMsg).slice(0, 200) });
   }
-
   // 生命周期: 每次对话计数 + 阶段转换 (委托 ans/lifecycle 模块)
   _lifecycleTick() {
     this.lifecycle.tick();
@@ -356,8 +371,9 @@ export class PPXAgent {
       this._onToolEvent = prevCb;
       this._onStepEvent = prevStepCb;
     }
-    this._pushTurn(sessionKey, String(userMsg), reply);
-    await this.memory.recordTurn(userMsg, reply);
+    this._pushTurn(sessionKey, String(userMsg), this._stripFallbackNotice(reply));
+    await this.memory.recordTurn(userMsg, this._stripFallbackNotice(reply));
+    this._lastFallback = null; // 降级提示不影响后续轮次
     return reply;
     }, { sessionKey, channel: "chatStream" });
   }
@@ -392,29 +408,78 @@ export class PPXAgent {
       }
     }
     let lastErr = null;
+    // v1.0.8 修复 (P2-2): 记录"本轮发生了降级切换"这一事实并对外广播。
+    //   原实现只在日志里 warn 一句, 用户侧完全静默 —— 拿到的是备用模型的回答却无从感知。
+    //   注意: **不改动返回值** (回退语义本身保持透明, chaos 测试锁死了成功时返回原始文本)。
+    const failed = [];
     for (const client of clients) {
       try {
-        return await this._llmWithTools(seedMessages, client);
+        const out = await this._llmWithTools(seedMessages, client);
+        if (failed.length) {
+          this._lastFallback = {
+            from: failed[0].model,
+            to: client.model,
+            reason: failed[0].message,
+            chain: failed.map((f) => f.model),
+            ts: Date.now(),
+          };
+          this.bus?.emit("llm/fallback", this._lastFallback, { source: "agent._llmWithFallback" });
+          warn(`provider 降级: ${this._lastFallback.from} 不可用 → 已切至 ${client.model} (${failed[0].message})`);
+        }
+        return out;
       } catch (e) {
         lastErr = e;
+        failed.push({ model: client.model, message: e.message });
         warn("provider 失败, 切换下一个:", client.model, e.message);
       }
     }
     throw lastErr || new Error("所有 provider 均失败");
   }
 
+  // 降级原因"人话化": 原始错误常带整段 JSON 报错体 (含 key 片段/内部字段),
+  // 既不适合直接给用户看, 也没必要。这里归一到几类常见故障。
+  _shortReason(msg) {
+    const s = String(msg ?? "");
+    if (/40[13]|unauthor|api.?key|authentication|invalid_request_error/i.test(s)) return "鉴权失败 (key 无效或已过期)";
+    if (/429|rate.?limit|too many requests|quota|insufficient/i.test(s)) return "限流或额度不足";
+    if (/timeout|timed out|abort|ETIMEDOUT/i.test(s)) return "请求超时";
+    if (/ECONNREFUSED|ENOTFOUND|ECONNRESET|fetch failed|socket hang up/i.test(s)) return "连接失败";
+    if (/\b50[0-9]\b/.test(s)) return "服务端错误";
+    const brief = s.replace(/\{[\s\S]*$/, "").replace(/\s+/g, " ").trim();
+    return (brief || "调用失败").slice(0, 60);
+  }
+
+  // 降级提示文案 (用户可见) —— 由 chat/chatStream 在回复末尾追加
+  _fallbackNotice(fb) {
+    if (!fb) return "";
+    const chain = fb.chain && fb.chain.length > 1 ? ` (失败链: ${fb.chain.join(" → ")})` : "";
+    return `${FALLBACK_NOTICE_TAG}主模型 ${fb.from} 不可用: ${this._shortReason(fb.reason)}。本轮回答已自动切换到 ${fb.to}${chain}。`;
+  }
+
+  // 从回复中剥掉降级提示: 保证写入会话历史/记忆的是模型原文, 提示只面向当轮用户可见
+  _stripFallbackNotice(text) {
+    const s = String(text ?? "");
+    const i = s.indexOf(FALLBACK_NOTICE_TAG);
+    return i === -1 ? s : s.slice(0, i).trimEnd();
+  }
+
   // 统一工具执行入口 (http 原生 tool_calls + 文本工具调用修复) [P0#1]
   // v1.0.7: 移除未使用的 llmInstance 死参数, 所有工具执行统一走此入口 (trace/事件只此一份)
+  // 2026-09-17 体检修复: start/done 事件带唯一 callId。
+  //   原先 Web UI 只能按"工具名"匹配起止事件, 同一轮里出现两个 read_file 时,
+  //   后到的事件会回填到前一张卡片上 (public/app.js 旧实现注释里也自述了这个缺陷)。
   async _runTool(name, args) {
     const t0 = Date.now();
     this._lastTurnUsedTools = true;
-    this.bus?.emit("tool/call", { name, args }, { source: "agent._runTool" });
-    if (this._onToolEvent) { try { this._onToolEvent({ type: "start", tool: name, args, ts: Date.now() }); } catch {} }
+    const callId = `t${++this._toolCallSeq}-${t0.toString(36)}`;
+    this.bus?.emit("tool/call", { name, args, callId }, { source: "agent._runTool" });
+    if (this._onToolEvent) { try { this._onToolEvent({ type: "start", id: callId, tool: name, args, ts: Date.now() }); } catch {} }
     const result = await this.tools.call(name, args, { agent: this, timeoutMs: Number(this.config.agent?.tool_timeout_ms) || 0 });
     const ok = !result.startsWith(TOOL_ERROR_PREFIX);
     if (name === "spawn_agent") this.tracer.event("agent/spawn", { args });
     this.bus?.emit("tool/result", {
       name,
+      callId,
       ok,
       args,
       durationMs: Date.now() - t0,
@@ -428,7 +493,7 @@ export class PPXAgent {
       durationMs: Date.now() - t0,
       error: ok ? null : result,
     });
-    if (this._onToolEvent) { try { this._onToolEvent({ type: "done", tool: name, args, ok, durationMs: Date.now() - t0, result: result.slice(0, 300), ts: Date.now() }); } catch {} }
+    if (this._onToolEvent) { try { this._onToolEvent({ type: "done", id: callId, tool: name, args, ok, durationMs: Date.now() - t0, result: result.slice(0, 300), ts: Date.now() }); } catch {} }
     return result;
   }
 
@@ -469,6 +534,37 @@ export class PPXAgent {
     } catch { return Number(this.config.agent?.tool_timeout_ms) || 0; }
   }
 
+  // 工具原始结果 → 人类可读文本 (仅供 _localIntent 直接回给用户时使用)
+  // v1.0.8 修复 (P2-1): 原实现 `return \`[工具] ${await this.tools.call(...)}\`` 直接拼字符串,
+  //   把内部标记 `[工具]`、错误前缀与原始 JSON (如 {"ok":true,"id":"..."}) 原封不动喷给用户。
+  //   这一层做"外向化": 错误 → 可读失败语; JSON → 抽取载荷字段; 数组 → 逐项罗列; 其余原样。
+  //   注意: 这是**用户可见文本**的专用通道, 模型侧上下文里的工具结果不走这里 (保持原始保真)。
+  _humanToolResult(raw) {
+    const s = String(raw ?? "").trim();
+    if (!s) return "(没有返回内容)";
+    if (s.startsWith(TOOL_ERROR_PREFIX)) {
+      return "没办成: " + s.slice(TOOL_ERROR_PREFIX.length).trim();
+    }
+    if (s.startsWith("{") || s.startsWith("[")) {
+      let obj;
+      try { obj = JSON.parse(s); } catch { return s; }
+      if (Array.isArray(obj)) {
+        return obj.length
+          ? obj.map((x) => (typeof x === "string" ? x : (x && (x.name || x.path || x.title)) || JSON.stringify(x))).join("\n")
+          : "(空)";
+      }
+      if (obj && typeof obj === "object") {
+        if (obj.error) return "没办成: " + String(obj.error);
+        for (const k of ["text", "content", "message", "result", "data", "output"]) {
+          const v = obj[k];
+          if (typeof v === "string" && v.trim()) return v;
+        }
+      }
+      return s; // 结构无法识别: 原样返回, 不丢信息
+    }
+    return s;
+  }
+
   // 离线工具路由: 无 LLM 时识别简单工具指令
   // ---- 内核自主决策: 本地意图预判层 (P2-7) ----
   // 高置信简单指令(问候/时间/记忆/明确工具)本地处理, 不调 LLM, 省成本更快
@@ -483,7 +579,7 @@ export class PPXAgent {
     }
     // 时间/日期
     if (/^(现在)?(几点|时间|日期|几号|今天|星期几)[!?。？]*$/i.test(m)) {
-      return `[工具] ${await this.tools.call("get_time", {})}`;
+      return `现在是 ${this._humanToolResult(await this.tools.call("get_time", {}))}`;
     }
     // 记忆查询: 你记得XXX / 上次聊过XXX (P1: LLM 查询扩展 + RRF 融合补语义召回)
     if (/^(你)?(记得|还记得|上次聊过|关于)[:：]?\s*(.+)/i.test(m)) {
@@ -493,12 +589,17 @@ export class PPXAgent {
     }
     // 记住 XX
     const add = m.match(/^记住[:：]\s*(.+)$/i);
-    if (add) return `[工具] ${await this.tools.call("memory_add", { content: add[1].trim() })}`;
+    if (add) {
+      const content = add[1].trim();
+      const r = String(await this.tools.call("memory_add", { content }) ?? "");
+      if (r.startsWith(TOOL_ERROR_PREFIX) || /"error"\s*:/.test(r)) return "没记上: " + this._humanToolResult(r);
+      return `好, 记下了: ${content}`;
+    }
     // 读文件 / 列目录 (明确工具指令)
     const read = m.match(/^读文件\s+(.+)$/i);
-    if (read) return `[工具] ${await this.tools.call("read_file", { path: read[1].trim() })}`;
+    if (read) return this._humanToolResult(await this.tools.call("read_file", { path: read[1].trim() }));
     const list = m.match(/^列出?\s+(\S+)?$/i);
-    if (list) return `[工具] ${await this.tools.call("list_dir", { path: list[1] || "." })}`;
+    if (list) return this._humanToolResult(await this.tools.call("list_dir", { path: list[1] || "." }));
     return null;
   }
 
@@ -579,6 +680,10 @@ export class PPXAgent {
         enabled: tools.filter((t) => t.enabled).length,
         list: tools.map((t) => ({ name: t.name, enabled: t.enabled, category: t.category })),
       },
+      // 策略订阅者熔断状态 (2026-09-17 接入 circuit-breaker 后可观测): 只列非闭合项, 正常时为空数组
+      policyGuard: this.tools && typeof this.tools.policyStatus === "function"
+        ? this.tools.policyStatus().filter((s) => s.state && s.state !== "closed")
+        : [],
       skills: this.skills && typeof this.skills.list === "function"
         ? this.skills.list().map((s) => ({ id: s.id, description: s.description }))
         : [],
@@ -632,20 +737,25 @@ export class PPXAgent {
 
   // 发布首启引导: 未配置任何可用模型时明确提示 (不阻断运行)
   // 默认本地优先 (agent.model_preference=local), 有本地模型或云端 key 即不告警
+  // v1.0.8 修复 (P2-3): 原判定自己手搓了一套"有本地/有云端key"逻辑, 既不看占位符也不看 model,
+  //   于是模板里 lmstudio(base_url=127.0.0.1, model=YOUR_LOCAL_MODEL_NAME) 会把告警吞掉 ——
+  //   用户端表现是"启动一切正常, 但每句话都在偷偷降级"。现改为直接复用路由的可用判定,
+  //   让"启动告警"与"实际选模型"共用一个口径, 并明确指出哪些条目还是占位符。
   _warnMissingCloudApi() {
     const provs = (this.config && this.config.providers) || [];
-    const isLocal = (p) => /127\.0\.0\.1|localhost|lm-studio|ollama/i.test(p.base_url || "");
-    const cloud = provs.filter((p) => !isLocal(p));
-    const hasCloudKey = cloud.some((p) => p.api_key || (p.api_key_env && process.env[p.api_key_env]));
-    const hasLocal = provs.some(isLocal);
-    // 默认本地优先(agent.model_preference=local): 有本地模型即满足运行, 不告警(本地测试正用本地模型)
-    if (hasLocal) return;
-    // 无本地但配了云端 key → 正常走云端, 不告警
-    if (hasCloudKey) return;
-    // 任何可用模型都没有 → 必须提示, 否则对话不可用
+    const usable = provs.filter((p) => { try { return isUsableProvider(p); } catch { return false; } });
+    if (usable.length) return;
+    // 全都不可用: 先点出"看着配了其实是模板占位"的条目, 再给通用引导
+    const stubbed = provs.filter((p) => hasPlaceholderField(p));
+    if (stubbed.length) {
+      const detail = stubbed
+        .map((p) => `${p.id || "?"}[${["model", "base_url", "api_key"].filter((f) => isPlaceholder(p[f])).join("/")}]`)
+        .join(", ");
+      warn(`以下 provider 仍是模板占位符, 已按"未配置"处理: ${detail}。请替换为真实值后重启。`);
+    }
     warn(
       "未检测到任何可用模型。皮皮虾默认本地优先(agent.model_preference=local), 需至少满足一项:\n" +
-      "  1) 启动本地模型服务 (LM Studio 等, 127.0.0.1 即识别)\n" +
+      "  1) 启动本地模型服务 (LM Studio 等, 127.0.0.1 即识别) **并把 model 改成该服务里真实存在的模型名**\n" +
       "  2) 配置云端大模型 API key: OPENAI_API_KEY | DEEPSEEK_API_KEY | VOLCENGINE_API_KEY(需填 endpoint) | DASHSCOPE_API_KEY\n" +
       "  3) 或显式设 agent.model_preference=cloud 后走云端 key\n" +
       "详见 README「快速开始」模型接入节。"

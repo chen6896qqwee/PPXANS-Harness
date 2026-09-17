@@ -4,8 +4,14 @@
 //   安全策略 (命令守卫/免疫闸门/防注入) 挂到工具执行唯一收口, 成为架构不变量而非可选行为
 import { info } from "../utils/logger.js";
 import { normalizeMeta, runWithPolicy, toDescriptor, TOOL_ERROR_PREFIX } from "./seam.js";
+// 熔断器 (src/bus/): 保护策略链不被故障订阅者反复拖累 —— 这正是该模块注释声明的设计意图。
+// 接线前它是"完整实现但零消费者"的预留件 (2026-09-17 接入)。
+import { CircuitBreaker } from "../bus/circuit-breaker.js";
 
 export { TOOL_ERROR_PREFIX };
+
+// 策略订阅者默认熔断参数: 60s 窗口内 3 次异常 → 熔断, 冷却 10s 后放行单个探测
+const DEFAULT_SUBSCRIBER_BREAKER = { threshold: 3, windowMs: 60000, cooldownMs: 10000 };
 
 // ---- Deny-Wins 决策合并 (HookBus consolidate 语义) ----
 // 多个策略订阅者对同一工具调用给出冲突决策时:
@@ -84,10 +90,21 @@ export class ToolCatalog {
   // ---- 策略订阅者 (P0): 工具执行唯一收口上的安全策略链 ----
   // fn(name, args, ctx) -> Promise<{decision:'allow'|'deny'|'ask', reason?, priority?}> | null (null/undefined = 弃权)
   // priority: 高者优先 (合并冲突决策时取高优先级 reason); 默认 0
-  // 订阅者异常不拖垮工具执行: 记日志并视同弃权 (fail-open), 但可被上层熔断器保护 (见 src/bus/circuit-breaker.js)
-  addPolicySubscriber(fn, { priority = 0, name = "" } = {}) {
+  // 订阅者异常不拖垮工具执行: 记日志并视同弃权 (fail-open), 且由 per-subscriber 熔断器兜底 ——
+  //   连续异常达阈值后进入熔断期, 期间该订阅者直接跳过错开 (不再反复调用 + 不再刷日志), 冷却后半开探测。
+  addPolicySubscriber(fn, { priority = 0, name = "", breaker = null } = {}) {
     if (typeof fn !== "function") throw new Error("策略订阅者需为函数");
-    const sub = { fn, priority: Number(priority) || 0, name: name || `policy-${this.policySubscribers.length + 1}` };
+    const sub = {
+      fn,
+      priority: Number(priority) || 0,
+      name: name || `policy-${this.policySubscribers.length + 1}`,
+      // fail-closed: 熔断期 before() 返回 {allowed:false}, 由策略链跳过该订阅者 (弃权) 而非放行
+      breaker: new CircuitBreaker({
+        ...DEFAULT_SUBSCRIBER_BREAKER,
+        ...(breaker || {}),
+        failPolicy: "fail-closed",
+      }),
+    };
     this.policySubscribers.push(sub);
     return () => {
       const i = this.policySubscribers.indexOf(sub);
@@ -95,16 +112,35 @@ export class ToolCatalog {
     };
   }
 
+  // 策略订阅者熔断状态 (可观测): 谁在闭合/熔断/半开, 调用数/熔断次数/窗口内失败数
+  policyStatus() {
+    return this.policySubscribers.map((s) => ({
+      name: s.name,
+      priority: s.priority,
+      ...(s.breaker && typeof s.breaker.stats === "function" ? s.breaker.stats() : {}),
+    }));
+  }
+
   // 未注入策略订阅者时零开销 (空数组循环天然跳过)
   async _runPolicyChain(name, args, ctx) {
     if (!this.policySubscribers.length) return { decision: "allow", reason: null, priority: 0 };
     const results = await Promise.all(this.policySubscribers.map(async (sub) => {
+      const breaker = sub.breaker;
+      // 熔断期: 跳过故障订阅者 (视同弃权), 避免反复调用 + 日志刷屏
+      const verdict = breaker && typeof breaker.before === "function" ? breaker.before() : { allowed: true };
+      if (!verdict.allowed) {
+        info(`[policy] 订阅者 ${sub.name} 熔断中 (${verdict.reason}), 本轮弃权`);
+        return null;
+      }
       try {
         const d = await sub.fn(name, args, ctx);
+        breaker?.after?.(true);
         if (!d || !d.decision) return null;
         return { decision: d.decision, reason: d.reason || null, priority: d.priority ?? sub.priority };
       } catch (e) {
-        info(`[policy] 订阅者 ${sub.name} 异常, 视同弃权: ${e?.message || e}`);
+        breaker?.after?.(false);
+        const st = breaker && typeof breaker.state === "string" ? breaker.state : "closed";
+        info(`[policy] 订阅者 ${sub.name} 异常, 视同弃权: ${e?.message || e}${st === "open" ? " (已熔断)" : ""}`);
         return null;
       }
     }));

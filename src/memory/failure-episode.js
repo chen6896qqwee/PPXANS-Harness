@@ -3,6 +3,9 @@
 //   每次失败存结构化 episode (错误类型/根因/修复/置信度), 下次相似故障检索历史辅助诊断, 自愈不再从零推理。
 // 与经验库 (Experience, L4) 互补: 经验库是"学到的教训", 本模块是"故障的结构化病历" (可检索、可回放)。
 // 纯代码可测, 检索用词法相似 (零依赖), 可升级 embedding。
+// ⚠ 接线状态 (2026-09-17 核对): 已由 evolvePlugin 装配为 ctx.provide("failures"), 但**无内置消费方**
+//   —— 没有代码在工具失败时写入 episode, 也没有代码在诊断时检索它。属"能力就绪、链路未接"。
+//   当前失败沉淀走的是经验库 (Experience) + refine 闭环; 本模块待接入才算生效。
 import fs from "node:fs";
 import path from "node:path";
 import { ensureDir, writeText } from "../utils/store.js";

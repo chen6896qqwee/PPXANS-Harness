@@ -11,19 +11,21 @@
 //   const ok  = isUsableProvider(prov);         // 是否可用(过滤占位符)
 //   const candid = await orderByHealth(all);    // 异步健康排序(可选, 给启动探测用)
 import { LLMClient } from "./client.js";
+// 占位符判定收敛到 config/placeholder.js (唯一真相源) —— v1.0.8 修复 P2-3:
+// 原先此处自带一份正则且漏了 `YOUR_*_MODEL` 形态, 导致模板里的 lmstudio
+// (model=YOUR_LOCAL_MODEL_NAME, base_url=127.0.0.1) 被判为"零配置可用"并选为主模型。
+import { isPlaceholder } from "../config/placeholder.js";
 
-// 占位符识别: 用户没填的 model/endpoint/key 标记 (OpenAI-cli 模板常留 REPLACE_WITH_YOUR_*)
-const PLACEHOLDER_RE = /REPLACE_WITH_YOUR_|YOUR_ENDPOINT|YOUR_API_KEY|sk-xxx|<your_/i;
 // 本地推理服务地址特征
 const LOCAL_HOST_RE = /127\.0\.0\.1|localhost|lm-studio|ollama/i;
 
 function hasRealKey(p) {
   // 显式 api_key 且非占位 -> 真 key
-  if (p.api_key && !PLACEHOLDER_RE.test(String(p.api_key))) return true;
+  if (p.api_key && !isPlaceholder(String(p.api_key))) return true;
   // env 引用且 env 里设了非空值 -> 真 key
   if (p.api_key_env && process.env[p.api_key_env]) {
     const v = String(process.env[p.api_key_env]);
-    return !!v && !PLACEHOLDER_RE.test(v);
+    return !!v && !isPlaceholder(v);
   }
   return false;
 }
@@ -35,8 +37,9 @@ function isLocal(p) {
 // 占位符过滤 + 可用判定 (与旧 isUsableProvider 同语义, 增加占位符排除)
 export function isUsableProvider(prov) {
   if (!prov) return false;
-  // 占位 model 的死配置直接判不可用 (volcengine 的 REPLACE_WITH_YOUR_ENDPOINT 等)
-  if (PLACEHOLDER_RE.test(String(prov.model || ""))) return false;
+  // 占位 model/base_url 的死配置直接判不可用
+  // (volcengine 的 REPLACE_WITH_YOUR_ENDPOINT, 以及模板里 lmstudio 的 YOUR_LOCAL_MODEL_NAME)
+  if (isPlaceholder(prov.model) || isPlaceholder(prov.base_url)) return false;
   if (hasRealKey(prov)) return true;          // 云端真 key
   if (isLocal(prov)) return true;              // 本地推理零配置可用
   return false;
