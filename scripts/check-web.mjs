@@ -33,31 +33,33 @@ const missId = [...new Set(refs)].filter((r) => !allIds.has(r));
 if (missId.length) fail("$() 引用了不存在的 id: " + missId.join(", "));
 else ok(`$() 引用 ${new Set(refs).size} 个 id, 全部存在于 DOM 或 JS 模板`);
 
-// 3) 括号 / 引号配平 (粗检, 排除字符串内容带来的误判)
-const pairs = [["{", "}"], ["(", ")"], ["[", "]"]];
-pairs.forEach(([a, b]) => {
-  const ca = (js.match(new RegExp("\\" + a, "g")) || []).length;
-  const cb = (js.match(new RegExp("\\" + b, "g")) || []).length;
-  if (ca !== cb) fail(`app.js 中 ${a}${b} 数量不等: ${ca} vs ${cb}`);
-});
-if (!bad) ok("app.js 括号配平");
+// 3) app.js 语法校验 (真解析, 替代旧的括号计数粗检)
+try {
+  new Function(js);
+  ok("app.js 语法解析通过");
+} catch (e) {
+  fail("app.js 语法错误: " + e.message);
+}
 
-// 4) CSS 里被 JS/HTML 使用的关键类是否已定义
+// 4) CSS 里被 JS/HTML 使用的关键类是否已定义 (v3.0 codex 风格结构)
 const cssClasses = new Set([...css.matchAll(/\.([a-z][\w-]*)/g)].map((m) => m[1]));
-const need = ["side", "brand", "newchat", "ghead", "nav", "topbar", "hero", "stream",
-  "msg", "tool", "chip", "composer", "send", "drawer", "dtab", "card", "mask", "modal",
-  "mset", "mrow", "setrow", "switch", "theme-opt", "listrow", "mini-btn", "toast", "menu"];
+const need = ["side", "brand", "newchat", "ghead", "topbar", "hero", "stream",
+  "ev", "toolcard", "approval", "plancard", "diffbox", "chip", "composer", "send",
+  "palette", "pitem", "drawer", "tab", "dpane", "tree", "goal", "issue", "badge",
+  "setrow", "toast", "btn"];
 const missCls = need.filter((c) => !cssClasses.has(c));
 if (missCls.length) fail("样式表缺少类: " + missCls.join(", "));
 else ok(`样式表覆盖全部关键类 (${need.length} 个)`);
 
-// 5) 关键结构断言
+// 5) 关键结构断言 (v3.0: 时间线/命令面板/审批/抽屉四 Tab)
 [["侧栏", 'id="side"'], ["composer", 'id="composer"'], ["抽屉", 'id="drawer"'],
- ["设置弹窗", 'id="setMask"'], ["表单弹窗", 'id="formMask"'], ["对话流", 'id="stream"'],
- ["空状态", 'id="hero"'], ["输入框", 'id="inp"'], ["发送按钮", 'id="btnSend"']].forEach(([n, s]) => {
+ ["命令面板", 'id="palette"'], ["对话流", 'id="stream"'], ["空状态", 'id="hero"'],
+ ["输入框", 'id="inp"'], ["发送按钮", 'id="btnSend"'],
+ ["文件树面板", 'id="pane-files"'], ["目标面板", 'id="pane-goal"'],
+ ["审查面板", 'id="pane-review"'], ["设置面板", 'id="pane-settings"']].forEach(([n, s]) => {
   if (!html.includes(s)) fail(`缺少结构: ${n} (${s})`);
 });
-ok("关键结构齐全");
+if (bad) console.log("  · 结构断言未全部通过"); else ok("关键结构齐全");
 
 // 6) 静态资源引用是否都会被内核静态服务命中
 [...html.matchAll(/(?:href|src)="(\/[^"]+)"/g)].map((m) => m[1]).forEach((u) => {

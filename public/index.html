@@ -21,7 +21,6 @@
 <g id="i-settings"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-2.7 1.1v.2a2 2 0 1 1-4 0v-.1a1.6 1.6 0 0 0-2.8-1.1l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.6 1.6 0 0 0 3.6 15H3.4a2 2 0 1 1 0-4h.2A1.6 1.6 0 0 0 4.7 8.3l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3h.1a1.6 1.6 0 0 0 1-1.5v-.2a2 2 0 1 1 4 0v.2a1.6 1.6 0 0 0 2.7 1.1l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8v.1a1.6 1.6 0 0 0 1.5 1h.2a2 2 0 1 1 0 4h-.2a1.6 1.6 0 0 0-1.5 1z"/></g>
 <g id="i-send"><path d="M12 19V5"/><path d="m5.5 11.5 6.5-6.5 6.5 6.5"/></g>
 <g id="i-stop"><rect x="7" y="7" width="10" height="10" rx="1.6" fill="currentColor" stroke="none"/></g>
-<g id="i-mic"><rect x="9" y="3" width="6" height="10" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0"/><path d="M12 18v3"/></g>
 <g id="i-folder"><path d="M3.5 7.5A2 2 0 0 1 5.5 5.5h3.4l2 2.2h7.6a2 2 0 0 1 2 2v7.8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></g>
 <g id="i-file"><path d="M6 3.5h7l5 5v12H6z"/><path d="M13 3.5v5h5"/></g>
 <g id="i-chev-d"><path d="m6 9 6 6 6-6"/></g>
@@ -44,15 +43,23 @@
 <g id="i-list"><path d="M8 6.5h12M8 12h12M8 17.5h12"/><circle cx="4.4" cy="6.5" r="1.1" fill="currentColor" stroke="none"/><circle cx="4.4" cy="12" r="1.1" fill="currentColor" stroke="none"/><circle cx="4.4" cy="17.5" r="1.1" fill="currentColor" stroke="none"/></g>
 <g id="i-folder-open"><path d="M3.5 8.5h17l-2 10h-13z"/><path d="M3.5 8.5V6a1.5 1.5 0 0 1 1.5-1.5h3.6l1.8 2h5.1A1.5 1.5 0 0 1 17 8"/></g>
 <g id="i-stop-dot"><circle cx="12" cy="12" r="8.5"/><rect x="9.4" y="9.4" width="5.2" height="5.2" rx="1" fill="currentColor" stroke="none"/></g>
+<g id="i-shield"><path d="M12 3.5 5 6.2v5.3c0 4.4 3 7.6 7 9 4-1.4 7-4.6 7-9V6.2z"/><path d="m9 11.6 2.2 2.2L15.4 9.4"/></g>
+<g id="i-gate"><path d="M5 20V9l7-5 7 5v11"/><path d="M9 20v-6h6v6"/></g>
+<g id="i-target"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4.5"/><circle cx="12" cy="12" r="1.2" fill="currentColor" stroke="none"/></g>
+<g id="i-scan"><path d="M4 8V5.5A1.5 1.5 0 0 1 5.5 4H8M16 4h2.5A1.5 1.5 0 0 1 20 5.5V8M20 16v2.5a1.5 1.5 0 0 1-1.5 1.5H16M8 20H5.5A1.5 1.5 0 0 1 4 18.5V16"/><path d="M4 12h16"/></g>
+<g id="i-diff"><path d="M12 4v16"/><path d="M7 9h10" /><path d="M7 15h10"/></g>
+<g id="i-term"><rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="m7 9.5 3 3-3 3"/><path d="M12.5 15.5H17"/></g>
+<g id="i-hook"><path d="M12 3v6a4 4 0 1 0 4 4"/><path d="M9.5 3h5"/></g>
+<g id="i-spark"><path d="M12 3v4M12 17v4M3 12h4M17 12h4"/><path d="m6 6 2.4 2.4M15.6 15.6 18 18M18 6l-2.4 2.4M8.4 15.6 6 18"/></g>
 </defs></svg>
 
 <div class="app">
-  <!-- ================= 侧栏 ================= -->
+  <!-- ================= 左栏: 会话侧栏 (codex 式) ================= -->
   <aside class="side" id="side">
     <div class="brand">
       <span class="mark"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><use href="#i-mark"/></svg></span>
       <span class="bname">皮皮虾</span>
-      <span class="btag" id="brandTag">PPX</span>
+      <span class="btag" id="brandTag">v3</span>
       <button class="icobtn" id="btnCollapse" title="收起侧栏" aria-label="收起侧栏" aria-controls="side" aria-expanded="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-collapse"/></svg></button>
     </div>
 
@@ -75,125 +82,131 @@
 
       <div class="group">
         <div class="ghead">
-          <span class="lab">工作区</span>
-          <span class="gacts">
-            <button class="icobtn sm" id="btnWsRoot" title="切换工作区目录"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-folder-open"/></svg></button>
-            <button class="icobtn sm" id="btnWsRefresh" title="刷新"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-refresh"/></svg></button>
-          </span>
+          <span class="lab">能力</span>
         </div>
-        <div class="gbody" id="wsList"></div>
+        <div class="gbody" id="capList">
+          <button class="cap" id="capFiles"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><use href="#i-folder"/></svg>工作区</button>
+          <button class="cap" id="capGoal"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-target"/></svg>目标看板</button>
+          <button class="cap" id="capReview"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-scan"/></svg>审查报告</button>
+          <button class="cap" id="capMemory"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-brain"/></svg>记忆</button>
+          <button class="cap" id="capSettings"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-settings"/></svg>设置</button>
+        </div>
       </div>
     </div>
 
-    <div class="side-foot">
-      <button class="nav" id="btnSettings">
-        <span class="ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><use href="#i-settings"/></svg></span>
-        <span class="lab">设置</span>
-      </button>
-      <div class="conn" id="conn"><i class="dot"></i><span class="txt">连接中…</span></div>
+    <div class="sidefoot" id="sideFoot">
+      <div class="agentline">
+        <span class="dot on" id="lifeDot"></span>
+        <span class="lifetxt" id="lifeTxt">生命周期 —</span>
+      </div>
     </div>
   </aside>
+  <button class="side-reveal" id="btnSide" hidden title="展开侧栏"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-panel"/></svg></button>
 
-  <!-- ================= 主区 ================= -->
+  <!-- ================= 中栏: 时间线 ================= -->
   <main class="main">
     <header class="topbar">
-      <button class="icobtn" id="btnSide" title="展开侧栏" aria-label="展开侧栏" aria-controls="side" aria-expanded="false" hidden><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><use href="#i-collapse"/></svg></button>
-      <div class="tb-title" id="tbTitle">新会话</div>
-      <div class="tb-right">
-        <button class="icobtn" id="btnDrawer" title="面板" aria-label="打开右侧面板" aria-controls="drawer" aria-expanded="false"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><use href="#i-panel"/></svg></button>
-        <button class="icobtn" id="btnSettings2" title="设置" aria-label="打开设置"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><use href="#i-settings"/></svg></button>
-      </div>
+      <span class="title" id="sessTitle">新会话</span>
+      <span class="pill" id="modePill" title="审批模式">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-shield"/></svg><em id="modeTxt">on-request</em>
+      </span>
+      <span class="pill" id="tokPill" hidden>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-bars"/></svg><em id="tokTxt">—</em>
+      </span>
+      <span class="flex1"></span>
+      <button class="icobtn" id="btnTheme" title="切换主题"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-moon"/></svg></button>
+      <button class="icobtn" id="btnDrawer" title="工作区面板"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-panel"/></svg></button>
     </header>
 
-    <div class="stage">
-      <section class="hero" id="hero">
-        <span class="mark"><svg width="42" height="42" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><use href="#i-mark"/></svg></span>
-        <h1>探索未至之境<span class="badge" id="heroVer">…</span></h1>
-        <div class="sub" id="heroSub">零依赖智能体内核 · 记忆 / 工具 / 军团 / 自愈</div>
-        <div class="quick" id="quick"></div>
-      </section>
-      <div class="stream" id="stream" hidden><div class="col" id="col" role="log" aria-live="polite" aria-relevant="additions text" aria-label="对话内容"></div></div>
-    </div>
-
-    <footer class="foot-wrap">
-      <div class="composer" id="composer">
-        <div class="chips">
-          <button class="chip" id="chipWs"><span class="cv"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><use href="#i-folder"/></svg></span><span id="wsLabel">工作区</span></button>
-          <button class="chip" id="chipPerm"><span id="permLabel">标准模式</span><span class="cv"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><use href="#i-chev-d"/></svg></span></button>
-        </div>
-        <div class="inrow">
-          <textarea id="inp" rows="1" aria-label="消息输入框" placeholder="描述你想要构建的内容 / 提问 / 输入指令…（@ 引用工作区文件）"></textarea>
-        </div>
-        <div class="cfoot">
-          <button class="icobtn ring" id="btnPlus" title="更多"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-plus"/></svg></button>
-          <button class="chip mini" id="chipTools"><span class="cv"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><use href="#i-plug"/></svg></span><span id="toolsLabel">工具</span></button>
-          <div class="grow"></div>
-          <button class="chip mini" id="chipModel"><span id="modelLabel">模型</span><span class="cv"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><use href="#i-chev-d"/></svg></span></button>
-          <button class="send" id="btnSend" disabled title="发送 (Enter)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use href="#i-send"/></svg></button>
-        </div>
+    <!-- 空态 hero -->
+    <section class="hero" id="hero">
+      <div class="hero-mark"><svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><use href="#i-mark"/></svg></div>
+      <h1 id="heroTitle">今天想推进什么？</h1>
+      <p class="hero-sub">对话 · 计划 · 审查 · 编排 —— 输入 <b>/</b> 唤起命令面板</p>
+      <div class="chips" id="chips">
+        <button class="chip" data-q="/plan ">制定计划</button>
+        <button class="chip" data-q="/review ">代码审查</button>
+        <button class="chip" data-q="/goal ">查看目标</button>
+        <button class="chip" data-q="/status">运行状态</button>
+        <button class="chip" data-q="/help">命令帮助</button>
       </div>
-      <div class="foot-note" id="footNote">Enter 发送 · Shift+Enter 换行 · Esc 停止生成</div>
-    </footer>
-
-    <!-- 右侧面板抽屉 -->
-    <aside class="drawer" id="drawer">
-      <div class="dhead">
-        <div class="dtabs">
-          <button class="dtab active" data-p="memory">记忆</button>
-          <button class="dtab" data-p="traces">轨迹</button>
-          <button class="dtab" data-p="stats">统计</button>
-          <button class="dtab" data-p="tasks">定时任务</button>
-          <button class="dtab" data-p="env">环境</button>
-        </div>
-        <button class="icobtn" id="btnDrawerClose" title="关闭"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-close"/></svg></button>
-      </div>
-      <div class="dbody" id="drawerBody"></div>
-    </aside>
-  </main>
-</div>
-
-<!-- ================= 设置 ================= -->
-<div class="mask" id="setMask">
-  <div class="modal" role="dialog" aria-modal="true" aria-label="设置" tabindex="-1">
-    <nav class="mset">
-      <div class="mtitle">设置</div>
-      <button class="mrow active" data-s="general"><span class="ico"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-sliders"/></svg></span>通用设置</button>
-      <button class="mrow" data-s="model"><span class="ico"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><use href="#i-cube"/></svg></span>模型</button>
-      <button class="mrow" data-s="plugin"><span class="ico"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-plug"/></svg></span>插件</button>
-      <button class="mrow" data-s="agent"><span class="ico"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><use href="#i-bot"/></svg></span>Agent 预设</button>
-      <button class="mrow" data-s="about"><span class="ico"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-info"/></svg></span>关于 / 体检</button>
-    </nav>
-    <section class="mbody">
-      <div class="mhead">
-        <span class="t" id="setTitle">通用设置</span>
-        <div class="grow"></div>
-        <button class="ghost" id="btnOpenCfg">打开配置文件</button>
-        <button class="icobtn" id="btnSetClose" title="关闭"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-close"/></svg></button>
-      </div>
-      <div class="mcontent" id="setBody"></div>
     </section>
-  </div>
+
+    <!-- 事件时间线 -->
+    <div class="stream" id="stream" hidden></div>
+
+    <!-- 输入区 -->
+    <div class="composer-wrap">
+      <div class="palette" id="palette" hidden></div>
+      <div class="composer" id="composer">
+        <textarea id="inp" rows="1" placeholder="给皮皮虾发消息…  (/ 唤起命令)"></textarea>
+        <button class="send" id="btnSend" disabled title="发送 (Enter)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><use href="#i-send"/></svg></button>
+      </div>
+      <div class="footNote" id="footNote">Enter 发送 · Shift+Enter 换行 · Esc 停止生成</div>
+    </div>
+  </main>
+
+  <!-- ================= 右栏: 工作区抽屉 (codex 式 Tab) ================= -->
+  <aside class="drawer" id="drawer" hidden>
+    <div class="dhead">
+      <div class="tabs">
+        <button class="tab on" data-tab="files"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><use href="#i-folder"/></svg>文件</button>
+        <button class="tab" data-tab="goal"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-target"/></svg>目标</button>
+        <button class="tab" data-tab="review"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-scan"/></svg>审查</button>
+        <button class="tab" data-tab="settings"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-settings"/></svg>设置</button>
+      </div>
+      <button class="icobtn sm" id="btnDrawerClose" title="关闭"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-close"/></svg></button>
+    </div>
+
+    <div class="dpane on" id="pane-files">
+      <div class="pane-tools">
+        <span class="wslab" id="wsRoot" title="工作区根目录">工作区</span>
+        <span class="flex1"></span>
+        <button class="icobtn sm" id="btnWsRoot" title="切换工作区目录"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-folder-open"/></svg></button>
+        <button class="icobtn sm" id="btnWsRefresh" title="刷新"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-refresh"/></svg></button>
+      </div>
+      <div class="tree" id="wsTree"><div class="empty">加载中…</div></div>
+      <div class="fileview" id="fileView" hidden>
+        <div class="fv-head"><span class="fv-path" id="fvPath"></span><span class="flex1"></span><button class="icobtn sm" id="fvClose" title="关闭"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-close"/></svg></button></div>
+        <pre class="fv-body" id="fvBody"></pre>
+      </div>
+    </div>
+
+    <div class="dpane" id="pane-goal">
+      <div class="pane-tools"><span class="wslab">目标看板</span><span class="flex1"></span><button class="icobtn sm" id="btnGoalRefresh" title="刷新"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-refresh"/></svg></button></div>
+      <div class="board" id="goalBoard"><div class="empty">暂无目标</div></div>
+    </div>
+
+    <div class="dpane" id="pane-review">
+      <div class="pane-tools"><span class="wslab">审查报告</span><span class="flex1"></span><button class="icobtn sm" id="btnReviewRun" title="触发审查"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-spark"/></svg></button></div>
+      <div class="review" id="reviewBody"><div class="empty">尚无报告 · 发送 /review 触发</div></div>
+    </div>
+
+    <div class="dpane" id="pane-settings">
+      <div class="pane-tools"><span class="wslab">设置</span></div>
+      <div class="settings" id="settingsBody">
+        <label class="setrow">审批模式
+          <select id="setApproval">
+            <option value="unless-trusted">unless-trusted（默认审查）</option>
+            <option value="on-request">on-request（按需审批）</option>
+            <option value="on-failure">on-failure（失败后审批）</option>
+            <option value="never">never（全自动）</option>
+          </select>
+        </label>
+        <label class="setrow">沙箱
+          <select id="setSandbox">
+            <option value="read-only">read-only（只读）</option>
+            <option value="workspace-write">workspace-write（工作区可写）</option>
+            <option value="danger-full-access">danger-full-access（完全访问）</option>
+          </select>
+        </label>
+        <div class="setinfo" id="setInfo"></div>
+      </div>
+    </div>
+  </aside>
 </div>
 
-<!-- ================= 通用表单弹窗 ================= -->
-<div class="mask" id="formMask">
-  <div class="modal narrow" role="dialog" aria-modal="true" aria-labelledby="formTitle" tabindex="-1">
-    <div class="mhead">
-      <span class="t" id="formTitle">编辑</span>
-      <div class="grow"></div>
-      <button class="icobtn" id="btnFormClose" title="关闭"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-close"/></svg></button>
-    </div>
-    <div class="mcontent" id="formBody"></div>
-    <div class="mhead" style="border-top:1px solid var(--line);border-bottom:none;justify-content:flex-end">
-      <button class="ghost" id="btnFormCancel">取消</button>
-      <button class="ghost primary" id="btnFormOk">确定</button>
-    </div>
-  </div>
-</div>
-
-<div class="toasts" id="toasts"></div>
-
-<script src="/vendor/marked.min.js"></script>
+<div class="toast" id="toast" hidden></div>
 <script src="/app.js"></script>
 </body>
 </html>
