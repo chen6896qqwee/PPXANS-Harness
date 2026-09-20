@@ -51,6 +51,18 @@ test("updateSettings: 更新用户名/端口/安全, 校验生效", () => {
   fs.rmSync(root, { recursive: true, force: true });
 });
 
+test("updateSettings: security.deny 可读写并校验", () => {
+  const root = tmpRoot("deny");
+  fs.writeFileSync(path.join(root, "config", "ppx.json"), JSON.stringify({}));
+  const s = updateSettings(root, { security: { deny: ["git push --force*", "rm -rf *"] } });
+  assert.deepEqual(s.security.deny, ["git push --force*", "rm -rf *"], "deny 写入后回传");
+  assert.throws(() => updateSettings(root, { security: { deny: "not-array" } }), /数组/, "deny 非数组被拒");
+  assert.throws(() => updateSettings(root, { security: { deny: [123] } }), /数组/, "deny 含非字符串被拒");
+  const onDisk = JSON.parse(fs.readFileSync(path.join(root, "config", "ppx.json"), "utf8"));
+  assert.deepEqual(onDisk.security.deny, ["git push --force*", "rm -rf *"], "deny 已落盘");
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
 test("updateSettings: 非法端口被拒绝", () => {
   const root = tmpRoot("badport");
   fs.writeFileSync(path.join(root, "config", "ppx.json"), JSON.stringify({}));

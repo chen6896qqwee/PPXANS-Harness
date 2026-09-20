@@ -59,5 +59,6 @@ test("runCodeAct: 沙箱剥离敏感环境变量", async () => {
 test("runCodeAct: 超时强制终止死循环脚本", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ppx-codeact-"));
   const out = await runCodeAct(root, "node", "while(true){}", 1500);
-  assert.ok(out.includes("超时") || out.includes("强制终止"), `死循环应被超时强杀, 实际: ${out}`);
+  // B1: 超时返回统一标准头 [exit=timeout time=...] command timed out after ...
+  assert.match(out, /^\[exit=timeout time=\d+ms\] command timed out after \d+ms/, `死循环应被超时强杀并带标准头, 实际: ${out}`);
 });

@@ -215,6 +215,30 @@ test("ToolLoopPolicy.shouldRetryErrors: 上限内重试, 超限放弃", () => {
   assert.equal(p2.shouldRetryErrors(["e"]), false);
 });
 
+test("ToolLoopPolicy.selfReviewError: 可修正错误走重试道, 无错误不裁决", () => {
+  const p = new ToolLoopPolicy({});
+  assert.equal(p.selfReviewError([]), null, "无错误不裁决");
+  assert.equal(p.selfReviewError(null), null, "null 不裁决");
+  // 命令不存在 / 文件缺失 / 参数错等可修正错误 → retry
+  const r = p.selfReviewError(["[工具错误] run_command: 命令不存在"]);
+  assert.equal(r.action, "retry");
+  assert.equal(p.selfReviewError(["[exit=1] 文件不存在"]).action, "retry");
+});
+
+test("ToolLoopPolicy.selfReviewError: 硬拒绝类错误拦停 (黑名单/审批拒/权限/DENY_HINT)", () => {
+  const p = new ToolLoopPolicy({});
+  const cases = [
+    "[工具错误] 硬黑名单拦截: rm -rf /",
+    "[工具错误] [permission] 工具 run_command 审批被拒绝或超时",
+    "命中后不要重试或改写命令绕过",
+    "权限不足: 拒绝访问",
+  ];
+  for (const c of cases) {
+    const v = p.selfReviewError([c]);
+    assert.equal(v.action, "stop", `应拦停: ${c}`);
+  }
+});
+
 test("ToolLoopPolicy.nextOverflowCap: 逐档缩紧, 有下限", () => {
   const p = new ToolLoopPolicy({});
   assert.equal(p.nextOverflowCap(4000), 2000);
