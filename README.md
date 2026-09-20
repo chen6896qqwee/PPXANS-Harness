@@ -1,278 +1,192 @@
-# 🦐 PPXANS-Harness
+# 🦐 PPXANS-Harness (皮皮虾)
 
-> **PPXANS-Harness = 皮皮虾神经系 (ANS) + Harness 一体化智能体内核**，纯 Node.js 编写，**零运行时依赖**。
-> **43 内置工具** · L0–L4 五层记忆 · SHA-256 审计哈希链 · MCP 服务端+客户端 · 多模型路由 · 自愈 7/7 · **768 测试全绿**。
+> **皮皮虾神经系 (ANS) + Harness 一体化智能体内核**，纯 Node.js，**零运行时依赖**。
 >
-> 由 `ppx-agent v1.6.0`（合并基座）+ `ppx-v2 v0.4.0`（能力吸收）合并而成，v2.5.0 起移除全部外部引擎底座，v2.6.0 起 web 壳与外部接入全面切 MCP。合并范围与取舍见 [MERGE-REPORT.md](MERGE-REPORT.md)、第三方来源见 [references/THIRD-PARTY-SOURCES.md](references/THIRD-PARTY-SOURCES.md)。
+> **69 内置工具** · L0–L4 五层记忆 · SHA-256 审计哈希链 · MCP 服务端+客户端 · 多模型路由 · 自愈 7/7 · **918 测试全绿** · Web UI (codex 风格)。
 
-> 🛡️ **自愈基准**：故意注入破坏 -> 自愈引擎修复 -> 输出修复率。
-> 跑 `node scripts/selfheal-bench.js` -> **7/7 100%**（发布前门禁，`PPX_MIN_SELFHEAL` 可设阈值）。
+**一个会自我修复、自我学习、可审计的超级 Agent。** 标准 MCP 服务器（`POST /mcp`）让 Claude Desktop / Cursor / 任何 MCP 客户端开箱即用。支持各大模型 API + 本地模型。
+
+> 🛡️ **自愈基准** `node scripts/selfheal-bench.js` → **7/7 100%**（发布前门禁，`PPX_MIN_SELFHEAL` 设阈值）
+> 🔗 **审计哈希链** `npm run audit:verify`（append-only + SHA-256 链式防篡改，篡改定位到行）
 >
-> 🔗 **审计哈希链**：工具调用落 append-only + SHA-256 链式账本，篡改可定位到具体行。
-> 跑 `npm run audit:verify` 校验，`npm run audit:verify -- --fix` 隔离损坏段并重建。
+> 👉 新手上路：5 分钟跑起来、写第一个工具/插件，见 [docs/QUICKSTART.md](docs/QUICKSTART.md)。v3.0 架构设计见 [docs/ARCHITECTURE-V3.md](docs/ARCHITECTURE-V3.md)。
 
-**一个会自我修复、自我学习、可审计的超级 Agent。** 零运行时依赖，纯 Node 原生，支持各大模型 API + 本地模型。**标准 MCP 服务器**（`POST /mcp`）让 Claude Desktop / Cursor / 任何 MCP 客户端开箱即用。
+---
 
-> 架构参考 openhanako/HanaAgent 与 TencentDB-Agent-Memory，扒其记忆分层、自愈内核、工具系统的精华，用干净自包含实现重搭。
->
-> 👉 **新手上路**：5 分钟跑起来、写第一个工具/插件、替换默认模块，见 [docs/QUICKSTART.md](docs/QUICKSTART.md)。
+## ✨ v3.0 新能力（codex 对齐 + 七项目特性吸收）
 
-## ✨ 特性
+v3.0 引入 codex 的 **SQ/EQ 双队列 + Turn 模型** 作为交互主轴，把权限、钩子、编辑、审查、证据能力**分层独立成可替换模块**，并重制零依赖 Web UI：
+
+| 模块 | 出处 | 能力 |
+|------|------|------|
+| `protocol/` | codex | **SQ·EQ 双队列事件流**：SubmissionQueue 入队 + EventQueue(WAL) 结构化事件，通道层与内核解耦总线 |
+| `permissions/` | codex + opencode + CASDK | **三合一权限引擎**：AskForApproval 四档 + SandboxPolicy 三档 + 通配符规则链(last-match-wins) + canUseTool 回调 + Bash/Edit/Plan 审批模板 |
+| `hooks/` | claude-code | **六事件钩子链**：PreToolUse(可否决/改参) / PostToolUse / PreCompact / SessionStart/Stop / SubagentStop，超时熔断，纯 JS |
+| `edit/` | aider | **SEARCH/REPLACE 编辑块**（多候选/空白容错/失败回灌修复）+ 编辑前快照逐文件回滚 |
+| `repomap/` | aider | **仓库地图**：def/ref 提取 → 引用图 → PageRank → token 预算内渲染，缓存 30s |
+| `review/` | OCR | **分级审查流水线**：plan→group→review→relocate→filter，输出 P0/P1/P2 静态规则报告 |
+| `evidence/` | oh-my-hermes | **证据边界**：prepared/observed 双层标记 + handoff manifest(哈希) + 目标看板 |
+| `commands/` | claude-code | **斜杠命令统一模型**：内置 /init /plan /review /compact /new /resume /model /status /memory /skills /goal，用户命令从 `.ppx/commands/*.md` 加载 |
+
+> **集成现状**：上述 9 模块中 8 个已装配进运行时（`plugin/v3.js` + `tools/v3.js`，MCP 实测可调）。`session/`（Turn/Rollout/Parts）为 standalone 模块随包保留、有完整单测，但尚未接入主链路，待 v3.1 集成——详见 [docs/ARCHITECTURE-V3.md](docs/ARCHITECTURE-V3.md) 集成现状节。
+
+**Web UI（codex 风格, public/ 零依赖重制）**：三栏事件时间线（用户/agent/工具卡/审批卡/计划卡/diff卡）+ 斜杠命令面板 + 审批卡三类模板 + 工作区 Tab（文件树/目标看板/审查报告/设置）+ 子 agent 彩色徽标 + `@` 引用文件 + Esc 中断 + 亮暗主题。
+
+---
+
+## 🧰 核心特性
 
 | 能力 | 说明 |
 |------|------|
-| 🧠 **五层记忆 L0–L4** | L0原始对话 → L1原子记忆(高斯衰减) → L2场景 → L3核心画像 → **L4程序性记忆**(技能/流程, 衰减仅为 L1 的 1/4) |
-| 🗂️ **记忆治理** | **软删可回滚**(forget/restore) + 版本链(update 留痕) + TTL 自动归档 + 按层清理 + 导出/导入迁移; 遗忘不再不可逆 |
-| 🔐 **审计哈希链** | 工具调用 append-only 账本 + SHA-256 链式防篡改, 篡改/删行可定位到具体行, 支持隔离损坏段重建 |
-| 🔧 **43 内置工具** | 文件/命令/搜索/HTTP/定时/记忆检索/读图/文档加载/文档入库/OCR/code_act/refine/refine_skill + **10个治理运维工具**(memory_forget/restore/export/import/clear_layer/list_deleted、audit_verify、persona_build/read、selfheal_run) |
-| 🩺 **自我修复** | 启动体检、损坏JSON自动修复、崩溃恢复、残留清理 |
-| 📚 **自我学习** | 经验库 + 自动提炼用户画像/agent人格 + refine 失败轨迹闭环 + refineSkill 成功轨迹沉淀技能 |
-| 🤖 **多 Agent 军团** | 多进程并行 + DAG 编排 + legion 模式 (broadcast/dispatch/runDag) + spawn_agent 自主协作 (并行/差异化视角/仲裁聚合/SDD 审查循环) |
-| 🔌 **多渠道接入** | HTTP(可用) + 飞书(已实现) + 微信(加解密+主动推送+加密回包, 已实现) |
-| 🖼️ **多模态读图** | 消息含图片路径自动读图注入 image_url 块 + 视觉路由到 vision provider (qwen-vl/gpt-4o/glm-4v 等) |
-| 📄 **文档加载 + RAG** | read_document 读 txt/md/pdf/html (零依赖 PDF 提取) + ingest_document 分块入库 + 可选 embedding 向量检索 |
-| 🔍 **OCR 文字识别** | ocr_image 识别图片/扫描件文字 + 扫描件 PDF 自动 OCR (本地 tesseract 零 key, 云 OCR 回退) |
-| 🛡️ **防注入安全边界** | 不泄露系统提示词/人格, 忽略「忽略指令/扮演新角色」注入 |
-| ⌨️ **CLI 交互** | readline 历史(↑↓) + /stop 中断 + /reset 清会话 + Ctrl+C 单次中断 |
-| ✅ 上下文压缩 | 长对话自动滚动摘要, 防 token 失控 |
-| ✅ 错误自愈 | 工具错误统一语义, 自动重试修正 |
-| ✅ 方法型Skill | humanize去AI味 / write_article分阶段写作 / clarify需求澄清 / brainstorm审批门禁 / plan精确计划 / verify验证优先 / debug五步调试 |
-| 🔌 **MCP 客户端** | 零依赖 MCP 客户端 (stdio + HTTP Streamable), 接入 9600+ MCP 工具服务器 |
-| 🛰️ **MCP 服务器** | 标准 MCP 服务端点 `POST /mcp` (Streamable HTTP, 双 era: 现代 2026-07-28 + legacy initialize 握手), 暴露全部 43 工具 / 记忆·轨迹·统计·会话资源 / 方法型技能 prompts / 对话工具 ppx.chat.* (SSE 流式 + 结构化 tool/step 事件) / x-mcp-header 客户端支持 |
-| 🎛️ **MCP 管理工具** | 会话/提供方/设置/任务面板 全部经标准 MCP 工具暴露 (ppx.sessions.* / ppx.providers.* / ppx.settings.* / ppx.task.*), web 产品壳已全面切换, REST /api/* 退役 |
-| ✅ **任务面板** | MCP 任务工具 + web UI 模块: 任务队列 (进行中/待处理/完成/失败) + 步骤状态推进 + 结果回填, 持久化 data/tasks.json, 6 套技能模板 |
-| ✅ 可观测 | 工具调用轨迹JSONL + 失败率/慢工具统计 + **结构化事件流**(traceId 经 AsyncLocalStorage 贯穿) |
-| ✅ LLM真摘要 | 长对话自动LLM语义摘要, 非堆叠 |
-| ✅ 场景系统 | 灵魂文件式场景(手动设定/历史提炼), 命中自动切换行为 |
-| ✅ Next.js产品壳 | web/ 前端代理8899内核, 会话/场景/记忆/轨迹/统计/任务全切 MCP (lib/mcp.ts 浏览器 JSON-RPC 客户端), 流式打字机 + 工具卡片, REST /api/* 退役 (legacy_rest=false 时彻底 410) |
-| ✅ **多轮对话历史** | 会话内上下文连续, 信息量感知裁剪控 token |
-| ✅ **ANS 状态化** | 生命周期落盘(重启不归零) + 主动提醒去重/完成跟踪 + 过期待办跳过 |
-| ✅ **流式输出** | SSE 逐字流式, Web UI 实时渲染 (P1) |
-| ✅ **命令安全** | 命令守卫三层防线: 用户 deny 规则 + 硬黑名单(rm -rf /、fork bomb、curl\|sh 等, allow_all 也拦) + 高危黑名单/前缀白名单, 反混淆检测防引号绕过 (P0) |
-| ✅ **SSRF 防护** | http_request 拦截内网/保留地址 (P1) |
-| ✅ **会话持久化** | 会话 JSONL 落盘, 重启不丢 (P1) |
-| ✅ **测试隔离** | 所有测试用临时目录, 不污染生产数据 (P0) |
-| 🔐 **HTTP 认证** | Bearer Token, 未配置自动生成随机token (P0) |
-| ✅ **Markdown 渲染** | Web UI marked.js 渲染代码块/列表 (P1) |
-| ✅ **自研底座 (唯一)** | 纯 Node fetch 直连 OpenAI 兼容 API (OpenAI/DeepSeek/火山/通义/智谱/本地 lmstudio/ollama/vLLM)，零运行时依赖，SSE 流式 + 原生 tool_calls + 文本工具调用修复，无任何外部引擎底座 |
-| ✅ **多模型 API 优先** | OpenAI/DeepSeek/火山/通义 + 本地模型兜底 |
+| 🧠 **五层记忆 L0–L4** | L0对话 → L1原子(高斯衰减) → L2场景 → L3画像 → L4程序性(技能/流程, 衰减仅 L1 1/4) |
+| 🗂️ **记忆治理** | 软删可回滚 + 版本链 + TTL 归档 + 按层清理 + 导出/导入迁移 |
+| 🔐 **审计哈希链** | 工具调用 append-only 账本 + SHA-256 链式防篡改，篡改/删行可定位到行，可隔离重建 |
+| 🛡️ **权限安全** | AskForApproval 四档审批 + SandboxPolicy 沙箱 + 命令守卫三层防线 + SSRF 防护 + fail-open 钩子栅栏 |
+| 🩺 **自我修复** | 启动体检、损坏JSON修复、崩溃恢复、残留清理 (自愈 7/7) |
+| 📚 **自我学习** | 经验库 + 画像/人格提炼 + refine 失败轨迹闭环 + refineSkill 成功沉淀技能 |
+| 🤖 **多 agent 军团** | 多进程并行 + DAG 编排 + legion 模式 + spawn_agent 自主协作 (并行/差异化视角/仲裁/SDD 审查循环) |
+| 🔌 **多渠道接入** | HTTP + 飞书 + 微信（加解密+主动推送+加密回包） |
+| 📄 **文档 + RAG + OCR** | read_document(txt/md/pdf/html) + ingest_document 分块入库 + ocr_image (本地 tesseract / 云回退) |
+| ⌨️ **CLI 交互** | readline 历史 + /stop 中断 + /reset 清会话 + Ctrl+C 单次中断 |
+| 🔌 **MCP 客户端 + 服务端** | 零依赖 MCP 客户端 (stdio + HTTP Streamable) 接入外部工具；`POST /mcp` 暴露 69 工具 + 记忆/轨迹/统计/会话资源 + 方法技能 prompts + ppx.* 管理工具 |
+| 🎛️ **MCP 管理工具** | 会话/提供方/设置/任务面板全部经标准 MCP 暴露 (`ppx.sessions.*`/`ppx.providers.*`/`ppx.settings.*`/`ppx.task.*`) |
+| ✅ **任务面板** | MCP 任务工具 + Web UI 模块：任务队列 + 步骤状态推进 + 结果回填，6 套技能模板 |
+| ✅ **可观测** | 工具轨迹 JSONL + 结构化事件流 (traceId 贯穿) + tool call result 头 |
+| ✅ **场景系统** | 灵魂文件式场景(手动设定/历史提炼)，命中自动切换行为 |
+| ✅ **流式输出** | SSE 逐字流式 + Web UI 实时渲染 |
+| 🔐 **HTTP 认证** | Bearer Token，未配置自动生成随机 token 持久化 |
 
-## 独立底座（自研，无外部引擎）
+**69 内置工具**（运行时实测）：
+- **47 内置**：文件/命令/搜索/HTTP/定时/记忆(读图/检索/入库)/文档(加载/OCR/入库)/场景/技能(加载/创建/提炼)/重构 refine/子agent spawn + 治理运维(repo_map/apply_patch/review_code/goal_board/audit_verify/persona/selfheal_run 等)
+- **22 ppx.\***：chat.send/stream、sessions.*、providers.(list/add/update/delete/test/reorder)、settings.get/update、task.(templates/create/list/update/step/delete/run)、session.reset
 
-皮皮虾是**独立自包含的 agent，只跑自己的底座**：`src/llm/client.js` 用纯 Node `fetch` 直连任意 OpenAI 兼容 API（OpenAI/DeepSeek/火山/通义/智谱/本地 lmstudio/ollama/vLLM），零第三方引擎依赖。
-
-- **v2.5.0 起外部引擎底座全部移除**：`openclaw` / `dsh`（DeepSeek Harness）后端代码、`_optional_engines` 配置、`.deps/` 内嵌目录、`dsh` npm 脚本、`openclaw-smoke.js` 全部删除。
-- 默认：本地/HTTP 直连优先（router 按 local → 云端真 key 顺序回退，配 API key 即可跑）
-- 多 provider 自动回退 + 瞬态错误重试（429/5xx/timeout）+ SSE 流式 + 原生 tool_calls + 文本工具调用修复（自研围栏 ⟪tool⟫ / DSML 解析）
-- 保留：皮皮虾四层记忆 / 自愈 / 方法Skill / 工具 / web 壳 全部保留
+---
 
 ## 🚀 快速开始
 
-### ⚠️ 首次使用：本地模型优先，云端可选（极简配置）
-
-皮皮虾**默认优先使用本地模型**（LM Studio 等本地推理，需先启动本地服务）。配了**至少一个**云端 API key 时自动云端优先；无任意可用模型（既无云端 key 也未运行本地服务）时对话不可用（见启动提示）。云端/本地自由接入，互不冲突。
-
-按需选一个厂商，把 key 设为环境变量（Windows 用 `setx`，Linux/macOS 用 `export`）：
+**本地开发 · 一键起 Web 应用（推荐）**
 
 ```bash
-# OpenAI / 任意 OpenAI 兼容端点
-setx OPENAI_API_KEY "sk-..."
+# 1. 配置模型 (config/ppx.json): 设 OPENAI_API_KEY / DEEPSEEK_API_KEY 等环境变量,
+#    或启动本地 LM Studio (默认 http://127.0.0.1:1234/v1) 走本地模型。
 
-# 深度求索 DeepSeek
-setx DEEPSEEK_API_KEY "sk-..."
-
-# 火山方舟（需同时把 config/ppx.json 的 volcengine.model 改成你的 endpoint 模型名）
-setx VOLCENGINE_API_KEY "..."
-
-# 通义千问 DashScope（含 qwen-turbo 文本 + qwen-vl-max 视觉）
-setx DASHSCOPE_API_KEY "sk-..."
-```
-
-重开终端生效，然后直接 `ppx` 开聊。配了云端 key 就**云端优先**（按 providers 云段顺序），没配任何云端 key 就**回落本地推理**（需本地模型服务在运行）：
-- 无云端 key + 本地 LM Studio 未启动 → 对话不可用（启动时会有明确提示）
-- 双击 `双击启动皮皮虾-服务.bat` 会强制本地 lmstudio 模式。
-路由逻辑见 docs/ARCHITECTURE-ORGANISM.md 模型接入节。
-
-> 本地模型（LM Studio）离线/私有场景直接用，**前提是本地服务已启动**；要更高质量答案可再配云端 key 自动升级。云端/本地自由接入，互不冲突。
-### 全局安装 (npm)
-
-直接从 npm 安装，即可使用命令行工具：
-
-```bash
-npm i -g ppxans-harness
-
-ppx           # 启动对话 CLI (别名 ppxans)
-ppx-serve     # 启动 HTTP 服务
-ppx-channels  # 通道 CLI
-```
-
-### 本地开发 · 一键起 Web 应用 (推荐)
-
-```bash
-# 1. 配置模型 (config/ppx.json)
-#    设置环境变量: OPENAI_API_KEY / DEEPSEEK_API_KEY / DASHSCOPE_API_KEY ...
-
-# 2. 一条命令起整个 Web 应用 (内核 + 界面同进程同端口, 自动开浏览器)
-npm start                        # → http://127.0.0.1:8899
+# 2. 一条命令起整个 Web 应用 (内核+界面同进程同端口, 自动开浏览器)
+npm start                          # → http://127.0.0.1:8899
 # 等价: node bin/ppx-web.js [--port 9000] [--host 0.0.0.0] [--no-open] [--root D:/ws]
 
 # 3. 启动自愈体检
 npm run selfheal
 ```
 
-**Windows 双击即用** (无需开终端，对齐 dsh 的启动体验):
+**Windows 双击即用**：
 
 | 入口 | 作用 |
 |---|---|
-| `启动皮皮虾.vbs` | 静默启动 (无控制台窗口, 内核自动开浏览器) —— **推荐** |
-| `启动皮皮虾.bat` | 带窗口启动 (可见启动日志, 便于排查) |
+| `启动皮皮虾.vbs` | 静默启动（无控制台, 内核自动开浏览器）—— **推荐** |
+| `启动皮皮虾.bat` | 带窗口启动（可见启动日志） |
 | `停止皮皮虾.bat` | 按端口精准停服 |
-| `高级菜单.bat` | CLI / 仅接口 / 体检 / 测试 / 旧版 Next.js 界面 |
+| `高级菜单.bat` | CLI / 仅接口 / 体检 / 测试 / 高级菜单 |
 
-启动器会自动清理上一次遗留的监听进程，然后单进程起服务并轮询就绪，就绪后打开浏览器并退出。
+启动器自动清理上一轮遗留监听进程 → 单进程起服务并轮询就绪 → 就绪后打开浏览器并退出。
 
-### 其他启动方式
+**其他启动方式**
 
 ```bash
-npm run chat          # 终端对话 CLI
+npm run chat          # 终端对话 CLI (ppx / ppxans)
 npm run serve         # 仅 HTTP 接口 (无界面): http://127.0.0.1:8899
-npm run web:next      # 旧版 Next.js 界面 (双进程 8899+3000, 需先 npm run web:build)
-npm run web:check     # 界面静态自检 (图标/DOM id/静态资源引用)
+npm run web:check     # Web UI 静态自检 (图标/DOM id/语法解析/静态资源)
+npm test              # 全量测试 (918 项)
 ```
 
 ### MCP 标准端点 (Streamable HTTP)
 
-`POST http://127.0.0.1:8899/mcp`（同 Bearer token 鉴权）。任何 MCP 客户端
-(Claude Desktop / Cursor / MCP Inspector 等) 可直接接入:
+`POST http://127.0.0.1:8899/mcp`（同 Bearer token 鉴权）。任何 MCP 客户端 (Claude Desktop / Cursor / MCP Inspector 等) 可直接接入：
 
-- `server/discover` + `tools/list` + `tools/call`（43 内置工具全量暴露）
-- resources: `memory://facts`, `traces://recent`, `stats://overview`, `sessions://list`
+- `tools/list` + `tools/call` — 69 工具全量暴露
+- resources: `memory://` `traces://` `stats://` `sessions://`
 - prompts: `humanize` / `plan` / `debug` / `verify` / `write_article`（方法型技能）
 - `ppx.chat.send` / `ppx.chat.stream`（对话工具，驱动完整工具循环）
-- `ppx.sessions.*` / `ppx.providers.*` / `ppx.settings.*` / `ppx.task.*`（管理工具，Web 界面在用）
 
-配置: `config/ppx.json` → `channels.http.mcp { enabled, path, legacy_rest }`。
-`enabled` 默认开；`path` 默认 `/mcp`；`legacy_rest` 默认 `true`（保留旧 REST 兼容），
-设 `false` 彻底退役 `/api/*` 与 `/message*`（这些端点将返回 410 并引导到 `/mcp`）。
+配置: `config/ppx.json` → `channels.http { port, auth_token }`。
 
-更多: 启动入口 / 所需配置 / 页面布局方案见 **[docs/web-launch.md](docs/web-launch.md)**。
+### 模型接入
 
-### 跑测试
-
-```bash
-npm test
-```
-
-## 🧪 评测与 CI
-
-- **本地能力评测**: `npm run eval` — 零依赖跑问候/时间/记忆/生命周期等 7 项 (无需 LLM)
-- **LLM 端到端评测**: `npm run eval -- --llm` — 加跑真实 LLM 问答/工具调用回归, provider 三选一:
-  - `--provider <id>`: 用 config/ppx.json 里指定的 provider
-  - `PPX_E2E_BASE_URL` + `PPX_E2E_API_KEY` + `PPX_E2E_MODEL` 环境变量
-  - 默认探活本地 LM Studio (http://127.0.0.1:1234)
-- **GitHub Actions CI**: push/PR 自动跑全量测试 + web 类型检查/构建 + 本地评测。要启用 LLM 回归, 在仓库 Settings → Secrets 配置三个变量 (均需配置才触发):
-  - `PPX_E2E_BASE_URL` (OpenAI 兼容端点, 如 `https://api.deepseek.com/v1`)
-  - `PPX_E2E_API_KEY`
-  - `PPX_E2E_MODEL` (如 `deepseek-chat`)
-- **压测**: `npm run bench` — 并发/长会话吞吐基线
-
-
-## 🔌 模型接入 (云端 API 优先, 本地模型兜底)
-
-皮皮虾支持任意 **OpenAI 兼容端点**, 自动多 provider 回退:
+任意 **OpenAI 兼容端点**，自动多 provider 回退：
 
 ```json
 {
   "providers": [
-    { "id": "openai",     "base_url": "https://api.openai.com/v1",              "api_key_env": "OPENAI_API_KEY",     "model": "gpt-4o-mini" },
-    { "id": "deepseek",   "base_url": "https://api.deepseek.com/v1",             "api_key_env": "DEEPSEEK_API_KEY",   "model": "deepseek-chat" },
-    { "id": "volcengine", "base_url": "https://ark.cn-beijing.volces.com/api/v3", "api_key_env": "VOLCENGINE_API_KEY", "model": "<你的endpoint>" },
-    { "id": "dashscope",  "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "api_key_env": "DASHSCOPE_API_KEY", "model": "qwen-turbo" }
+    { "id": "openai",     "base_url": "https://api.openai.com/v1",           "api_key_env": "OPENAI_API_KEY",   "model": "gpt-4o-mini" },
+    { "id": "deepseek",   "base_url": "https://api.deepseek.com/v1",          "api_key_env": "DEEPSEEK_API_KEY", "model": "deepseek-chat" },
+    { "id": "dashscope",  "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "api_key_env": "DASHSCOPE_API_KEY", "model": "qwen-turbo" },
+    { "id": "lmstudio",   "base_url": "http://127.0.0.1:1234/v1",             "api_key": "lm-studio",            "model": "<本地模型名>" }
   ]
 }
 ```
 
-**回退机制**: 路由层 (router.js) 负责选主模型, 运行时 (agent) 负责失败切换——选中 provider 连不上自动切下一个, 直到成功。本地 LM Studio 示例:
+**回退机制**：路由层选主模型，运行时负责失败切换——选中 provider 连不上自动切下一个直到成功。默认本地优先，配了云端 key 自动云端优先。
 
-```json
-{ "id": "lmstudio", "base_url": "http://127.0.0.1:1234/v1", "api_key": "lm-studio", "model": "gemma-4-e2b" }
-```
+---
 
-## 🧠 记忆架构 (L0 → L4)
-
-```
-对话 → L0 原始对话(session 事件日志) → L1 原子记忆(高斯衰减) → L2 场景(关键词聚类) → L3 画像(persona)
-                                                                                  ↘ L4 程序性记忆(技能/流程, 慢衰减)
-```
-
-- **L0**: 对话原文由会话事件日志 `data/sessions/*.jsonl` 全量承载; 每日滚动压缩视图由 MemoryTicker 产出到 `data/memory/daily/` + `longterm.md`, 过滤噪音
-- **L1**: `facts.json`, score = score × exp(-λt²), 命中加分（λ = `decay_per_day`，默认 0.02）
-- **L2**: `scenes.json`, 相关记忆聚类成场景
-- **L3**: `user.persona.md` + `agent.persona.md`, 从记忆提炼画像
-- **L4**: 程序性记忆（技能/流程/方法论），与 L1 同库以 `layer: 4` 标记；衰减率固定为 `0.005`，仅为 L1 的 1/4 —— 技能应当长期留存，不该像闲聊事实一样快速遗忘
-
-### 记忆治理（可回滚的遗忘）
-
-原版的遗忘是**不可逆硬删**。现在引入治理语义，误删不再无法挽回：
-
-| 能力 | 工具 | 说明 |
-|---|---|---|
-| 软删 | `memory_forget` | 标记 `status='deleted'`，数据保留，检索立即可见性消失 |
-| 回滚 | `memory_restore` | 恢复软删记忆，恢复即视作一次访问（避免恢复后被立刻衰减清空） |
-| 复核 | `memory_list_deleted` | 列出已遗忘条目（含原因与时间），防误删无人发现 |
-| 版本链 | `update()` | 更新保留旧版为 `archived` + `prevId` 链接，记忆演化可追溯 |
-| TTL 归档 | `sweepExpired()` | 超 `memory_ttl_days`（默认 90 天）未访问则软归档，支持 `dryRun` 预演 |
-| 按层清理 | `memory_clear_layer` | 清 L1 或 L4，默认软删，`hard=true` 才物理删除 |
-| 迁移 | `memory_export` / `memory_import` | 导出含软删/归档条目；导入 `merge` 按内容去重、`replace` 整体替换 |
-
-> 容量保护仍是硬删（`fact-store._prune` 超 `max_facts` 裁剪最弱项）——治理管"想忘的"，`_prune` 管"装不下的"，两者分工不重叠。
-
-## 🔐 审计哈希链
-
-工具调用落 `data/logs/audit.ndjson`，每条带 `prevHash` 串成 SHA-256 链：
-
-- **append-only**：只追加，不改历史行
-- **防篡改**：改动任意一行会导致后续所有行校验失败，`verify()` 精确报出首个断裂行号
-- **参数脱敏**：落盘前掩码 `sk-*` / `Bearer` / `api_key` / URL query 凭证（`?token=` 等）/ 手机号
-- **可隔离**：链损坏时 `quarantineBroken()` 备份损坏段、重建空链并记录隔离事件（自愈语义）
+## 🧪 测试 / 评测 / CI
 
 ```bash
-npm run audit:verify              # 校验链完整性
-npm run audit:verify -- --fix     # 损坏则隔离并重建
-npm run audit:verify -- --tail 20 # 附带最近 20 条
+npm test                # 全量 918 项 (0 失败)
+npm run eval            # 本地能力评测 (7 项, 无需 LLM)
+npm run eval -- --llm   # LLM 端到端评测 (需 provider)
+npm run bench           # 并发/长会话吞吐压测
+npm run audit:verify    # 审计哈希链完整性校验
 ```
 
-`config.audit.enabled: false` 可关闭（性能敏感场景）。未启用时工具调用路径零开销。
+**GitHub Actions CI**：push/PR 自动跑全量测试 + Web 静态自检 + 本地评测。要启用 LLM 回归，在 Settings → Secrets 配置 `PPX_E2E_BASE_URL` / `PPX_E2E_API_KEY` / `PPX_E2E_MODEL`。
 
-## 🩺 自我修复
+---
 
-- 启动体检: 补建缺失目录 / 修复损坏JSON(备份后重建)
-- 崩溃恢复: 检测异常退出, 清理残留临时文件
-- 数据一致性: integrity 标记, 干净退出/异常退出可感知
+## 🧠 记忆架构（L0 → L4）
 
-## 📂 目录结构
+```
+对话 → L0 原始对话(会话日志) → L1 原子记忆(高斯衰减) → L2 场景(关键词聚类) → L3 画像(persona)
+                                                                          ↘ L4 程序性记忆(技能/流程, 慢衰减)
+```
+
+- **L0**: `data/sessions/*.jsonl` 全量承载 + MemoryTicker 滚动压缩
+- **L1**: `facts.json`, score = score × exp(-λt²), 命中加分 (λ = `decay_per_day`)
+- **L2**: `scenes.json` 相关记忆聚类
+- **L3**: `user.persona.md` + `agent.persona.md`
+- **L4**: 技能/流程程序性记忆, 衰减率 0.005 仅为 L1 的 1/4 —— 技能长期留存
+
+**记忆治理（可回滚的遗忘）**：软删(`memory_forget`) + 回滚(`memory_restore`) + 复核(`memory_list_deleted`) + 版本链 + TTL 归档 + 按层清理 + 导出/导入迁移。容量保护仍是硬删（`_prune` 裁最弱项），治理管"想忘的"、`_prune` 管"装不下的"，两者分工不重叠。
+
+---
+
+## 📂 目录结构（v3.0）
 
 ```
 PPXANS-Harness/
-├── config/         配置 (ppx.json + identity/ishiki 人格)
+├── config/         配置 (ppx.json + 人格)
 ├── src/
-│   ├── agent/      Agent 引擎 (编排 + 工具循环 + 多模型回退)
-│   ├── core/       核心纯逻辑 (policy 工具循环策略 / trace 事件流 traceId 贯穿)
-│   ├── services/   业务服务 (memory-service 记忆协调 / learning-service 自我学习)
-│   ├── memory/     五层记忆 (L0-L4) + 会话事件日志 + 经验库 + 压缩层
-│   ├── audit/      verifier 语义验证闸门 + audit-chain 防篡改哈希链
-│   ├── ans/        ANS 神经系 (values/lifecycle/proactive/reward/eviction/guard)
-│   ├── selfheal/   自愈引擎
-│   ├── tools/      工具系统 (43 个 + MCP 动态注册; governance.js 为治理工具)
-│   ├── channels/   通道 (http/feishu/wechat)
-│   ├── orchestrator/ 军团编排器 (多进程)
-│   ├── llm/        LLM 客户端
-│   └── utils/      基础设施
+│   ├── agent/      Agent 引擎 (工具循环 + 多模型回退 + v3 插件装配)
+│   ├── protocol/   [v3] SQ·EQ 双队列事件流 (WAL)
+│   ├── session/    [v3] Turn 状态机 + rollout + parts (standalone, 待 v3.1)
+│   ├── permissions/[v3] 审批 + 沙箱 + 规则链 + canUseTool
+│   ├── hooks/      [v3] 六事件钩子链
+│   ├── edit/       [v3] SR 编辑块 + 快照回滚
+│   ├── repomap/    [v3] 仓库地图 (PageRank)
+│   ├── review/     [v3] 分级审查流水线
+│   ├── evidence/   [v3] 证据边界 + 目标看板 + manifest
+│   ├── commands/   [v3] 斜杠命令统一模型
+│   ├── plugin/     v3.js 五插件装配 (permissions/hooks/commands/evidence/protocol)
+│   ├── tools/      工具系统 (69 个 + v3 工具注册)
+│   ├── core/  services/  memory/  audit/  ans/  selfheal/  channels/  orchestrator/  llm/  utils/
+├── public/         零依赖 Web UI (index.html/app.js/app.css, codex 风格)
+├── bin/            ppx / ppxans / ppx-web / ppx-serve / ppx-channels 入口
 ├── data/           运行时数据 (不进 git)
-├── references/     第三方项目来源登记 (不含源码)
-├── test/           测试 (768 项 764 过 0 失败 4 跳过)
-└── docs/           文档
+├── references/     第三方项目来源登记
+├── test/           测试 (918 项, v3 新模块全覆盖)
+└── docs/           文档 (ARCHITECTURE-V3 / QUICKSTART / web-launch 等)
 ```
+
+---
 
 ## 📄 License
 
@@ -282,6 +196,6 @@ Apache License 2.0
 
 - [openhanako (HanaAgent)](https://github.com/liliMozi/openhanako) — 记忆分层、自愈内核、人格系统
 - [TencentDB-Agent-Memory](https://github.com/TencentCloud/TencentDB-Agent-Memory) — L0-L3 四层记忆架构
-- [OpenClaw](https://openclaw.ai) — agent 运行时组织
-- **ppx-v2 (ppx Harness)** — 审计哈希链、记忆治理（软删/回滚/版本链/TTL）、L4 程序性记忆、10 个治理工具
-- [openai/codex](https://github.com/openai/codex)、[deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) — 仅作架构参考，源码未纳入，见 [references/THIRD-PARTY-SOURCES.md](references/THIRD-PARTY-SOURCES.md)
+- **ppx-v2 (ppx Harness)** — 审计哈希链、记忆治理、L4 程序性记忆、治理工具
+- [openai/codex](https://github.com/openai/codex) — v3.0 主骨架参照 (SQ/EQ 队列、权限、仓库地图)
+- [openrowan / opencode](https://github.com/sst/opencode)、[claude-code](https://github.com/anthropics/claude-code)、[aider](https://aider.chat)、[OpenHands](https://github.com/All-Hands-AI/OpenHands)、[open-code-review](https://github.com/srikanth235/open-code-review)、[claude-agent-sdk-ts](https://github.com/anthropics/claude-agent-sdk-typescript)、[oh-my-hermes](https://github.com/wintermute-cell/oh-my-hermes) — v3.0 特性吸收来源，源码未直接纳入，见 [docs/ARCHITECTURE-V3.md](docs/ARCHITECTURE-V3.md) 与 [references/THIRD-PARTY-SOURCES.md](references/THIRD-PARTY-SOURCES.md)
