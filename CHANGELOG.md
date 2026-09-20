@@ -1,6 +1,32 @@
 # CHANGELOG
 
+## v3.0.0 (2026-09-18) — codex 对齐整体重构: 九大新层 + codex 风格 Web UI
 
+> **定性**: 以 codex-main 为主骨架参照的整体升级，吸收 claude-code / opencode / aider / OpenHands / open-code-review / claude-agent-sdk / oh-my-hermes 七项目特性。
+> 全量回归 **882 项测试全绿**（v2.7.0 基线 787 → 新增 95 项），纯 Node 零运行时依赖不变。
+
+### 新增核心层（src/ 九个模块）
+- **protocol/** — codex SQ/EQ 双队列事件流: SubmissionQueue + EventQueue(WAL JSONL) + OpType/EventType 常量 + createProtocolBus
+- **session/** — Session→Task→Turn 状态机 (turn.js) + rollout JSONL 持久化/fork/rewind (rollout.js) + 结构化消息部件 (parts.js, opencode 风格)
+- **permissions/** — 三合一权限引擎: codex AskForApproval 四档 + SandboxPolicy 三档 + opencode 通配符规则链(last-match-wins) + CASDK canUseTool 回调；支持运行时热更新
+- **hooks/** — claude-code 六事件钩子链 (PreToolUse 可否决/改参 / PostToolUse 可附加上下文 / Pre·PostCompact / Session·Start·Stop / SubagentStop)，优先级 + 超时熔断
+- **edit/** — aider SEARCH/REPLACE 编辑块 (精确/去空行/模糊三级匹配 + 失败回灌反馈) + Snapshot 编辑快照回滚
+- **repomap/** — aider 仓库地图: 正则 def/ref 提取 + 纯 JS PageRank + token 预算渲染，30s 缓存
+- **review/** — open-code-review 分级审查流水线: plan→group→review→relocate→filter，P0/P1/P2 报告
+- **evidence/** — oh-my-hermes prepared/observed 证据边界 + handoff manifest (SHA-256) + goal board 目标看板 + conformance 校验
+- **commands/** — claude-code 斜杠命令统一模型: 13 个内置命令 + `.ppx/commands/*.md` 用户命令
+
+### 集成接线
+- agent._runTool 织入: PreToolUse 钩子 → 权限引擎 → (ask 时) 审批等待流 → 执行 → PostToolUse 钩子
+- 审批流 (codex approval flow): `_requestApproval`/`resolveApproval`/`pendingApprovals`，超时默认拒绝
+- 新工具 4 个: `repo_map` / `apply_patch`(SR 编辑块+失败整体回滚) / `review_code` / `goal_board` (工具总数 43→47)
+- v3 插件组 (`plugin/v3.js`): hooks/permissions/commands/evidence/protocol 五插件，可被用户插件替换
+- HTTP 端点 6 个: `/api/commands` `/api/approvals/pending` `/api/approvals/:id` `/api/goalboard` `/api/review/latest` `/api/permissions`
+
+### Web UI — codex 风格整体重制 (public/, 零依赖 vanilla)
+- 左栏会话/能力 · 中栏**事件时间线**(用户气泡/agent markdown/工具折叠卡/审批卡/计划卡/diff 卡/错误卡) · 右栏**工作区抽屉**(文件树/目标看板/审查报告/设置 四 Tab)
+- **斜杠命令面板** (/ 唤起 + ↑↓ 选用)、**审批卡片** (Bash/Edit/Plan 三类模板 + 批准/拒绝)、子 agent 颜色徽标、Esc 中断、主题切换
+- check-web.mjs 升级: 括号粗检 → 真语法解析 + v3 结构断言
 
 ## 未发布 (2026-09-17) - 全面代码与架构体检轮: 安全 / 可用性 / 无障碍
 

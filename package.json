@@ -1,6 +1,6 @@
 {
   "name": "ppxans-harness",
-  "version": "2.7.0",
+  "version": "3.0.0",
   "description": "PPXANS-Harness - 皮皮虾神经系 (ANS) + Harness 一体化智能体内核. 零运行时依赖纯Node. 自愈 + 自学习 + 五层记忆 + SHA-256 审计哈希链 + 多 Agent 军团 + 治理内核(deny-wins/熔断/seam) + 进化内核(Playbook/故障记忆) + 符号画布 + supervisor. 自研底座: 仅 OpenAI 兼容 HTTP 直连, 无外部引擎依赖. Agent Nervous System harness in pure Node, zero runtime dependencies.",
   "type": "module",
   "license": "Apache-2.0",
@@ -29,10 +29,8 @@
     "web": "node bin/ppx-web.js",
     "web:noopen": "node bin/ppx-web.js --no-open",
     "web:check": "node scripts/check-web.mjs",
-    "web:next": "node scripts/start-web.js",
     "chat": "node src/cli.js",
     "serve": "node src/server.js",
-    "web:build": "npm run build --prefix web",
     "release": "node scripts/release.js",
     "eval": "node scripts/eval.js",
     "selfheal": "node scripts/selfheal-bench.js",

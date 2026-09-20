@@ -1,5 +1,7 @@
 # 架构说明
 
+> **v3.0 (2026-09-18)**: 本文档描述 v2.x 基线架构。v3.0 codex 对齐升级（新增 protocol/session/permissions/hooks/edit/repomap/review/evidence/commands 九层 + codex 风格 Web UI）见 **[ARCHITECTURE-V3.md](./ARCHITECTURE-V3.md)**。
+
 皮皮虾是一个**独立自包含的纯 Node agent**（零运行时依赖）。v2.5.0 起仅保留自研 http 底座直连 OpenAI 兼容 API（OpenAI/DeepSeek/火山/通义/智谱/本地 lmstudio/ollama/vLLM）；OpenClaw / DeepSeek Harness 等外部引擎已全部移除（源码曾内嵌 `.deps/deepseek-harness` 作为可选底座，v2.5.0 删除）。架构理念上仍吸收其记忆分层、自愈内核、工具系统的精华，但实现完全自研。
 
 ## 整体架构
