@@ -6,7 +6,6 @@
 //   - registerMigration(name, from, to, fn) 注册迁移链, 不允许跳级, 不允许覆盖
 //   - migrateData() 读当前版本 -> 沿迁移链推进 -> 原子写回数据 + 更新 .schema 文件
 //   - 崩溃安全: 迁移在原子写回后版本才推进, 中断重跑幂等
-import fs from "node:fs";
 import path from "node:path";
 import { atomicWrite, ensureDir, readJson } from "./store.js";
 

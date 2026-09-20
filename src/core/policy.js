@@ -166,6 +166,24 @@ export class ToolLoopPolicy {
     this.errorRetries++;
     return true;
   }
+
+  // ---- 自省裁决 (Reflective 内核): 对工具失败做语义分类, 决定重试策略 ----
+  // 在机械次数重试之上加一道闸门: 硬拒绝类错误 (黑名单/审批拒/权限/deny/DENY_HINT)
+  // 不许盲目改写命令绕过, 直接拦停; 可修正类错误才走次数重试。
+  // 返回 { action: "stop"|"retry", reason } — 纯方法, 可独立测试。
+  selfReviewError(errors) {
+    if (!errors || !errors.length) return null;
+    const text = errors.join("\n");
+    // 硬拒绝特征: 命中命令守卫拦截 / 审批被拒 / 权限拒绝 / 黑名单
+    if (/命中后不要重试|改造命令绕过|硬黑名单|审批被拒绝|审批拒绝|权限.*拒|deny|DENY|拦截/i.test(text)) {
+      return {
+        action: "stop",
+        reason: "这是硬性拒绝类错误, 盲目重试或改写命令会绕过安全闸门 — 停下不重试, 说明原因或请用户调整配置。",
+      };
+    }
+    // 可修正类错误 (命令不存在/文件缺失/参数错等): 走次数重试道
+    return { action: "retry", reason: "可修正错误, 喂回模型重试 (仍受次数上限约束)" };
+  }
 }
 
 // ---- 工具循环主驱动 (原 PPXAgent._llmWithTools) ----
@@ -251,6 +269,17 @@ export async function runToolLoop({
       }
     }
     if (policy.shouldRetryErrors(errors)) {
+      // 自省裁决 (Reflective 内核): 硬拒绝类错误直接拦停, 不得盲目改写命令绕过
+      // 语义闸门在次数闸门之前: 即使重试次数未满, 硬拒绝也不重试 (安全红线)
+      const verdict = policy.selfReviewError(errors);
+      if (verdict && verdict.action === "stop") {
+        ev("tool/self_review_stop", { round, reason: verdict.reason, retries: policy.errorRetries });
+        messages.push({
+          role: "user",
+          content: "自省裁决: " + verdict.reason + "\n失败详情:\n" + errors.join("\n") + "\n请停止重试, 直接基于已有信息给出结论, 或向用户说明原因。",
+        });
+        continue;
+      }
       ev("tool/error_retry", { round, errors: errors.length, retries: policy.errorRetries, max: policy.maxErrorRetry });
       messages.push({
         role: "user",

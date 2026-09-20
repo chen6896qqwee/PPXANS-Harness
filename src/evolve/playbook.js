@@ -9,9 +9,9 @@
 // ⚠ 接线状态 (2026-09-17 核对): 已由 evolvePlugin 装配为 ctx.provide("playbook"), 但**无内置消费方**
 //   —— 没有代码把 playbook bullets 注入 system prompt, 也没有代码在对话后产生 delta 操作。
 //   属"引擎就绪、链路未接"; 待接入 (注入 + delta 生成) 才算生效。
-import fs from "node:fs";
+import { shortId } from "../utils/id.js";
 import path from "node:path";
-import { ensureDir, readText, writeText } from "../utils/store.js";
+import { ensureDir, readJson, writeJson } from "../utils/store.js";
 
 // ---- 词法相似度 (grow-and-refine 用, 零依赖) ----
 // 英文/空格分隔 → 词级 Jaccard; 中文等 CJK 连续串 → 字符 bigram Dice (单 token 时退化)。
@@ -61,7 +61,7 @@ export function applyDelta(playbook, ops = [], { maxBullets = 200 } = {}) {
       // 新增前查重: 与已有 bullet 词法相似 > 0.6 视为重复, 拒收 (grow-and-refine)
       const dup = pb.bullets.find((b) => lexicalSimilarity(b.content, content) > 0.6);
       if (dup) { rejected.push({ op, reason: "重复: " + dup.id }); continue; }
-      const id = op.id || ("b" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5));
+      const id = op.id || shortId("b", 5);
       const kind = ["strategy", "pitfall", "domain"].includes(op.kind) ? op.kind : "strategy";
       pb.bullets.push({ id, kind, content, counters: { helpful: 0, harmful: 0 }, evidence_ref: op.evidence_ref || null, createdAt: Date.now() });
       applied.push({ op: "ADD", id });
@@ -144,12 +144,8 @@ export class PlaybookStore {
   }
 
   _load() {
-    try {
-      if (fs.existsSync(this.file)) {
-        const d = JSON.parse(fs.readFileSync(this.file, "utf8"));
-        if (d && Array.isArray(d.bullets)) return d;
-      }
-    } catch {}
+    const d = readJson(this.file, null);
+    if (d && Array.isArray(d.bullets)) return d;
     return { base: "", bullets: [], version: 1 };
   }
 
@@ -162,7 +158,7 @@ export class PlaybookStore {
 
   save(pb = this._playbook) {
     this._playbook = pb;
-    writeText(this.file, JSON.stringify(pb, null, 2));
+    writeJson(this.file, pb);
     return pb;
   }
 

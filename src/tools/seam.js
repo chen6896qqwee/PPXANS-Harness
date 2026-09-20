@@ -5,6 +5,36 @@
 
 export const TOOL_ERROR_PREFIX = "[工具错误]";
 
+// ---- B1: 工具结果标准化 (吸收 codex format_exec_output_for_model) ----
+// 命令类工具返回统一元数据头, 模型不靠猜判断成败:
+//   [exit=0 time=0.42s out=3行] <内容>
+//   [exit=1 time=1.02s out=0行][stderr] <错误>
+//   [exit=timeout time=30000ms] command timed out after 30000ms
+// 纯函数, 可独立测试 (B1 验收点)。
+// opts = { ms, lineCount, timedOut, exitCode, timedOutMs }
+export function formatToolResultHeader({
+  ms = 0,
+  lineCount = 0,
+  timedOut = false,
+  exitCode = null,
+  timedOutMs = 0,
+} = {}) {
+  if (timedOut) {
+    return `[exit=timeout time=${ms}ms] command timed out after ${timedOutMs || ms}ms`;
+  }
+  const codeStr = exitCode === null ? "?" : String(exitCode);
+  return `[exit=${codeStr} time=${(ms / 1000).toFixed(2)}s out=${lineCount}行]`;
+}
+
+// 计算文本行数 (B1 辅助): 去尾随空行, 纯空白算 0
+// 修正: 尾部换行不应多计一行 (echo 输出 "abc\r\n" 应为 1 行)
+export function countLines(text) {
+  const s = String(text ?? "");
+  const t = s.replace(/\r\n/g, "\n").replace(/\n\s*$/, "").trim();
+  if (!t) return 0;
+  return t.split("\n").length;
+}
+
 // power 权限级: user < agent < super
 export const POWER_LEVEL = { user: 0, agent: 1, super: 2 };
 

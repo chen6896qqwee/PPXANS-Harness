@@ -6,9 +6,9 @@
 // ⚠ 接线状态 (2026-09-17 核对): 已由 evolvePlugin 装配为 ctx.provide("failures"), 但**无内置消费方**
 //   —— 没有代码在工具失败时写入 episode, 也没有代码在诊断时检索它。属"能力就绪、链路未接"。
 //   当前失败沉淀走的是经验库 (Experience) + refine 闭环; 本模块待接入才算生效。
-import fs from "node:fs";
 import path from "node:path";
-import { ensureDir, writeText } from "../utils/store.js";
+import { ensureDir, readJson, writeJson } from "../utils/store.js";
+import { shortId } from "../utils/id.js";
 import { lexicalSimilarity } from "../evolve/playbook.js";
 
 export const FAILURE_CATEGORY = ["throttle", "network", "validation", "auth", "unknown"];
@@ -23,24 +23,19 @@ export class FailureEpisodeStore {
   }
 
   _load() {
-    try {
-      if (fs.existsSync(this.file)) {
-        const d = JSON.parse(fs.readFileSync(this.file, "utf8"));
-        if (Array.isArray(d)) return d;
-      }
-    } catch {}
-    return [];
+    const d = readJson(this.file, null);
+    return Array.isArray(d) ? d : [];
   }
 
   _save() {
-    writeText(this.file, JSON.stringify(this._episodes, null, 2));
+    writeJson(this.file, this._episodes);
   }
 
   // 记录一次失败 episode
   // { tool, error, category, rootCause, fix, confidence, traceRef }
   record(ep) {
     const e = {
-      id: "fe" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
+      id: shortId("fe", 5),
       tool: ep.tool || "unknown",
       error: String(ep.error || "").slice(0, 500),
       category: FAILURE_CATEGORY.includes(ep.category) ? ep.category : "unknown",

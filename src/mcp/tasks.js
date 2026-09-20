@@ -2,9 +2,9 @@
 // 轻量任务工作区: 任务 = { id, title, description, status, steps[], result, createdAt, updatedAt }
 // 持久化到 <root>/data/tasks.json (原子写), 支持 create/list/get/update/step/delete/complete。
 // 供 MCP 工具 ppx.task.* 与 web 前端任务面板使用。
-import fs from "node:fs";
 import path from "node:path";
-import { ensureDir, atomicWrite } from "../utils/store.js";
+import { readJson, writeJson } from "../utils/store.js";
+import { shortId } from "../utils/id.js";
 
 const VALID_TASK_STATUS = new Set(["todo", "running", "done", "failed"]);
 const VALID_STEP_STATUS = new Set(["pending", "running", "done", "failed"]);
@@ -18,22 +18,17 @@ export class TaskBoard {
   }
 
   _load() {
-    try {
-      if (fs.existsSync(this.file)) {
-        const raw = JSON.parse(fs.readFileSync(this.file, "utf8"));
-        if (Array.isArray(raw.tasks)) {
-          for (const t of raw.tasks) {
-            if (t && t.id) this.tasks.set(t.id, this._normalize(t));
-          }
-        }
+    const raw = readJson(this.file, null); // 损坏则从空开始, 下次写入覆盖
+    if (raw && Array.isArray(raw.tasks)) {
+      for (const t of raw.tasks) {
+        if (t && t.id) this.tasks.set(t.id, this._normalize(t));
       }
-    } catch (e) { /* 损坏则从空开始, 下次写入覆盖 */ }
+    }
   }
 
   _save() {
     try {
-      ensureDir(path.dirname(this.file));
-      atomicWrite(this.file, JSON.stringify({ tasks: [...this.tasks.values()] }, null, 2));
+      writeJson(this.file, { tasks: [...this.tasks.values()] });
     } catch (e) { /* 持久化失败不阻断内存操作 */ }
   }
 
@@ -58,7 +53,7 @@ export class TaskBoard {
 
   create({ title, description = "", steps = [] } = {}) {
     if (!title) throw new Error("任务需 title");
-    const id = "t_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+    const id = shortId("t_", 5);
     const t = this._normalize({
       id, title, description,
       steps: steps.map((s) => ({ title: String(s) })).filter((s) => s.title),

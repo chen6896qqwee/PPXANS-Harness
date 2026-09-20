@@ -2,9 +2,7 @@
 // 独立可更换模块: agent 只持有 Lifecycle 实例, 需要自定义阶段逻辑时替换此模块即可
 // 阶段: born → growing(首次对话) → mature(10 次对话); evolving(进化)/ reproducing(繁衍) 为累计计数
 // v1.0.7 持久化: 传入 file 时状态落盘 JSON, 跨进程/重启不归零 (P1)
-import fs from "node:fs";
-import path from "node:path";
-import { ensureDir } from "../utils/store.js";
+import { readJson, writeJson } from "../utils/store.js";
 import { info } from "../utils/logger.js";
 
 const MATURE_CHATS = 10;   // 对话达到该次数 → mature
@@ -25,34 +23,29 @@ export class Lifecycle {
   // 从磁盘恢复状态 (跨进程/重启), 文件缺失或损坏时静默用初始值
   _load() {
     if (!this.file) return;
-    try {
-      if (fs.existsSync(this.file)) {
-        const s = JSON.parse(fs.readFileSync(this.file, "utf8"));
-        if (s && typeof s.stage === "string" && s.stage) {
-          this.stage = s.stage;
-          this.bornAt = s.bornAt || Date.now();
-          this.chats = Number(s.chats) || 0;
-          this.evolved = Number(s.evolved) || 0;
-          this.reproduced = Number(s.reproduced) || 0;
-          this.log = Array.isArray(s.log) ? s.log.slice(-LOG_LIMIT) : [];
-        }
-      }
-    } catch { /* 损坏文件静默忽略, 用初始状态 */ }
+    const s = readJson(this.file, null); // 损坏文件静默忽略, 用初始状态
+    if (s && typeof s.stage === "string" && s.stage) {
+      this.stage = s.stage;
+      this.bornAt = s.bornAt || Date.now();
+      this.chats = Number(s.chats) || 0;
+      this.evolved = Number(s.evolved) || 0;
+      this.reproduced = Number(s.reproduced) || 0;
+      this.log = Array.isArray(s.log) ? s.log.slice(-LOG_LIMIT) : [];
+    }
   }
 
   _save() {
     if (!this.file) return;
     try {
-      ensureDir(path.dirname(this.file));
-      fs.writeFileSync(this.file, JSON.stringify({
+      writeJson(this.file, {
         stage: this.stage,
         bornAt: this.bornAt,
         chats: this.chats,
         evolved: this.evolved,
         reproduced: this.reproduced,
         log: this.log.slice(-LOG_LIMIT),
-      }, null, 2), "utf8");
-    } catch {}
+      });
+    } catch { /* 状态落盘失败不影响主流程 */ }
   }
 
   // 每次对话推进: born → growing → mature (计数由调用方保证每次对话调一次)

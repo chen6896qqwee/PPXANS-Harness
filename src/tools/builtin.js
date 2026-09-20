@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import { scrubPII } from "../utils/pii.js";
 import { LocalShellProvider } from "../seam/shell.js";
 import { checkCommand, DENY_HINT } from "./command-guard.js";
+import { formatToolResultHeader, countLines } from "./seam.js";
 
 const execFileP = promisify(execFile);
 
@@ -60,8 +61,7 @@ export function safePath(root, p) {
   return resolved;
 }
 
-// ---- code_act (CodeAct 出口): 一次提交脚本批量操作, 压 N 轮工具往返 → 1 轮 ----
-// 安全: 默认关闭 (security.code_act), 开启后限 python/node 解释器 + 工作目录 + 超时 + PII + 黑名单扫描
+// ---- code_act (CodeAct 出口): 一次提交脚本批量操作, 压 N 轮工具往返 → 1 轮 ----// 安全: 默认关闭 (security.code_act), 开启后限 python/node 解释器 + 工作目录 + 超时 + PII + 黑名单扫描
 // 相比 run_command 的增量风险: 脚本体绕过命令串黑名单, 故独立开关 + 默认关闭
 // 沙箱加固 (进程级): 干净环境变量(剥离密钥/令牌) + node 内存上限 + 超时强杀进程树 + 输出上限
 //   真正隔离需外部 Docker/MicroVM (见 docs/CONFIG.md), 此处为无依赖下的最大进程级约束
@@ -87,6 +87,7 @@ export async function runCodeAct(rootDir, lang, code, timeoutMs) {
   const interpreter = lang === "node" ? process.execPath : (isWin ? "python" : "python3");
   // node 加内存上限; python 无等价零依赖参数 (可外接 Docker 时再限制)
   const args = lang === "node" ? [`--max-old-space-size=${CODE_ACT_MEMORY_MB}`, tmp] : [tmp];
+  const t0 = Date.now();
   try {
     const { stdout, stderr } = await execFileP(interpreter, args, {
       cwd: rootDir,
@@ -95,14 +96,18 @@ export async function runCodeAct(rootDir, lang, code, timeoutMs) {
       env: sandboxEnv(),
       windowsHide: true,
     });
+    const ms = Date.now() - t0;
     const out = (stdout || "") + (stderr ? "\n[stderr] " + stderr : "");
-    return scrubPII(out).cleaned.slice(0, 20000) || "(无输出)";
+    // B1: code_act 同样带统一元数据头 (成功即 exit=0)
+    const head = formatToolResultHeader({ ms, lineCount: countLines(out), exitCode: 0 });
+    return head + "\n" + (scrubPII(out).cleaned.slice(0, 20000) || "(无输出)");
   } catch (e) {
+    const ms = Date.now() - t0;
+    const timedOut = !!(e && (e.killed || /timed out|ETIMEDOUT/i.test(e.message)));
+    const head = formatToolResultHeader({ ms, timedOut, timedOutMs: timeoutMs || 30000 });
     // 超时/输出超限/内存超限的友好提示
-    if (e.killed || /timed out|ETIMEDOUT/i.test(e.message)) {
-      return JSON.stringify({ error: `code_act 执行超时 (${timeoutMs || 30000}ms), 已强制终止` });
-    }
-    return JSON.stringify({ error: e.message, code: e.code });
+    if (timedOut) return head;
+    return head + "\n" + JSON.stringify({ error: e.message, code: e.code });
   } finally {
     try { fs.rmSync(tmp, { force: true }); } catch {}
   }
@@ -199,10 +204,17 @@ export function registerBuiltinTools(catalog, { rootDir, facts, memory }) {
       }
       // 通过 shell seam 调用 (可替换 provider: 本地/沙箱/Docker), 换 provider 即换执行环境
       const shell = (ctx?.agent?.ctx && ctx.agent.ctx.consume("shell")) || defaultShell;
+      const t0 = Date.now();
       const r = await shell.exec(cmd, { cwd: rootDir, timeoutMs: opts.command_timeout_ms || 30000 });
-      if (!r.ok) return JSON.stringify({ error: r.stderr, code: r.code });
+      const ms = Date.now() - t0;
+      // B1: 工具结果标准化 — 统一元数据头, 模型可判成败 (吸收 codex format_exec_output_for_model)
+      const timedOut = !!(r && r.timedOut);
+      const head = formatToolResultHeader({ ms, lineCount: timedOut ? 0 : countLines(r.stdout + " " + (r.stderr || "")), timedOut, timedOutMs: opts.command_timeout_ms || 30000, exitCode: r.code });
+      if (!r.ok && timedOut) return head + "\n[工具错误] run_command: 超时";
+      if (!r.ok) return head + "\n[工具错误] run_command: " + (r.stderr || r.stdout || "");
       const out = r.stdout + (r.stderr ? "\n[stderr] " + r.stderr : "");
-      return scrubPII(out).cleaned.slice(0, 20000) || "(无输出)";
+      const cleaned = scrubPII(out).cleaned.slice(0, 20000) || "(无输出)";
+      return head + "\n" + cleaned;
     },
   });
 

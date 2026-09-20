@@ -13,6 +13,7 @@
 //   - 账本 ledger: 全程记录审查/修复轮次, 熔断时未决发现交主 agent 裁定
 import path from "node:path";
 import { Legion } from "../orchestrator/legion.js";
+import { withTimeout } from "../utils/async.js";
 
 const DELEGATE_TIMEOUT_MS = 120000; // 子任务最长等待 (防卡死主 agent 工具循环)
 
@@ -101,14 +102,7 @@ export async function arbitrate(agent, tasks, results, perspectives, judge) {
   }
 }
 
-// 带超时等待 (防子 agent 卡死) — 定时器必须清理, 否则快速 resolve 后仍挂起 120s 阻止进程退出
-function withTimeout(p, ms, label) {
-  let timer;
-  const timeout = new Promise((_, rej) => {
-    timer = setTimeout(() => rej(new Error(`${label}超时 (${ms / 1000}s)`)), ms);
-  });
-  return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
-}
+// (withTimeout 收敛到 utils/async.js: 原先本文件与 orchestrator/supervisor.js 各写一份)
 
 // ---- SDD review 循环: 实施 -> 只读审查 -> (修复 -> 复审) * N -> 熔断 ----
 // 返回: 通过时 "✅ 审查通过..." + 产出; 熔断时 "⚠️ 未决发现停放..." + 产出

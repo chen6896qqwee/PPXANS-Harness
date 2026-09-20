@@ -4,9 +4,8 @@
 //   细节按 node_id 从事件日志取 —— 上层存结构, 下层存证据, 完整 drill-down 路径。
 // 皮皮虾自研实现: 从 trace.js 的事件流 (turn/step 边界事件) 归纳画布, 非 LLM、纯代码、可测。
 // 触发条件: steps >= minSteps (默认 8) 或事件数超阈值时才开启, 防过度设计。
-import fs from "node:fs";
 import path from "node:path";
-import { ensureDir, writeText, logicalDay } from "../utils/store.js";
+import { ensureDir, writeText, readJson, logicalDay } from "../utils/store.js";
 
 export const CANVAS_DEFAULTS = { minSteps: 8, maxNodes: 30, maxEdges: 40 };
 
@@ -101,9 +100,7 @@ export class CanvasStore {
   }
 
   read(day = logicalDay()) {
-    const f = this._file(day);
-    if (!fs.existsSync(f)) return null;
-    try { return JSON.parse(fs.readFileSync(f, "utf8")); } catch { return null; }
+    return readJson(this._file(day), null);
   }
 
   // 从 trace 事件自动生成并保存 (若步骤数达标); 返回 null 表示未触发

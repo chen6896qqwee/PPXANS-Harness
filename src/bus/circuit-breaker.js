@@ -15,6 +15,7 @@ export class CircuitBreaker {
     this._state = "closed";              // closed | open | half_open
     this._failures = [];                 // 窗口内失败时间戳
     this._openedAt = 0;
+    this._probeAt = 0;                   // half_open 探测放行时刻 (探测超时兜底用)
     this._calls = 0;
     this._opens = 0;
     this._probeFailures = 0;
@@ -36,12 +37,19 @@ export class CircuitBreaker {
     if (this._state === "open") {
       if (now - this._openedAt >= this.cooldownMs) {
         this._state = "half_open";
+        this._probeAt = now;
         return { allowed: true, probe: true }; // 探测放行
       }
       if (this.failPolicy === "fail-closed") return { allowed: false, reason: "circuit-open" };
       return { allowed: true, degraded: true }; // fail-open: 放行但标记降级
     }
-    // half_open: 只放一个探测, 其余短路
+    // half_open: 只放一个探测, 其余短路。
+    // 2026-09-18 修复 (P2): 探测方若从不回报 after() (调用方遗漏/崩溃), 原实现永久卡死在
+    //   half_open 全拒绝。兜底: 探测放行超过一个冷却期仍无回报, 允许重新探测。
+    if (now - this._probeAt >= this.cooldownMs) {
+      this._probeAt = now;
+      return { allowed: true, probe: true, reprobe: true };
+    }
     return { allowed: false, reason: "circuit-half-open" };
   }
 

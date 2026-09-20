@@ -34,20 +34,25 @@ export class SceneStore {
     this.scenes = mig.data;
   }
 
-  // 把一条事实归入最匹配的场景 (或新建)
-  assign(fact) {
-    const tokens = tokenize(fact.content);
-    if (!tokens.length) return null;
-
-    // 找最匹配的场景
+  // 关键词命中数最高的场景。命中数 0 不会成为候选, 故返回的 scene 非空 ⟺ 至少命中 1 个关键词。
+  _bestScene(tokens) {
     let best = null, bestScore = 0;
     for (const s of this.scenes) {
       let score = 0;
       for (const t of tokens) if ((s.keywords || []).includes(t)) score++;
       if (score > bestScore) { bestScore = score; best = s; }
     }
+    return { scene: best, score: bestScore };
+  }
 
-    if (best && bestScore >= 1) {
+  // 把一条事实归入最匹配的场景 (或新建)
+  assign(fact) {
+    const tokens = tokenize(fact.content);
+    if (!tokens.length) return null;
+
+    let best = this._bestScene(tokens).scene;
+
+    if (best) {
       best.facts.push({ id: fact.id, content: fact.content, ts: fact.created });
       if (best.facts.length > 50) best.facts = best.facts.slice(-50);
       best.lastUpdated = logicalDay();
@@ -107,13 +112,7 @@ export class SceneStore {
   findMatch(text) {
     const tokens = tokenize(text);
     if (!tokens.length) return null;
-    let best = null, bestScore = 0;
-    for (const s of this.scenes) {
-      let score = 0;
-      for (const t of tokens) if ((s.keywords || []).includes(t)) score++;
-      if (score > bestScore) { bestScore = score; best = s; }
-    }
-    return bestScore >= 1 ? best : null;
+    return this._bestScene(tokens).scene;
   }
 
   // 激活场景的上下文块 (人设 + 能力)

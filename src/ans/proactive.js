@@ -11,9 +11,7 @@
 // v1.0.7 去重 + 完成跟踪 (P1):
 //   - 提醒状态存 data/memory/proactive.json: { [factId]: { lastRemindedAt, done } }
 //   - 同一待办在窗口内 (默认 24h) 不重复提醒; 标记完成的待办不再提醒
-import fs from "node:fs";
-import path from "node:path";
-import { ensureDir } from "../utils/store.js";
+import { loadAgentState, saveAgentState } from "../utils/json-state.js";
 import { info } from "../utils/logger.js";
 
 // 待办/偏好信号词 (启发式)
@@ -33,28 +31,13 @@ export function isExpired(content) {
   return false;
 }
 
-function _stateFile(agent) {
-  return path.join(agent.dataDir, "memory", "proactive.json");
-}
-
-// 读取提醒状态 (缺失/损坏 → {})
+// 提醒状态读写 (实现收敛到 utils/json-state, 对外导出签名不变)
 export function loadState(agent) {
-  try {
-    const f = _stateFile(agent);
-    if (fs.existsSync(f)) {
-      const s = JSON.parse(fs.readFileSync(f, "utf8"));
-      return (s && typeof s === "object") ? s : {};
-    }
-  } catch {}
-  return {};
+  return loadAgentState(agent, "proactive");
 }
 
 export function saveState(agent, state) {
-  try {
-    const f = _stateFile(agent);
-    ensureDir(path.dirname(f));
-    fs.writeFileSync(f, JSON.stringify(state, null, 2), "utf8");
-  } catch {}
+  return saveAgentState(agent, "proactive", state);
 }
 
 // 结构化扫描: 从 L1 事实里筛出待办信号 (契约的数据源)

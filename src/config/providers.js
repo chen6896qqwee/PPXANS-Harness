@@ -5,10 +5,8 @@
 //   - 返回前端时: 抹掉 api_key 明文, 只暴露 api_key_env 与 api_key_set 标志
 //   - 校验: id 命名规则 / 字段必填 / id 冲突检测
 //   - 热重载: 调用方写盘后, 调 agent.reloadProviders() 重建内存中的 LLM 客户端列表
-import fs from "node:fs";
-import path from "node:path";
 import { withFileLock } from "../utils/store.js";
-import { info, warn, error } from "../utils/logger.js";
+import { configFilePath, readPpxConfig, writeConfigAtomic } from "../utils/config-file.js";
 import { isPlaceholder } from "./placeholder.js";
 
 // 提供方字段白名单 (写入磁盘时的过滤)
@@ -18,48 +16,14 @@ const PROVIDER_KEYS = [
   "dsml",
 ];
 
-function getProvidersPath(root) {
-  return path.join(root, "config", "ppx.json");
-}
+const getProvidersPath = configFilePath;
 
 // 读取整个 config, 返回 { providers, raw }
 export function readConfig(root) {
-  const p = getProvidersPath(root);
-  if (!fs.existsSync(p)) return { providers: [], raw: { providers: [] } };
-  try {
-    const raw = JSON.parse(fs.readFileSync(p, "utf8"));
-    const providers = Array.isArray(raw.providers) ? raw.providers : [];
-    return { providers, raw };
-  } catch (e) {
-    warn("config/ppx.json 读取失败:", e.message);
-    return { providers: [], raw: { providers: [] } };
-  }
-}
-
-// 写盘: 先备份, 再原子写 (tmp + rename), 防中途崩溃损坏
-function writeConfigAtomic(root, cfg) {
-  const p = getProvidersPath(root);
-  // 备份 (最多保留最近 3 个 .bak, 多则删)
-  if (fs.existsSync(p)) {
-    const bak = p + ".bak-" + new Date().toISOString().replace(/[:.]/g, "-");
-    try { fs.copyFileSync(p, bak); } catch (e) { warn("备份失败:", e.message); }
-    // 清理老备份 (保留最近 3 个)
-    try {
-      const dir = path.dirname(p);
-      const base = path.basename(p);
-      const baks = fs.readdirSync(dir)
-        .filter((f) => f.startsWith(base + ".bak-"))
-        .map((f) => ({ f, t: fs.statSync(path.join(dir, f)).mtimeMs }));
-      baks.sort((a, b) => b.t - a.t);
-      for (const old of baks.slice(3)) {
-        try { fs.unlinkSync(path.join(dir, old.f)); } catch {}
-      }
-    } catch {}
-  }
-  // 原子写
-  const tmp = p + ".tmp";
-  fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2), "utf8");
-  fs.renameSync(tmp, p);
+  const raw = readPpxConfig(root, null);
+  if (raw === null) return { providers: [], raw: { providers: [] } };
+  const providers = Array.isArray(raw.providers) ? raw.providers : [];
+  return { providers, raw };
 }
 
 // 校验一个提供方对象是否合法; 返回 null 或错误信息

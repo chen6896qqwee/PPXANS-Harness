@@ -24,6 +24,12 @@ export class RuntimeBus {
     if (this._history.length > this._historyLimit) this._history.shift();
     const set = this._events.get(type);
     if (set) for (const fn of set) { try { fn(ev); } catch {} }
+    // 2026-09-18 修复 (P1): on("*") 通配订阅此前从不分发 (emit 只查精确 type),
+    //   trace() 与一切 "*" 观察者永久空转。现补齐通配分发 (精确 set 之后)。
+    if (type !== "*") {
+      const wild = this._events.get("*");
+      if (wild) for (const fn of wild) { try { fn(ev); } catch {} }
+    }
     return ev;
   }
 
@@ -44,7 +50,14 @@ export class RuntimeBus {
       const handler = this._handlers.get(verb);
       if (!handler) return resolve({ ok: false, error: `no-command-handler:${verb}`, payload });
       let done = false;
-      const finish = (r) => { if (done) return; done = true; resolve(r); };
+      let timer = null;
+      // finish 时清掉超时定时器: 否则每个 command 都把事件循环挂住 timeoutMs
+      const finish = (r) => {
+        if (done) return;
+        done = true;
+        if (timer) { clearTimeout(timer); timer = null; }
+        resolve(r);
+      };
       const id = `${verb}:${this._seq++}`;
       const cmd = { id, ts: Date.now(), verb, payload };
       // 拦截器链 (⑧免疫: 可在执行前做权限/风险校验, 拒绝则短路)
@@ -61,7 +74,7 @@ export class RuntimeBus {
         }
       };
       run(0);
-      if (timeoutMs > 0) setTimeout(() => finish({ ok: false, error: "command-timeout", cmdId: id }), timeoutMs);
+      if (timeoutMs > 0) timer = setTimeout(() => finish({ ok: false, error: "command-timeout", cmdId: id }), timeoutMs);
       this.emit("command", { id, verb, payload });
     });
   }

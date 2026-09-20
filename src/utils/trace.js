@@ -7,7 +7,8 @@
 //   对齐 dsh "会话日志是模型可见内容的唯一事实源" 思想, 用皮皮虾自有结构增量实现。
 import fs from "node:fs";
 import path from "node:path";
-import { ensureDir, logicalDay } from "./store.js";
+import { logsDir, logicalDay } from "./store.js";
+import { shortId } from "./id.js";
 import { scrubPII } from "./pii.js";
 
 const MAX_TRACE_BODY = 2000;   // 单条结果保留上限, 防爆文件
@@ -23,9 +24,8 @@ export const EVT = {
 
 export class Traces {
   constructor(dataDir) {
-    this.dir = path.join(dataDir, "logs", "traces");
-    ensureDir(this.dir);
-    this.sessionId = "s_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    this.dir = logsDir(dataDir); // 与 core/trace.js 同一目录 (logs/traces)
+    this.sessionId = shortId("s_", 6);
     this.count = 0;
   }
 

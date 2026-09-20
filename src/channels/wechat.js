@@ -51,15 +51,10 @@ export class WechatWebhookChannel extends Channel {
   // 把 /wechat/webhook 挂到 HTTP server (webhook 型通道, 支持明文/加密回包 + GET echostr URL 验证)
   // v1.0.8: 注册到 HttpChannel 的 webhook 路由 (单一 request handler 分发); 支持 GET echostr
   mount(server, httpChannel = null) {
-    const register = httpChannel && typeof httpChannel.registerWebhook === "function"
-      ? (path, fn) => httpChannel.registerWebhook(path, fn)
-      : (path, fn) => { server && server.on?.("request", fn); };
+    const register = this._registrar(server, httpChannel);
     register(this.path, async (req, res) => {
       const u = new URL(req.url || "/", "http://localhost");
-      let body = "";
-      if (req.method === "POST") {
-        for await (const c of req) body += c;
-      }
+      const body = req.method === "POST" ? await this._readBody(req) : "";
       const query = {
         msg_signature: u.searchParams.get("msg_signature") || "",
         timestamp: u.searchParams.get("timestamp") || "",
@@ -70,10 +65,9 @@ export class WechatWebhookChannel extends Channel {
         const out = await this.handleWebhook(body, query);
         if (out.xml) { res.writeHead(200, { "Content-Type": "text/xml" }); res.end(out.xml); }
         else if (typeof out === "string") { res.writeHead(200, { "Content-Type": "text/plain" }); res.end(out); } // echostr 明文回显 (企业微信 URL 验证要求)
-        else { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(out)); }
+        else this._sendJson(res, 200, out);
       } catch (e) {
-        res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: e.message }));
+        this._sendJson(res, 500, { error: e.message });
       }
     });
   }

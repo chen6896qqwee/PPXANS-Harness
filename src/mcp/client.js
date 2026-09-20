@@ -132,6 +132,10 @@ class StdioTransport {
         cwd: this.cwd || undefined,
         env: { ...process.env, ...this.env },
         stdio: ["pipe", "pipe", "pipe"],
+        // 2026-09-18 修复 (仅非 Windows): close() 用 process.kill(-pid) 杀进程组,
+        //   但原 spawn 未 detached, 子进程与父进程同组 → 负 pid kill 必抛 ESRCH 被吞,
+        //   npx/uvx 派生的孙进程在 Unix 上泄漏。Windows 走 taskkill /T 不受影响。
+        detached: process.platform !== "win32",
       });
       this.proc = proc;
       proc.stdout.setEncoding("utf8");

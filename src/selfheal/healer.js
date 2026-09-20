@@ -5,7 +5,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { ensureDir, readJson } from "../utils/store.js";
-import { info, warn, error } from "../utils/logger.js";
+import { info, warn } from "../utils/logger.js";
 
 export class Healer {
   // dataDir 可选: 显式传入真实数据目录 (PPX_DATA_DIR 可能指向非默认位置)。
@@ -79,9 +79,25 @@ walk(this.dataDir);
     fs.writeFileSync(this.integrity, JSON.stringify({ clean: true, pid: process.pid, ts: Date.now() }), "utf8");
   }
 
-  // 清理历史 corrupt 备份: 保留最近 N 个, 更早自动删除 (默认保留 2)
-  cleanupCorruptBackups(keep = 2) {
-    const files = [];
+  // ---- 备份清理 (2026-09-18 重构: 原先三个方法各抄一份「收集→按 mtime 排序→保留最近 N→删其余」) ----
+
+  // 通用清理器: collect() 给出候选 [{p, mtime}] → 按 mtime 新→旧排序 → 保留最近 keep 个, 其余逐个 remove
+  // 单个删除失败只告警不中断 (与原来逐方法 try/catch 语义一致)。
+  _pruneByMtime({ keep, collect, remove, logLabel, warnLabel }) {
+    const all = collect();
+    all.sort((a, b) => b.mtime - a.mtime);
+    const removed = [];
+    for (const item of all.slice(keep)) {
+      try { remove(item.p); removed.push(path.basename(item.p)); }
+      catch (e) { warn(`清理${warnLabel}失败: ${item.p}: ${e.message}`); }
+    }
+    if (removed.length) info(`selfheal: 清理旧${logLabel} ${removed.length} 个: ${removed.join(", ")}`);
+    return removed;
+  }
+
+  // 递归收集 dataDir 下满足 pred(fileName) 的文件 (带 mtime)
+  _collectFilesBy(pred) {
+    const found = [];
     const walk = (d) => {
       if (!fs.existsSync(d)) return;
       for (const f of fs.readdirSync(d)) {
@@ -89,67 +105,57 @@ walk(this.dataDir);
         let st;
         try { st = fs.statSync(p); } catch { continue; }
         if (st.isDirectory()) walk(p);
-        else if (f.includes(".corrupt-")) files.push({ p, mtime: st.mtimeMs });
+        else if (pred(f)) found.push({ p, mtime: st.mtimeMs });
       }
     };
     walk(this.dataDir);
-    files.sort((a, b) => b.mtime - a.mtime);
-    const removed = [];
-    for (const f of files.slice(keep)) {
-      try { fs.unlinkSync(f.p); removed.push(path.basename(f.p)); }
-      catch (e) { warn("清理损坏备份失败: " + f.p + ": " + e.message); }
-    }
-    if (removed.length) info("selfheal: 清理旧 corrupt 备份 " + removed.length + " 个: " + removed.join(", "));
-    return removed;
+    return found;
+  }
+
+  // 清理历史 corrupt 备份: 保留最近 N 个, 更早自动删除 (默认保留 2)
+  cleanupCorruptBackups(keep = 2) {
+    return this._pruneByMtime({
+      keep,
+      collect: () => this._collectFilesBy((f) => f.includes(".corrupt-")),
+      remove: (p) => fs.unlinkSync(p),
+      logLabel: "corrupt 备份",
+      warnLabel: "损坏备份",
+    });
   }
 
   // 清理历史手动备份目录 (memory-backup-*): 保留最近 N 个, 更早自动删除 (默认保留 2)
   // 手动全量备份目录不在 corrupt 备份机制内, 若无清理会持续累积磁盘占用
   cleanupStaleBackupDirs(keep = 2) {
-    if (!fs.existsSync(this.dataDir)) return [];
-    const dirs = [];
-    for (const f of fs.readdirSync(this.dataDir)) {
-      if (!f.startsWith("memory-backup-")) continue;
-      const p = path.join(this.dataDir, f);
-      let st;
-      try { st = fs.statSync(p); } catch { continue; }
-      if (!st.isDirectory()) continue;
-      dirs.push({ p, mtime: st.mtimeMs });
-    }
-    dirs.sort((a, b) => b.mtime - a.mtime);
-    const removed = [];
-    for (const d of dirs.slice(keep)) {
-      try { fs.rmSync(d.p, { recursive: true, force: true }); removed.push(path.basename(d.p)); }
-      catch (e) { warn("清理过期备份目录失败: " + d.p + ": " + e.message); }
-    }
-    if (removed.length) info("selfheal: 清理旧手动备份目录 " + removed.length + " 个: " + removed.join(", "));
-    return removed;
+    return this._pruneByMtime({
+      keep,
+      collect: () => {
+        if (!fs.existsSync(this.dataDir)) return [];
+        const dirs = [];
+        for (const f of fs.readdirSync(this.dataDir)) {
+          if (!f.startsWith("memory-backup-")) continue;
+          const p = path.join(this.dataDir, f);
+          let st;
+          try { st = fs.statSync(p); } catch { continue; }
+          if (st.isDirectory()) dirs.push({ p, mtime: st.mtimeMs });
+        }
+        return dirs;
+      },
+      remove: (p) => fs.rmSync(p, { recursive: true, force: true }),
+      logLabel: "手动备份目录",
+      warnLabel: "过期备份目录",
+    });
   }
 
   // 清理历史 .bak-* 文件 (去重/迁移等一次性工具留下的手动备份): 保留最近 N 个, 更早自动删除 (默认保留 2)
   // 覆盖 facts.json.bak-* / lessons.json.bak-* 等, 防手动备份文件在 data/ 内无限累积
   cleanupStaleBakFiles(keep = 2) {
-    if (!fs.existsSync(this.dataDir)) return [];
-    const files = [];
-    const walk = (d) => {
-      if (!fs.existsSync(d)) return;
-      for (const f of fs.readdirSync(d)) {
-        const p = path.join(d, f);
-        let st;
-        try { st = fs.statSync(p); } catch { continue; }
-        if (st.isDirectory()) walk(p);
-        else if (f.includes(".bak-") && !f.endsWith(".lock")) files.push({ p, mtime: st.mtimeMs });
-      }
-    };
-    walk(this.dataDir);
-    files.sort((a, b) => b.mtime - a.mtime);
-    const removed = [];
-    for (const f of files.slice(keep)) {
-      try { fs.unlinkSync(f.p); removed.push(path.basename(f.p)); }
-      catch (e) { warn("清理过期备份文件失败: " + f.p + ": " + e.message); }
-    }
-    if (removed.length) info("selfheal: 清理旧 .bak-* 备份文件 " + removed.length + " 个: " + removed.join(", "));
-    return removed;
+    return this._pruneByMtime({
+      keep,
+      collect: () => this._collectFilesBy((f) => f.includes(".bak-") && !f.endsWith(".lock")),
+      remove: (p) => fs.unlinkSync(p),
+      logLabel: ".bak-* 备份文件",
+      warnLabel: "过期备份文件",
+    });
   }
   
   // 完整自愈入口

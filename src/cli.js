@@ -35,7 +35,8 @@ if (agent.config.agent?.proactive?.enabled) {
     console.log("\n[主动提醒] " + payload.text);
     rl.prompt();
   });
-  console.log(`  (主动提醒已开启: 每 ${Math.round(agent.config.agent.proactive.interval_ms / 60000)} 分钟扫描记忆待办)`);
+  const proactiveMs = Number(agent.config.agent.proactive.interval_ms) || 3600000;
+  console.log(`  (主动提醒已开启: 每 ${Math.round(proactiveMs / 60000)} 分钟扫描记忆待办)`);
 }
 
 rl.on("line", async (line) => {

@@ -101,12 +101,26 @@ function wrap(fn) {
  * @param {object} agent - PPXAgent 实例
  * @returns {{ tools: object[], taskBoard: object }}
  */
+// 2026-09-18 重构: 原先是一个 189 行的方法体, 内含 20 个工具定义字面量。
+//   现按「会话 / 提供方 / 设置 / 任务」四个域拆成独立工厂函数, 每个域可单独阅读与修改;
+//   createAdminTools 的签名与返回结构 ({ tools, taskBoard }) 完全不变。
 export function createAdminTools(agent) {
   const root = agent.root;
   const taskBoard = createTaskBoard(root);
+  return {
+    tools: [
+      ...sessionTools(agent),
+      ...providerTools(agent, root),
+      ...settingsTools(agent, root),
+      ...taskTools(agent, taskBoard),
+    ],
+    taskBoard,
+  };
+}
 
-  const tools = [
-    // ---- 会话管理 ----
+// ---- 域 1: 会话管理 (5 个工具) ----
+function sessionTools(agent) {
+  return [
     {
       name: "ppx.sessions.list",
       title: "会话列表",
@@ -143,7 +157,12 @@ export function createAdminTools(agent) {
       execute: wrap((args) => { agent.resetSession(String(args.sessionId || "default")); return { ok: true }; }),
     },
 
-    // ---- 提供方 CRUD (模型配置) ----
+  ];
+}
+
+// ---- 域 2: 提供方 CRUD (模型配置, 6 个工具) ----
+function providerTools(agent, root) {
+  return [
     {
       name: "ppx.providers.list",
       title: "模型提供方列表",
@@ -206,7 +225,12 @@ export function createAdminTools(agent) {
       execute: wrap(async (args) => { ensureConfigDir(root); const providers = reorderProviders(root, args.order || []); agent.reloadProviders(); return { ok: true, providers }; }),
     },
 
-    // ---- 设置 ----
+  ];
+}
+
+// ---- 域 3: 设置读写 (2 个工具) ----
+function settingsTools(agent, root) {
+  return [
     {
       name: "ppx.settings.get",
       title: "读取设置",
@@ -222,7 +246,12 @@ export function createAdminTools(agent) {
       execute: wrap(async (args) => { ensureConfigDir(root); const settings = updateSettings(root, args.patch || {}); agent.reloadSettings(); return { ok: true, settings }; }),
     },
 
-    // ---- 任务面板 ----
+  ];
+}
+
+// ---- 域 4: 任务面板 (7 个工具) ----
+function taskTools(agent, taskBoard) {
+  return [
     {
       name: "ppx.task.templates",
       title: "任务模板列表",
@@ -287,6 +316,4 @@ export function createAdminTools(agent) {
       }),
     },
   ];
-
-  return { tools, taskBoard };
 }

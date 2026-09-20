@@ -1,6 +1,5 @@
 ﻿// src/persona/index.js - 人格系统
 // 从 identity.md + ishiki.md 组装人格 prompt (参考 openhanako)
-import fs from "node:fs";
 import path from "node:path";
 import { readText } from "../utils/store.js";
 

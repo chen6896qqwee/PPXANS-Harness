@@ -10,53 +10,25 @@
 //
 // 删除策略 (务实): findSimilar 检测到的高相似对 → 保留高保真(importance/hits 更高)那条, 低的那条标"冗余候选"。
 //   默认只"报告 + 标记", 硬删除交给 FactStore 既有 _prune (超 maxFacts 时)。本模块产出治理信号, 不越权改数据。
-import fs from "node:fs";
-import path from "node:path";
-import { ensureDir } from "../utils/store.js";
+import { loadAgentState, saveAgentState } from "../utils/json-state.js";
+import { charBigrams, setOverlap } from "../utils/similarity.js";
 import { info } from "../utils/logger.js";
 
 // 冗余判定阈值 (bigram overlap 相似度, 0~1; 中文同义变体通常 >0.6)
 const SIM_THRESHOLD = 0.6;
-// 中文 bigram 集: 连续两个字符为一组 (字符级 bigram, 对中文简繁/词序变化有容错)
-function _bigramSet(s) {
-  const set = new Set();
-  const t = String(s || "").replace(/\s+/g, "");
-  for (let i = 0; i < t.length - 1; i++) set.add(t.slice(i, i + 2));
-  return set;
-}
-// bigram overlap: 交集 / 较短集合 (0~1) — 对「共享核心词但措辞宽松」更敏感
-function _overlap(a, b) {
-  const A = _bigramSet(a), B = _bigramSet(b);
-  if (!A.size || !B.size) return 0;
-  let inter = 0;
-  for (const x of A) if (B.has(x)) inter++;
-  return inter / Math.min(A.size, B.size);
-}
+// bigram overlap 收敛到 utils/similarity (原先此处自带一份 _bigramSet/_overlap 实现)
 // 冷记忆判定: 连续 N 天未被访问 + 分数低于分位 → 冷
 const COLD_DAYS = 14;
 // 治理报告保留条数
 const REPORT_LIMIT = 50;
 
-function _file(agent) { return path.join(agent.dataDir, "memory", "eviction.json"); }
-
-// 读取治理状态 (缺失/损坏 → 空)
+// 治理状态读写 (实现收敛到 utils/json-state, 对外导出签名不变)
 export function loadState(agent) {
-  try {
-    const f = _file(agent);
-    if (fs.existsSync(f)) {
-      const s = JSON.parse(fs.readFileSync(f, "utf8"));
-      return (s && typeof s === "object") ? s : {};
-    }
-  } catch {}
-  return {};
+  return loadAgentState(agent, "eviction");
 }
 
 export function saveState(agent, state) {
-  try {
-    const f = _file(agent);
-    ensureDir(path.dirname(f));
-    fs.writeFileSync(f, JSON.stringify(state, null, 2), "utf8");
-  } catch {}
+  return saveAgentState(agent, "eviction", state);
 }
 
 // 幂等记录一次扫描结果 (去重: 同 id 已存在则更新, 不无限追加)
@@ -80,18 +52,26 @@ export function scan(agent) {
   const DAY = 86400000;
 
   // 1) 冗余识别: 两两 findSimilar 检测高相似对, 标低保真那条为冗余候选
+  // 2026-09-18 性能修复: 原实现每对都调 _overlap 重算两侧 bigram Set,
+  //   maxFacts=1000 时最多 100 万次 Set 重建, 全程同步阻塞事件循环。
+  //   现预建每条事实的 bigram Set (一次 O(n)), 两两比较只做交集计数。
   const redundant = [];
   const visited = new Set();
+  const bigrams = new Map();
+  for (const f of all) {
+    try { bigrams.set(f.id, charBigrams(f.content)); } catch { bigrams.set(f.id, new Set()); }
+  }
   // 两两比较 (自实现 overlap): findSimilar 对自身返回1.0无法用, 逐对算 bigram 相似度
   for (let i = 0; i < all.length; i++) {
     const f = all[i];
     if (visited.has(f.id)) continue;
     let best = null, bestSim = 0;
+    const fa = bigrams.get(f.id);
     for (let j = 0; j < all.length; j++) {
       const g = all[j];
       if (g.id === f.id || visited.has(g.id)) continue;
       try {
-        const sim = _overlap(f.content, g.content);
+        const sim = setOverlap(fa, bigrams.get(g.id));
         if (sim > bestSim) { bestSim = sim; best = g; }
       } catch {}
     }

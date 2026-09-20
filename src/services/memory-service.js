@@ -101,7 +101,9 @@ export class MemoryService {
     // 有 embedder 时走 dense 语义检索 (与 BM25 RRF 融合), 否则 LLM 扩展 + RRF
     let hits;
     if (this.facts.embedder) {
-      hits = this.facts.querySemantic(q, { limit, scope });
+      // 2026-09-18 修复: querySemantic 是 async, 原漏 await 导致 hits 是 Promise,
+      //   tracer 恒记 hits:0 (可观测数据失真), 后续读 hits 也会踩坑
+      hits = await this.facts.querySemantic(q, { limit, scope });
     } else {
       const variants = [q];
       const llm = this._llm();

@@ -11,14 +11,15 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import fs from "node:fs";
 import path from "node:path";
-import { ensureDir, logicalDay } from "../utils/store.js";
+import { logsDir, logicalDay } from "../utils/store.js";
+import { shortId } from "../utils/id.js";
 import { scrubPII } from "../utils/pii.js";
 
 const als = new AsyncLocalStorage();
 const MAX_PAYLOAD = 2000; // 单条事件载荷上限, 防爆文件
 
 export function genTraceId() {
-  return "t_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  return shortId("t_", 8);
 }
 
 // 入口包装: 生成新 traceId, 所有异步子调用自动继承
@@ -41,9 +42,8 @@ export function hasTrace() {
 // ---- 事件流写入器 (agent 构造时实例化一个, 全局复用) ----
 export class EventTracer {
   constructor(dataDir) {
-    this.dir = path.join(dataDir, "logs", "traces");
-    ensureDir(this.dir);
-    this.sessionId = "s_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    this.dir = logsDir(dataDir); // 与 utils/trace.js 同一目录 (logs/traces)
+    this.sessionId = shortId("s_", 6);
     this.count = 0;
   }
 
@@ -61,8 +61,10 @@ export class EventTracer {
       sessionId: this.sessionId,
       traceId: store?.traceId || null,
       seq: this.count,
-      type,
+      // ...safe 在 type 之前 (2026-09-18 修复): payload 自带 type 键时不得覆盖埋点事件类型,
+      //   否则 events-*.jsonl 中 type 与实际语义不符, 基于 type 的检索/统计失真
       ...safe,
+      type,
     };
     if (opts.durationMs != null) entry.durationMs = Math.round(opts.durationMs);
     if (opts.error != null) entry.error = String(opts.error).slice(0, 500);

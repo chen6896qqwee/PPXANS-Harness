@@ -7,14 +7,10 @@
 // ⚠ 接线状态 (2026-09-17 核对): runSupervisor **无内置调用点** —— 尚无 mode/工具把它接成可用入口;
 //   spawn_agent 当前走 tools/delegate.js 自带的 review 循环。属"编排器就绪、未接线", 需显式调用才生效。
 
-// 带超时等待 (防子 agent 卡死) — 定时器必须清理
-export function withTimeout(p, ms, label) {
-  let timer;
-  const timeout = new Promise((_, rej) => {
-    timer = setTimeout(() => rej(new Error(`${label}超时 (${ms / 1000}s)`)), ms);
-  });
-  return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
-}
+// 带超时等待 (防子 agent 卡死) — 实现收敛到 utils/async.js (原先本文件与 tools/delegate.js 各写一份)
+// 本文件内部继续使用, 同时保留同名导出, 对外接口不变。
+import { withTimeout } from "../utils/async.js";
+export { withTimeout };
 
 export const SUPERVISOR_DEFAULTS = {
   maxRounds: 3,          // 最多几轮修正

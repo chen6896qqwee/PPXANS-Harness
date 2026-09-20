@@ -8,10 +8,7 @@
 //
 // 与 refine 的关系: refine 是"失败→经验库"(事后的深度提炼), reward 是"成败→行为倾向"(实时的行为调节)。
 // 两者互补: reward 管"下次倾向怎么做", refine 管"为什么失败下次怎么做更好"。
-import fs from "node:fs";
-import path from "node:path";
-import { ensureDir } from "../utils/store.js";
-import { info } from "../utils/logger.js";
+import { loadAgentState, saveAgentState } from "../utils/json-state.js";
 
 // EWMA 平滑系数 α: 越大越偏重最近结果 (α=0.25 对偶发抖动有韧性, 又能反映近期趋势)
 const ALPHA = 0.25;
@@ -19,29 +16,16 @@ const ALPHA = 0.25;
 const MIN_SAMPLES = 5;
 // 不可靠权重阈值 (权重 < 此值 → 标记低可靠)
 const LOW_WEIGHT = 0.45;
-// 持久化文件
-function _file(agent) { return path.join(agent.dataDir, "memory", "reward.json"); }
 
 const STATE = { ALPHA, MIN_SAMPLES, LOW_WEIGHT };
 
-// 读取状态 (缺失/损坏 → 空)
+// 状态读写 (实现收敛到 utils/json-state, 对外导出签名不变)
 export function loadState(agent) {
-  try {
-    const f = _file(agent);
-    if (fs.existsSync(f)) {
-      const s = JSON.parse(fs.readFileSync(f, "utf8"));
-      return (s && typeof s === "object") ? s : {};
-    }
-  } catch {}
-  return {};
+  return loadAgentState(agent, "reward");
 }
 
 export function saveState(agent, state) {
-  try {
-    const f = _file(agent);
-    ensureDir(path.dirname(f));
-    fs.writeFileSync(f, JSON.stringify(state, null, 2), "utf8");
-  } catch {}
+  return saveAgentState(agent, "reward", state);
 }
 
 // 记一笔工具成败 (总线 tool/result 驱动)。ok: boolean (工具调用成功与否)

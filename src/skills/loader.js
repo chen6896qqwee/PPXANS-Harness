@@ -3,6 +3,7 @@
 // 扫描 <skillsDir>/*/SKILL.md, 解析 frontmatter(name/description), 提供 list/get/loadAll
 import fs from "node:fs";
 import path from "node:path";
+import { readJson, writeJson } from "../utils/store.js";
 
 // 解析 SKILL.md 顶部的 --- frontmatter ---
 // 支持简单 `key: value` 和 YAML 折叠块（`>` / `|`），保证多行 description 可被解析。
@@ -117,12 +118,12 @@ export class SkillLoader {
   }
 
   _readUsage() {
-    try { if (fs.existsSync(this.usageFile)) { const d = JSON.parse(fs.readFileSync(this.usageFile, "utf8")); if (d && typeof d === "object") return d; } } catch {}
-    return {};
+    const d = readJson(this.usageFile, null);
+    return (d && typeof d === "object") ? d : {};
   }
 
   _saveUsage() {
-    try { fs.writeFileSync(this.usageFile, JSON.stringify(this._usage, null, 2), "utf8"); } catch {}
+    try { writeJson(this.usageFile, this._usage); } catch { /* 用量统计落盘失败不影响主流程 */ }
   }
 
   // 记录一次技能使用 (load_skill 时调用)

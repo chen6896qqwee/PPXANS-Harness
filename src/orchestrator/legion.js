@@ -4,7 +4,8 @@ import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { EventEmitter } from "node:events";
-import { info, warn, error } from "../utils/logger.js";
+import { info, error } from "../utils/logger.js";
+import { createLineReader, writeLine } from "../utils/ndjson.js";
 import { runDag } from "./dag.js";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -50,31 +51,24 @@ export class Legion extends EventEmitter {
     this.agents.set(name, entry);
 
     proc.stdout.setEncoding("utf8");
-    let buf = "";
-    proc.stdout.on("data", (chunk) => {
-      buf += chunk;
-      let idx;
-      while ((idx = buf.indexOf("\n")) >= 0) {
-        const line = buf.slice(0, idx).trim();
-        buf = buf.slice(idx + 1);
-        if (!line) continue;
-        try {
-          const msg = JSON.parse(line);
-          // step 中间事件: 触发 onProgress 回调, 不消费 pending (等最终 reply)
-          if (msg.type === "step" && msg.id && entry.pending.has(msg.id)) {
-            const p = entry.pending.get(msg.id);
-            if (p && p.onProgress) { try { p.onProgress(msg); } catch {} }
-            continue;
-          }
-          if (msg.id && entry.pending.has(msg.id)) {
-            const { resolve, reject } = entry.pending.get(msg.id);
-            entry.pending.delete(msg.id);
-            if (msg.type === "error") reject(new Error(msg.error));
-            else resolve(msg);
-          }
-        } catch {}
-      }
+    const onLine = createLineReader((line) => {
+      try {
+        const msg = JSON.parse(line);
+        // step 中间事件: 触发 onProgress 回调, 不消费 pending (等最终 reply)
+        if (msg.type === "step" && msg.id && entry.pending.has(msg.id)) {
+          const p = entry.pending.get(msg.id);
+          if (p && p.onProgress) { try { p.onProgress(msg); } catch {} }
+          return;
+        }
+        if (msg.id && entry.pending.has(msg.id)) {
+          const { resolve, reject } = entry.pending.get(msg.id);
+          entry.pending.delete(msg.id);
+          if (msg.type === "error") reject(new Error(msg.error));
+          else resolve(msg);
+        }
+      } catch {}
     });
+    proc.stdout.on("data", onLine);
     proc.on("error", (err) => {
       // v1.0.8: spawn 失败 (node bin 不存在等) 兜底, 拒绝所有 pending, 防永久挂起
       error(`agent[${name}] 启动失败: ${err.message}`);
@@ -113,7 +107,7 @@ export class Legion extends EventEmitter {
         onProgress,
       });
       try {
-        entry.proc.stdin.write(JSON.stringify({ id, ...msg }) + "\n");
+        writeLine(entry.proc.stdin, { id, ...msg });
       } catch (e) {
         clearTimeout(timer);
         entry.pending.delete(id);

@@ -24,6 +24,8 @@ import { FailureEpisodeStore } from "../memory/failure-episode.js";
 import { CanvasStore } from "../memory/canvas.js";
 import { AssetHub } from "../memory/asset-hub.js";
 import { exportMemorySnapshot, mergeSnapshotBack, hasSnapshot } from "../memory/fork.js";
+// v3.0 (codex 对齐): 新工具 (repo_map/apply_patch/review_code/goal_board)
+import { registerV3Tools } from "../tools/v3.js";
 
 // fork 工具 (供 ctx.consume("fork") 取用)
 const forkTools = { exportMemorySnapshot, mergeSnapshotBack, hasSnapshot };
@@ -137,7 +139,8 @@ export const toolsPlugin = (ctx) => {
   const memory = ctx.consume("memory");
   const tools = new ToolCatalog();
   registerBuiltinTools(tools, { rootDir: root, facts, memory });
-  const scheduler = new Scheduler(dataDir);
+  // 2026-09-18: onFire 兜底 —— 重启恢复的持久化任务无 action 闭包, 触发时按 job.name 还原行为
+  const scheduler = new Scheduler(dataDir, { onFire: (job) => facts.add(`定时任务触发: ${job?.name || "?"}`, { source: "schedule" }) });
   ctx.provide("scheduler", scheduler);
   registerAdvancedTools(tools, { dataDir, scheduler, onMemoryNote: (note) => facts.add(note, { source: "schedule" }) });
   registerMethodTools(tools);
@@ -166,6 +169,8 @@ export const toolsPlugin = (ctx) => {
     healer: ctx.consume("healer"),
     experience: ctx.consume("experience"),
   });
+  // v3.0 (codex 对齐): repo_map / apply_patch / review_code / goal_board
+  registerV3Tools(tools, { rootDir: root, agent: ctx.consume("agent") });
   ctx.provide("tools", tools);
   ctx.provide("toolsEnabled", config.tools?.enabled !== false);
 };

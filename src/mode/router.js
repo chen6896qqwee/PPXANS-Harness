@@ -3,7 +3,6 @@
 // 适合: 多领域任务, 快速定位专门能力; 按需加载技能, 省 token。
 import path from "node:path";
 import { SkillLoader } from "../skills/loader.js";
-import { buildMessages } from "./index.js";
 
 // 技能匹配: 中文用连续两字(bigram)命中描述, 英文/数字用词命中
 export function matchSkill(loader, text) {

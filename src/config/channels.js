@@ -1,10 +1,8 @@
 // src/config/channels.js - 通道配置 CRUD (借鉴 providers.js 模式)
 // 唯一事实源 = config/ppx.json 的 channels 对象; 原子写盘 + 备份
 // 用途: `ppx channels` CLI / HTTP API 让用户自己连通道, 不改源码
-import fs from "node:fs";
-import path from "node:path";
 import { withFileLock } from "../utils/store.js";
-import { warn } from "../utils/logger.js";
+import { configFilePath, readPpxConfig, writeConfigAtomic } from "../utils/config-file.js";
 
 // 每通道字段 schema: { type, label, def, secret }
 // secret=true 的字段写盘存明文 (本地配置), 但 list/sanitize 时只暴露 "已设置" 标志
@@ -39,44 +37,13 @@ export const CHANNEL_SCHEMAS = {
 
 export const CHANNEL_NAMES = Object.keys(CHANNEL_SCHEMAS);
 
-function getConfigPath(root) {
-  return path.join(root, "config", "ppx.json");
-}
+const getConfigPath = configFilePath;
 
 // 读取 config, 返回 { channels, raw }
 export function readChannels(root) {
-  const p = getConfigPath(root);
-  if (!fs.existsSync(p)) return { channels: {}, raw: { channels: {} } };
-  try {
-    const raw = JSON.parse(fs.readFileSync(p, "utf8"));
-    return { channels: raw.channels || {}, raw };
-  } catch (e) {
-    warn("config/ppx.json 读取失败:", e.message);
-    return { channels: {}, raw: { channels: {} } };
-  }
-}
-
-// 写盘: 先备份, 再原子写 (tmp + rename), 防中途崩溃损坏
-function writeConfigAtomic(root, cfg) {
-  const p = getConfigPath(root);
-  if (fs.existsSync(p)) {
-    const bak = p + ".bak-" + new Date().toISOString().replace(/[:.]/g, "-");
-    try { fs.copyFileSync(p, bak); } catch (e) { warn("备份失败:", e.message); }
-    try {
-      const dir = path.dirname(p);
-      const base = path.basename(p);
-      const baks = fs.readdirSync(dir)
-        .filter((f) => f.startsWith(base + ".bak-"))
-        .map((f) => ({ f, t: fs.statSync(path.join(dir, f)).mtimeMs }));
-      baks.sort((a, b) => b.t - a.t);
-      for (const old of baks.slice(3)) {
-        try { fs.unlinkSync(path.join(dir, old.f)); } catch {}
-      }
-    } catch {}
-  }
-  const tmp = p + ".tmp";
-  fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2), "utf8");
-  fs.renameSync(tmp, p);
+  const raw = readPpxConfig(root, null);
+  if (raw === null) return { channels: {}, raw: { channels: {} } };
+  return { channels: raw.channels || {}, raw };
 }
 
 // 校验 patch: 剔除未知字段 + 类型检查; 返回 { clean, errors[] }

@@ -8,17 +8,16 @@ function keyOf(encodingAESKey) {
   return Buffer.from(String(encodingAESKey) + "=", "base64");
 }
 
-// SHA1 签名校验: sort([token, timestamp, nonce, encrypt]).join("") 的 sha1 与 signature 比对
-export function verifySignature(token, timestamp, nonce, encrypt, signature) {
-  const arr = [String(token), String(timestamp), String(nonce), String(encrypt)].sort();
-  const sha1 = crypto.createHash("sha1").update(arr.join(""), "utf8").digest("hex");
-  return sha1 === String(signature);
-}
-
-// 生成签名 (加密回包时用, 与 verifySignature 同一算法)
+// SHA1 签名: sort([token, timestamp, nonce, encrypt]).join("") 的 sha1 (验签与回包签名同一算法)
+// 2026-09-18 重构: 原 verifySignature / generateSignature 各抄一份算法, 现统一由本函数产出
 export function generateSignature(token, timestamp, nonce, encrypt) {
   const arr = [String(token), String(timestamp), String(nonce), String(encrypt)].sort();
   return crypto.createHash("sha1").update(arr.join(""), "utf8").digest("hex");
+}
+
+// 签名校验 (与 generateSignature 同算法)
+export function verifySignature(token, timestamp, nonce, encrypt, signature) {
+  return generateSignature(token, timestamp, nonce, encrypt) === String(signature);
 }
 
 // 解密 <Encrypt> → { msg, receiveId } (receiveId 通常为 corpId)

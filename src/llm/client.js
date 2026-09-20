@@ -141,7 +141,8 @@ export class LLMClient {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), this.timeoutMs);
     const extSig = signal || null;
-    if (extSig) extSig.addEventListener("abort", () => ctrl.abort());
+    // { once: true } (2026-09-18 修复): 复用同一 signal 的多次流式对话不再累积监听器
+    if (extSig) extSig.addEventListener("abort", () => ctrl.abort(), { once: true });
     let full = "";
     try {
       const resp = await fetch(url, {

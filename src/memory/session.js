@@ -15,7 +15,7 @@
 //  - 所有读取路径把多天分片合并成按 seq(ts) 升序的单一事件流
 import fs from "node:fs";
 import path from "node:path";
-import { ensureDir } from "../utils/store.js";
+import { ensureDir, logicalDay } from "../utils/store.js";
 
 // 事件类型集 (对齐 dsh 事件域: user/assistant/tool/system)
 export const EVENTS = {
@@ -67,12 +67,10 @@ export class SessionStore {
   _isShard(fname) { return DEFAULT_SHARD_RE.test(fname); }
   // default 分片文件路径 (day 形如 YYYY-MM-DD)
   _shardFile(day) { return path.join(this.dir, `default-${day}.jsonl`); }
-  // 事件 ts 归属的本地自然日 (与 eventsByDay/logicalDay 一致, 避免时区错位)
+  // 事件 ts 归属的本地自然日 (复用 utils/store.logicalDay, 与 eventsByDay 一致, 避免时区错位;
+  // 2026-09-18 重构: 原先这里手写了一份与 logicalDay 相同的实现, 双份易漂移)
   _dayOf(ts) {
-    const d = new Date(ts);
-    const m = String(d.getMonth() + 1).padStart(2, "0");
-    const day = String(d.getDate()).padStart(2, "0");
-    return `${d.getFullYear()}-${m}-${day}`;
+    return logicalDay(new Date(ts));
   }
   // 列出 default 相关的所有文件 (旧单文件 + 各日分片)
   _defaultFiles() {
@@ -231,8 +229,10 @@ export class SessionStore {
     }
     this._dayCache = byDay;
     this._dayCacheAt = this._version;
+    // 2026-09-18 修复: 每一天的缓存数组都必须在入缓存前排好时间序 ——
+    //   原实现只对当次请求的 day 排序, 其余天命中缓存时返回的是事件追加顺序 (乱序)
+    for (const arr of byDay.values()) arr.sort((a, b) => a.timestamp - b.timestamp);
     const out = byDay.get(dayStr) || [];
-    out.sort((a, b) => a.timestamp - b.timestamp);
     return out;
   }
 

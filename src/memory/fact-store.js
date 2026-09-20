@@ -2,8 +2,9 @@
 // 架构参考 openhanako: 每条记忆有 importance, 高斯衰减, 命中加分
 import path from "node:path";
 import crypto from "node:crypto";
-import { ensureDir, readJson, writeJson, nowISO, logicalDay, withFileLock } from "../utils/store.js";
+import { ensureDir, readJson, writeJson, nowISO, withFileLock } from "../utils/store.js";
 import { migrateData, writeSchema } from "../utils/schema.js";
+import { setJaccard, setOverlap } from "../utils/similarity.js";
 import { walFileOf, appendWal, readWal, truncateWal } from "../utils/wal.js";
 
 // 记忆动词前缀: 去重时剔除, 让"记住：X"与"X"视为同一条 (防 LLM 提炼版与原文冗余)
@@ -129,35 +130,34 @@ export class FactStore {
 
   // 单条事件变更记录 (调用方必须已持有文件锁):
   //   非 WAL: 立即全量落盘 (旧行为); WAL: 追加事件, 达阈值自动 compact
+  // 四个变体 (_change/_markMutated/_markRemoved/_markReplace) 共享此追加逻辑 (2026-09-18 重构收敛)
+  _walAppend(evt, count = 1) {
+    appendWal(this.walFile, evt);
+    this._walPending += count;
+    if (this._walPending >= this.walThreshold) this._flushLocked();
+  }
+
   _change(evt) {
     if (!this.wal) { this._flushLocked(); return; }
-    appendWal(this.walFile, evt);
-    this._walPending += 1;
-    if (this._walPending >= this.walThreshold) this._flushLocked();
+    this._walAppend(evt);
   }
 
   // upsert 变体 (携带完整对象快照, 重放幂等)
   _markMutated(...facts) {
     if (!this.wal) { this._flushLocked(); return; }
-    for (const f of facts) appendWal(this.walFile, { op: "upsert", fact: f });
-    this._walPending += facts.length;
-    if (this._walPending >= this.walThreshold) this._flushLocked();
+    for (const f of facts) this._walAppend({ op: "upsert", fact: f }, 1);
   }
 
   // remove 变体 (批量删除 id)
   _markRemoved(ids) {
     if (!this.wal) { this._flushLocked(); return; }
-    appendWal(this.walFile, { op: "remove", ids });
-    this._walPending += 1;
-    if (this._walPending >= this.walThreshold) this._flushLocked();
+    this._walAppend({ op: "remove", ids });
   }
 
   // replace 变体 (整体替换, 供 importAll replace)
   _markReplace(facts) {
     if (!this.wal) { this._flushLocked(); return; }
-    appendWal(this.walFile, { op: "replace", facts });
-    this._walPending += 1;
-    if (this._walPending >= this.walThreshold) this._flushLocked();
+    this._walAppend({ op: "replace", facts });
   }
 
   // 启动重放: WAL 增量按序应用到内存 (幂等); 磁盘落盘由构造末尾 save() 统一完成
@@ -207,6 +207,39 @@ export class FactStore {
     return k.replace(/[。！？!?；;，,]+$/, "");
   }
 
+  // 导入条目 → 完整事实对象 (importAll merge/replace 两分支共用, 2026-09-18 重构去重);
+  // content 归一化后为空返回 null。补全对象字段 —— 缺失 lastAccess/importance 会让
+  // 衰减/recency 计算出 NaN, 检索永远返回空 (v2.7.0 修复语义保持)。
+  _normalizeFact(it) {
+    const norm = this._norm(it?.content);
+    if (!norm) return null;
+    const now = nowISO();
+    return {
+      id: it.id || cryptoRandomId(),
+      content: norm,
+      type: it.type || "general",
+      source: it.source || "import",
+      importance: it.importance ?? this.opts.baseImportance,
+      score: it.score ?? (it.importance ?? this.opts.baseImportance),
+      created: it.created || now,
+      lastAccess: it.lastAccess || now,
+      hits: it.hits || 0,
+      scope: it.scope ?? null,
+      layer: Number(it.layer) === LAYER_L4 ? LAYER_L4 : LAYER_L1,
+      status: it.status === "deleted" ? "deleted" : "active",
+      prevId: it.prevId ?? null,
+      ...(it.ttlDays ? { ttlDays: Number(it.ttlDays) } : {}),
+      ...(it.meta ? { meta: it.meta } : {}),
+    };
+  }
+
+  // 软删公共实现 (forget / sweepExpired / clearLayer 共用): 标记 status='deleted' + 时间/原因
+  _softDelete(f, reason) {
+    f.status = "deleted";
+    f.deletedAt = nowISO();
+    f.deleteReason = reason ? String(reason).slice(0, 200) : null;
+  }
+
   add(content, { importance = this.opts.baseImportance, type = "general", source = "manual", dedupe = true, scope = null, meta = null, similarThreshold = 0, layer = LAYER_L1, ttlDays = null } = {}) {
     const norm = this._norm(content);
     if (!norm) return null;
@@ -218,9 +251,10 @@ export class FactStore {
       const now = nowISO();
       if (dedupe) {
         // 内容去重: 归一化后相同 (含"记住："等前缀差异) 已存在则命中加分, 不新增
-        // 排除软删记忆 (已 forget 的条目不应拦截新记忆写入)
+        // 排除软删与归档记忆 (2026-09-18 修复: 原只排除 deleted, archived 旧版本也能命中,
+        //   命中加分落在不可见副本上, 活跃记忆不新增)
         const normKey = this._normKey(content);
-        const existing = this.facts.find((f) => f.status !== "deleted" && this._normKey(f.content) === normKey);
+        const existing = this.facts.find((f) => f.status !== "deleted" && f.status !== "archived" && this._normKey(f.content) === normKey);
         if (existing) {
           existing.hits += 1;
           existing.lastAccess = now;
@@ -263,10 +297,12 @@ export class FactStore {
       this.facts.push(fact);
       this._indexFact(fact);
       this._statsCache.clear(); // 新增事实 -> 作用域统计失效
+      // 新增先记 upsert 再裁剪 (2026-09-18 修复 WAL 事件序): 原先 _prune 先写 remove、
+      //   _markMutated 后补 upsert, WAL 重放时 upsert 在 remove 之后 → 被裁剪的事实"复活"。
+      //   改为 upsert → remove 顺序, 重放结果与内存一致。
+      this._markMutated(fact);
       // 总量裁剪: 超 maxFacts 时删除最弱事实 (防记忆膨胀)
       this._prune();
-      // 新增永远记录 (upsert 幂等, 与裁剪的 remove 事件共存无害; 防只记 remove 丢新增)
-      this._markMutated(fact);
       return fact;
     });
   }
@@ -374,25 +410,15 @@ export class FactStore {
 
   // bigram Jaccard 相似度 (0~1): 两段文本的 bigram 集合重合度
   // 用于语义相似去重 (LLM 提炼变体字面不同但语义相同), 阈值通常 0.5+
+  // (集合运算收敛到 utils/similarity, 分词仍用本类的 scope 感知 _bigramSet)
   _jaccard(a, b) {
-    const A = this._bigramSet(a);
-    const B = this._bigramSet(b);
-    if (!A.size || !B.size) return 0;
-    let inter = 0;
-    for (const t of A) if (B.has(t)) inter++;
-    const union = A.size + B.size - inter;
-    return union ? inter / union : 0;
+    return setJaccard(this._bigramSet(a), this._bigramSet(b));
   }
 
   // bigram overlap 系数 (0~1): 交集 / 较短集合, 对「词序变化但共享核心词」的松散同义改写更敏感
   // 比 Jaccard 更宽松: LLM 提炼变体词序/措辞大变时 Jaccard 可能 <0.6, 但核心词重合度高, overlap 能捕获
   _overlap(a, b) {
-    const A = this._bigramSet(a);
-    const B = this._bigramSet(b);
-    if (!A.size || !B.size) return 0;
-    let inter = 0;
-    for (const t of A) if (B.has(t)) inter++;
-    return inter / Math.min(A.size, B.size);
+    return setOverlap(this._bigramSet(a), this._bigramSet(b));
   }
 
   // 查找与给定内容最相似的现有事实 (相似度 >= threshold 才返回, 默认 null)
@@ -681,9 +707,7 @@ export class FactStore {
       for (const id of targets) {
         const f = this.facts.find((x) => x.id === id);
         if (f && f.status !== "deleted") {
-          f.status = "deleted";
-          f.deletedAt = nowISO();
-          f.deleteReason = `TTL ${ttlDays} 天未访问自动归档`;
+          this._softDelete(f, `TTL ${ttlDays} 天未访问自动归档`);
           n++;
           touched.push(f);
         }
@@ -738,30 +762,9 @@ export class FactStore {
     return withFileLock(this.file, () => {
       this._reload();
       if (mode === "replace") {
-        // v2.7.0: 补全对象字段 (与 merge 分支一致) —— 旧版只留 id/content,
+        // v2.7.0: 补全对象字段 (与 merge 分支一致, 见 _normalizeFact) —— 旧版只留 id/content,
         // lastAccess/importance 缺失导致衰减/recency 计算 NaN, 检索永远返回空
-        this.facts = items.map((it) => {
-          const norm = this._norm(it.content);
-          if (!norm) return null;
-          const now = nowISO();
-          return {
-            id: it.id || cryptoRandomId(),
-            content: norm,
-            type: it.type || "general",
-            source: it.source || "import",
-            importance: it.importance ?? this.opts.baseImportance,
-            score: it.score ?? (it.importance ?? this.opts.baseImportance),
-            created: it.created || now,
-            lastAccess: it.lastAccess || now,
-            hits: it.hits || 0,
-            scope: it.scope ?? null,
-            layer: Number(it.layer) === LAYER_L4 ? LAYER_L4 : LAYER_L1,
-            status: it.status === "deleted" ? "deleted" : "active",
-            prevId: it.prevId ?? null,
-            ...(it.ttlDays ? { ttlDays: Number(it.ttlDays) } : {}),
-            ...(it.meta ? { meta: it.meta } : {}),
-          };
-        }).filter(Boolean);
+        this.facts = items.map((it) => this._normalizeFact(it)).filter(Boolean);
         this.rebuildIndex();
         this._markReplace(this.facts);
         return { ok: true, mode, imported: this.facts.length, skipped: 0 };
@@ -770,29 +773,11 @@ export class FactStore {
       const seen = new Set(this.facts.map((f) => this._normKey(f.content)));
       const added = [];
       for (const it of items) {
-        const norm = this._norm(it.content);
-        if (!norm) { skipped++; continue; }
-        const k = this._normKey(norm);
+        const factObj = this._normalizeFact(it);
+        if (!factObj) { skipped++; continue; }
+        const k = this._normKey(factObj.content);
         if (seen.has(k)) { skipped++; continue; }
         seen.add(k);
-        const now = nowISO();
-        const factObj = {
-          id: it.id || cryptoRandomId(),
-          content: norm,
-          type: it.type || "general",
-          source: it.source || "import",
-          importance: it.importance ?? this.opts.baseImportance,
-          score: it.score ?? (it.importance ?? this.opts.baseImportance),
-          created: it.created || now,
-          lastAccess: it.lastAccess || now,
-          hits: it.hits || 0,
-          scope: it.scope ?? null,
-          layer: Number(it.layer) === LAYER_L4 ? LAYER_L4 : LAYER_L1,
-          status: it.status === "deleted" ? "deleted" : "active",
-          prevId: it.prevId ?? null,
-          ...(it.ttlDays ? { ttlDays: Number(it.ttlDays) } : {}),
-          ...(it.meta ? { meta: it.meta } : {}),
-        };
         this.facts.push(factObj);
         imported++;
         added.push(factObj);

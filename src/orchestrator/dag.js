@@ -62,7 +62,14 @@ export async function runDag(graph, executor, { concurrency = 0 } = {}) {
       const node = byId.get(id);
       const deps = {};
       for (const d of node.dependsOn || []) deps[d] = results[d];
-      results[id] = await executor(id, node, deps);
+      // 2026-09-18 修复 (P1): executor 抛错原样冒泡, runOne().finally() 链上无人接住
+      //   → unhandled rejection → Node 进程直接崩溃 (任一 agent 超时/失败即炸整个编排)。
+      //   现捕获后把错误文本作为该节点结果, 下游节点可感知失败, 编排整体继续。
+      try {
+        results[id] = await executor(id, node, deps);
+      } catch (e) {
+        results[id] = `[执行失败] ${e && e.message ? e.message : e}`;
+      }
       order.push(id);
     };
     await new Promise((resolveAll) => {

@@ -5,9 +5,9 @@
 //   - 检索隔离: 私有资产仅 owner 可检索; 团队资产共享 (简化: 全局可见)
 // 皮皮虾自研实现, 构建在现有 facts (带 scope) 之上: 资产 = 一组带 scope 的 facts + 元数据登记。
 // 纯代码可测, 无 LLM。
-import fs from "node:fs";
 import path from "node:path";
-import { ensureDir, writeText, readText } from "../utils/store.js";
+import { ensureDir, readJson, writeJson } from "../utils/store.js";
+import { shortId } from "../utils/id.js";
 
 export const VISIBILITY = { PRIVATE: "private", TEAM: "team" };
 
@@ -26,22 +26,17 @@ export class AssetHub {
   }
 
   _load() {
-    try {
-      if (fs.existsSync(this.file)) {
-        const d = JSON.parse(fs.readFileSync(this.file, "utf8"));
-        if (Array.isArray(d)) return d;
-      }
-    } catch {}
-    return [];
+    const d = readJson(this.file, null);
+    return Array.isArray(d) ? d : [];
   }
 
-  _save() { writeText(this.file, JSON.stringify(this._assets, null, 2)); }
+  _save() { writeJson(this.file, this._assets); }
 
   // 登记一个资产 (关联到 facts scope)
   // { name, kind: 'document'|'skill'|'experience', scope, owner, visibility, source, description }
   register(asset) {
     if (!asset || !asset.name) throw new Error("资产需 name");
-    const id = "as" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+    const id = shortId("as", 5);
     const a = {
       id,
       name: asset.name,

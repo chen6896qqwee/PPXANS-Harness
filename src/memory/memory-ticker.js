@@ -4,7 +4,7 @@
 // 今日视图 -> 滚动压缩 -> longterm.md (长期记忆)
 import fs from "node:fs";
 import path from "node:path";
-import { ensureDir, readText, writeText, logicalDay } from "../utils/store.js";
+import { ensureDir, readText, writeText, readJson, writeJson, logicalDay } from "../utils/store.js";
 
 const TURNS_PER_SUMMARY = 10;
 const COMPACT_THRESHOLD = 50;   // 今日事件超此条数触发滚动压缩
@@ -39,13 +39,11 @@ export class MemoryTicker {
   }
 
   _loadState() {
-    try {
-      if (fs.existsSync(this.stateFile)) this.state = JSON.parse(fs.readFileSync(this.stateFile, "utf8"));
-    } catch { this.state = { day: null, turnCount: 0 }; }
+    this.state = readJson(this.stateFile, { day: null, turnCount: 0 });
   }
 
   _saveState() {
-    writeText(this.stateFile, JSON.stringify(this.state, null, 2));
+    writeJson(this.stateFile, this.state);
   }
 
   _rollDay() {

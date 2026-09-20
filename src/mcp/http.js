@@ -7,6 +7,7 @@
 //   - 取消 = 关闭 SSE 流 (无需 notifications/cancelled)
 //   - Origin 校验防 DNS rebinding; 本地默认只绑 127.0.0.1
 import { McpServer, McpError, MCP_ERROR, MODERN_PROTOCOL_VERSION, SERVER_INFO_META_KEY } from "./server.js";
+import { readBody, sendJson, SSE_HEADERS } from "../utils/http.js";
 
 const MAX_BODY = 1024 * 1024; // 1MB
 
@@ -15,15 +16,7 @@ function sseMessage(obj) {
   return `event: message\ndata: ${JSON.stringify(obj)}\n\n`;
 }
 
-// 读取请求体
-async function readBody(req) {
-  let body = "";
-  for await (const chunk of req) {
-    body += chunk;
-    if (body.length > MAX_BODY) throw new McpError(MCP_ERROR.INVALID_REQUEST, "request too large");
-  }
-  return body;
-}
+// (readBody 收敛到 utils/http.js: 超限返回 null, 由下方改为抛 McpError 保持原语义)
 
 // ---- 传输错误 -> HTTP 状态码映射 (2026-07-28) ----
 function statusFor(err) {
@@ -54,8 +47,7 @@ export function createMcpHttpHandler(server, opts = {}) {
     try {
       // 1. 方法限制: 只收 POST
       if (req.method !== "POST") {
-        res.writeHead(405, { "Content-Type": "application/json", "Allow": "POST" });
-        res.end(JSON.stringify({ error: "method not allowed" }));
+        sendJson(res, 405, { error: "method not allowed" }, { headers: { "Allow": "POST" } });
         return;
       }
 
@@ -66,8 +58,7 @@ export function createMcpHttpHandler(server, opts = {}) {
           ? opts.allowedOrigins.includes(origin)
           : /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(origin);
         if (!allowed) {
-          res.writeHead(403, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32600, message: "origin not allowed" } }));
+          sendJson(res, 403, { jsonrpc: "2.0", error: { code: -32600, message: "origin not allowed" } });
           return;
         }
       }
@@ -79,15 +70,15 @@ export function createMcpHttpHandler(server, opts = {}) {
       // 4. 读 body + 解析
       let msg;
       try {
-        const body = await readBody(req);
+        const body = await readBody(req, { maxBytes: MAX_BODY });
+        if (body === null) throw new McpError(MCP_ERROR.INVALID_REQUEST, "request too large");
         msg = body ? JSON.parse(body) : {};
       } catch (e) {
-        res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({
+        sendJson(res, 400, {
           jsonrpc: "2.0",
           id: null,
           error: { code: MCP_ERROR.PARSE_ERROR, message: `Parse error: ${e.message}` },
-        }));
+        });
         return;
       }
 
@@ -95,12 +86,11 @@ export function createMcpHttpHandler(server, opts = {}) {
       const headerVersion = req.headers["mcp-protocol-version"];
       const bodyVersion = msg && msg.params && msg.params._meta && msg.params._meta["io.modelcontextprotocol/protocolVersion"];
       if (bodyVersion && headerVersion && headerVersion !== bodyVersion) {
-        res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({
+        sendJson(res, 400, {
           jsonrpc: "2.0",
           id: msg.id ?? null,
           error: { code: MCP_ERROR.HEADER_MISMATCH, message: "Header MCP-Protocol-Version does not match body _meta", data: { header: headerVersion, body: bodyVersion } },
-        }));
+        });
         return;
       }
       // 现代请求 (有 bodyVersion) 但缺 header: 允许 (兼容未带头的老客户端), 记录即可
@@ -115,8 +105,7 @@ export function createMcpHttpHandler(server, opts = {}) {
           // 通知失败仅记日志, 不影响 202 语义
           if (opts.onError) opts.onError(e);
         });
-        res.writeHead(202, { "Content-Type": "application/json" });
-        res.end();
+        sendJson(res, 202);
         return;
       }
 
@@ -127,12 +116,7 @@ export function createMcpHttpHandler(server, opts = {}) {
 
       if (wantsSSE) {
         // SSE 响应流: 进度通知 + 最终响应, 关闭流 = 取消
-        res.writeHead(200, {
-          "Content-Type": "text/event-stream",
-          "Cache-Control": "no-cache",
-          "Connection": "keep-alive",
-          "X-Accel-Buffering": "no",
-        });
+        res.writeHead(200, SSE_HEADERS);
         res.write(": keep-alive\n\n");
         const progressToken = msg.params && msg.params._meta && msg.params._meta.progressToken;
         const streamCtx = {
@@ -175,22 +159,19 @@ export function createMcpHttpHandler(server, opts = {}) {
       // 8. 普通 JSON 响应
       try {
         const { result } = await server.handle(msg, {});
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: result ?? {} }));
+        sendJson(res, 200, { jsonrpc: "2.0", id: msg.id, result: result ?? {} });
       } catch (e) {
         const err = e instanceof McpError ? e : new McpError(MCP_ERROR.INTERNAL_ERROR, e.message || "internal error");
-        res.writeHead(statusFor(err), { "Content-Type": "application/json" });
-        res.end(JSON.stringify({
+        sendJson(res, statusFor(err), {
           jsonrpc: "2.0",
           id: msg.id ?? null,
           error: { code: err.code, message: err.message, ...(err.data ? { data: err.data } : {}) },
-        }));
+        });
       }
     } catch (e) {
       // 外层兜底 (不应发生)
       try {
-        res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32603, message: e.message || "internal error" } }));
+        sendJson(res, 500, { jsonrpc: "2.0", error: { code: -32603, message: e.message || "internal error" } });
       } catch {}
     }
   };

@@ -106,3 +106,11 @@ export function logicalDay(d = new Date()) {
   const day = String(d.getDate()).padStart(2, "0");
   return `${y}-${m}-${day}`;
 }
+
+// 按逻辑日切分 JSONL 的日志目录 (工具轨迹 utils/trace.js 与事件流 core/trace.js 共用)。
+// 两个写入器必须落在同一目录, 用同一函数取路径可避免字面量各写一份后悄悄漂移。
+export function logsDir(dataDir, sub = "traces") {
+  const dir = path.join(dataDir, "logs", sub);
+  ensureDir(dir);
+  return dir;
+}

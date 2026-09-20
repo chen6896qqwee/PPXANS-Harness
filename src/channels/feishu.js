@@ -62,25 +62,17 @@ export class FeishuChannel extends Channel {
   // v1.0.8: 注册到 HttpChannel 的 webhook 路由 (单一 request handler 分发, 无多 listener 竞态);
   // 校验飞书事件订阅头 X-Lark-Request-Token
   mount(server, httpChannel = null) {
-    const register = httpChannel && typeof httpChannel.registerWebhook === "function"
-      ? (path, fn) => httpChannel.registerWebhook(path, fn)
-      : (path, fn) => { /* 无主通道时挂到 server (仅路径匹配, 调用方负责防双响应) */ server && server.on?.("request", fn); };
+    const register = this._registrar(server, httpChannel);
     register(this.webhookPath, async (req, res) => {
-      let body = "";
-      for await (const c of req) body += c;
+      const body = await this._readBody(req);
       // 飞书事件订阅用请求头 X-Lark-Request-Token 携带 verify_token (body 内 token 极少存在, 仅作纵深)
       if (this.verifyToken && req.headers["x-lark-request-token"] !== this.verifyToken) {
-        res.writeHead(403, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "invalid token" }));
-        return;
+        return this._sendJson(res, 403, { error: "invalid token" });
       }
       try {
-        const out = await this.handleWebhook(body);
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify(out));
+        return this._sendJson(res, 200, await this.handleWebhook(body));
       } catch (e) {
-        res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: e.message }));
+        return this._sendJson(res, 500, { error: e.message });
       }
     });
   }

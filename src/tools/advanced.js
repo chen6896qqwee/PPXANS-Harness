@@ -1,6 +1,5 @@
 // src/tools/advanced.js - 进阶工具集 (搜索 / HTTP / 定时任务)
 // 全部零依赖: 用 Node 原生 fetch + timers
-import fs from "node:fs";
 import net from "node:net";
 import dns from "node:dns/promises";
 import path from "node:path";
@@ -93,10 +92,25 @@ async function searchWeb(query) {
 }
 
 // ---------- HTTP 请求 (含 SSRF 防护) ----------
-function isPrivateIP(ip) {
+// 2026-09-18 修复 (P1): 原实现只按 IPv4 点分十进制判断, IPv6 字面量 (parts.length !== 4)
+//   直接返回 false → http://[::1]/ http://[fe80::x]/ http://[fc00::x]/ 全部被当"公网"放行,
+//   可打本机回环与内网服务。现补齐 IPv6 判定 (回环/未指定/链路本地/唯一本地 fc00::/7),
+//   并处理 IPv4-mapped IPv6 (::ffff:127.0.0.1 等)。导出供回归测试使用。
+export function isPrivateIP(ip) {
   if (!ip) return false;
-  const parts = (ip.replace(/^::ffff:/, "")).split(".").map(Number);
-  if (parts.length !== 4) return false;
+  let s = String(ip).trim().replace(/^\[|\]$/g, "");
+  // IPv4-mapped IPv6 (::ffff:a.b.c.d) → 取回 IPv4 部分走 v4 逻辑
+  const mapped = s.match(/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i);
+  if (mapped) s = mapped[1];
+  if (s.includes(":")) {
+    const low = s.toLowerCase();
+    if (low === "::" || low === "::1") return true;            // 未指定 / 回环
+    if (low.startsWith("fe80")) return true;                   // 链路本地 fe80::/10
+    if (/^f[cd][0-9a-f]{2}:/.test(low)) return true;           // 唯一本地 fc00::/7
+    return false;
+  }
+  const parts = s.split(".").map(Number);
+  if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return false;
   const [a, b] = parts;
   if (a === 127) return true;
   if (a === 10) return true;
@@ -184,13 +198,29 @@ function _htmlToText(html) {
 }
 
 // ---------- 定时任务 ----------
+// 2026-09-18 修复 (P1): 原构造函数只从 jobs.json 恢复 jobs 数组、从不 _schedule(),
+//   且 add() 传入的 action 是运行时闭包, JSON.stringify 落盘时被静默丢弃 ——
+//   进程重启后所有持久化任务没有任何定时器在跑, 触发了也因无 action 空转。
+//   现: ① 构造时重排每日 (HH:MM) 任务; 陈旧的 once (after:Ns) 任务跨重启丢弃不补触发;
+//       ② _fire 对无 action 的恢复任务走 onFire 回调 (由注册方按 job.name 还原行为)。
 export class Scheduler {
-  constructor(dataDir) {
+  constructor(dataDir, { onFire = null } = {}) {
     this.dir = path.join(dataDir, "scheduler");
     ensureDir(this.dir);
     this.file = path.join(this.dir, "jobs.json");
-    this.jobs = readJson(this.file, []);
-    this.timers = new Map();
+    this.onFire = onFire;
+    this.timers = new Map(); // 必须先于恢复重排初始化 (2026-09-18 回归测试抓出)
+    const loaded = readJson(this.file, []);
+    // 重启恢复: 重排每日任务; once (after:Ns) 任务视为陈旧丢弃 (语义 = "N秒后一次", 跨重启已失义)
+    this.jobs = [];
+    for (const job of loaded) {
+      if (job && job.enabled === false) { this.jobs.push(job); continue; }
+      if (typeof job?.cron === "string" && /^\d{2}:\d{2}$/.test(job.cron)) {
+        this.jobs.push(job);
+        this._schedule(job);
+      }
+    }
+    if (this.jobs.length !== loaded.length) writeJson(this.file, this.jobs);
   }
 
   add({ name, cron, action, type = "once" }) {
@@ -229,6 +259,7 @@ export class Scheduler {
     else { this._schedule(job); } // 每日任务重新排
     try {
       if (typeof job.action === "function") await job.action();
+      else if (this.onFire) await this.onFire(job); // 重启恢复的任务: action 闭包已丢, 走注册方回调
     } catch (e) { console.error("定时任务失败:", e); }
   }
 

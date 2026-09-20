@@ -83,19 +83,22 @@ export class McpServer {
     };
     this.supportedVersions = opts.supportedVersions || SUPPORTED_VERSIONS;
     // 对话虚拟工具 (MCP 客户端驱动 agent 对话的入口, 不进 catalog 避免污染 LLM 工具列表)
+    // 两个对话工具入参完全一致 (message + sessionId), 共用一个 schema 工厂, 避免改一处漏一处;
+    // 每次调用返回新对象, 不共享引用 (防止下游按需改写 schema 时互相污染)。
+    const chatInputSchema = () => ({
+      type: "object",
+      properties: {
+        message: { type: "string", description: "用户消息" },
+        sessionId: { type: "string", description: "会话标识 (默认 default)" },
+      },
+      required: ["message"],
+    });
     const chatTools = [
       {
         name: "ppx.chat.send",
         title: "对话 (非流式)",
         description: "发送消息给皮皮虾 agent, 返回完整回复。内部会执行完整工具调用循环 (记忆/搜索/命令等)。sessionId 用于区分会话上下文, 默认 default。",
-        inputSchema: {
-          type: "object",
-          properties: {
-            message: { type: "string", description: "用户消息" },
-            sessionId: { type: "string", description: "会话标识 (默认 default)" },
-          },
-          required: ["message"],
-        },
+        inputSchema: chatInputSchema(),
         execute: async (args, ctx, agent) => {
           const reply = await agent.chat(String(args.message || ""), { sessionKey: args.sessionId || "default" });
           return { content: [{ type: "text", text: String(reply) }] };
@@ -105,14 +108,7 @@ export class McpServer {
         name: "ppx.chat.stream",
         title: "对话 (流式)",
         description: "发送消息给皮皮虾 agent, 流式返回回复 (SSE 进度通知)。内部会执行完整工具调用循环。sessionId 用于区分会话上下文, 默认 default。",
-        inputSchema: {
-          type: "object",
-          properties: {
-            message: { type: "string", description: "用户消息" },
-            sessionId: { type: "string", description: "会话标识 (默认 default)" },
-          },
-          required: ["message"],
-        },
+        inputSchema: chatInputSchema(),
         execute: async (args, ctx, agent) => {
           let full = "";
           const reply = await agent.chatStream(String(args.message || ""), {
