@@ -1,10 +1,54 @@
+<div align="center">
+
 # 🦐 PPXANS-Harness
 
-**皮皮虾神经系（ANS）+ Harness 一体化智能体内核** —— 纯 Node.js、**零运行时依赖**的可审计自主智能体。
+### 一个能自己记住、自己修复、自己学习，而且每一步都留痕的 AI 智能体内核
 
-一个会自我修复、自我学习、可审计验证的超级 Agent：**85 内置工具 · L0–L4 五层记忆 + 事实有效期 · SHA-256 审计哈希链 · 标准 MCP 服务端+客户端 · 多模型路由 · 本地向量/ASR 可选 · 自愈 7/7 · 1014 测试全绿 · Web UI**。
+**纯 Node.js · 零运行时依赖 · 下载即跑**
 
-自带标准 MCP 服务（`POST /mcp`），Claude Desktop / Cursor / 任何 MCP 客户端**开箱即用**；支持各大模型 API + 本地模型，自由回退。
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Node](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](package.json)
+[![Runtime deps](https://img.shields.io/badge/runtime_dependencies-0-brightgreen.svg)](package.json)
+[![Tests](https://img.shields.io/badge/tests-1022_passing-brightgreen.svg)](#-测试--评测--ci)
+[![Self-heal](https://img.shields.io/badge/self--heal-7%2F7-brightgreen.svg)](scripts/selfheal-bench.js)
+[![MCP](https://img.shields.io/badge/MCP-server_%2B_client-blueviolet.svg)](#mcp-标准端点-streamable-http)
+
+<img src="docs/demo/terminal.svg" width="760" alt="PPXANS-Harness demo">
+
+</div>
+
+接上任意 **OpenAI 兼容大模型**，它就变成一个**有记性、会成长、可审计**的助手：有自己的五层记忆（记得你是谁、忘掉无关的）、启动自愈、从失败里学、每次工具调用都写进 SHA-256 防篡改账本，还自带标准 **MCP 服务端** —— Claude Desktop / Cursor / 任何 MCP 客户端**开箱即用**。
+
+> **English —** PPXANS-Harness is a self-contained AI **agent kernel in pure Node.js, with zero runtime dependencies**. Point it at any OpenAI-compatible model and you get an agent with a 5-layer memory, startup self-healing, failure-driven self-learning, a tamper-evident tool-call audit chain, multi-agent orchestration, and a built-in MCP server. `npm start` and go — there is no `npm install` step.
+
+### ⚡ 30 秒跑起来
+
+```bash
+git clone https://github.com/chen6896qqwee/PPXANS-Harness.git
+cd PPXANS-Harness
+
+# 任选一家模型，或本地 LM Studio（默认 http://127.0.0.1:1234/v1）
+export ZHIPU_API_KEY=xxx      # 或 OPENAI_API_KEY / DEEPSEEK_API_KEY / DASHSCOPE_API_KEY ...
+
+npm start                     # → http://127.0.0.1:8899   （内核 + Web 界面，同进程同端口，自动开浏览器）
+```
+
+**没有 `npm install`。** 主包的 `package.json` 里根本没有 `dependencies` 字段 —— 只用 Node 内置模块，`node bin/ppx-web.js` 就能起。
+
+### 这东西到底是什么？（说人话）
+
+不是框架，不是 SDK，是**一个完整能跑的产品**。你可以把它理解成：给大模型装上**记忆、免疫系统和体检报告**的底座。
+
+| 常见 Agent 的毛病 | PPXANS-Harness 怎么做 |
+|---|---|
+| 一关窗口就失忆 | 五层记忆 L0–L4 跨会话留存；软删可回滚、事实带有效期、装不下才裁剪 |
+| 一崩就全没了 | 启动体检 + 损坏文件修复 + 崩溃恢复，自愈基准 **7/7** |
+| 同一个错反复犯 | 失败沉淀成经验（refine），成功沉淀成技能（refineSkill），还会自动升级 |
+| 干了啥说不清 | 每次工具调用 append-only 写进 **SHA-256 链式账本**，改一行全链校验失败并定位到行 |
+| 生态孤岛 | 标准 **MCP 服务端**（`POST /mcp`）+ 客户端，外部工具与客户端双向接入 |
+| 依赖地狱 | 主包**零运行时依赖**，`node bin/ppx-web.js` 直接起 |
+
+**运行时实测**：63 内置工具 + 22 个 `ppx.*` 管理工具（MCP 共暴露 **85**）· 自愈 **7/7 100%** · 全量测试 **1022 项（1018 通过 / 0 失败 / 4 skip）** · 渐进披露把固定开销从 8172 降到 ~3357 tok/请求（**-59%**）。
 
 > 🛡️ **自愈基准**：`node scripts/selfheal-bench.js` → **7/7 100%**（发布前门禁，`PPX_MIN_SELFHEAL` 可设阈值）
 > 🔗 **审计哈希链**：`npm run audit:verify` —— append-only + SHA-256 链式防篡改，篡改/删除可定位到行
@@ -112,7 +156,7 @@ npm run selfheal
 npm run chat          # 终端对话 CLI (ppx / ppxans)
 npm run serve         # 仅 HTTP 接口 (无界面): http://127.0.0.1:8899
 npm run web:check     # Web UI 静态自检 (图标/DOM id/语法解析/静态资源)
-npm test              # 全量测试 (1014 项)
+npm test              # 全量测试 (1022 项)
 ```
 
 ### MCP 标准端点 (Streamable HTTP)
@@ -148,7 +192,7 @@ npm test              # 全量测试 (1014 项)
 ## 🧪 测试 / 评测 / CI
 
 ```bash
-npm test                # 全量 1014 项 (0 失败)
+npm test                # 全量 1022 项 (1018 通过 / 0 失败 / 4 skip)
 npm run eval            # 本地能力评测 (7 项, 无需 LLM)
 npm run eval -- --llm   # LLM 端到端评测 (需 provider)
 npm run bench           # 并发/长会话吞吐压测
@@ -199,7 +243,7 @@ PPXANS-Harness/
 ├── bin/            ppx / ppxans / ppx-web / ppx-serve / ppx-channels 入口
 ├── data/           运行时数据 (不进 git)
 ├── references/     第三方项目来源登记
-├── test/           测试 (1014 项, v3 新模块全覆盖)
+├── test/           测试 (1022 项, v3 新模块全覆盖)
 └── docs/           文档 (ARCHITECTURE-V3 / QUICKSTART / web-launch 等)
 ```
 
