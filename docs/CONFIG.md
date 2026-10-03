@@ -79,6 +79,15 @@ npm run chat
 | `api_key` | key |
 | `model` | embedding 模型名 |
 
+## budget（成本预算，v3.2.0+）
+
+| 字段 | 默认 | 说明 |
+|------|------|------|
+| `budget.usd` | 0（不限） | **进程累计支出上限（USD）**。达限后 `chat`/`chatStream` 拒绝继续调用模型，返回含调整入口的提示；tracer/bus 发 `budget/exceeded` 事件。只拦用户入口，不拦后台 refine/记忆提炼（避免自学习断粮）。按进程累计，重启归零——跨进程持久预算属外部计量职责 |
+| `budget.model_prices` | — | 模型价格覆盖（USD / 1M tokens）：`{"my-model": {"prompt": 0.15, "completion": 0.6}}`。优先级：精确命中 > 前缀命中（最长） > 内置表。未知模型 cost 记 0（不编数字），想纳入预算控制必须显式配置价格 |
+
+内置价格表见 `src/llm/pricing.js`（glm / deepseek / gpt / claude / gemini / qwen / kimi 常用档，公开目录价快照仅供估算）。金额进 `data/usage-stats.json` 的 `cost` / `byModel.*.cost` 字段，每满 10 次调用自动落盘（崩溃最多丢 9 笔），退出兜底 flush。
+
 ## experience / selfheal / tools / plugins
 
 | 字段 | 默认 | 说明 |

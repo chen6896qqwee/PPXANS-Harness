@@ -154,6 +154,8 @@ export class PPXAgent {
     // 2026-10-03l: 加 cost (USD) 维度 + budget.usd 支出上限 (超限后 chat/chatStream 拒绝继续烧钱)
     this.usageStats = { calls: 0, tokens: 0, cost: 0, byModel: {} };
     this._budgetExceeded = false;
+    this._usageLastFlush = 0;
+    this._healthCache = null;
     this._installUsageTracking();
     // 待审批映射 (codex approval flow): id -> { req, resolve, timer }
     this._pendingApprovals = new Map();
@@ -602,13 +604,26 @@ export class PPXAgent {
       if (native.length) clients = [...native, ...fence];
     }
     if (clients.length > 1) {
-      try {
-        const states = await Promise.all(clients.map((c) => c.health ? c.health() : Promise.resolve(true)));
-        const healthy = clients.filter((_, i) => states[i]);
+      // 健康探测 TTL 缓存 (2026-10-03m): 每轮 chat 都全量探活 = 高频对话下每次多一段串行探活延迟。
+      // TTL 内复用上次结果 (默认 30s, config.agent.health_cache_ms 可调, 0 = 关闭缓存);
+      // provider 集合变化 (键不匹配) 时重新探测。
+      const ttl = Number(this.config?.agent?.health_cache_ms ?? 30000);
+      const cacheKey = clients.map((c) => c.model || c.name).join("|");
+      const cached = ttl > 0 && this._healthCache && this._healthCache.key === cacheKey
+        && Date.now() - this._healthCache.ts < ttl ? this._healthCache.states : null;
+      if (cached) {
+        const healthy = clients.filter((_, i) => cached[i]);
         if (healthy.length) clients = healthy;
-        else info("所有 provider 健康探测失败, 按原配置顺序尝试兜底");
-      } catch (e) {
-        warn("health 探测异常, 按原顺序回退:", e.message);
+      } else {
+        try {
+          const states = await Promise.all(clients.map((c) => c.health ? c.health() : Promise.resolve(true)));
+          this._healthCache = { ts: Date.now(), key: cacheKey, states };
+          const healthy = clients.filter((_, i) => states[i]);
+          if (healthy.length) clients = healthy;
+          else info("所有 provider 健康探测失败, 按原配置顺序尝试兜底");
+        } catch (e) {
+          warn("health 探测异常, 按原顺序回退:", e.message);
+        }
       }
     }
     let lastErr = null;
@@ -1273,6 +1288,11 @@ export class PPXAgent {
               this.usageStats.byModel[m].cost = Math.round(((this.usageStats.byModel[m].cost || 0) + cost) * 1e6) / 1e6;
               this._checkBudget();
             }
+            // 周期落盘 (2026-10-03m): 崩溃不丢账 —— 每满 10 次调用落一次,
+            // 长跑进程被 kill 时 usage-stats.json 最多丢 9 笔而非全量 (退出另有兑底)
+            if (this.usageStats.calls % 10 === 0) {
+              this._flushUsageStats();
+            }
           } catch { /* 统计失败不阻塞调用 */ }
           return r;
         };
@@ -1298,16 +1318,22 @@ export class PPXAgent {
     return `[预算耗尽] 本进程累计支出 $${(this.usageStats.cost || 0).toFixed(4)} 已达上限 $${(Number.isFinite(cap) ? cap : 0).toFixed(2)}，已停止继续调用模型。调整 config/ppx.json 的 budget.usd（0 或删除 = 不限）后重启生效。`;
   }
 
-  shutdown() {
-    this.stopProactiveTicker();
-    // 使用统计落盘 (ZCode 使用统计对齐): data/usage-stats.json (含 cost 金额维度 + 预算上限快照)
+  // 使用统计落盘 (ZCode 使用统计对齐): data/usage-stats.json (含 cost 金额维度 + 预算上限快照)
+  // 2026-10-03m: 从 shutdown 抽出供周期落盘复用 (周期性 + 退出兑底双保险)
+  _flushUsageStats() {
     try {
       const usagePayload = { updated: new Date().toISOString(), ...this.usageStats };
       const cap = Number(this.config?.budget?.usd);
       if (Number.isFinite(cap) && cap > 0) usagePayload.budget_usd = cap;
-      fs.writeFileSync(path.join(this.dataDir, "usage-stats.json"),
-        JSON.stringify(usagePayload, null, 2));
-    } catch { /* 落盘失败不阻塞退出 */ }
+      fs.writeFileSync(path.join(this.dataDir, "usage-stats.json"), JSON.stringify(usagePayload, null, 2));
+      this._usageLastFlush = Date.now();
+    } catch { /* 落盘失败不阻塞主链 */ }
+  }
+
+  shutdown() {
+    this.stopProactiveTicker();
+    // 使用统计落盘 (退出兑底; 长跑期间已有周期落盘, 此处只补尾部增量)
+    this._flushUsageStats();
     this._mcp?.close?.();
     // 释放内嵌数据库句柄 (SQLite 后端必需: 不关会导致文件被占用, 无法迁移/清理)
     try { this.facts?.close?.(); } catch { /* JSON 后端无 close, 静默跳过 */ }

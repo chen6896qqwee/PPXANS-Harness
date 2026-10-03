@@ -169,3 +169,21 @@ test("budget: chatStream 超限同样拦截并以提示收尾", async () => {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+// ---- 3. 周期落盘: 长跑进程被 kill 时不丢账 (2026-10-03m) ----
+test("usage-stats: 周期落盘 — 未 shutdown 也有账可查", async () => {
+  const root = tmp();
+  const { agent } = budgetSetup(root, null);
+  try {
+    for (let i = 0; i < 10; i++) await agent.chat(`hello flush ${i}`);
+    const file = path.join(agent.dataDir, "usage-stats.json");
+    assert.ok(fs.existsSync(file), "满 10 次调用后应自动落盘 (无需 shutdown)");
+    const stats = JSON.parse(fs.readFileSync(file, "utf8"));
+    assert.ok(stats.calls >= 10, `落盘 calls 应 >= 10, 实际 ${stats.calls}`);
+    assert.ok(typeof stats.cost === "number" && stats.cost > 0, "落盘应含 cost 金额");
+    agent._flushUsageStats(); // 手动 flush 幂等
+  } finally {
+    agent.shutdown();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

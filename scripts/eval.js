@@ -59,6 +59,13 @@ async function localCapabilities() {
   const ctx = agent._context("测试");
   check("核心价值注入", ctx.includes("核心价值") && ctx.includes("保护用户隐私"));
 
+  // localIntent 反向用例 (2026-10-03m): 复合请求不得被高置信短句模板误劫持
+  // (误劫持 = 模型根本收不到任务, 用户拿到的是寒暄模板而非对请求的回应)
+  const mixedGreet = await agent.chat("你好，帮我写一份三段式产品发布计划");
+  check("复合请求不被问候模板误劫持", !String(mixedGreet).includes("在的兄弟, 说。"), String(mixedGreet).slice(0, 30));
+  const mixedTime = await agent.chat("帮我把现在几点记下来");
+  check("复合请求不被时间模板误劫持", !/^现在是 \d{4}/.test(String(mixedTime)), String(mixedTime).slice(0, 30));
+
   // 生命周期推进
   for (let i = 0; i < 3; i++) await agent.chat("好的");
   check("生命周期推进", agent.lifecycle.chats >= 3 && agent.lifecycle.stage === "growing", `chats=${agent.lifecycle.chats} stage=${agent.lifecycle.stage}`);

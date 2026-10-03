@@ -2,14 +2,14 @@
 
 # 🦐 PPXANS-Harness
 
-### 一个能自己记住、自己修复、自己学习，而且每一步都留痕的 AI 智能体内核
+### 皮皮虾（PPXANS）—— 一个能自己记住、自己修复、自己学习，而且每一步都留痕的 AI 智能体内核
 
 **纯 Node.js · 零运行时依赖 · 下载即跑**
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](package.json)
 [![Runtime deps](https://img.shields.io/badge/runtime_dependencies-0-brightgreen.svg)](package.json)
-[![Tests](https://img.shields.io/badge/tests-1022_passing-brightgreen.svg)](#-测试--评测--ci)
+[![Tests](https://img.shields.io/badge/tests-1029_passing-brightgreen.svg)](#-测试--评测--ci)
 [![Self-heal](https://img.shields.io/badge/self--heal-7%2F7-brightgreen.svg)](scripts/selfheal-bench.js)
 [![MCP](https://img.shields.io/badge/MCP-server_%2B_client-blueviolet.svg)](#mcp-标准端点-streamable-http)
 
@@ -48,7 +48,7 @@ npm start                     # → http://127.0.0.1:8899   （内核 + Web 界�
 | 生态孤岛 | 标准 **MCP 服务端**（`POST /mcp`）+ 客户端，外部工具与客户端双向接入 |
 | 依赖地狱 | 主包**零运行时依赖**，`node bin/ppx-web.js` 直接起 |
 
-**运行时实测**：63 内置工具 + 22 个 `ppx.*` 管理工具（MCP 共暴露 **85**）· 自愈 **7/7 100%** · 全量测试 **1022 项（1018 通过 / 0 失败 / 4 skip）** · 渐进披露把固定开销从 8172 降到 ~3357 tok/请求（**-59%**）。
+**运行时实测**：63 内置工具 + 22 个 `ppx.*` 管理工具（MCP 共暴露 **85**）· 自愈 **7/7 100%** · 全量测试 **1029 项（1025 通过 / 0 失败 / 4 skip）** · 渐进披露把固定开销从 8172 降到 ~3357 tok/请求（**-59%**）。
 
 > 🛡️ **自愈基准**：`node scripts/selfheal-bench.js` → **7/7 100%**（发布前门禁，`PPX_MIN_SELFHEAL` 可设阈值）
 > 🔗 **审计哈希链**：`npm run audit:verify` —— append-only + SHA-256 链式防篡改，篡改/删除可定位到行
@@ -156,7 +156,7 @@ npm run selfheal
 npm run chat          # 终端对话 CLI (ppx / ppxans)
 npm run serve         # 仅 HTTP 接口 (无界面): http://127.0.0.1:8899
 npm run web:check     # Web UI 静态自检 (图标/DOM id/语法解析/静态资源)
-npm test              # 全量测试 (1022 项)
+npm test              # 全量测试 (1029 项)
 ```
 
 ### MCP 标准端点 (Streamable HTTP)
@@ -192,7 +192,7 @@ npm test              # 全量测试 (1022 项)
 ## 🧪 测试 / 评测 / CI
 
 ```bash
-npm test                # 全量 1022 项 (1018 通过 / 0 失败 / 4 skip)
+npm test                # 全量 1029 项 (1025 通过 / 0 失败 / 4 skip)
 npm run eval            # 本地能力评测 (7 项, 无需 LLM)
 npm run eval -- --llm   # LLM 端到端评测 (需 provider)
 npm run bench           # 并发/长会话吞吐压测
@@ -243,7 +243,7 @@ PPXANS-Harness/
 ├── bin/            ppx / ppxans / ppx-web / ppx-serve / ppx-channels 入口
 ├── data/           运行时数据 (不进 git)
 ├── references/     第三方项目来源登记
-├── test/           测试 (1022 项, v3 新模块全覆盖)
+├── test/           测试 (1029 项, v3 新模块全覆盖)
 └── docs/           文档 (ARCHITECTURE-V3 / QUICKSTART / web-launch 等)
 ```
 
