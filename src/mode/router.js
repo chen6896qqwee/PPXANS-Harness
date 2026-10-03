@@ -3,33 +3,22 @@
 // 适合: 多领域任务, 快速定位专门能力; 按需加载技能, 省 token。
 import path from "node:path";
 import { SkillLoader } from "../skills/loader.js";
+import { debug } from "../utils/logger.js";
 
-// 技能匹配: 中文用连续两字(bigram)命中描述, 英文/数字用词命中
-export function matchSkill(loader, text) {
-  const skills = loader.list();
-  const q = String(text || "").toLowerCase();
-  let best = null, bestScore = 0;
-  for (const s of skills) {
-    const desc = (s.description || "").toLowerCase();
-    let score = 0;
-    const bigrams = new Set();
-    const cjk = q.match(/[\u4e00-\u9fff]+/g) || [];
-    for (const seg of cjk) for (let i = 0; i < seg.length - 1; i++) bigrams.add(seg.slice(i, i + 2));
-    for (const bg of bigrams) if (desc.includes(bg)) score += 1;
-    const words = q.match(/[a-z0-9]+/g) || [];
-    for (const w of words) if (w.length >= 2 && desc.includes(w)) score += 1;
-    if (score > bestScore) { bestScore = score; best = s; }
-  }
-  return bestScore >= 1 ? best : null;
-}
+// 技能匹配移至 src/skills/search.js (2026-10-01): name 加权 + 高置信阈值 + 歧义不押注,
+// 并供 skill_search 工具复用同一打分器。此处保持转出口兼容既有 import。
+export { matchSkill } from "../skills/search.js";
 
 export async function routerExecutor(agent, userMsg, { sessionKey = "default" } = {}) {
   if (!agent.llm) {
     return (await agent._localIntent(userMsg)) || "[皮皮虾] 未配置模型 provider (配置见 docs/QUICKSTART.md 第 3 节)。";
   }
   // 1. 技能路由: 匹配用户输入到已安装技能
-  const loader = new SkillLoader(path.join(agent.root, "skills"));
+  // 2026-10-01 优化: 复用 agent.skills (原每条消息 new 一个 loader 全量重扫),
+  // 命中即 trackUse — 路由路径此前绕过了使用统计, 自进化飞轮 (auto_skill/升级闸门) 因此少计数。
+  const loader = agent.skills || new SkillLoader(path.join(agent.root, "skills"));
   const skill = matchSkill(loader, userMsg);
+  if (skill && typeof loader.trackUse === "function") { try { loader.trackUse(skill.id); } catch (e) { debug(`[mode/router] 已忽略异常: ${e && e.message ? e.message : e}`); } }
   // 2. 注入技能内容到 system prompt, 再执行 (场景上下文已由 agent._context 注入)
   const system = agent._context(userMsg)
     + (skill ? `\n\n[已激活技能: ${skill.name}]\n${loader.read(skill.id)}` : "");

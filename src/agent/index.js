@@ -2,6 +2,7 @@
 import { ensureUTF8Console } from "../utils/winutf8.js";
 import path from "node:path";
 import os from "node:os";
+import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { TOOL_ERROR_PREFIX } from "../tools/index.js";
@@ -10,14 +11,16 @@ import { normalizeCommand } from "../tools/command-guard.js";
 // (探索熔断/重复检测/溢出降档/错误重试/结果裁剪/循环驱动), 重新导出保持测试与外部兼容
 import { runToolLoop, LLM_FAILED_HINT } from "../core/policy.js";
 // 重构第三刀 (2026-09-14): 结构化事件流 traceId 贯穿 (AsyncLocalStorage), 关键路径埋点
-import { EventTracer, runWithTrace } from "../core/trace.js";
+import { EventTracer, runWithTrace, currentTrace } from "../core/trace.js";
 // 重构第二刀 (2026-09-14): 记忆升降级 + 自我学习收敛为独立服务, agent 只保留薄委托
 import { MemoryService } from "../services/memory-service.js";
 import { LearningService } from "../services/learning-service.js";
 export { isOverflowError as _isOverflowError, trimToolResult, toToolContent } from "../core/policy.js";
 import { logicalDay } from "../utils/store.js";
 import { loadConfig } from "../config/index.js";
-import { info, warn, error } from "../utils/logger.js";
+// 成本折算 (2026-10-03l): usageStats 加金额维度 + 支出预算闸门 (增强框架第 8 条: 预算控制)
+import { estimateCost } from "../llm/pricing.js";
+import { info, warn, error, debug } from "../utils/logger.js";
 import { Context, compose, loadPlugins } from "../plugin/index.js";
 import { builtinPlugins, resolveLLM, resolveAllLLMs, isUsableProvider } from "../plugin/builtin.js";
 // v3.0 (codex 对齐): 新层插件 (permissions/hooks/commands/evidence/protocol)
@@ -26,18 +29,21 @@ import { v3Plugins } from "../plugin/v3.js";
 import { isPlaceholder, hasPlaceholderField } from "../config/placeholder.js";
 import { registerMcpTools } from "../mcp/index.js";
 import { Auditor } from "../audit/verifier.js";
+import { classifyFailure } from "../memory/failure-episode.js";
 // ANS 独立模块 (可更换): 价值对齐 / 自主任务生成 / 生命周期
 import { Lifecycle } from "../ans/lifecycle.js";
 import { suggestProactive, markTaskDone } from "../ans/proactive.js";
 import { record as rewardRecord, status as rewardStatus } from "../ans/reward.js";
 import { scan as evictionScan, status as evictionStatus } from "../ans/eviction.js";
 import { installGuard, guardStatus, installGuardOnCatalog } from "../ans/guard.js";
+import { scanInjection, wrapUntrusted, reportSuspicious, stripProtoKeys } from "../security/injection.js";
 import { SkillLoader } from "../skills/loader.js";
 import { EvolutionEngine } from "../selfheal/evolve.js";
 // 重构 (2026-09-15): 历史/上下文管理 + 提示词构建从 PPXAgent 类抽出为 mixin
 // (context.js: 历史裁剪/token 预算/会话压缩; prompts.js: 技能清单/核心价值/DSML/画像/多模态)
 import { contextMethods } from "./context.js";
 import { promptMethods } from "./prompts.js";
+import { TurnProjection } from "../session/projection.js";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 // 会话历史条数/token 预算已迁到 config.memory (max_history_items / history_token_budget)
@@ -100,14 +106,34 @@ export class PPXAgent {
     this.memory = this.ctx.consume("memory");
     this.llm = this.ctx.consume("llm");
     this.allProviders = this.ctx.consume("allProviders");
+    // 可选分层路由 (2026-10-02): config.model_routing.aux 指定辅助任务 (记忆提取/摘要/压缩等
+    // 非主对话调用) 的厂商 id; 不配置 = 辅助调用跟随主模型, 零配置零门槛。
+    this.auxLLM = null;
+    {
+      const auxId = this.config.model_routing?.aux;
+      if (auxId) {
+        const hit = (this.allProviders || []).find((c) => c.providerId === auxId);
+        if (hit) this.auxLLM = hit;
+        else warn(`model_routing.aux="${auxId}" 未匹配任何可用 provider, 辅助调用回落主模型`);
+      }
+    }
     this.l0 = this.ctx.consume("l0");
     this.scenes = this.ctx.consume("scenes");
     this.personaStore = this.ctx.consume("personaStore");
     this.traces = this.ctx.consume("traces");
+    // 故障病历 (2026-10-03 接线): 原先 evolvePlugin 提供了却零消费 —— 失败只写经验库,
+    // 本模块的"结构化病历 + 同类检索"从未生效。现于 _runTool 接入读写闭环。
+    this.failures = this.ctx.consume("failures");
+    // 记忆管线健康监控 (2026-10-03 接线): 与 failures 同属"装配了但零消费"的预留件 ——
+    // 没人 record() 时 status() 永远 healthy, 降级建议形同虚设。现由 MemoryService 记账与消费。
+    this.memoryHealth = this.ctx.consume("memoryHealth");
     // 重构第三刀: 结构化事件流 (记忆升降级/工具失败/spawn/自愈触发), 独立于工具轨迹
     this.tracer = new EventTracer(this.dataDir);
     this.bus = this.ctx.consume("bus");
     this.tools = this.ctx.consume("tools");
+    // 2026-10-03 接线: 语境 Playbook (evolve 引擎) —— prompts._playbookPrompt 注入 system
+    // prompt, LearningService.refine 失败提炼时自动 ADD bullet (原 provide 后零消费)
+    this.playbook = this.ctx.consume("playbook");
     this.scheduler = this.ctx.consume("scheduler");
     this.toolsEnabled = this.ctx.consume("toolsEnabled");
     // v3.0 (codex 对齐): 权限引擎 / 钩子链 / 命令注册表 / 目标看板 / 协议总线
@@ -116,6 +142,19 @@ export class PPXAgent {
     this.commands = this.ctx.consume("commands");
     this.goalBoard = this.ctx.consume("goalBoard");
     this.protocolBus = this.ctx.consume("protocolBus");
+    // ZCode 工具能力门接线 (2026-10-02 吸收): 工具声明式能力 → 权限引擎
+    //   开关: config.agent.capability_gate (默认开); auto_approve_high_risk (默认关)
+    //   ⚠ 必须在 permissions/tools 都消费之后 (2026-10-03 自测发现: 原先放在消费前被静默跳过)
+    if (this.permissions && this.tools && typeof this.tools.getCapability === "function") {
+      this.permissions.getCapability = (n) => this.tools.getCapability(n);
+      this.permissions.capabilityGate = this.config.agent?.capability_gate !== false;
+      this.permissions.autoApproveHighRisk = !!this.config.agent?.auto_approve_high_risk;
+    }
+    // ZCode 使用统计对齐 (2026-10-02): 会话级 token/调用次数记账 (零侵入包装 provider)
+    // 2026-10-03l: 加 cost (USD) 维度 + budget.usd 支出上限 (超限后 chat/chatStream 拒绝继续烧钱)
+    this.usageStats = { calls: 0, tokens: 0, cost: 0, byModel: {} };
+    this._budgetExceeded = false;
+    this._installUsageTracking();
     // 待审批映射 (codex approval flow): id -> { req, resolve, timer }
     this._pendingApprovals = new Map();
     this._approvalSeq = 0;
@@ -131,7 +170,7 @@ export class PPXAgent {
     // ⑦ Reward 闭环: 订阅总线工具成败, 自动更新行为倾向 (EWMA)
     this.bus?.on("tool/result", (ev) => {
       const { name, ok } = ev.payload || {};
-      if (name) { try { rewardRecord(this, { tool: name, ok: !!ok }); } catch {} }
+      if (name) { try { rewardRecord(this, { tool: name, ok: !!ok }); } catch (e) { debug(`[agent/index] 已忽略异常: ${e && e.message ? e.message : e}`); } }
     });
     // P0 (2026-09-15): 免疫闸门接入工具执行收口 (修 MERGE-REPORT 遗留 P2 —— guard 之前只盖总线命令,
     // 工具走 catalog 绕过全局闸门)。共享同一 state: approveGuard 一次授权同时作用于总线+工具。
@@ -149,10 +188,10 @@ export class PPXAgent {
       const stale = jobs.find((j) => j.name === "eviction-daily" && typeof j.action !== "function");
       if (stale) this.scheduler?.remove(stale.id);
       const hasE = jobs.some((j) => j.name === "eviction-daily" && typeof j.action === "function");
-      if (!hasE) this.scheduler?.add({ name: "eviction-daily", cron: "02:00", type: "daily", action: () => { try { evictionScan(this); } catch {} } });
-    } catch {}
+      if (!hasE) this.scheduler?.add({ name: "eviction-daily", cron: "02:00", type: "daily", action: () => { try { evictionScan(this); } catch (e) { debug(`[agent/index] 已忽略异常: ${e && e.message ? e.message : e}`); } } });
+    } catch (e) { debug(`[agent/index] 已忽略异常: ${e && e.message ? e.message : e}`); }
     // 首次启动跑一次排遗扫描 (预热治理状态)
-    try { evictionScan(this); } catch {}
+    try { evictionScan(this); } catch (e) { debug(`[agent/index] 已忽略异常: ${e && e.message ? e.message : e}`); }
     this._warnMissingCloudApi(); // 发布首启引导: 未配云端 key 时明确提示
   }
 
@@ -162,10 +201,18 @@ export class PPXAgent {
     this._onToolEvent = null; // 工具事件回调
     this._toolCallSeq = 0; // 工具调用序号: 给 start/done 事件生成唯一 id, 供 UI 精确配对
     this._interrupted = false;
-    this._lastTurnUsedTools = false;
+    this._interruptedSessions = new Set(); // v3.0.1 (P1#3): 按会话中断, 并发会话不串台
+    this._turnCbs = new Map(); // v3.0.1 (P1#4): traceId -> { onTool, onStep }, 并发流式回调互不覆盖
+    this._turnsUsedTools = new Set(); // v3.0.1 (P1#4): 用过工具的 traceId 集合 (替代单布尔标志)
+    this._turnFallbacks = new Map(); // v3.0.1 (P1#4): traceId -> 降级事实 (替代单槽 _lastFallback)
+    this._lastTurnUsedTools = false; // 兼容保留: 无 trace 上下文的裸调用路径
     this._lastFallback = null; // P2-2: 最近一次 provider 降级事实 (在本轮内有效, 用完即清)
     this._mcp = null; // MCP 连接句柄 (connectMcp 后赋值)
     this._proactiveTimer = null; // 主动任务生成定时器
+    // v3.1 首片 (P1#8): Turn 投影层接入 —— SessionStore 仍是唯一事实源,
+    // 本层只投影每轮生命周期 (open/closed/aborted), 纯可观测, config.agent.turn_projection=false 可旁路
+    this.turnProjection = new TurnProjection();
+    this.turnProjection.enabled = this.config.agent?.turn_projection !== false;
   }
 
   // ---- 装配阶段 5: 长期状态引擎 (生命周期 / 进化 / 审计 / 技能) ----
@@ -183,17 +230,19 @@ export class PPXAgent {
   // ---- 装配阶段 6: 业务服务 (记忆协调 / 自我学习, 依赖注入) ----
   _initServices() {
     // 重构第二刀: 记忆协调服务 + 自我学习服务 (依赖注入, llm 用闭包实时取当前 provider)
+    // 2026-10-02: 辅助服务优先走 model_routing.aux (可选, 未配置回落主模型)
     this.memorySvc = new MemoryService({
-      getLlm: () => this.llm,
+      getLlm: () => this.auxLLM || this.llm,
       facts: this.facts,
       scenes: this.scenes,
       personaStore: this.personaStore,
       experience: this.experience,
       lifecycle: this.lifecycle,
       tracer: this.tracer,
+      health: this.memoryHealth, // 记忆管线健康度: 每步 record, 降级时跳过 LLM 压缩/提炼
     });
     this.learningSvc = new LearningService({
-      getLlm: () => this.llm,
+      getLlm: () => this.auxLLM || this.llm,
       traces: this.traces,
       skills: this.skills,
       experience: this.experience,
@@ -202,6 +251,7 @@ export class PPXAgent {
       tracer: this.tracer,
       toolNames: () => this._toolNames(),
       runTool: (name, args) => this.tools.call(name, args, { agent: this }),
+      playbook: this.playbook, // 2026-10-03 接线: 教训沉淀为 playbook bullets
     });
     // 注入 LLM 摘要器/提炼器 (依赖 service, 装配后注入)
     this.memory.summarizer = (raw) => this.memorySvc.summarizeMemory(raw);
@@ -212,6 +262,8 @@ export class PPXAgent {
   _initStartup() {
     // 应用 tools.disabled: 从 config/ppx.json 读取需禁用的工具, 启动时禁用 (设置 UI 写盘生效)
     this._applyDisabledTools();
+    // 应用工具披露策略: 只把核心工具 schema 发给 LLM, 其余按需加载 (省上下文)
+    this._applyToolExposure();
 
     // 可选: 启动时自动连接 MCP 服务器 (config.mcp.auto_connect = true 时非阻塞连接)
     if (this.config.mcp?.auto_connect && this.config.mcp.servers?.length) {
@@ -236,9 +288,49 @@ export class PPXAgent {
   setToolEvent(cb) { this._onToolEvent = typeof cb === "function" ? cb : null; }
   // turn/step 分层: 推理轮次事件 (每轮工具循环发一次 step), 供军团 worker 上报进度
   setStepEvent(cb) { this._onStepEvent = typeof cb === "function" ? cb : null; }
-  notify(message) { if (this._notifyCb) { try { this._notifyCb(String(message)); } catch (e) {} } }
-  interrupt() { this._interrupted = true; }
-  clearInterrupt() { this._interrupted = false; }
+  notify(message) { if (this._notifyCb) { try { this._notifyCb(String(message)); } catch (e) { debug(`[agent/index] 已忽略异常: ${e && e.message ? e.message : e}`); } } }
+  // v3.0.1 (P1#3): 中断支持按会话 —— 带 sessionKey 只中断该会话 (HTTP 并发场景不串台);
+  // 无 key 全局中断 (CLI 单会话兼容)。
+  interrupt(sessionKey) {
+    if (sessionKey) this._interruptedSessions.add(sessionKey);
+    else this._interrupted = true;
+  }
+  // 每轮对话开始复位: 清本会话中断 + 全局标志 (兼容 CLI /stop → 下一轮继续的既有语义)
+  clearInterrupt(sessionKey) {
+    if (sessionKey) this._interruptedSessions.delete(sessionKey);
+    else this._interruptedSessions.clear();
+    this._interrupted = false;
+  }
+  isInterrupted(sessionKey) {
+    if (this._interrupted) return true;
+    if (sessionKey) return this._interruptedSessions.has(sessionKey);
+    return this._interruptedSessions.size > 0;
+  }
+
+  // v3.0.1 (P1#4): 工具/step 事件路由 —— 优先当前 trace 注册的按轮回调 (并发流式会话互不覆盖),
+  // 无按轮回调时兜底全局回调 (setToolEvent/setStepEvent, Web UI 全局面板用)
+  _emitTool(ev) {
+    const per = this._turnCbs.get(currentTrace()?.traceId);
+    const cb = (per && per.onTool) || this._onToolEvent;
+    if (cb) { try { cb(ev); } catch (e) { debug(`[agent/index] 已忽略异常: ${e && e.message ? e.message : e}`); } }
+  }
+  _emitStep(ev) {
+    const per = this._turnCbs.get(currentTrace()?.traceId);
+    const cb = (per && per.onStep) || this._onStepEvent;
+    if (cb) { try { cb(ev); } catch (e) { debug(`[agent/index] 已忽略异常: ${e && e.message ? e.message : e}`); } }
+  }
+  // 取走当前轮的降级事实 (按 traceId, 无则回落全局单槽), 取后即清
+  _takeFallback() {
+    const tid = currentTrace()?.traceId;
+    if (tid && this._turnFallbacks.has(tid)) {
+      const fb = this._turnFallbacks.get(tid);
+      this._turnFallbacks.delete(tid);
+      return fb;
+    }
+    const fb = this._lastFallback;
+    this._lastFallback = null;
+    return fb;
+  }
 
   // 只读模式 (SDD 审查者, 吸收 Superpowers): 禁用一切修改/执行类工具, 只能读/查
   // 供 spawn_agent review 循环的审查者角色 (worker 经 PPX_AGENT_READONLY=1 触发)
@@ -249,7 +341,7 @@ export class PPXAgent {
       "scene_create", "scene_describe", "spawn_agent", "refine_skill",
       "refine", // v1.0.8: refine 会写经验库, 只读审查者也不应触发
     ];
-    for (const t of disabled) { try { this.tools.disable(t); } catch {} }
+    for (const t of disabled) { try { this.tools.disable(t); } catch (e) { debug(`[agent/index] 已忽略异常: ${e && e.message ? e.message : e}`); } }
     this.readonly = true;
     return this;
   }
@@ -294,9 +386,28 @@ export class PPXAgent {
   async chat(userMsg, { persist = true, sessionKey = "default", mode = null } = {}) {
     // 重构第三刀: 入口生成 traceId, 记忆/工具/学习子调用自动继承 (AsyncLocalStorage)
     return runWithTrace(async () => {
-    this.clearInterrupt(); // 新一轮对话开始, 复位上一轮的中断状态
+    // 支出预算闸门 (2026-10-03l): 超限后拒绝继续烧钱, 提示如何调额
+    if (this._budgetExceeded) return this._budgetMessage();
+    const tid = currentTrace()?.traceId;
+    // v3.1 首片 (P1#8): Turn 投影 begin (纯可观测, 失败不影响主链路)
+    const turnInfo = this.turnProjection.begin(sessionKey, userMsg);
+    let turnEnded = false;
+    const _endTurn = (interrupted) => {
+      if (turnEnded) return;
+      turnEnded = true;
+      const endInfo = interrupted ? this.turnProjection.abort(sessionKey) : this.turnProjection.complete(sessionKey);
+      if (turnInfo) {
+        this.bus?.emit("chat/turn/end", { sessionKey, ...turnInfo, ...endInfo, interrupted }, { source: "agent.chat" });
+        this.protocolBus?.eq?.push?.({ type: "TASK_TURN_ENDED", payload: { sessionKey, ...turnInfo, ...endInfo, interrupted } });
+      }
+    };
+    try {
+    this.clearInterrupt(sessionKey); // 新一轮对话开始, 复位本会话的上一轮中断状态
     this.bus?.emit("chat/user", { userMsg, sessionKey }, { source: "agent.chat" });
-    this._lastFallback = null; // P2-2: 只关心"本轮"是否降级, 先清上次残留
+    if (turnInfo) {
+      this.bus?.emit("chat/turn/begin", { sessionKey, ...turnInfo }, { source: "agent.chat" });
+      this.protocolBus?.eq?.push?.({ type: "TASK_TURN_BEGAN", payload: { sessionKey, ...turnInfo } });
+    }
     let reply;
     // 内核自主决策: 高置信简单指令本地处理, 不调 LLM
     const local = (this.config.agent?.localIntent !== false) ? await this._localIntent(userMsg) : null;
@@ -313,8 +424,9 @@ export class PPXAgent {
       }
     }
 
-    const usedTools = this._lastTurnUsedTools;
-    this._lastTurnUsedTools = false;
+    // v3.0.1 (P1#4): 按轮读取工具使用标记 (traceId 路由), 无 trace 时回落兼容单槽
+    const usedTools = tid ? this._turnsUsedTools.delete(tid) : this._lastTurnUsedTools;
+    if (!tid) this._lastTurnUsedTools = false;
     if (this._notifyCb && usedTools) this.notify("[done] 任务完成 (工具执行)。");
 
     if (persist) {
@@ -327,13 +439,20 @@ export class PPXAgent {
     this.evolve && this.evolve.tick();
     // P2-2: 本轮若发生过 provider 降级, 在回复末尾附可见提示
     //   (放在 persist 之后 —— 写入会话历史/记忆的始终是模型原文, 提示只对当轮用户可见)
-    if (this._lastFallback) {
-      const fb = this._lastFallback;
-      this._lastFallback = null;
+    const fb = this._takeFallback();
+    if (fb) {
       reply = String(reply ?? "") + this._fallbackNotice(fb);
       this.notify(`[降级] ${fb.from} → ${fb.to}`);
     }
+    // v3.1 首片 (P1#8): 本轮被中断 → turn 标 aborted, 否则正常 closed
+    _endTurn(this.isInterrupted(sessionKey));
     return reply;
+    } finally {
+      // v3.0.1 (P1#4): 无论成功/失败都清本轮状态, 防长跑进程按 trace 泄漏
+      if (tid) { this._turnsUsedTools.delete(tid); this._turnFallbacks.delete(tid); }
+      // v3.1 首片: 异常路径 turn 未正常结束 → 标 aborted 收口
+      _endTurn(true);
+    }
     }, { sessionKey, channel: "chat", userMsg: String(userMsg).slice(0, 200) });
   }
   // 单轮落库公共路径 (chat / chatStream 共用, 2026-09-18 重构去重):
@@ -391,7 +510,9 @@ export class PPXAgent {
     // 重构第三刀: 入口生成 traceId (无 LLM 降级 chat 时嵌套新 trace, 独立可追踪)
     return runWithTrace(async () => {
     if (!this.llm) return this.chat(userMsg, { sessionKey });
-    this.clearInterrupt(); // 新一轮对话开始, 复位中断状态
+    // 支出预算闸门 (2026-10-03l): 超限后不再发请求, 直接以提示文案收尾本轮流
+    if (this._budgetExceeded) { const m = this._budgetMessage(); if (onDelta) onDelta(m); return m; }
+    this.clearInterrupt(sessionKey); // 新一轮对话开始, 复位本会话中断状态
     // 内核自主决策: 高置信简单指令本地处理
     const local = (this.config.agent?.localIntent !== false) ? await this._localIntent(userMsg) : null;
     if (local) { onDelta && onDelta(local); return local; }
@@ -403,15 +524,32 @@ export class PPXAgent {
     const hasImage = messages.some((m) => Array.isArray(m.content) && m.content.some((c) => c && c.type === "image_url"));
     const activeLLM = hasImage ? (this._visionLLM() || this.llm) : this.llm;
 
-    // 挂工具事件透传 (供 onTool 推送)
-    const prevCb = this._onToolEvent;
-    if (onTool) this._onToolEvent = (ev) => { try { onTool(ev); } catch {} };
-    // 挂 step 事件透传 (供 onStep 推送推理轮次)
-    const prevStepCb = this._onStepEvent;
-    if (onStep) this._onStepEvent = (ev) => { try { onStep(ev); } catch {} };
+    // v3.0.1 (P1#4): 按轮回调注册 (traceId 路由) —— 并发流式会话互不覆盖,
+    // 替代原 prev/restore 单槽模式 (并发下 A 结束会抹掉 B 的回调, B 结束会泄漏 A 的回调)
+    const tid = currentTrace()?.traceId;
+    if (tid && (onTool || onStep)) {
+      this._turnCbs.set(tid, {
+        onTool: onTool ? (ev) => { try { onTool(ev); } catch (e) { debug(`[agent/index] 已忽略异常: ${e && e.message ? e.message : e}`); } } : null,
+        onStep: onStep ? (ev) => { try { onStep(ev); } catch (e) { debug(`[agent/index] 已忽略异常: ${e && e.message ? e.message : e}`); } } : null,
+      });
+    }
+
+    // v3.1 首片 (P1#8): Turn 投影 begin (纯可观测)
+    const turnInfo = this.turnProjection.begin(sessionKey, userMsg);
+    let turnEnded = false;
+    const _endTurn = (interrupted) => {
+      if (turnEnded) return;
+      turnEnded = true;
+      const endInfo = interrupted ? this.turnProjection.abort(sessionKey) : this.turnProjection.complete(sessionKey);
+      if (turnInfo) {
+        this.bus?.emit("chat/turn/end", { sessionKey, ...turnInfo, ...endInfo, interrupted }, { source: "agent.chatStream" });
+        this.protocolBus?.eq?.push?.({ type: "TASK_TURN_ENDED", payload: { sessionKey, ...turnInfo, ...endInfo, interrupted } });
+      }
+    };
 
     let reply;
     try {
+      try {
       // 无工具开启: 直连后端可逐字流式 (恢复打字机效果); 有工具时走工具循环保轨迹完整 [复审 P2]
       if (!this.toolsEnabled && activeLLM.supportsStream) {
         reply = await activeLLM.streamChat(messages, {
@@ -426,13 +564,21 @@ export class PPXAgent {
       reply = await this.chat(userMsg, { sessionKey });
       if (onDelta) onDelta(reply);
     } finally {
-      this._onToolEvent = prevCb;
-      this._onStepEvent = prevStepCb;
+      // v3.0.1 (P1#4): 清本轮按回注册 (原 prev/restore 模式已废弃)
+      if (tid) this._turnCbs.delete(tid);
+      this._takeFallback(); // 丢弃本轨降级事实 (chatStream 不向用户展示降级提示)
     }
     // 落库用模型原文 (剥掉本轮降级提示), 与 chat 共用同一路径
     await this._persistTurn(sessionKey, userMsg, this._stripFallbackNotice(reply));
-    this._lastFallback = null; // 降级提示不影响后续轮次
+    // v3.1 首片 (P1#8): 本轮被中断 → turn 标 aborted, 否则正常 closed
+    _endTurn(this.isInterrupted(sessionKey));
     return reply;
+    } catch (e) {
+      // v3.1 首片: 异常路径 turn 收口为 aborted 后原样抛出 (chatStream 自身无兜底, 保持原语义)
+      throw e;
+    } finally {
+      _endTurn(true);
+    }
     }, { sessionKey, channel: "chatStream" });
   }
 
@@ -474,15 +620,18 @@ export class PPXAgent {
       try {
         const out = await this._llmWithTools(seedMessages, client);
         if (failed.length) {
-          this._lastFallback = {
+          // v3.0.1 (P1#4): 降级事实按轮存 (traceId 路由), 并发会话各记各的
+          const fb = {
             from: failed[0].model,
             to: client.model,
             reason: failed[0].message,
             chain: failed.map((f) => f.model),
             ts: Date.now(),
           };
-          this.bus?.emit("llm/fallback", this._lastFallback, { source: "agent._llmWithFallback" });
-          warn(`provider 降级: ${this._lastFallback.from} 不可用 → 已切至 ${client.model} (${failed[0].message})`);
+          const _tid = currentTrace()?.traceId;
+          if (_tid) this._turnFallbacks.set(_tid, fb); else this._lastFallback = fb;
+          this.bus?.emit("llm/fallback", fb, { source: "agent._llmWithFallback" });
+          warn(`provider 降级: ${fb.from} 不可用 → 已切至 ${client.model} (${failed[0].message})`);
         }
         return out;
       } catch (e) {
@@ -540,9 +689,50 @@ export class PPXAgent {
   // v3.0 (codex 对齐): PreToolUse 钩子(可否决/改参) → 权限引擎(deny/ask/allow) → 执行 → PostToolUse 钩子
   async _runTool(name, args) {
     const t0 = Date.now();
-    this._lastTurnUsedTools = true;
+    // v3.0.1 (P1#4): 按轮标记"用过工具" (traceId 路由), 并发会话互不串台; 无 trace 时回落单槽
+    const _tid = currentTrace()?.traceId;
+    if (_tid) this._turnsUsedTools.add(_tid); else this._lastTurnUsedTools = true;
+    // 原型污染消毒: 剥离 __proto__/constructor/prototype 键 (LLM JSON 可携带恶意键)
+    const stripped = stripProtoKeys(args);
+    if (stripped.stripped.length) {
+      this.tracer.event("security/proto-stripped", { tool: name, keys: stripped.stripped });
+      args = stripped.clean;
+    }
     const callId = `t${++this._toolCallSeq}-${t0.toString(36)}`;
 
+    // ① 准入: PreToolUse 钩子链 (可否决/改参) + 权限引擎 (deny/ask/审批缓存)
+    const admit = await this._admitToolCall(name, args, callId, t0);
+    if (!admit.ok) return admit.error;
+    args = admit.args;
+
+    this.bus?.emit("tool/call", { name, args, callId }, { source: "agent._runTool" });
+    this._emitTool({ type: "start", id: callId, tool: name, args, ts: Date.now() });
+    // let 而非 const: 后处理(注入标注/病历回灌)与 PostToolUse 钩子都会追加内容
+    // (2026-09-18 修复: 原为 const, 钩子追加时抛 "Assignment to constant variable" 被 catch (e) { debug(`[agent/index] 已忽略异常: ${e && e.message ? e.message : e}`); } 静默吞掉)
+    let result = await this.tools.call(name, args, { agent: this, timeoutMs: Number(this.config.agent?.tool_timeout_ms) || 0 });
+    const ok = !result.startsWith(TOOL_ERROR_PREFIX);
+
+    // ② 结果加工: 注入扫描 → 事件/轨迹落库 → 故障病历回灌 (均可能改写 result)
+    result = this._processToolOutcome(name, args, callId, result, ok, t0);
+
+    // ③ PostToolUse 钩子链 (可附加上下文, 追加在结果尾部)
+    if (this.hooks && ok) {
+      try {
+        const h = await this.hooks.emit("PostToolUse", { tool: name, args, result, callId });
+        // 2026-09-18 修复 (第二处): 原实现 map h.results 里的 r.additionalContext,
+        //   但 results 条目结构是 { result: res }, 恒取到 undefined —— 收集结果实际在
+        //   h.additionalContext (hooks/index.js 统一收集)。原特性从未生效。
+        const extra = (Array.isArray(h?.additionalContext) ? h.additionalContext : [])
+          .filter(Boolean).map(String).join("\n");
+        if (extra) result = result + "\n" + extra;
+      } catch (e) { debug(`[agent/index] 已忽略异常: ${e && e.message ? e.message : e}`); }
+    }
+    this._emitToolDone(callId, name, args, ok, Date.now() - t0, result);
+    return result;
+  }
+
+  // 准入链 (从 _runTool 抽出, 原 136 行中占 50 行): 钩子 + 权限, 返回 { ok, args } 或 { ok:false, error }
+  async _admitToolCall(name, args, callId, t0) {
     // --- v3.0: PreToolUse 钩子链 (claude-code 语义: 可否决/可改参) ---
     if (this.hooks) {
       try {
@@ -551,10 +741,10 @@ export class PPXAgent {
           const msg = `[hook] 工具 ${name} 被 PreToolUse 钩子否决: ${h.reason || "无理由"}`;
           this.tracer.event("tool/hook-blocked", { tool: name, reason: h.reason });
           this._emitToolDone(callId, name, args, false, Date.now() - t0, msg);
-          return TOOL_ERROR_PREFIX + msg;
+          return { ok: false, error: TOOL_ERROR_PREFIX + msg };
         }
         if (h && h.args && typeof h.args === "object") args = h.args; // 钩子改参
-      } catch {} // 钩子自身异常不阻断主链
+      } catch (e) { debug(`[agent/index] 已忽略异常: ${e && e.message ? e.message : e}`); } // 钩子自身异常不阻断主链
     }
 
     // --- v3.0: 权限引擎 (codex AskForApproval + SandboxPolicy + 规则链) ---
@@ -565,7 +755,7 @@ export class PPXAgent {
           const msg = `[permission] 工具 ${name} 被拒绝: ${perm.reason || "命中 deny 规则"}`;
           this.tracer.event("tool/perm-denied", { tool: name, reason: perm.reason });
           this._emitToolDone(callId, name, args, false, Date.now() - t0, msg);
-          return TOOL_ERROR_PREFIX + msg;
+          return { ok: false, error: TOOL_ERROR_PREFIX + msg };
         }
         if (perm.decision === "ask") {
           // B2: 审批缓存 (codex ApprovalStore 语义) — 会话内相同命令已批准过则不重复 ask
@@ -575,7 +765,6 @@ export class PPXAgent {
           const cached = cacheKey && this.config.agent?.approval_cache !== false && this._approvalCache.get(cacheKey);
           let upd = null;
           if (cached) {
-            // 命中缓存: 记录 tracer 事件供审计, 但仍保留原 reason 供钩子参考
             this.tracer.event("approval/cache-hit", { tool: name, key: cacheKey });
             upd = {}; // 视为已批准
           } else {
@@ -588,19 +777,35 @@ export class PPXAgent {
             const msg = `[permission] 工具 ${name} 审批被拒绝或超时`;
             this.tracer.event("tool/perm-rejected", { tool: name });
             this._emitToolDone(callId, name, args, false, Date.now() - t0, msg);
-            return TOOL_ERROR_PREFIX + msg;
+            return { ok: false, error: TOOL_ERROR_PREFIX + msg };
           }
         }
-      } catch {} // 权限引擎异常不阻断主链 (fail-open, 与 v2 行为一致)
+      } catch (e) {
+        // 2026-10-03 修复 (P1): 原实现吞异常后放行 (fail-open) —— 权限引擎自己崩了
+        // 防线反而全开, 与 permissions 内核 fail-closed (应答者异常 → deny) 口径相反。
+        // 改为 fail-closed: 引擎异常 = 防线失效, 拒绝执行并给可判读错误。
+        const msg = `[permission] 权限引擎异常, 已拒绝执行工具 ${name}: ${e && typeof e.message === "string" ? e.message : String(e)}`;
+        this.tracer.event("tool/perm-error", { tool: name });
+        this._emitToolDone(callId, name, args, false, Date.now() - t0, msg);
+        return { ok: false, error: TOOL_ERROR_PREFIX + msg };
+      }
     }
+    return { ok: true, args };
+  }
 
-    this.bus?.emit("tool/call", { name, args, callId }, { source: "agent._runTool" });
-    if (this._onToolEvent) { try { this._onToolEvent({ type: "start", id: callId, tool: name, args, ts: Date.now() }); } catch {} }
-    // let 而非 const: PostToolUse 钩子的 additionalContext 会追加到结果尾部
-    // (2026-09-18 修复: 原为 const, 钩子追加时抛 "Assignment to constant variable" 被 catch {} 静默吞掉,
-    //  additionalContext 特性从未生效)
-    let result = await this.tools.call(name, args, { agent: this, timeoutMs: Number(this.config.agent?.tool_timeout_ms) || 0 });
-    const ok = !result.startsWith(TOOL_ERROR_PREFIX);
+  // 结果加工 (从 _runTool 抽出): 注入扫描 → 事件/轨迹 → 故障病历回灌; 返回可能被改写的 result
+  _processToolOutcome(name, args, callId, result, ok, t0) {
+    // 提示注入防线 (2026-10-03 红队驱动): 工具输出 = 不可信数据。
+    // 疑似注入 → 原文外包"不可信"标注 + 安全事件上 tracer (数据不删, 指令不执行语义靠标注传达给模型)。
+    try {
+      if (ok && typeof result === "string" && result.length > 20 && !result.startsWith("{")) {
+        const scan = scanInjection(result);
+        if (scan.suspicious) {
+          reportSuspicious(name, scan, { tracer: this.tracer });
+          result = wrapUntrusted(name, result, scan);
+        }
+      }
+    } catch { /* 扫描异常不阻断工具结果 */ }
     if (name === "spawn_agent") this.tracer.event("agent/spawn", { args });
     this.bus?.emit("tool/result", {
       name,
@@ -619,25 +824,33 @@ export class PPXAgent {
       error: ok ? null : result,
     });
 
-    // --- v3.0: PostToolUse 钩子链 (可附加上下文, 追加在结果尾部) ---
-    if (this.hooks && ok) {
+    // --- 故障病历闭环 (2026-10-03 接线: 该模块此前"能力就绪、链路未接", 零消费) ---
+    // 写: 本次失败落成结构化病历 (工具 / 错误文本 / 归类 / trace 引用)
+    // 读: 检索历史同类故障, 把"已知根因 + 修法"附在错误结果之后, 模型不必从零推理
+    // 顺序: 先 search 再 record —— 否则本次失败会命中自己
+    if (!ok && this.failures) {
       try {
-        const h = await this.hooks.emit("PostToolUse", { tool: name, args, result, callId });
-        // 2026-09-18 修复 (第二处): 原实现 map h.results 里的 r.additionalContext,
-        //   但 results 条目结构是 { result: res }, 恒取到 undefined —— 收集结果实际在
-        //   h.additionalContext (hooks/index.js 统一收集)。原特性从未生效。
-        const extra = (Array.isArray(h?.additionalContext) ? h.additionalContext : [])
-          .filter(Boolean).map(String).join("\n");
-        if (extra) result = result + "\n" + extra;
-      } catch {}
+        const errText = String(result).slice(0, 300);
+        const past = this.failures.search({ tool: name, error: errText, limit: 2 });
+        const ep = this.failures.record({ tool: name, error: errText, category: classifyFailure(errText), traceRef: callId });
+        // 有根因/修法档案的直接给结论; 只有原始错误的给"复发计数"信号
+        const withFix = past.filter((p) => p.fix || p.rootCause);
+        if (withFix.length) {
+          const lines = withFix.map((p) => `- [${p.tool}/${p.category}] ${p.rootCause || p.error}${p.fix ? ` → 修法: ${p.fix}` : ""}`);
+          result = result + "\n【历史同类故障·供参考】\n" + lines.join("\n");
+          this.tracer.event("failure/history-hit", { tool: name, hits: lines.length, mode: "prescription", episodeId: ep.id });
+        } else if (past.length) {
+          result = result + `\n【复发警告】同类失败历史已有 ${past.length} 次记录 (工具 ${name}, 归类 ${ep.category}), 请勿重复相同调用, 换策略或先排查环境。`;
+          this.tracer.event("failure/history-hit", { tool: name, hits: past.length, mode: "repeat-warning", episodeId: ep.id });
+        }
+      } catch { /* 病历读写异常不阻断工具结果 */ }
     }
-    this._emitToolDone(callId, name, args, ok, Date.now() - t0, result);
     return result;
   }
 
   // v3.0: 统一 done 事件发射 (原内联三处, 收敛为一个私有方法)
   _emitToolDone(callId, name, args, ok, durationMs, result) {
-    if (this._onToolEvent) { try { this._onToolEvent({ type: "done", id: callId, tool: name, args, ok, durationMs, result: String(result == null ? "" : result).slice(0, 300), ts: Date.now() }); } catch {} }
+    this._emitTool({ type: "done", id: callId, tool: name, args, ok, durationMs, result: String(result == null ? "" : result).slice(0, 300), ts: Date.now() });
   }
 
   // v3.0 (codex approval flow): 产生审批请求并等待 Web UI/通道裁决
@@ -660,7 +873,7 @@ export class PPXAgent {
       // 事件外投: SSE onApproval / tracer / 协议总线
       this.tracer.event("approval/requested", { id, tool, kind });
       this.protocolBus?.eq?.push?.({ type: "APPROVAL_REQUESTED", payload: req });
-      if (this._onApprovalEvent) { try { this._onApprovalEvent(req); } catch {} }
+      if (this._onApprovalEvent) { try { this._onApprovalEvent(req); } catch (e) { debug(`[agent/index] 已忽略异常: ${e && e.message ? e.message : e}`); } }
       this.bus?.emit("approval/requested", req, { source: "agent.approval" });
     });
   }
@@ -693,8 +906,9 @@ export class PPXAgent {
       llm: llmInstance,
       tools: this.toolsEnabled ? this.tools.toOpenAI() : [],
       config: this.config,
-      isInterrupted: () => this._interrupted,
-      onStep: (ev) => { if (this._onStepEvent) { try { this._onStepEvent(ev); } catch {} } },
+      // v3.0.1 (P1#3): 从 ALS trace 取当前会话 key, 只响应该会话的中断 (并发不串台)
+      isInterrupted: () => this.isInterrupted(currentTrace()?.sessionKey),
+      onStep: (ev) => this._emitStep(ev),
       runTool: (name, args) => this._runTool(name, args),
       shrinkMessages: (messages, budget) => this._shrinkMessagesForOverflow(messages, budget),
       histTokenCap: () => this._histTokenCap(),
@@ -829,7 +1043,7 @@ export class PPXAgent {
     try {
       if (this.tools && typeof this.tools.listDetailed === "function") return this.tools.listDetailed().map((t) => t.name);
       if (this.tools && typeof this.tools.names === "function") return this.tools.names();
-    } catch {}
+    } catch (e) { debug(`[agent/index] 已忽略异常: ${e && e.message ? e.message : e}`); }
     return [];
   }
 
@@ -922,8 +1136,8 @@ export class PPXAgent {
       _proactiveRunning = true;
       try {
         const payload = await suggestProactive(this);
-        if (payload && typeof cb === "function") { try { cb(payload); } catch {} }
-      } catch {} finally { _proactiveRunning = false; }
+        if (payload && typeof cb === "function") { try { cb(payload); } catch (e) { debug(`[agent/index] 已忽略异常: ${e && e.message ? e.message : e}`); } }
+      } catch (e) { debug(`[agent/index] 已忽略异常: ${e && e.message ? e.message : e}`); } finally { _proactiveRunning = false; }
     }, ms);
     info(`[proactive] 主动任务生成已启动 (每 ${Math.round(ms / 60000)} 分钟)`);
     return this._proactiveTimer;
@@ -974,6 +1188,9 @@ export class PPXAgent {
     this.config = this._loadConfig(null);
     this.llm = resolveLLM(this.config);
     this.allProviders = resolveAllLLMs(this.config);
+    // v3.0.1 (P1#7): 热重载产生的是全新客户端实例, 必须重新包装使用统计,
+    // 否则旧包装随旧实例废弃, 新实例的 chat 调用不再计数 (usageStats 静默失效)
+    this._installUsageTracking();
     info(`[providers] 热重载完成: ${this.allProviders.length} 个客户端`);
     return { llm: this.llm ? (this.llm.backend || this.llm.model) : null, count: this.allProviders.length };
   }
@@ -986,6 +1203,7 @@ export class PPXAgent {
     this.ctx.provide("userName", this.userName);
     // 应用 tools.disabled 变更 (设置 UI 启停工具后立即生效)
     this._applyDisabledTools();
+    this._applyToolExposure(); // 披露策略也随设置热重载 (progressive/core 可在线调整)
     info(`[settings] 热重载完成: 用户=${this.userName}, 模式=${this.config.agent?.mode || "react"}`);
     return { userName: this.userName, mode: this.config.agent?.mode || "react" };
   }
@@ -997,18 +1215,107 @@ export class PPXAgent {
       if (!disabled.length) return;
       let n = 0;
       for (const name of disabled) {
-        try { if (this.tools.disable(name)) n += 1; } catch {}
+        try { if (this.tools.disable(name)) n += 1; } catch (e) { debug(`[agent/index] 已忽略异常: ${e && e.message ? e.message : e}`); }
       }
       if (n) info(`[tools] 已禁用 ${n} 个工具: ${disabled.join(", ")}`);
     } catch { /* 工具未就绪时静默跳过 */ }
   }
 
+  // 应用工具披露策略 (2026-10-03, 上下文工程): 只把核心工具的完整 schema 发给 LLM, 其余按需加载。
+  // 与 enabled 正交: 未披露的工具仍可被 catalog.call 调用 (内部链路/测试不受影响), 只是不进 tools 参数。
+  // 动机: 59 工具的 JSON schema 实测约 6725 tok/请求, 而单个任务通常只用 3–5 个。
+  _applyToolExposure() {
+    try {
+      const cfg = this.config.tools || {};
+      if (cfg.progressive === false) {
+        this.tools.setExposure(null); // 旧行为: 全量披露
+        return;
+      }
+      const core = Array.isArray(cfg.core) && cfg.core.length ? cfg.core : null;
+      if (!core) {
+        this.tools.setExposure(null);
+        return;
+      }
+      const known = new Set(this.tools.list());
+      const effective = core.filter((n) => known.has(n));
+      this.tools.setExposure(effective);
+      const hidden = this.tools.hiddenFromLLM().length;
+      if (hidden) info(`[tools] 渐进披露: ${effective.length} 个核心工具进 LLM schema, 其余 ${hidden} 个按需加载`);
+    } catch { /* 工具未就绪时静默跳过 */ }
+  }
+
+  // ZCode 使用统计对齐: 包装所有 provider 的 chat/apiChat, 累计 token/调用次数 (零侵入)
+  _installUsageTracking() {
+    const clients = new Set([...(this.allProviders || []), this.llm].filter(Boolean));
+    for (const c of clients) {
+      if (!c || c.__ppxUsageWrapped) continue;
+      c.__ppxUsageWrapped = true;
+      for (const meth of ["apiChat", "chat"]) {
+        if (typeof c[meth] !== "function") continue;
+        const orig = c[meth].bind(c);
+        c[meth] = async (msgs, opts) => {
+          const r = await orig(msgs, opts);
+          try {
+            const u = r?.usage;
+            const tk = (u?.total_tokens ?? (u?.prompt_tokens || 0) + (u?.completion_tokens || 0)) || 0;
+            this.usageStats.calls++;
+            this.usageStats.tokens += tk;
+            const m = c.model || "unknown";
+            this.usageStats.byModel[m] ??= { calls: 0, tokens: 0, cost: 0 };
+            this.usageStats.byModel[m].calls++;
+            this.usageStats.byModel[m].tokens += tk;
+            // 成本折算 (2026-10-03l): 内置价格表前缀匹配, config.budget.model_prices 可覆盖;
+            // 未知模型 cost 记 0 (不编数字), 想纳入预算就显式配价格
+            let cost = 0;
+            try { cost = estimateCost(m, u || {}, this.config?.budget?.model_prices); } catch { /* 价格异常不影响主链 */ }
+            if (cost > 0) {
+              this.usageStats.cost = Math.round(((this.usageStats.cost || 0) + cost) * 1e6) / 1e6;
+              this.usageStats.byModel[m].cost = Math.round(((this.usageStats.byModel[m].cost || 0) + cost) * 1e6) / 1e6;
+              this._checkBudget();
+            }
+          } catch { /* 统计失败不阻塞调用 */ }
+          return r;
+        };
+      }
+    }
+  }
+
+  // 支出预算判定 (2026-10-03l): config.budget.usd (USD, 0/缺省 = 不限), 达限后置位。
+  // 闸门只拦 chat/chatStream 用户入口 (后台 refine/记忆提炼是小额, 不拦以免自学习链路断粮);
+  // 按进程累计, 重启归零 —— 跨进程持久预算属外部计量职责, 这里诚实不做。
+  _checkBudget() {
+    const cap = Number(this.config?.budget?.usd);
+    if (!Number.isFinite(cap) || cap <= 0 || this._budgetExceeded) return;
+    if ((this.usageStats.cost || 0) < cap) return;
+    this._budgetExceeded = true;
+    this.tracer?.event("budget/exceeded", { cost: this.usageStats.cost, budgetUsd: cap });
+    this.bus?.emit("budget/exceeded", { cost: this.usageStats.cost, budgetUsd: cap }, { source: "agent._checkBudget" });
+  }
+
+  // 预算耗尽的用户可见文案
+  _budgetMessage() {
+    const cap = Number(this.config?.budget?.usd);
+    return `[预算耗尽] 本进程累计支出 $${(this.usageStats.cost || 0).toFixed(4)} 已达上限 $${(Number.isFinite(cap) ? cap : 0).toFixed(2)}，已停止继续调用模型。调整 config/ppx.json 的 budget.usd（0 或删除 = 不限）后重启生效。`;
+  }
+
   shutdown() {
     this.stopProactiveTicker();
+    // 使用统计落盘 (ZCode 使用统计对齐): data/usage-stats.json (含 cost 金额维度 + 预算上限快照)
+    try {
+      const usagePayload = { updated: new Date().toISOString(), ...this.usageStats };
+      const cap = Number(this.config?.budget?.usd);
+      if (Number.isFinite(cap) && cap > 0) usagePayload.budget_usd = cap;
+      fs.writeFileSync(path.join(this.dataDir, "usage-stats.json"),
+        JSON.stringify(usagePayload, null, 2));
+    } catch { /* 落盘失败不阻塞退出 */ }
     this._mcp?.close?.();
+    // 释放内嵌数据库句柄 (SQLite 后端必需: 不关会导致文件被占用, 无法迁移/清理)
+    try { this.facts?.close?.(); } catch { /* JSON 后端无 close, 静默跳过 */ }
+    // 2026-10-03: WAL 模式落盘兜底 —— 未达阈值的增量在退出前 compact 进快照 (防进程退出丢增量)
+    try { this.facts?.flush?.(); } catch (e) { debug(`[agent/index] 已忽略异常: ${e && e.message ? e.message : e}`); }
     // v1.0.8: 清理军团子进程 (spawn_agent 派生的 worker), 防后台残留
     if (this._legion && typeof this._legion.shutdownAll === "function") {
-      try { this._legion.shutdownAll(); } catch {}
+      try { this._legion.shutdownAll(); } catch (e) { debug(`[agent/index] 已忽略异常: ${e && e.message ? e.message : e}`); }
     }
     this.memory._saveState?.();
     this.scheduler?.shutdown?.(); // ⑤/②: 清定时器防进程挂起

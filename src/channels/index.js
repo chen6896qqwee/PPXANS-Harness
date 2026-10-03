@@ -5,6 +5,7 @@ import { HttpChannel } from "./http.js";
 import { FeishuChannel } from "./feishu.js";
 import { WechatWebhookChannel } from "./wechat.js";
 import { LogChannel } from "./log.js";
+import { debug } from "../utils/logger.js";
 
 // 内置通道类型注册表: name -> 通道类 (构造函数签名: (agent, configObj))
 export const BUILTIN_CHANNEL_TYPES = {
@@ -96,7 +97,7 @@ export class ChannelManager {
 
   async stop() {
     for (const c of this.channels) {
-      try { await c.disconnect?.(); } catch {}
+      try { await c.disconnect?.(); } catch (e) { debug(`[channels/index] 已忽略异常: ${e && e.message ? e.message : e}`); }
     }
     this.channels = [];
     this.httpServer = null;

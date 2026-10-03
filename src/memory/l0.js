@@ -5,6 +5,7 @@
 import path from "node:path";
 import { ensureDir, logicalDay } from "../utils/store.js";
 import { SessionStore, EVENTS } from "./session.js";
+import { debug } from "../utils/logger.js";
 
 // 短消息/命令/噪音过滤
 function shouldCapture(content) {
@@ -29,7 +30,7 @@ export class L0Recorder {
       this.sessionStore = new SessionStore(dir);
       this.dir = path.join(dir, "memory", "l0");
     }
-    if (this.dir) { try { ensureDir(this.dir); } catch {} }
+    if (this.dir) { try { ensureDir(this.dir); } catch (e) { debug(`[memory/l0] 已忽略异常: ${e && e.message ? e.message : e}`); } }
   }
 
   // 记录: 代理到 session 事件日志 (session 是唯一事实源, 不再独立写 JSONL)

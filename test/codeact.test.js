@@ -41,7 +41,8 @@ test("code_act 工具: 代码命中黑名单被拒绝", async () => {
 test("code_act 工具: 非法语言被拒绝", async () => {
   const { catalog } = makeCatalog();
   const res = await catalog.call("code_act", { language: "bash", code: "echo hi" }, { agent: { config: { security: { code_act: true } } } });
-  assert.ok(res.includes("仅支持"), `非法语言应被拒, 实际: ${res}`);
+  // 2026-10-03 参数校验器: enum 不匹配在工具执行前即拦截 (更早拒绝), 文案随之升级
+  assert.ok(res.includes("参数错误") || res.includes("仅支持"), `非法语言应被拒, 实际: ${res}`);
 });
 
 test("runCodeAct: 沙箱剥离敏感环境变量", async () => {

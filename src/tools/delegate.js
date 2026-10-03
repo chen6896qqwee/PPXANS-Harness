@@ -13,6 +13,8 @@
 //   - 账本 ledger: 全程记录审查/修复轮次, 熔断时未决发现交主 agent 裁定
 import path from "node:path";
 import { Legion } from "../orchestrator/legion.js";
+import { runSupervisor } from "../orchestrator/supervisor.js"; // 2026-10-03 接线
+import { resolveExpert, listExperts } from "../orchestrator/experts.js";
 import { withTimeout } from "../utils/async.js";
 
 const DELEGATE_TIMEOUT_MS = 120000; // 子任务最长等待 (防卡死主 agent 工具循环)
@@ -104,6 +106,21 @@ export async function arbitrate(agent, tasks, results, perspectives, judge) {
 
 // (withTimeout 收敛到 utils/async.js: 原先本文件与 orchestrator/supervisor.js 各写一份)
 
+// 仲裁 + 记忆板上下文 (2026-10-02): share_board 时先读板 (本角色最近发布), 让仲裁者看到军团累积知识。
+// 板为空/异常时静默退化为纯仲裁, 不阻塞。
+export async function arbitrateWithBoard(agent, tasks, results, perspectives, judge, { board, shareBoard, boardTopic } = {}) {
+  let boardContext = "";
+  if (shareBoard && board) {
+    try {
+      const entries = board.query({ topic: boardTopic, limit: 20 });
+      if (entries.length) {
+        boardContext = "\n\n【军团记忆板 (本角色近期发布)】\n" + entries.map((e) => `- ${e.from}: ${e.content}`).join("\n");
+      }
+    } catch { /* 读板失败不阻塞仲裁 */ }
+  }
+  return arbitrate(agent, tasks, results, perspectives, judge + boardContext);
+}
+
 // ---- SDD review 循环: 实施 -> 只读审查 -> (修复 -> 复审) * N -> 熔断 ----
 // 返回: 通过时 "✅ 审查通过..." + 产出; 熔断时 "⚠️ 未决发现停放..." + 产出
 // namePrefix: 多任务 review 时传入 `${role}_${ts}_${i}`, 保证每对 agent 名唯一
@@ -173,7 +190,22 @@ async function runReviewLoop({ agent, L, task, perspective, role, judge, fixRoun
   return `✅ 审查通过 (审查发现: ${summary})\n\n${result}`;
 }
 
-export function registerDelegateTools(catalog, _opts = {}) {
+// ---- 军团共享记忆板接入 (2026-10-02) ----
+// 子任务结论自动发布到记忆板 (topic=角色), 仲裁前自动读板注入。
+// 发布永不阻塞委派: 任何异常吞掉 (记忆板是增强, 不是依赖)。
+export function publishToBoard(board, { from, topic, task, reply, status = "完成" }) {
+  if (!board) return;
+  try {
+    board.publish({
+      from,
+      topic,
+      content: `[${status}] 任务: ${String(task).slice(0, 120)} → 结论: ${String(reply).slice(0, 400)}`,
+    });
+  } catch { /* 记忆板满/IO 异常均不阻塞委派 */ }
+}
+
+export function registerDelegateTools(catalog, opts = {}) {
+  const board = opts.board || null;
   catalog.register({
     name: "spawn_agent",
     description: "派生子 agent 处理子任务并等待结果。适合需要专门角色、并行、或隔离执行的任务 (如数据分析、代码审查、多角度论证)。子 agent 共享全局经验库。支持: 单个 task; 或 tasks 数组并行派发多个子 agent + perspectives 差异化视角; arbitrate=true 时主 agent 仲裁聚合各方结果; review=true 时走 SDD 审查循环: 实施者干活 -> 只读审查者挑问题 -> 修复 -> 复审, 达上限熔断停放交主 agent 裁定 (单任务直接审查; 多任务每个子任务独立一对实施+审查, 可配 arbitrate 聚合)。",
@@ -188,6 +220,10 @@ export function registerDelegateTools(catalog, _opts = {}) {
         judge: { type: "string", description: "仲裁评审指令 (arbitrate=true 时生效, 如 找出最可靠结论/合并去重); review=true 时为审查准则, 可缺省" },
         review: { type: "boolean", description: "SDD 审查循环: 实施者 -> 只读审查者 -> 发现问题自动修复复审, 达上限熔断, 默认 false。单 task 与多 tasks 均支持" },
         fix_rounds: { type: "number", description: "审查循环最大修复轮数 (review=true 时生效, 默认 3, 上限 5)" },
+        share_board: { type: "boolean", description: "子任务结论自动发布到军团共享记忆板 (board_query 可查), 仲裁前主 agent 自动读板。默认 true" },
+        expert: { type: "string", description: `固化专家角色 (单任务)。名册: ${listExperts()}。专家自带角色名+专属视角 (只读专家自动禁修改工具)` },
+        experts: { type: "array", items: { type: "string" }, description: "每任务一个专家 (与 tasks 一一对应, 优先于 expert)。如 [\"code\",\"design\",\"security\"] 三任务分派代码/设计/安全专家; supervisor=true 时为编排专家名册 (数量即专家数, 默认 2)" },
+        supervisor: { type: "boolean", description: "监督者编排循环 (2026-10-03 接线): 同一任务派发给多个专家 → 分歧检测 → 监督者评审 (接受/打回带反馈重派) → 定稿整合。适合高要求决策/多角度论证需收敛结论的任务。默认 false。fix_rounds 控制最大轮数" },
       },
     },
     execute: async (args, ctx) => {
@@ -205,52 +241,101 @@ export function registerDelegateTools(catalog, _opts = {}) {
       // 懒建军团 (复用已有, 避免重复 spawn 进程)
       let L = agent._legion;
       if (!L) { L = new Legion(); agent._legion = L; }
-      const role = String(args.role || "helper").replace(/[^\w-]/g, "_").slice(0, 24);
+      // 角色名清洗: 保留中文 (中文向导项目, 侦察兵/分析师等中文角色名是常态), 只洗特殊字符
+      const role = String(args.role || "helper").replace(/[^\w\u4e00-\u9fff-]/g, "_").slice(0, 24);
 
       const perspectives = Array.isArray(args.perspectives) ? args.perspectives.map((p) => String(p)).slice(0, tasks.length) : [];
+      // share_board 默认开: 子任务结论自动上板, 仲裁前自动读板 (显式 false 关闭)
+      const shareBoard = args.share_board !== false && !!board;
+
+      // 专家名册解析 (2026-10-02): experts 每任务 > expert 全局 > 无专家 (退回 role/perspectives)
+      // 未命中的专家键静默降级为无专家, 不炸委派。
+      const expertKeys = Array.isArray(args.experts) && args.experts.length
+        ? args.experts
+        : args.expert ? [args.expert] : [];
+      const expertList = tasks.map((_, i) => resolveExpert(expertKeys[i] ?? expertKeys[0]));
+      const effRoles = tasks.map((_, i) => expertList[i]?.name || role);
+      const effPersps = tasks.map((_, i) => perspectives[i] || expertList[i]?.perspective || null);
+
+      const boardTopic = role;
 
       try {
+        // 监督者编排循环 (2026-10-03 接线, runSupervisor 首个产品入口):
+        // 同一任务 → 多专家并行 → 分歧检测 → 监督者评审 (接受/打回带反馈) → 定稿。默认 2 专家。
+        if (args.supervisor) {
+          const nExperts = Math.min(4, Math.max(2,
+            (Array.isArray(args.experts) && args.experts.length) || perspectives.length || 2));
+          const ts = Date.now().toString(36);
+          const names = [];
+          for (let i = 0; i < nExperts; i++) {
+            const nm = `${effRoles[i] || role}_sup_${ts}_${i}`;
+            const opts = { dataDir: path.join(agent.dataDir, "legion", nm), globalDataDir: agent.globalDataDir };
+            if (expertList[i]?.readonly) opts.env = { PPX_AGENT_READONLY: "1" }; // 只读专家防线对齐 review 循环
+            L.spawnAgent(nm, opts);
+            names.push(nm);
+          }
+          if (agent.lifecycle) agent.lifecycle.reproduce(nExperts);
+          const out = await runSupervisor({
+            legion: L,
+            agents: names,
+            task: tasks[0],
+            judge: args.judge || "",
+            llm: agent.auxLLM || agent.llm,
+            maxRounds: (() => { const n = Number(args.fix_rounds); return Number.isFinite(n) ? Math.min(Math.max(n, 1), 5) : 3; })(),
+            timeoutMs: DELEGATE_TIMEOUT_MS,
+          });
+          const head = out.divergent
+            ? `⚠️ 监督者编排 (${out.rounds} 轮, 一致率 ${(out.consensus * 100).toFixed(0)}%): 达轮数上限仍有分歧, 各方结论如下`
+            : `✅ 监督者编排 (${out.rounds} 轮, 一致率 ${(out.consensus * 100).toFixed(0)}%):`;
+          return `${head}\n\n${out.answer}`;
+        }
+
         // SDD review 循环: 实施 -> 审查 -> 修复 -> 熔断
         // 单任务: 直接跑; 多任务: 每个任务独立一对 (实施者+只读审查者), 并行跑, 可仲裁聚合
         if (args.review) {
           const prefix = `${role}_${Date.now().toString(36)}`;
           if (tasks.length === 1) {
-            return await runReviewLoop({
+            const out = await runReviewLoop({
               agent, L, task: tasks[0],
-              perspective: perspectives[0],
-              role, judge: args.judge,
+              perspective: effPersps[0],
+              role: effRoles[0], judge: args.judge,
               fixRounds: args.fix_rounds,
               namePrefix: `${prefix}_0`,
             });
+            publishToBoard(board, { from: `${effRoles[0]}_impl`, topic: boardTopic, task: tasks[0], reply: out, status: out.startsWith("✅") ? "完成" : "熔断停放" });
+            return out;
           }
           // 多任务: 并行各任务 review, 各自独立 (agent 名唯一, 不冲突)
           const settled = await Promise.all(tasks.map(async (task, i) => {
             try {
-              return await runReviewLoop({
+              const out = await runReviewLoop({
                 agent, L, task,
-                perspective: perspectives[i],
-                role, judge: args.judge,
+                perspective: effPersps[i],
+                role: effRoles[i], judge: args.judge,
                 fixRounds: args.fix_rounds,
                 namePrefix: `${prefix}_${i}`,
               });
+              publishToBoard(board, { from: `${effRoles[i]}_${i}_impl`, topic: boardTopic, task, reply: out, status: out.startsWith("✅") ? "完成" : "熔断停放" });
+              return out;
             } catch (e) {
               return `[子任务${i + 1} review 失败] ${e.message}`;
             }
           }));
           if (args.arbitrate) {
-            return await arbitrate(agent, tasks, settled, perspectives, args.judge);
+            return await arbitrateWithBoard(agent, tasks, settled, perspectives, args.judge, { board, shareBoard, boardTopic });
           }
           return tasks.map((t, i) => {
-            const p = perspectives?.[i] ? ` (${perspectives[i]})` : "";
+            const p = perspectives?.[i] || expertList[i] ? ` (${expertList[i]?.name || ""}${perspectives[i] ? "·" + perspectives[i] : ""})` : "";
             return `【子任务${i + 1}${p}】${t}\n${settled[i]}`;
           }).join("\n\n");
         }
-        // 并行 spawn 子 agent: 每个独立数据目录 + 独立视角
-        const names = tasks.map((_, i) => `${role}_${i}_${Date.now().toString(36)}`);
-        for (const n of names) {
-          L.spawnAgent(n, {
-            dataDir: path.join(agent.dataDir, "legion", n),
+        // 并行 spawn 子 agent: 每个独立数据目录 + 独立视角; 只读专家 spawn 时禁修改工具
+        const names = tasks.map((_, i) => `${effRoles[i]}_${i}_${Date.now().toString(36)}`);
+        for (let i = 0; i < names.length; i++) {
+          L.spawnAgent(names[i], {
+            dataDir: path.join(agent.dataDir, "legion", names[i]),
             globalDataDir: agent.globalDataDir,
+            env: expertList[i]?.readonly ? { PPX_AGENT_READONLY: "1" } : {},
           });
         }
         // 生命周期: 繁衍计数 (ANS: reproducing)
@@ -260,7 +345,7 @@ export function registerDelegateTools(catalog, _opts = {}) {
         const settled = await Promise.all(tasks.map(async (task, i) => {
           try {
             const reply = await withTimeout(
-              L.send(names[i], { type: "chat", message: task, perspective: perspectives[i] }, { timeout: DELEGATE_TIMEOUT_MS + 5000 }),
+              L.send(names[i], { type: "chat", message: task, perspective: effPersps[i] }, { timeout: DELEGATE_TIMEOUT_MS + 5000 }),
               DELEGATE_TIMEOUT_MS,
               `子任务${i + 1}`
             );
@@ -271,16 +356,23 @@ export function registerDelegateTools(catalog, _opts = {}) {
         }));
         const results = settled.map((s) => s.reply);
 
+        // share_board: 每个子任务结论自动上板 (成功/失败都记, 状态区分)
+        if (shareBoard) {
+          settled.forEach((s, i) => {
+            publishToBoard(board, { from: names[i], topic: boardTopic, task: tasks[i], reply: s.reply, status: s.ok ? "完成" : "失败" });
+          });
+        }
+
         // 单任务: 保持旧行为, 直接返回子 agent 回复
         if (tasks.length === 1) return results[0];
 
         // 多任务: 有 arbitrate 走主 agent 仲裁聚合, 否则拼接各方结果
         if (args.arbitrate) {
-          const out = await arbitrate(agent, tasks, results, perspectives, args.judge);
+          const out = await arbitrateWithBoard(agent, tasks, results, perspectives, args.judge, { board, shareBoard, boardTopic });
           return out;
         }
         return tasks.map((t, i) => {
-          const p = perspectives?.[i] ? ` (${perspectives[i]})` : "";
+          const p = perspectives?.[i] || expertList[i] ? ` (${expertList[i]?.name || ""}${perspectives[i] ? "·" + perspectives[i] : ""})` : "";
           return `【子任务${i + 1}${p}】${t}\n${results[i]}`;
         }).join("\n\n");
       } catch (e) {

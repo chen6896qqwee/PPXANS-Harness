@@ -28,6 +28,8 @@ export class LearningService {
     this.tracer = deps.tracer;           // 结构化事件流
     this.toolNames = deps.toolNames;     // () => string[], 工具名清单 (verifyLesson 接地)
     this.runTool = deps.runTool;         // (name, args) => Promise<string>, create_skill 调用
+    // 2026-10-03 接线: 语境 Playbook —— refine 成功的教训同步沉淀为 playbook bullet (反哺 system prompt)
+    this.playbook = deps.playbook || null;
     if (!(this.auditor instanceof Auditor)) {
       // 兼容: 外部可能传普通对象 (测试/轻量装配), 不强求 Auditor 实例
     }
@@ -63,6 +65,13 @@ export class LearningService {
       (p) => {
         this.experience.learn({ task: "自动提炼", lesson: p.lesson, tags: ["auto-refine"] });
         if (this.lifecycle) this.lifecycle.evolve(); // 生命周期: 进化计数 (落盘)
+        // 2026-10-03 接线: 教训 → playbook bullet (grow-and-refine 去重内置; 空库首次 ADD)
+        if (this.playbook) {
+          try {
+            this.playbook.apply([{ op: "ADD", kind: "lesson", content: p.lesson, evidence_ref: "learning/refine" }]);
+            this.tracer?.event("evolve/playbook", { op: "ADD", lesson: p.lesson.slice(0, 120) });
+          } catch (e) { /* playbook 沉淀失败不影响经验库主链路 */ }
+        }
       }
     );
     if (!g.committed) {

@@ -2,10 +2,11 @@
 // 架构参考 openhanako: 每条记忆有 importance, 高斯衰减, 命中加分
 import path from "node:path";
 import crypto from "node:crypto";
-import { ensureDir, readJson, writeJson, nowISO, withFileLock } from "../utils/store.js";
+import { ensureDir, readJson, readJsonGuarded, writeJson, nowISO, withFileLock } from "../utils/store.js";
 import { migrateData, writeSchema } from "../utils/schema.js";
 import { setJaccard, setOverlap } from "../utils/similarity.js";
 import { walFileOf, appendWal, readWal, truncateWal } from "../utils/wal.js";
+import { warn } from "../utils/logger.js";
 
 // 记忆动词前缀: 去重时剔除, 让"记住：X"与"X"视为同一条 (防 LLM 提炼版与原文冗余)
 const MEMORY_VERB_PREFIXES = [
@@ -47,7 +48,19 @@ export class FactStore {
     this.walThreshold = Math.max(1, Number(this.opts.walThreshold) || 50);
     this.walFile = walFileOf(this.file);
     this._walPending = 0;
-    this.facts = readJson(this.file, []);
+    // v3.0.1 (P0#1): 读入时区分「文件不存在」与「文件损坏」。
+    // 损坏时文件原地保留 (healer 启动体检会改名 .corrupt-<ts> 备份后重建),
+    // 此处必须跳过立即覆盖写回空数组, 否则损坏现场被清 → 数据不可恢复。
+    const guarded = readJsonGuarded(this.file, []);
+    this.facts = guarded.data;
+    if (guarded.parseFailed) {
+      if (this.wal) {
+        // WAL 模式: 快照损坏但追加日志可能完好, 重放后可恢复大部分状态
+        warn(`[memory/fact-store] facts.json 损坏 (文件保留), 尝试从 WAL 重放恢复 (${this.walFile})`);
+      } else {
+        warn(`[memory/fact-store] facts.json 损坏 (文件保留), 本次启动跳过立即落盘以保护现场; 等待 healer 恢复或人工处理`);
+      }
+    }
     // schema 版本迁移 (旁挂 .schema 文件; 数据文件保持纯数组, healer/外部读取者无感)
     const mig = migrateData({
       file: this.file,
@@ -66,7 +79,9 @@ export class FactStore {
     this._embedCacheMax = 1000; // LRU 上限: 超过淘汰最旧插入项, 防长跑会话内存无界增长
     for (const fact of this.facts) this._indexFact(fact);
     if (this.wal) this._replayWal(); // 重放 WAL 增量 (崩溃恢复: 快照 + 追加日志 = 完整状态)
-    this.save();
+    // v3.0.1 (P0#1): 非 WAL 模式下若快照损坏, 跳过构造期立即落盘 (保护现场, 防空数组覆盖);
+    // 后续任何显式 add/update 仍会正常落盘, 届时内存状态即事实源
+    if (!(guarded.parseFailed && !this.wal)) this.save();
   }
 
   // 全量落盘。非 WAL 模式: 直接原子写 (兼容旧行为, 调用方通常在锁内)。
@@ -193,6 +208,47 @@ export class FactStore {
     return Date.now() / 86400000;
   }
 
+  // ---- 事实有效期窗口 (v3.1, 吸收 Zep/Graphiti 思想) ----
+  // 动机: 只有衰减没有时效的事实会在"用户改主意"后继续命中 —— 检索器分不清
+  // 「曾经为真」与「现在为真」。每条事实可带 validFrom/validTo (ISO 或可解析时间),
+  // 缺省 = 永久有效 (完全向后兼容旧数据)。
+  _normTime(v) {
+    if (v == null || v === "") return null;
+    const t = v instanceof Date ? v.getTime() : new Date(v).getTime();
+    return Number.isFinite(t) ? new Date(t).toISOString() : null;
+  }
+
+  _isCurrent(f, nowMs = Date.now()) {
+    if (f.validFrom) {
+      const t = new Date(f.validFrom).getTime();
+      if (Number.isFinite(t) && nowMs < t) return false; // 尚未生效
+    }
+    if (f.validTo) {
+      const t = new Date(f.validTo).getTime();
+      if (Number.isFinite(t) && nowMs >= t) return false; // 已失效
+    }
+    return true;
+  }
+
+  // 更新事实有效期 (治理 API): 典型用法 = 新事实入库时把被取代的旧事实 validTo 收口到当前
+  setValidity(id, { validFrom = undefined, validTo = undefined } = {}) {
+    return withFileLock(this.file, () => {
+      this._reload();
+      const f = this.facts.find((x) => x.id === id);
+      if (!f) return null;
+      if (validFrom !== undefined) f.validFrom = this._normTime(validFrom);
+      if (validTo !== undefined) f.validTo = this._normTime(validTo);
+      // 时效只影响检索可见性, 不改 status (治理面仍可见, 软删/归档另有语义)
+      this._markMutated(f);
+      return { id: f.id, validFrom: f.validFrom ?? null, validTo: f.validTo ?? null };
+    });
+  }
+
+  // 列出时效窗口已过 (或未到) 的事实 (治理/体检用, 检索默认不可见)
+  listOutOfWindow(scope = null) {
+    return this._live(scope).filter((f) => !this._isCurrent(f));
+  }
+
   // 内容归一化: 去首尾空白 + 折叠连续空白, 用于去重比对
   _norm(s) {
     return String(s || "").trim().replace(/\s+/g, " ");
@@ -229,6 +285,8 @@ export class FactStore {
       status: it.status === "deleted" ? "deleted" : "active",
       prevId: it.prevId ?? null,
       ...(it.ttlDays ? { ttlDays: Number(it.ttlDays) } : {}),
+      ...(this._normTime(it.validFrom) ? { validFrom: this._normTime(it.validFrom) } : {}),
+      ...(this._normTime(it.validTo) ? { validTo: this._normTime(it.validTo) } : {}),
       ...(it.meta ? { meta: it.meta } : {}),
     };
   }
@@ -240,7 +298,7 @@ export class FactStore {
     f.deleteReason = reason ? String(reason).slice(0, 200) : null;
   }
 
-  add(content, { importance = this.opts.baseImportance, type = "general", source = "manual", dedupe = true, scope = null, meta = null, similarThreshold = 0, layer = LAYER_L1, ttlDays = null } = {}) {
+  add(content, { importance = this.opts.baseImportance, type = "general", source = "manual", dedupe = true, scope = null, meta = null, similarThreshold = 0, layer = LAYER_L1, ttlDays = null, validFrom = null, validTo = null, supersedeId = null } = {}) {
     const norm = this._norm(content);
     if (!norm) return null;
     // 跨进程/多 agent 共享 dataDir 时的写保护: 锁内读-改-写, 防并发覆盖丢更新 (与 Experience 对称)
@@ -292,10 +350,22 @@ export class FactStore {
         status: "active",
         prevId: null,
         ...(ttlDays ? { ttlDays: Number(ttlDays) } : {}),
+        // 事实有效期窗口 (v3.1): 缺省字段 = 永久有效 (旧数据/调用方零影响)
+        ...(this._normTime(validFrom) ? { validFrom: this._normTime(validFrom) } : {}),
+        ...(this._normTime(validTo) ? { validTo: this._normTime(validTo) } : {}),
         ...(meta ? { meta } : {}),
       };
       this.facts.push(fact);
       this._indexFact(fact);
+      // v3.1 (Graphiti 思想): supersedeId 指定被本条取代的旧事实, 其 validTo 收口到当前时刻
+      // —— 旧事实不删除 (可审计"当时为真"), 只是从此不再被检索命中
+      if (supersedeId) {
+        const old = this.facts.find((x) => x.id === supersedeId);
+        if (old && old.id !== fact.id && !old.validTo) {
+          old.validTo = now;
+          this._markMutated(old);
+        }
+      }
       this._statsCache.clear(); // 新增事实 -> 作用域统计失效
       // 新增先记 upsert 再裁剪 (2026-09-18 修复 WAL 事件序): 原先 _prune 先写 remove、
       //   _markMutated 后补 upsert, WAL 重放时 upsert 在 remove 之后 → 被裁剪的事实"复活"。
@@ -439,12 +509,14 @@ export class FactStore {
   }
 
   // 检索: BM25 主导 (IDF 区分常见/罕见词 + 长度归一) + 子串强信号 + 高斯衰减(乘性时效) + 命中权重
-  query(q, { limit = 5, minScore = 1, scope = null } = {}) {
+  query(q, { limit = 5, minScore = 1, scope = null, includeExpired = false } = {}) {
     const nowD = this._nowDays();
     const ql = (q || "").toLowerCase();
     const qAll = this._bigramSet(ql);
     // scope 过滤基底 (检索隔离: 只查指定 scope 的事实); 软删条目一律不进检索
-    const scoped = this._live(scope);
+    // v3.1: 时效窗口过滤 —— 已失效/未生效的事实默认不命中 (includeExpired=true 供治理检视)
+    const liveAll = this._live(scope);
+    const scoped = includeExpired ? liveAll : liveAll.filter((f) => this._isCurrent(f));
     // 空查询: 按衰减分返回全部 (保持旧行为, 供 memory-ticker 取 top facts)
     if (qAll.size === 0) {
       return scoped
@@ -494,10 +566,10 @@ export class FactStore {
   }
 
   // 多查询变体检索 + RRF 融合 (供 LLM 查询扩展等场景: 每个变体各查一遍再融合)
-  queryMulti(queries, { limit = 5, scope = null, minScore = 1 } = {}) {
+  queryMulti(queries, { limit = 5, scope = null, minScore = 1, includeExpired = false } = {}) {
     const lists = [];
     for (const q of queries) {
-      const r = this.query(q, { limit: Math.max(limit * 2, 10), scope, minScore });
+      const r = this.query(q, { limit: Math.max(limit * 2, 10), scope, minScore, includeExpired });
       if (r.length) lists.push(r);
     }
     if (!lists.length) return [];
@@ -529,9 +601,10 @@ export class FactStore {
   }
 
   // 语义检索: embedder 有则 dense cosine 排序 + 与 BM25 RRF 融合; 无则退化为 BM25
-  async querySemantic(q, { limit = 5, scope = null } = {}) {
-    if (!this.embedder) return this.query(q, { limit, scope });
-    const scoped = scope == null ? this.facts : this.facts.filter((f) => f.scope === scope);
+  async querySemantic(q, { limit = 5, scope = null, includeExpired = false } = {}) {
+    if (!this.embedder) return this.query(q, { limit, scope, includeExpired });
+    const liveAll = this._live(scope);
+    const scoped = includeExpired ? liveAll : liveAll.filter((f) => this._isCurrent(f)); // v3.1 时效过滤
     const qv = await this._embed(q).catch(() => null);
     if (!qv) return this.query(q, { limit, scope });
     // 懒加载每条事实的 embedding (内存缓存, 不落盘避免 facts.json 膨胀)

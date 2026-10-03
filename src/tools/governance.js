@@ -36,17 +36,21 @@ function registerMemoryGovernanceTools(catalog, { rootDir, facts, dataDir } = {}
       type: "object",
       properties: {
         id_or_content: { type: "string", description: "记忆 id 或内容 (按内容精确匹配, 去记忆动词前缀后比对)" },
+        id: { type: "string", description: "记忆 id (与 id_or_content 二选一, 与 memory_restore 参数名对齐)" },
         reason: { type: "string", description: "遗忘原因 (记入审计, 便于后续复核)" },
       },
-      required: ["id_or_content"],
+      required: [],
     },
     category: "memory",
     power: "user",
     idempotent: true,
     execute: async (args) => {
       if (!facts) return noFacts();
-      const f = facts.forget(args.id_or_content, { reason: args.reason || null });
-      if (!f) return JSON.stringify({ error: "未找到匹配记忆", target: args.id_or_content });
+      // 2026-10-03 统一: 兼容接受 id (与 memory_restore 同名), 消除两个工具参数命名不一致
+      const target = args.id_or_content || args.id;
+      if (!target) return JSON.stringify({ error: "缺少必填参数 id 或 id_or_content" });
+      const f = facts.forget(target, { reason: args.reason || null });
+      if (!f) return JSON.stringify({ error: "未找到匹配记忆", target });
       return JSON.stringify({ ok: true, id: f.id, content: f.content, status: f.status, note: "已软删, 可用 memory_restore 回滚" });
     },
   });
@@ -57,16 +61,21 @@ function registerMemoryGovernanceTools(catalog, { rootDir, facts, dataDir } = {}
     description: "恢复一条被遗忘 (软删) 的记忆。",
     parameters: {
       type: "object",
-      properties: { id: { type: "string", description: "记忆 id" } },
-      required: ["id"],
+    properties: {
+      id: { type: "string", description: "记忆 id" },
+      id_or_content: { type: "string", description: "记忆 id 或内容 (与 id 二选一, 兼容 memory_forget 参数名)" },
+    },
+    required: [],
     },
     category: "memory",
     power: "user",
     idempotent: true,
     execute: async (args) => {
       if (!facts) return noFacts();
-      const f = facts.restore(args.id);
-      if (!f) return JSON.stringify({ error: "未找到该记忆", id: args.id });
+      // 2026-10-03 统一: 兼容接受 id_or_content (与 memory_forget 同名)
+      const target = args.id || args.id_or_content;
+      const f = facts.restore(target);
+      if (!f) return JSON.stringify({ error: "未找到该记忆", id: target });
       return JSON.stringify({ ok: true, id: f.id, content: f.content, status: f.status });
     },
   });

@@ -1,6 +1,6 @@
 {
   "name": "ppxans-harness",
-  "version": "3.0.0",
+  "version": "3.2.0",
   "description": "PPXANS-Harness - 皮皮虾神经系 (ANS) + Harness 一体化智能体内核. 零运行时依赖纯Node. 自愈 + 自学习 + 五层记忆 + SHA-256 审计哈希链 + 多 Agent 军团 + 治理内核(deny-wins/熔断/seam) + 进化内核(Playbook/故障记忆) + 符号画布 + supervisor. 自研底座: 仅 OpenAI 兼容 HTTP 直连, 无外部引擎依赖. Agent Nervous System harness in pure Node, zero runtime dependencies.",
   "type": "module",
   "license": "Apache-2.0",
@@ -14,7 +14,8 @@
     "ppxans": "bin/ppx.js",
     "ppx-web": "bin/ppx-web.js",
     "ppx-serve": "bin/ppx-serve.js",
-    "ppx-channels": "bin/ppx-channels.js"
+    "ppx-channels": "bin/ppx-channels.js",
+    "ppx-setup": "bin/ppx-setup.js"
   },
   "repository": {
     "type": "git",
@@ -37,8 +38,14 @@
     "selfheal:run": "node src/selfheal/run.js",
     "audit:verify": "node scripts/audit-verify.js",
     "bench": "node scripts/bench.js",
+    "bench:audit": "node scripts/audit-bench.js",
+    "bench:ctx": "node scripts/ctx-profile.js",
     "test": "node --test --test-force-exit test/*.test.js",
-    "prepublishOnly": "npm run selfheal && npm test"
+    "prepublishOnly": "npm run selfheal && npm test",
+    "package": "node scripts/package.js",
+    "package:portable": "node scripts/package.js portable",
+    "package:installer": "node scripts/package.js installer",
+    "setup": "node bin/ppx-setup.js"
   },
   "keywords": [
     "agent",
@@ -56,6 +63,7 @@
     "bin/",
     "src/",
     "config/",
+    "skills/",
     "README.md",
     "LICENSE"
   ],

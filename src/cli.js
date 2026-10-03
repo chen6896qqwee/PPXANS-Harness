@@ -6,8 +6,12 @@ import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import { PPXAgent } from "./agent/index.js";
 import { suggestProactive } from "./ans/proactive.js";
+import { installCrashGuard } from "./utils/crashguard.js";
 
 ensureUTF8Console();
+// v3.0.1 (P1#6): CLI 直跑入口装全局异常兜底 —— 此前只有 server 入口装了, chat 直跑时
+// 任何未捕获 rejection (调度器/proactive ticker/流式回调) 会按 Node>=15 默认行为直接杀进程
+installCrashGuard({ tag: "ppx-cli" });
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const agent = new PPXAgent({ root: ROOT });
 
@@ -42,7 +46,11 @@ if (agent.config.agent?.proactive?.enabled) {
 rl.on("line", async (line) => {
   const text = line.trim();
   if (!text) return rl.prompt();
-  if (busy) return rl.prompt(); // 上一轮任务未结束, 忽略输入 (可用 /stop 或 Ctrl+C 打断)
+  if (busy) {
+    // 2026-10-03 修复: 原 silently 忽略, 用户以为输入丢失。改为可判读提示。
+    console.log("  (任务执行中, 输入已忽略; /stop 可中断当前任务)");
+    return rl.prompt();
+  }
 
   // 退出
   if (["quit", "exit", "q"].includes(text.toLowerCase())) {

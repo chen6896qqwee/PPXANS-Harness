@@ -5,6 +5,7 @@
 import { buildDsmlPrompt } from "../llm/dsml.js";
 import { valuesPrompt } from "../ans/values.js";
 import { context as rewardContext } from "../ans/reward.js";
+import { renderBullets } from "../evolve/playbook.js";
 import { imageFileToDataUrl } from "../tools/builtin.js";
 
 // 多模态: 提取 user 消息中的图片路径并同步读图, 注入 OpenAI 视觉格式的 content 数组。
@@ -39,8 +40,40 @@ export const promptMethods = {
       if (!this.skills) return "";
       const list = this.skills.list().filter((s) => s && s.description);
       if (!list.length) return "";
+      // 蓝皮书 2026 优化 (2026-10-01): description 是触发路由的唯一依据, 但目录常驻上下文,
+      // 全量全文描述会随技能数线性膨胀。改为: 常用优先 (usage 降序) + 单条描述截断 + top-K 上限,
+      // 其余技能由 skill_search 按需发现 — 三层渐进加载的第 1 层保持轻量。
+      const usage = typeof this.skills.usageAll === "function" ? this.skills.usageAll() : {};
+      const sorted = [...list].sort((a, b) => ((usage[b.id] || {}).uses || 0) - ((usage[a.id] || {}).uses || 0) || a.id.localeCompare(b.id));
+      const DESC_CAP = 120, MAX_SHOWN = 16;
+      const lines = sorted.slice(0, MAX_SHOWN).map((s) => {
+        let d = String(s.description).split("\n")[0];
+        if (d.length > DESC_CAP) d = d.slice(0, DESC_CAP) + "…";
+        return `- ${s.id}: ${d}`;
+      });
+      const more = sorted.length - Math.min(sorted.length, MAX_SHOWN);
       return "【可用技能】面对对应任务时用 load_skill 读取全文再执行:\n"
-        + list.map((s) => `- ${s.id}: ${s.description}`).join("\n");
+        + lines.join("\n")
+        + (more > 0 ? `\n(另有 ${more} 个技能未列出, 可用 skill_search 按关键词检索)` : "");
+    } catch { return ""; }
+  },
+
+  // 按需工具清单 (2026-10-03, 上下文工程): 未披露给 LLM 的工具**只列名字、不列参数 schema**。
+  // 目的: 让 agent 知道"还有什么能力可取", 同时不为 41 个工具的 JSON schema 付 token。
+  // 实测 59 工具全量 schema ≈ 6725 tok/请求, 而这张清单 ≈ 300 tok —— 省掉 95% 的开销。
+  // 与 _skillsPrompt 同一思路: 渐进披露的中间层 (列名 → 按需拉全文)。
+  _toolsPrompt() {
+    try {
+      if (!this.tools || typeof this.tools.hiddenFromLLM !== "function") return "";
+      const hidden = this.tools.hiddenFromLLM();
+      if (!hidden.length) return "";
+      const MAX_SHOWN = 40;
+      const shown = hidden.slice(0, MAX_SHOWN);
+      const more = hidden.length - shown.length;
+      return "【按需工具】以下能力已注册, 但完整参数说明未加载。需要时先 enable_capability 启用, 下一轮即可调用:\n"
+        + shown.join(", ")
+        + (more > 0 ? ` …(另有 ${more} 个)` : "")
+        + "\n(不确定用哪个时, 先 list_capabilities 查看全部能力及其用途)";
     } catch { return ""; }
   },
 
@@ -55,10 +88,21 @@ export const promptMethods = {
     const active = this.scenes.activeContext(userMsg || "");
     const baseCtx = active ? base + "\n\n" + active : base;
     const skills = this._skillsPrompt();
+    const toolsHint = this._toolsPrompt();
     // DSML 原生文本模型 opt-in (provider.dsml=true): 注入工具协议, 让模型能稳定输出 DSML 结构做工具调用
     const dsml = this._dsmlPrompt();
     const rewardCtx = rewardContext(this); // ⑦ 低可靠性工具提醒 (Reward 闭环注入)
-    return [values, baseCtx, skills, citation, perspective, extra, dsml, rewardCtx].filter(Boolean).join("\n\n");
+    const playbookCtx = this._playbookPrompt(); // 2026-10-03 接线: 语境 Playbook bullets 注入
+    return [values, baseCtx, skills, toolsHint, citation, perspective, extra, dsml, rewardCtx, playbookCtx].filter(Boolean).join("\n\n");
+  },
+
+  // 语境 Playbook 注入 (2026-10-03 接线): 修复 playbook 引擎"就绪、无消费方"的缺口。
+  // bullets 为空时 renderBullets 返回空串 → 零 token 成本, 不影响现有会话。
+  _playbookPrompt() {
+    try {
+      if (!this.playbook) return "";
+      return renderBullets(this.playbook.playbook, { maxBullets: 12 });
+    } catch { return ""; }
   },
 
   // DSML 工具调用协议注入 (v1.1.1 接线): 修复 buildDsmlPrompt 过去从未注入的缺口。

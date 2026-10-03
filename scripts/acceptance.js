@@ -71,8 +71,13 @@ async function functionalSuite() {
       return r;
     });
     await check("功能", "本地意图: 记住写入记忆", async () => {
-      const r = await agent.chat("记住：验收用例-我喜欢喝咖啡");
-      assert(r.includes("ok") || r.includes("true"), `应写入成功, 实际: ${r}`);
+      const tag = `验收用例-${Date.now()}-我喜欢喝咖啡`;
+      const r = await agent.chat(`记住：${tag}`);
+      // 2026-10-02 修复: 原断言要求回复含 ok/true, 但成功文案是「好, 记下了: ...」必假失败。
+      // 改为双重验证: 1) 回复不是失败文案; 2) 记忆库真能检索到该事实 (落库闭环)。
+      assert(!r.startsWith("没记上") && !/"error"\s*:/.test(r), `写入应成功, 实际: ${r}`);
+      const q = await agent.chat(`记得：${tag}`);
+      assert(q.includes(tag), `记忆检索应命中刚写入的事实, 实际: ${q}`);
       return r;
     });
     agent.shutdown();

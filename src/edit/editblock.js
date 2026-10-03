@@ -130,6 +130,32 @@ function applyFuzzy(content, plan) {
   return out.join("\n");
 }
 
+// ---- 最佳匹配窗口诊断 (2026-10-02 深度优化) ----
+// not-found 时在文件里找"最像 SEARCH 的区域", 给出行号+相似度, 喂回 LLM 精准自修正,
+// 替代原先"未找到+首尾20行"的瞎蒙模式。
+// 逐行比较: 相等=1 分, 一方包含另一方=0.6 分 (容忍空格/标点微差), 空白行跳过。
+function bestMatchWindow(content, search) {
+  const cLines = String(content).split("\n");
+  const sLines = String(search).split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+  if (!sLines.length || !cLines.length) return null;
+  const norm = (s) => s.toLowerCase().replace(/\s+/g, " ");
+  const sNorm = sLines.map(norm);
+  let best = null;
+  for (let i = 0; i + sLines.length <= cLines.length; i++) {
+    let hit = 0;
+    for (let j = 0; j < sLines.length; j++) {
+      const a = norm(cLines[i + j]);
+      if (!a && !sNorm[j]) { hit += 1; continue; }
+      if (a === sNorm[j]) hit += 1;
+      else if (a && (a.includes(sNorm[j]) || sNorm[j].includes(a))) hit += 0.6;
+    }
+    const score = hit / sLines.length;
+    if (!best || score > best.score) best = { line: i + 1, score };
+    if (best.score === 1) break;
+  }
+  return best && best.score >= 0.3 ? best : null;
+}
+
 // ---- 应用单个块 ----
 // 返回 { ok, content, matched, kind, error?, search }
 export function applyEditBlock(content, block, { fuzzy = true } = {}) {
@@ -182,6 +208,11 @@ export function applyEditBlock(content, block, { fuzzy = true } = {}) {
 
   result.kind = "not-found";
   result.error = `未找到匹配 (not-found): ${shortPreview(search)}`;
+  const hint = bestMatchWindow(content, search);
+  if (hint) {
+    result.hint = hint;
+    result.error += ` — 最接近的位置在第 ${hint.line} 行附近 (相似度 ${Math.round(hint.score * 100)}%), 请对照该区域修正 SEARCH 块`;
+  }
   return result;
 }
 
@@ -199,20 +230,28 @@ export function applyAll(content, blocks) {
 }
 
 // ---- 生成回灌 LLM 的失败块修复提示 (aider 回灌循环) ----
+// 2026-10-02: 失败块附最佳匹配区域摘录 (±5 行), LLM 拿着原文改 SEARCH, 不再瞎蒙
 export function formatRetryFeedback(results, fileContent = "") {
   const failed = (results || []).filter((r) => !r.ok);
   if (failed.length === 0) return "";
 
   const out = [];
   out.push("以下编辑块应用失败, 请根据当前文件内容修正后重试 (SEARCH 块必须精确匹配现有内容):");
+  const fl = String(fileContent || "").split("\n");
   for (const f of failed) {
     out.push(`- 文件 ${f.path || "(未知)"} 失败类型=${f.kind}: ${f.error || ""}`);
     if (f.search) {
       out.push("  原 SEARCH 预览: " + shortPreview(f.search));
     }
+    // 带上最像 SEARCH 的原文区域 (±5 行), LLM 照着改即可命中
+    if (f.hint && fl.length) {
+      const lo = Math.max(0, f.hint.line - 6);
+      const hi = Math.min(fl.length, f.hint.line - 1 + 5 + 1);
+      out.push(`  当前文件第 ${lo + 1}-${hi} 行 (最接近 SEARCH 的区域):`);
+      out.push(fl.slice(lo, hi).map((l, i) => `  ${lo + i + 1} | ${l}`).join("\n"));
+    }
   }
-  if (fileContent) {
-    const fl = String(fileContent).split("\n");
+  if (fileContent && !failed.some((f) => f.hint)) {
     out.push("== 文件前 20 行 ==");
     out.push(fl.slice(0, 20).join("\n"));
     if (fl.length > 20) {

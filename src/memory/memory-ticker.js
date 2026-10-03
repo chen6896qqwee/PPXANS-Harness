@@ -5,6 +5,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { ensureDir, readText, writeText, readJson, writeJson, logicalDay } from "../utils/store.js";
+import { debug } from "../utils/logger.js";
 
 const TURNS_PER_SUMMARY = 10;
 const COMPACT_THRESHOLD = 50;   // 今日事件超此条数触发滚动压缩
@@ -91,7 +92,7 @@ ${lines.join("\n")}\n`);
           for (const f of facts) this.factStore.add(f, { source: "extract", similarThreshold: 0.6 });
           return;
         }
-      } catch {}
+      } catch (e) { debug(`[memory/memory-ticker] 已忽略异常: ${e && e.message ? e.message : e}`); }
     }
     if (user) this.factStore.addMemory(user);
   }
@@ -203,7 +204,7 @@ ${topFacts || "(暂无)"}
   // 可观测: longterm 大小 + 今日事件数, 供 agent.stats() 聚合
   stats() {
     let longtermBytes = 0;
-    try { longtermBytes = fs.statSync(this.longtermMd).size; } catch {}
+    try { longtermBytes = fs.statSync(this.longtermMd).size; } catch (e) { debug(`[memory/memory-ticker] 已忽略异常: ${e && e.message ? e.message : e}`); }
     return {
       longterm_bytes: longtermBytes,
       events_today: _renderLines(this.sessionStore, logicalDay()).length,

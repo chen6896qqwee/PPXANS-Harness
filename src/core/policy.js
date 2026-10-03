@@ -5,7 +5,7 @@
 //       循环何时停、降档、重试、注入方向盘, 全由本模块决策。
 //       依赖全部注入 (llm/tools/runTool/shrinkMessages/...), 无 agent 引用, 可独立测试。
 import { TOOL_ERROR_PREFIX } from "../tools/index.js";
-import { warn } from "../utils/logger.js";
+import { warn, debug } from "../utils/logger.js";
 
 // ---- 阈值默认值 (config.agent.* 可覆盖) ----
 export const DEFAULT_MAX_TOOL_ROUNDS = 8;
@@ -78,7 +78,7 @@ export async function callWithTimeoutRetry({
   budgetMs = null,           // 工具超时预算 (toolTimeoutOf 注入, 事件采集用)
   onEvent = null,
 }) {
-  const ev = (type, payload) => { if (onEvent) { try { onEvent(type, payload); } catch {} } };
+  const ev = (type, payload) => { if (onEvent) { try { onEvent(type, payload); } catch (e) { debug(`[core/policy] 已忽略异常: ${e && e.message ? e.message : e}`); } } };
   const t0 = Date.now();
   let result = await runTool(name, args);
   let elapsedMs = Date.now() - t0;
@@ -112,6 +112,8 @@ export class ToolLoopPolicy {
     this.exploreBreak = Number(c.explore_break_limit) || DEFAULT_EXPLORE_BREAK;
     this.repeatFlag = Number(c.repeat_flag_limit) || DEFAULT_REPEAT_FLAG;
     this.overflowShrinkMax = DEFAULT_OVERFLOW_SHRINK_MAX;
+    // 同轮独立工具调用并发执行 (2026-10-01 优化): 默认开, agent.parallel_tool_calls=false 回退串行
+    this.parallelToolCalls = c.parallel_tool_calls !== false;
     // 运行时状态 (每轮循环实例持有, 重启归零)
     this.errorRetries = 0;
     this.exploreStreak = 0;
@@ -142,7 +144,7 @@ export class ToolLoopPolicy {
     let repeatHit = false;
     for (const tc of called) {
       let a = {};
-      try { a = JSON.parse(tc.function.arguments || "{}"); } catch {}
+      try { a = JSON.parse(tc.function.arguments || "{}"); } catch (e) { debug(`[core/policy] 已忽略异常: ${e && e.message ? e.message : e}`); }
       const sig = (tc.function?.name || "") + "::" + JSON.stringify(a).slice(0, 120);
       this.seenSig.set(sig, (this.seenSig.get(sig) || 0) + 1);
       if (this.seenSig.get(sig) >= this.repeatFlag) repeatHit = true;
@@ -216,11 +218,11 @@ export async function runToolLoop({
 }) {
   const policy = new ToolLoopPolicy(config.agent || config);
   let messages = [...seedMessages];
-  const ev = (type, payload) => { if (onEvent) { try { onEvent(type, payload); } catch {} } };
+  const ev = (type, payload) => { if (onEvent) { try { onEvent(type, payload); } catch (e) { debug(`[core/policy] 已忽略异常: ${e && e.message ? e.message : e}`); } } };
 
   for (let round = 0; round < policy.maxRounds; round++) {
     if (isInterrupted()) return "[皮皮虾] 任务已被中断 (operator cancelled).";
-    if (onStep) { try { onStep({ type: "step", round, maxRounds: policy.maxRounds, ts: Date.now() }); } catch {} }
+    if (onStep) { try { onStep({ type: "step", round, maxRounds: policy.maxRounds, ts: Date.now() }); } catch (e) { debug(`[core/policy] 已忽略异常: ${e && e.message ? e.message : e}`); } }
 
     let resp;
     try {
@@ -250,22 +252,42 @@ export async function runToolLoop({
     }
 
     // 工具错误重试: 若本轮有工具失败, 汇总错误喂回模型修正后重试 (最多 maxErrorRetry 次)
-    const errors = [];
+    // 并发执行 (2026-10-01 优化, 审计 P1 遗留项): 同一轮的 tool_calls 相互独立
+    // (OpenAI 语义: 数组内无依赖), 串行会让 N 个独立调用的延迟线性叠加。
+    // Promise.all 保序: messages 回传顺序与 errors 汇总顺序仍与 tool_calls 一致,
+    // 下游 (recordTurn 重复检测 / 错误喂回) 语义不变。agent.parallel_tool_calls=false 回退串行。
+    const callable = [];
     for (const tc of toolCalls) {
       if (tc.type === "function" && tc.function) {
         let args = {};
-        try { args = JSON.parse(tc.function.arguments || "{}"); } catch {}
-        // v1.6.0 第四刀: 超时检测 + 幂等重试一次 (tool/timeout 事件采集 P50/P95/P99 数据基础)
-        const { result } = await callWithTimeoutRetry({
-          name: tc.function.name,
-          args,
-          runTool,
-          isIdempotent: isIdempotentTool(tc.function.name),
-          budgetMs: toolTimeoutOf(tc.function.name),
-          onEvent,
-        });
-        messages.push({ role: "tool", tool_call_id: tc.id, content: toToolContent(result, policy.resultBudget) });
-        if (result.startsWith(TOOL_ERROR_PREFIX)) errors.push(result);
+        try { args = JSON.parse(tc.function.arguments || "{}"); } catch (e) { debug(`[core/policy] 已忽略异常: ${e && e.message ? e.message : e}`); }
+        callable.push({ tc, args });
+      }
+    }
+    // v1.6.0 第四刀语义保留: 超时检测 + 幂等重试一次 (tool/timeout 事件采集 P50/P95/P99 数据基础)
+    const execOne = ({ tc, args }) => callWithTimeoutRetry({
+      name: tc.function.name,
+      args,
+      runTool,
+      isIdempotent: isIdempotentTool(tc.function.name),
+      budgetMs: toolTimeoutOf(tc.function.name),
+      onEvent,
+    }).then((r) => ({ tc, ...r }));
+    const errors = [];
+    const collect = (tc, result) => {
+      // 2026-10-03 修复 (P1): 原 tool 消息只有非标 `_id`, 缺 OpenAI 规范要求的 tool_call_id
+      // → 严格校验后端 (OpenAI 官方 / vLLM) 第二轮必 400。补上标准字段; `_id` 保留兼容内部消费方
+      messages.push({ role: "tool", tool_call_id: tc.id, _id: tc.id, content: toToolContent(result, policy.resultBudget) });
+      if (result.startsWith(TOOL_ERROR_PREFIX)) errors.push(result);
+    };
+    if (policy.parallelToolCalls) {
+      const settled = await Promise.all(callable.map(execOne));
+      for (const { tc, result } of settled) collect(tc, result);
+    } else {
+      // 串行回退路径 (旧行为): 逐个执行 + 逐个回传
+      for (const item of callable) {
+        const { result } = await execOne(item);
+        collect(item.tc, result);
       }
     }
     if (policy.shouldRetryErrors(errors)) {

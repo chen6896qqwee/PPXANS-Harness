@@ -60,8 +60,9 @@ function defRegexes(ext) {
   }
 }
 
-// 从单个文件内容提取 { defs:[{name,line,kind}], refSet:Set, refCounts:Map }
-function extractSymbols(content, ext) {
+// 从单个文件内容提取 { defs:[{name,line,sig,kind}], refSet:Set, refCounts:Map }
+// (2026-10-02 导出: wiki 生成器复用符号提取)
+export function extractSymbols(content, ext) {
   const lines = content.split(/\r?\n/);
   const defs = [];
   const defLineSet = new Set();
@@ -69,7 +70,9 @@ function extractSymbols(content, ext) {
 
   const pushDef = (name, lineNo) => {
     if (!name || STOP.has(name)) return;
-    defs.push({ name, line: lineNo, kind: ext });
+    // 签名 = 定义行原文 (trim, 截 120 字符): 渲染时比 rank 数值对 LLM 有用得多
+    const sig = lines[lineNo - 1].trim().slice(0, 120);
+    defs.push({ name, line: lineNo, sig, kind: ext });
     defLineSet.add(lineNo);
     defNames.add(name);
   };
@@ -162,7 +165,7 @@ export function scanRepo(root, opts = {}) {
         files.push({ rel, ext, dir: path.dirname(rel) });
         for (const d of defs) {
           if (!defRecords.has(d.name)) defRecords.set(d.name, []);
-          defRecords.get(d.name).push({ file: rel, line: d.line, kind: d.kind });
+          defRecords.get(d.name).push({ file: rel, line: d.line, sig: d.sig, kind: d.kind });
         }
         for (const [name, c] of localRefs) {
           refCounts.set(name, (refCounts.get(name) || 0) + c);
@@ -253,14 +256,16 @@ export function renderRepoMap(root, opts = {}) {
   const s = scan || scanRepo(root, { maxFiles, maxDepth, ignore });
   const rank = computePageRank(s);
 
-  // 定义节点按所在目录分组 (同名取最高 rank)
-  const byDir = new Map(); // dir -> Map(name -> score)
+  // 定义节点按所在目录分组 (同名取最高 rank, 签名取该 rank 对应记录)
+  const byDir = new Map(); // dir -> Map(name -> { score, sig, where })
   for (const [name, recs] of s.defRecords) {
     const dir = path.dirname(recs[0].file);
     const score = rank.get(name) || 0;
     if (!byDir.has(dir)) byDir.set(dir, new Map());
     const m = byDir.get(dir);
-    if (!m.has(name) || score > m.get(name)) m.set(name, score);
+    if (!m.has(name) || score > m.get(name)) {
+      m.set(name, { score, sig: recs[0].sig, where: `${recs[0].file}:${recs[0].line}` });
+    }
   }
 
   const lines = [];
@@ -277,9 +282,10 @@ export function renderRepoMap(root, opts = {}) {
     const head = dir === "." ? "(root)" : dir;
     lines.push(head);
     used += approxTokens(head);
-    const entries = [...byDir.get(dir).entries()].sort((a, b) => b[1] - a[1]).slice(0, topPerDir);
-    for (const [name, score] of entries) {
-      const line = `  ${name}  (rank ${score.toFixed(4)})`;
+    const entries = [...byDir.get(dir).entries()].sort((a, b) => b[1].score - a[1].score).slice(0, topPerDir);
+    for (const [name, info] of entries) {
+      // 签名优先 (LLM 拿到函数骨架), rank 数值是排序依据不是展示内容
+      const line = info.sig ? `  ${info.sig}  // ${info.where}` : `  ${name}  (${info.where})`;
       const tk = approxTokens(line);
       if (used + tk > tokenBudget) { truncated = true; break; }
       lines.push(line);

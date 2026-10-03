@@ -23,10 +23,21 @@ export class MemoryService {
     this.experience = deps.experience;   // 经验库
     this.lifecycle = deps.lifecycle;     // ANS 生命周期 (进化计数)
     this.tracer = deps.tracer;           // 结构化事件流
+    // 记忆管线健康监控 (2026-10-03 接线): MemoryHealthMonitor 由 evolvePlugin 装配,
+    // 但此前**零消费** —— 没人 record() 也没人读 advice(), 于是 status() 永远是 healthy,
+    // 降级逻辑形同虚设。现由本服务在每步管线记录成败, 并在降级时真的跳过 LLM 压缩/提炼。
+    this.health = deps.health || null;
     this._personaBuilt = null;           // L3 画像上次生成日期 (跨天刷新标记, 原 agent 字段)
   }
 
   _llm() { return this.getLlm ? this.getLlm() : null; }
+
+  // 管线步骤门禁: 健康度降级时跳过对应 LLM 步骤 (只写不压 → 防上下文污染 + 省调用)
+  _skipStep(step) {
+    if (!this.health || typeof this.health.advice !== "function") return false;
+    const adv = this.health.advice();
+    return !!(adv && Array.isArray(adv.skip) && adv.skip.includes(step));
+  }
 
   // 辅助 LLM 调用前置健康探测: 模型不可用 (本地服务未运行/远端不可达) 时快速跳过
   async _auxLlmReady() {
@@ -40,6 +51,10 @@ export class MemoryService {
   async extractMemory(user, assistant, existing = []) {
     const llm = this._llm();
     if (!llm) return [];
+    if (this._skipStep("extract")) {
+      this.tracer?.event("memory/extract", { count: 0, reason: "health_degraded" });
+      return [];
+    }
     if (!(await this._auxLlmReady())) return []; // 模型不可用时跳过提炼 (退回启发式)
     // 噪声治理: 显式跳过寒暄/无信息量/关于系统本身的元讨论
     const sys = "你是记忆提炼器。从对话中提取值得长期记忆的关键事实、用户偏好、待办事项。只输出 JSON 数组, 每项是{content: 一句完整中文记忆}。没有值得记的返回 []。不要解释, 只输出 JSON。\n跳过以下内容: 1) 寒暄/问候/客套话; 2) 无信息量的闲聊; 3) 对助手/系统本身的元讨论与建议 (如任务描述方式、提示词建议等); 4) 已被现有记忆覆盖的内容。";
@@ -49,10 +64,18 @@ export class MemoryService {
       userMsg += "\n\n【已有记忆】以下记忆已存在, 若你提炼的内容与其中任意一条含义相同或被其覆盖, 则不要输出该条 (避免重复):\n"
         + existing.map((f, i) => `${i + 1}. ${f.content}`).join("\n");
     }
-    const r = await llm.chat([
-      { role: "system", content: sys },
-      { role: "user", content: userMsg },
-    ], { timeoutMs: AUX_LLM_TIMEOUT_MS, retryMax: 0 });
+    let r;
+    try {
+      r = await llm.chat([
+        { role: "system", content: sys },
+        { role: "user", content: userMsg },
+      ], { timeoutMs: AUX_LLM_TIMEOUT_MS, retryMax: 0 });
+      this.health?.record("extract", { ok: true });
+    } catch (e) {
+      // 管线步骤成败必须记账 —— 没有这个信号, MemoryHealthMonitor 永远停在 healthy
+      this.health?.record("extract", { ok: false, error: e?.message || String(e) });
+      throw e; // 保持原语义: 由调用方决定是否降级
+    }
     const text = String(r.content || "").trim();
     // 容忍模型把 JSON 包在 markdown 代码块里
     const cleaned = text.replace(/```(?:json|JSON)?\s*/g, "").replace(/```/g, "").trim();
@@ -71,11 +94,19 @@ export class MemoryService {
   async summarizeMemory(raw) {
     const llm = this._llm();
     if (!llm) throw new Error("无 LLM");
+    if (this._skipStep("compact")) throw new Error("记忆管线降级中, 跳过压缩 (只写不压)");
     if (!(await this._auxLlmReady())) throw new Error("LLM 不可用, 跳过辅助摘要");
-    const r = await llm.chat([
-      { role: "system", content: "你是记忆压缩器。把下面这段对话记录压缩成一段简洁的中文摘要(≤200字), 保留关键事实、用户偏好、进展和待办。不要客套, 直接输出摘要。" },
-      { role: "user", content: String(raw).slice(0, 4000) },
-    ], { timeoutMs: AUX_LLM_TIMEOUT_MS, retryMax: 0 });
+    let r;
+    try {
+      r = await llm.chat([
+        { role: "system", content: "你是记忆压缩器。把下面这段对话记录压缩成一段简洁的中文摘要(≤200字), 保留关键事实、用户偏好、进展和待办。不要客套, 直接输出摘要。" },
+        { role: "user", content: String(raw).slice(0, 4000) },
+      ], { timeoutMs: AUX_LLM_TIMEOUT_MS, retryMax: 0 });
+      this.health?.record("compact", { ok: true });
+    } catch (e) {
+      this.health?.record("compact", { ok: false, error: e?.message || String(e) });
+      throw e;
+    }
     this.tracer?.event("memory/summarize", { chars: String(raw).length, ok: true });
     return r.content;
   }

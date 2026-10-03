@@ -9,6 +9,7 @@ import { scrubPII } from "../utils/pii.js";
 import { LocalShellProvider } from "../seam/shell.js";
 import { checkCommand, DENY_HINT } from "./command-guard.js";
 import { formatToolResultHeader, countLines } from "./seam.js";
+import { debug } from "../utils/logger.js";
 
 const execFileP = promisify(execFile);
 
@@ -36,6 +37,13 @@ export function imageFileToDataUrl(rootDir, p, { maxBytes = 8 * 1024 * 1024 } = 
 // 安全路径: 阻止逃出工作目录 (防路径穿越)
 // v1.0.9: 追加 realpath 校验 — 字符串前缀检查可被工作区内 symlink 指向外部绕过 (resolve 后仍在 root 内但实际文件在外部)
 export function safePath(root, p) {
+  // 跨平台一致防护: Windows 盘符路径 (C:\... / C:/... / C:...) 在 Windows 宿主上
+  // 会被 resolve 判为绝对路径而越界拒绝, 但在 POSIX 宿主上会被当作普通相对路径
+  // 放行 (创建出名为 "C:\Windows" 的怪异文件)。统一在入口拒绝, 保证安全不变量
+  // 与宿主平台无关 (2026-10-01 修复: repo_map 测试在 Linux 失败暴露)。
+  if (typeof p === "string" && /^[a-zA-Z]:/.test(p)) {
+    throw new Error(`路径越界拒绝: ${p}`);
+  }
   const resolved = path.resolve(root, p);
   if (resolved !== root && !resolved.startsWith(root + path.sep)) {
     throw new Error(`路径越界拒绝: ${p}`);
@@ -109,7 +117,7 @@ export async function runCodeAct(rootDir, lang, code, timeoutMs) {
     if (timedOut) return head;
     return head + "\n" + JSON.stringify({ error: e.message, code: e.code });
   } finally {
-    try { fs.rmSync(tmp, { force: true }); } catch {}
+    try { fs.rmSync(tmp, { force: true }); } catch (e) { debug(`[tools/builtin] 已忽略异常: ${e && e.message ? e.message : e}`); }
   }
 }
 
@@ -118,6 +126,7 @@ export function registerBuiltinTools(catalog, { rootDir, facts, memory }) {
   // 1. 读文件
   catalog.register({
     name: "read_file",
+    capability: { readOnly: true, riskLevel: "low", sideEffect: "none" },
     description: "读取文件内容。返回文件文本。",
     parameters: {
       type: "object",
@@ -136,6 +145,7 @@ export function registerBuiltinTools(catalog, { rootDir, facts, memory }) {
   // 2. 写文件
   catalog.register({
     name: "write_file",
+    capability: { riskLevel: "medium", sideEffect: "workspace" },
     description: "写入文件 (覆盖)。可用于创建/修改文件。",
     parameters: {
       type: "object",
@@ -163,9 +173,69 @@ export function registerBuiltinTools(catalog, { rootDir, facts, memory }) {
     },
   });
 
+  // 2b. 追加文件 (2026-10-02 基线暴露缺口: 无追加能力时 agent 只能整体重写, 易丢原内容)
+  catalog.register({
+    name: "append_file",
+    capability: { riskLevel: "medium", sideEffect: "workspace" },
+    description: "向文件末尾追加内容 (不覆盖原文件)。文件不存在时等同创建。",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "文件路径" },
+        content: { type: "string", description: "要追加的内容 (追加在文件末尾)" },
+      },
+      required: ["path", "content"],
+    },
+    execute: async (args) => {
+      const content = String(args.content ?? "");
+      if (content.length > 512 * 1024) return JSON.stringify({ error: `追加内容过大 (>512KB, 当前 ${content.length} 字符)` });
+      const p = safePath(rootDir, args.path);
+      if (fs.existsSync(p) && fs.statSync(p).isDirectory()) {
+        return JSON.stringify({ error: `目标是目录: ${args.path}` });
+      }
+      try {
+        fs.mkdirSync(path.dirname(p), { recursive: true });
+        // 已有内容且不以换行结尾时补一个换行, 避免追加粘到原末行
+        let prefix = "";
+        if (fs.existsSync(p)) {
+          const old = fs.readFileSync(p, "utf8");
+          if (old.length && !old.endsWith("\n")) prefix = "\n";
+        }
+        fs.appendFileSync(p, prefix + content, "utf8");
+        return JSON.stringify({ ok: true, appended: Buffer.byteLength(content) });
+      } catch (e) {
+        return JSON.stringify({ error: `追加失败: ${e.message}` });
+      }
+    },
+  });
+
+  // 2c. 删除文件 (2026-10-02 基线暴露缺口: 无删除工具, agent 只能放弃或绕道)
+  catalog.register({
+    name: "delete_file",
+    capability: { destructive: true, riskLevel: "high", sideEffect: "workspace" },
+    description: "删除指定文件 (仅限工作区内, 不能删目录)。",
+    parameters: {
+      type: "object",
+      properties: { path: { type: "string", description: "要删除的文件路径" } },
+      required: ["path"],
+    },
+    execute: async (args) => {
+      const p = safePath(rootDir, args.path);
+      if (!fs.existsSync(p)) return JSON.stringify({ error: `文件不存在: ${args.path}` });
+      if (fs.statSync(p).isDirectory()) return JSON.stringify({ error: `目标是目录, 拒绝删除 (只支持文件): ${args.path}` });
+      try {
+        fs.unlinkSync(p);
+        return JSON.stringify({ ok: true, deleted: args.path });
+      } catch (e) {
+        return JSON.stringify({ error: `删除失败: ${e.message}` });
+      }
+    },
+  });
+
   // 3. 列目录
   catalog.register({
     name: "list_dir",
+    capability: { readOnly: true, riskLevel: "low", sideEffect: "none" },
     description: "列出目录内容 (文件名列表)。",
     parameters: {
       type: "object",
@@ -188,6 +258,7 @@ export function registerBuiltinTools(catalog, { rootDir, facts, memory }) {
   // 4. 执行命令 (安全: 限制在允许目录, 超时)
   catalog.register({
     name: "run_command",
+    capability: { destructive: true, riskLevel: "high", sideEffect: "system" },
     description: "执行 shell 命令并返回输出。只能在工作目录内执行, 有超时。",
     parameters: {
       type: "object",
@@ -249,6 +320,7 @@ export function registerBuiltinTools(catalog, { rootDir, facts, memory }) {
   // 5. 当前时间
   catalog.register({
     name: "get_time",
+    capability: { readOnly: true, riskLevel: "low", sideEffect: "none" },
     description: "获取当前日期和时间。",
     parameters: { type: "object", properties: {} },
     execute: async () => new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" }),
@@ -257,6 +329,7 @@ export function registerBuiltinTools(catalog, { rootDir, facts, memory }) {
   // 6. 记忆查询 (皮皮虾自己查记忆)
   catalog.register({
     name: "memory_search",
+    capability: { readOnly: true, riskLevel: "low", sideEffect: "none" },
     description: "搜索皮皮虾的记忆库, 返回相关事实。",
     parameters: {
       type: "object",
@@ -275,6 +348,7 @@ export function registerBuiltinTools(catalog, { rootDir, facts, memory }) {
   // 7. 记住新事实
   catalog.register({
     name: "memory_add",
+    capability: { riskLevel: "low", sideEffect: "workspace" },
     description: "把一条重要信息写进皮皮虾的长期记忆。",
     parameters: {
       type: "object",
@@ -291,6 +365,7 @@ export function registerBuiltinTools(catalog, { rootDir, facts, memory }) {
   // 8. 读图片 (多模态): 返回 base64 data URL, 供多模态模型视觉理解
   catalog.register({
     name: "read_image",
+    capability: { readOnly: true, riskLevel: "low", sideEffect: "none" },
     description: "读取图片文件, 返回 base64 data URL 供多模态模型理解图片内容 (需配置支持视觉的模型, 如 gpt-4o/qwen-vl/glm-4v)。",
     parameters: {
       type: "object",

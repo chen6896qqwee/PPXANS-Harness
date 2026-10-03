@@ -1,50 +1,37 @@
-# --- Node ---
-node_modules/
-*.log
-npm-debug.log*
-
-# --- 构建产物 ---
-dist/
-web/.next/
-web/out/
-web/dev/
-web/server/
-web/static/
-web/build-manifest.json
-web/fallback-build-manifest.json
-web/_dev.log
-
-# --- 运行数据 (不入库) ---
+# ===== 运行时数据 (含个人记忆/会话/审计账本, 严禁入库) =====
 data/
-*.db
-*.sqlite
-/data/memory/
-/data/experience/
-/data/sessions/
-/data/logs/
+*.ppx-data/
 
-# --- 记忆导出产物 (memory_export 工具输出) ---
-exports/
+# ===== 依赖与构建 =====
+node_modules/
+dist/
+build/
+*.tsbuildinfo
 
-# --- 审计隔离备份 (audit_verify --fix 产出) ---
-*.quarantine-*
+# ===== 密钥与环境 (双保险: 配置文件只用 api_key_env 引用环境变量) =====
+.env
+.env.*
+!.env.example
+config/ppx.json
+# (2026-10-03 清理: 原单列的 config/ppx.local.json 为死规则 — 无代码引用, 且已被下行通配覆盖)
+config/*local*.json
 
-# --- 外部依赖源码 (.deps 内嵌项目不入库) ---
-.deps/
-*.zip
-
-# --- 测试残留 ---
-__nonexistent__/
-
-# --- 本次运行的临时产物 (启动日志 / 探针 / 截图) ---
-tmp/
-
-# --- 系统 ---
+# ===== 日志与临时文件 =====
+*.log
+logs/
+*.tmp
+*.bak
+*.corrupt-*
+*.lock
 .DS_Store
 Thumbs.db
 
-# --- 运行时使用计数 ---
-skills/.usage.json
+# ===== 测试与基准产物 =====
+.nyc_output/
+coverage/
+bench-results/
 
-# --- 本地配置 (不入库, 模板见 config/ppx.json.example) ---
-config/ppx.json
+# ===== 编辑器 =====
+.idea/
+.vscode/*
+!.vscode/extensions.json

@@ -1,10 +1,16 @@
 // src/llm/embedder.js - 文本向量化 (dense embedding, 零依赖)
 // 从 config.embedding 读 OpenAI 兼容端点, 返回 embed 函数供 FactStore.setEmbedder 注入。
 // 不配 embedding 时返回 null, 检索自动退化为 BM25 + LLM 查询扩展 (零依赖兜底)。
-// config.embedding = { base_url, api_key_env 或 api_key, model, dimensions? }
+// config.embedding = { backend?: "cloud"|"local", base_url, api_key_env 或 api_key, model, dimensions? }
+//   backend: "cloud" (默认, OpenAI 兼容端点) | "local" (transformers.js 本地向量, 可选依赖,
+//            见 local-embedder.js; 包未安装自动降级回 BM25)
+import { createLocalEmbedder } from "./local-embedder.js";
 
 export function createEmbedder(config = {}) {
-  if (!config || !config.base_url) return null;
+  if (!config) return null;
+  // v3.1: 本地向量后端 (真内嵌, 离线可用)
+  if (config.backend === "local") return createLocalEmbedder(config);
+  if (!config.base_url) return null;
   const apiKey = config.api_key || process.env[config.api_key_env] || "";
   if (!apiKey) return null;
   const base = String(config.base_url).replace(/\/$/, "");

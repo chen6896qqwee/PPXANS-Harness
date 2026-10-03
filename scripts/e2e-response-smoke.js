@@ -12,7 +12,13 @@ const HH = String(now.getHours()).padStart(2, "0");
 const YYYY = String(now.getFullYear());
 
 const MODEL = process.env.PPX_E2E_MODEL || "qwen3.5-9b-the-defiant-fable-uncnr-heretic-neo-max-mtp";
-const config = { id: "lmstudio", base_url: "http://127.0.0.1:1234/v1", api_key: "lm-studio", model: MODEL, vision: true, timeout_ms: 120000 };
+// 2026-10-01: 优先用 config/ppx.json 首位 provider (向导写入), 无则回落 lmstudio
+import { loadConfig } from "../src/config/index.js";
+const _pc = loadConfig(process.cwd());
+const _pp = (_pc.providers || [])[0];
+const config = _pp
+  ? { id: _pp.id, base_url: _pp.base_url, api_key: _pp.api_key || "lm-studio", model: _pp.model, vision: true, timeout_ms: 120000 }
+  : { id: "lmstudio", base_url: "http://127.0.0.1:1234/v1", api_key: "lm-studio", model: MODEL, vision: true, timeout_ms: 120000 };
 
 const tools = [
   { type: "function", function: { name: "get_time", description: "获取当前日期和时间", parameters: { type: "object", properties: {}, required: [] } } },

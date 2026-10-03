@@ -14,6 +14,10 @@ echo   皮皮虾 PPXANS-Harness · Web 应用一键启动
 echo   ============================================
 echo.
 
+REM 2026-10-01 重构: 内置运行时优先 (便携版/安装包自带 runtime\node.exe), 系统兜底
+set "NODE=node"
+if exist "%~dp0runtime\node.exe" set "NODE=%~dp0runtime\node.exe"
+
 where node >nul 2>&1
 if errorlevel 1 (
   echo   [错误] 未检测到 Node.js。请先安装 Node 20 或更高版本:
@@ -25,7 +29,7 @@ if errorlevel 1 (
 
 REM ---- 读取端口 (与内核配置同源, 不写死) ----
 set "PORT="
-for /f "delims=" %%p in ('node "%~dp0bin\ppx-web.js" --print-port 2^>nul') do set "PORT=%%p"
+for /f "delims=" %%p in ('"%NODE%" "%~dp0bin\ppx-web.js" --print-port 2^>nul') do set "PORT=%%p"
 if "%PORT%"=="" set "PORT=8899"
 
 REM ---- 清理上一次遗留的监听进程 (幂等, 避免端口占用) ----
@@ -39,7 +43,7 @@ if defined OLD (
 
 REM ---- 后台最小化启动 (内核与界面同进程同端口) ----
 echo   [启动] 内核 + 界面 (单进程, 端口 %PORT%)
-start "皮皮虾 Web" /min %ComSpec% /k node "%~dp0bin\ppx-web.js" --port %PORT%
+start "皮皮虾 Web" /min %ComSpec% /k "%NODE%" "%~dp0bin\ppx-web.js" --port %PORT%
 
 REM ---- 轮询就绪 (最多约 30 秒) ----
 set /a N=0

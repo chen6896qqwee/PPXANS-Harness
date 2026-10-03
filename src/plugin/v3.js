@@ -48,11 +48,19 @@ export const evidencePlugin = (ctx) => {
   ctx.provide("goalBoard", createGoalBoard());
 };
 
-// 协议总线插件: codex SQ/EQ 双队列 (WAL 可选落盘, 默认 data/protocol/eq.jsonl)
+// 协议总线插件: codex SQ/EQ 双队列
+// 2026-10-03 接线 (P2): WAL 原硬编码 null (注释宣称"默认 data/protocol/eq.jsonl" 但从未开启) →
+// 默认落盘 data/protocol/eq.wal.jsonl (config.protocol.wal_enabled=false 可关), 支持崩溃后 replay()。
+// EQ 事件另有真实消费方: channels/http.js 订阅后经 SSE /events 广播给 Web UI 时间线。
 export const protocolPlugin = (ctx) => {
-  const bus = createProtocolBus({ walPath: null });
+  const dataDir = ctx.consume("dataDir");
+  const config = ctx.consume("config") || {};
+  const walEnabled = config?.protocol?.wal_enabled !== false;
+  const bus = createProtocolBus({
+    walPath: walEnabled && dataDir ? path.join(dataDir, "protocol", "eq.wal.jsonl") : null,
+  });
   ctx.provide("protocolBus", bus);
-  info("[v3] 协议总线就绪 (SQ/EQ)");
+  info(`[v3] 协议总线就绪 (SQ/EQ${walEnabled ? " + WAL" : ""})`);
 };
 
 // v3 全量插件组 (builtinPlugins 之后追加装配)

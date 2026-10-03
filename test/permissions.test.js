@@ -7,6 +7,8 @@ import {
   TRUSTED_TOOLS,
   createPermissionEngine,
   parseDecision,
+  applyPreset,
+  currentPreset,
 } from "../src/permissions/index.js";
 import fs from "node:fs";
 import os from "node:os";
@@ -194,4 +196,129 @@ test("parseDecision 兼容字符串与对象", () => {
   assert.equal(parseDecision({ behavior: "allow" }), "allow");
   assert.equal(parseDecision({ decision: "deny" }), "deny");
   assert.equal(parseDecision(null), null);
+});
+
+// --- DSH (DeepSeek Harness) 对齐: 具名预设 / 一次性提权 / 应答者链 fail closed ---
+
+test("权限预设: 捆绑应用 + custom 折叠 + 未知预设抛错", () => {
+  const eng = createPermissionEngine({ workspaceRoot: os.tmpdir() });
+  applyPreset(eng, "read-only");
+  assert.equal(eng.sandbox, SandboxPolicy.READ_ONLY);
+  assert.equal(eng.approvalMode, AskForApproval.ON_REQUEST);
+  assert.equal(currentPreset(eng), "read-only");
+  // 手动拧 knob 到非预设组合 → custom
+  eng.approvalMode = AskForApproval.NEVER;
+  assert.equal(currentPreset(eng), "custom");
+  // danger-full-access 预设捆绑 never (DSH 事故复盘: 完全放开必须全自动+可丢弃环境)
+  applyPreset(eng, "danger-full-access");
+  assert.equal(eng.sandbox, SandboxPolicy.DANGER_FULL_ACCESS);
+  assert.equal(eng.approvalMode, AskForApproval.NEVER);
+  assert.throws(() => applyPreset(eng, "no-such"), /未知权限预设/);
+});
+
+test("一次性提权: 单次消费后自动还原, 且不改审批策略", async () => {
+  const root = os.tmpdir();
+  const eng = createPermissionEngine({
+    workspaceRoot: root,
+    sandbox: SandboxPolicy.WORKSPACE_WRITE,
+    approvalMode: AskForApproval.ON_REQUEST,
+  });
+  // 越界写: 默认 deny
+  let r = await eng.check("write_file", { path: "/etc/evil.txt", content: "x" });
+  assert.equal(r.decision, "deny");
+  // 人工批准一次性提权到 full: 本次放行 (on-request 下写文件非高危, 直接 allow)
+  eng.requestEscalation(SandboxPolicy.DANGER_FULL_ACCESS, { oneShot: true });
+  r = await eng.check("write_file", { path: "/etc/evil.txt", content: "x" });
+  assert.equal(r.decision, "allow", `提权后应放行, 实际: ${r.reason}`);
+  // 第二次: 已消费, 回落 deny
+  r = await eng.check("write_file", { path: "/etc/evil.txt", content: "x" });
+  assert.equal(r.decision, "deny", "oneShot 应自动还原");
+  // 会话级提权 (oneShot=false): 持续生效, 沙箱变了但审批策略没变
+  eng.requestEscalation(SandboxPolicy.DANGER_FULL_ACCESS, { oneShot: false });
+  r = await eng.check("delete_file", { path: "/etc/passwd" });
+  assert.notEqual(r.reason, "", "应正常决策");
+  assert.equal(eng.sandbox, SandboxPolicy.WORKSPACE_WRITE, "会话策略本身不被提权改写");
+});
+
+test("应答者链: allow/deny 生效, 异常与 NEVER 模式 fail closed", async () => {
+  const root = os.tmpdir();
+  // 应答者放行
+  const engAllow = createPermissionEngine({
+    workspaceRoot: root, approvalMode: AskForApproval.ON_REQUEST,
+    onAsk: async (tool, args, reason) => "allow",
+  });
+  assert.equal((await engAllow.check("run_command", { command: "curl http://x" })).decision, "allow");
+  // 应答者拒绝
+  const engDeny = createPermissionEngine({
+    workspaceRoot: root, approvalMode: AskForApproval.ON_REQUEST,
+    onAsk: async () => "deny",
+  });
+  assert.equal((await engDeny.check("run_command", { command: "curl http://x" })).decision, "deny");
+  // 应答者抛异常 → fail closed
+  const engBoom = createPermissionEngine({
+    workspaceRoot: root, approvalMode: AskForApproval.ON_REQUEST,
+    onAsk: async () => { throw new Error("UI 挂了"); },
+  });
+  const rBoom = await engBoom.check("run_command", { command: "curl http://x" });
+  assert.equal(rBoom.decision, "deny");
+  assert.ok(/fail closed/.test(rBoom.reason), "异常应标注 fail closed");
+  // NEVER 模式: 即使注册了应答者, 本该 ask 的调用 (网络被禁的 http_request) 也直接降级拒绝
+  const engNever = createPermissionEngine({
+    workspaceRoot: root, approvalMode: AskForApproval.NEVER,
+    onAsk: async () => "allow",
+  });
+  const rNever = await engNever.check("http_request", { url: "http://x" });
+  assert.equal(rNever.decision, "deny", "never 不进应答者链, ask 直接降级拒绝");
+});
+
+// --- ZCode 工具能力门 (声明式元数据裁定) ---
+
+const HIGH_TOOL_CAPS = { my_shell: { destructive: true, riskLevel: "high", sideEffect: "system" } };
+
+test("能力门: high 风险默认 ask, 应答者可裁; autoApproveHighRisk 直通", async () => {
+  const eng = createPermissionEngine({
+    workspaceRoot: os.tmpdir(), approvalMode: AskForApproval.ON_FAILURE,
+    capabilityGate: true, getCapability: (n) => HIGH_TOOL_CAPS[n] || null,
+    onAsk: async () => "deny",
+  });
+  assert.equal((await eng.check("my_shell", {})).decision, "deny", "high 应触发 ask → 应答者拒绝");
+  // autoApproveHighRisk: 高风险直通
+  const eng2 = createPermissionEngine({
+    workspaceRoot: os.tmpdir(), approvalMode: AskForApproval.ON_FAILURE,
+    capabilityGate: true, getCapability: (n) => HIGH_TOOL_CAPS[n] || null,
+    autoApproveHighRisk: true,
+  });
+  assert.equal((await eng2.check("my_shell", {})).decision, "allow");
+});
+
+test("能力门: high + never 模式降级拒绝 (高危不可静默放行, CVE 教训)", async () => {
+  const eng = createPermissionEngine({
+    workspaceRoot: os.tmpdir(), approvalMode: AskForApproval.NEVER,
+    capabilityGate: true, getCapability: (n) => HIGH_TOOL_CAPS[n] || null,
+  });
+  const r = await eng.check("my_shell", {});
+  assert.equal(r.decision, "deny");
+  assert.ok(/降级拒绝/.test(r.reason));
+});
+
+test("能力门: plan 模式只读直通, 破坏性拒绝", async () => {
+  const eng = createPermissionEngine({
+    workspaceRoot: os.tmpdir(), approvalMode: AskForApproval.ON_REQUEST,
+    capabilityGate: true, planEnabled: true,
+    getCapability: (n) => n === "reader" ? { readOnly: true, riskLevel: "low" }
+      : n === "killer" ? { destructive: true, riskLevel: "high" } : null,
+  });
+  assert.equal((await eng.check("reader", {})).decision, "allow", "plan 模式只读直通");
+  assert.equal((await eng.check("killer", {})).decision, "deny", "plan 模式破坏性拒绝");
+  // 退出 plan 模式: 恢复正常判定 (高风险 ask)
+  eng.planEnabled = false;
+  assert.equal((await eng.check("killer", {})).decision, "ask", "退 plan 后高风险走 ask");
+});
+
+test("能力门关闭: 行为与旧版完全一致 (向后兼容)", async () => {
+  const eng = createPermissionEngine({
+    workspaceRoot: os.tmpdir(), approvalMode: AskForApproval.NEVER,
+    capabilityGate: false, getCapability: (n) => HIGH_TOOL_CAPS[n] || null,
+  });
+  assert.equal((await eng.check("my_shell", {})).decision, "allow", "关闸时 high 工具按旧语义放行");
 });

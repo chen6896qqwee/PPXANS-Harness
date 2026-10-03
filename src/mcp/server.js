@@ -6,7 +6,7 @@
 //   - legacy 2025-06-18 及更早: initialize 握手 + capabilities 协商 (兼容存量 MCP 客户端)。
 // 传输无关: 仅做 JSON-RPC 分发, stdio/HTTP 传输由上层 (src/mcp/http.js 等) 接入。
 import { TOOL_ERROR_PREFIX } from "../tools/catalog.js";
-import { warn } from "../utils/logger.js";
+import { warn, debug } from "../utils/logger.js";
 import { sanitizeMcpName } from "./index.js";
 
 // 版本号统一读 package.json, 避免与发布版本漂移 (外部体检: 硬编码 2.5.0 导致 serverInfo 落后真实版本)
@@ -16,7 +16,7 @@ import path from "node:path";
 let PKG_VERSION = "0.0.0";
 try {
   PKG_VERSION = JSON.parse(readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "package.json"), "utf8")).version || "0.0.0";
-} catch {} // 非标准安装位置时降级, 不影响启动
+} catch (e) { debug(`[mcp/server] 已忽略异常: ${e && e.message ? e.message : e}`); } // 非标准安装位置时降级, 不影响启动
 
 // 协议版本常量 (与官方 schema/2026-07-28 对齐)
 export const MODERN_PROTOCOL_VERSION = "2026-07-28";  // 现代 era (每请求 _meta)

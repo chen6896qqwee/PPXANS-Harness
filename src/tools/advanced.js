@@ -4,6 +4,7 @@ import net from "node:net";
 import dns from "node:dns/promises";
 import path from "node:path";
 import { ensureDir, readJson, writeJson } from "../utils/store.js";
+import { debug } from "../utils/logger.js";
 
 // ---------- 网页搜索 (零依赖, 多引擎兜底: tavily/brave[有key] -> DDG) ----------
 // 有 TAVILY_API_KEY / BRAVE_API_KEY 时优先用官方 API, 否则回退加固后的 DDG 解析
@@ -11,7 +12,7 @@ function _stripTags(h) { return String(h || "").replace(/<[^>]+>/g, "").replace(
 function _decodeDDGUrl(u) {
   // DDG 结果链接是 /duckduckgo.html?uddg=<encoded>&rut=...
   const m = String(u || "").match(/[?&]uddg=([^&]+)/);
-  if (m) { try { return decodeURIComponent(m[1]); } catch {} }
+  if (m) { try { return decodeURIComponent(m[1]); } catch (e) { debug(`[tools/advanced] 已忽略异常: ${e && e.message ? e.message : e}`); } }
   return u;
 }
 
@@ -33,7 +34,7 @@ async function searchWeb(query) {
         const results = (j.results || []).map(x => ({ title: x.title, url: x.url, snippet: x.content }));
         if (results.length) return results;
       }
-    } catch {}
+    } catch (e) { debug(`[tools/advanced] 已忽略异常: ${e && e.message ? e.message : e}`); }
   }
 
   // 2. Brave (官方 API, 需 BRAVE_API_KEY)
@@ -49,7 +50,7 @@ async function searchWeb(query) {
         const results = (j.web?.results || []).map(x => ({ title: x.title, url: x.url, snippet: x.description }));
         if (results.length) return results;
       }
-    } catch {}
+    } catch (e) { debug(`[tools/advanced] 已忽略异常: ${e && e.message ? e.message : e}`); }
   }
 
   // 3. DuckDuckGo HTML (免key兜底, 加固解析)
@@ -69,7 +70,7 @@ async function searchWeb(query) {
       if (title) results.push({ title, url: _decodeDDGUrl(m[1]), snippet });
     }
     if (results.length) return results;
-  } catch {}
+  } catch (e) { debug(`[tools/advanced] 已忽略异常: ${e && e.message ? e.message : e}`); }
 
   // 4. DuckDuckGo lite (最终兜底)
   try {
@@ -86,7 +87,7 @@ async function searchWeb(query) {
       if (title) results.push({ title, url: _decodeDDGUrl(m[1]), snippet: "" });
     }
     if (results.length) return results;
-  } catch {}
+  } catch (e) { debug(`[tools/advanced] 已忽略异常: ${e && e.message ? e.message : e}`); }
 
   throw new Error("所有搜索源失败: 无结果");
 }
@@ -273,7 +274,7 @@ export class Scheduler {
 
   // 清理所有定时器 (进程关停时调用, 防 daily/repeating 任务把事件循环挂住不退出)
   shutdown() {
-    for (const [id, t] of this.timers) { try { clearTimeout(t); } catch {} }
+    for (const [id, t] of this.timers) { try { clearTimeout(t); } catch (e) { debug(`[tools/advanced] 已忽略异常: ${e && e.message ? e.message : e}`); } }
     this.timers.clear();
   }
 }
@@ -289,7 +290,9 @@ export function registerAdvancedTools(catalog, { dataDir, scheduler, onMemoryNot
         const results = await searchWeb(args.query);
         return results.map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.snippet || ""}`).join("\n");
       } catch (e) {
-        return JSON.stringify({ error: `搜索失败: ${e.message}` });
+        // 2026-10-03 修复 (P2): 网络级失败原返回优雅 JSON (ok=true), 模型可判读性差,
+        // 且故障病历闭环只认 [工具错误] 前缀 → 学习闭环对网络类失败完全失明。对齐项目错误纪律。
+        return `[工具错误] web_search: ${e.message}`;
       }
     },
   });
@@ -312,7 +315,9 @@ export function registerAdvancedTools(catalog, { dataDir, scheduler, onMemoryNot
         const r = await httpRequest(args);
         return JSON.stringify({ status: r.status, ok: r.ok, body: r.body.slice(0, 5000) });
       } catch (e) {
-        return JSON.stringify({ error: `HTTP 请求失败: ${e.message}` });
+        // 2026-10-03 修复 (P2): 同 web_search —— 网络/DNS/超时失败必须以 [工具错误] 前缀返回,
+        // 否则故障病历 (failures.record) 永远不记录这类最常见的执行失败。
+        return `[工具错误] http_request: ${e.message}`;
       }
     },
   });

@@ -15,7 +15,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { ensureDir } from "../utils/store.js";
-import { warn } from "../utils/logger.js";
+import { warn, debug } from "../utils/logger.js";
 
 export const AUDIT_SEQ_FILE = "audit.seq";
 export const AUDIT_FILE = "audit.ndjson";
@@ -52,6 +52,12 @@ export class AuditLog {
     this._seqFile = path.join(path.dirname(this.file), AUDIT_SEQ_FILE);
     ensureDir(path.dirname(this.file));
     this._seq = this._loadSeq();
+    // 链头缓存 (2026-10-03 性能优化): append 每次都要拿链头, 而 lastHash() 原先每次全量读日志文件
+    // → 整体 O(N^2)。实测 574KB 日志追加 2000 条耗时 23.5s。
+    // 现改为"缓存 + 文件字节数校验": 单进程热路径只做一次 statSync; 若文件被其他进程写过
+    // (size 变化) 则回退到读盘, 保证多进程语义不变。
+    this._head = undefined; // undefined=未加载, null=空链
+    this._headSize = -1; // 缓存对应的文件大小
   }
 
   _loadSeq() {
@@ -63,7 +69,7 @@ export class AuditLog {
       try {
         const lines = fs.readFileSync(this.file, "utf8").trim().split("\n").filter(Boolean);
         if (lines.length) return Number(JSON.parse(lines[lines.length - 1]).seq) || 0;
-      } catch {}
+      } catch (e) { debug(`[audit/audit-chain] 已忽略异常: ${e && e.message ? e.message : e}`); }
       return 0;
     }
   }
@@ -91,9 +97,17 @@ export class AuditLog {
     entry.hash = this._hash(entry);
     this.totalWrites = (this.totalWrites || 0) + 1;
     try {
-      fs.appendFileSync(this.file, JSON.stringify(entry) + "\n", "utf8");
+      const line = JSON.stringify(entry) + "\n";
+      fs.appendFileSync(this.file, line, "utf8");
       this._seq = seq;
       fs.writeFileSync(this._seqFile, String(seq), "utf8");
+      // 同步链头缓存: 下一次 lastHash() 命中快路径, 不再全量读日志
+      this._head = entry.hash;
+      try {
+        this._headSize = fs.statSync(this.file).size;
+      } catch {
+        this._headSize = -1;
+      }
     } catch (e) {
       // 审计写入失败不阻断主流程 (可观测性降级不阻塞 agent, 与 core/trace.js 同策略),
       // 但不静默吞: 计数 + warn, 供 audit.health() 暴露写入健康度 (审计承诺不能被悄悄破坏)。
@@ -114,12 +128,19 @@ export class AuditLog {
   }
 
   // 读最后一条 hash (链头)
+  // 快路径: 文件字节数与缓存一致 → 直接返回内存链头 (O(1), 只花一次 statSync)
+  // 慢路径: 文件被外部改动过 (多进程追加/被截断/不存在) → 读盘重建缓存
   lastHash() {
     try {
+      const st = fs.statSync(this.file);
+      if (this._headSize === st.size) return this._head;
       const lines = fs.readFileSync(this.file, "utf8").trim().split("\n").filter(Boolean);
-      if (!lines.length) return null;
-      return JSON.parse(lines[lines.length - 1]).hash || null;
+      this._head = lines.length ? (JSON.parse(lines[lines.length - 1]).hash || null) : null;
+      this._headSize = st.size;
+      return this._head;
     } catch {
+      this._head = null;
+      this._headSize = -1;
       return null;
     }
   }
@@ -171,7 +192,7 @@ export function quarantineBroken(dataDir) {
   try {
     const bak = log.file + ".quarantine-" + Date.now();
     fs.renameSync(log.file, bak);
-    try { fs.rmSync(log._seqFile, { force: true }); } catch {}
+    try { fs.rmSync(log._seqFile, { force: true }); } catch (e) { debug(`[audit/audit-chain] 已忽略异常: ${e && e.message ? e.message : e}`); }
     // 重建空日志 + 记录隔离事件 (新的链起点)
     const fresh = new AuditLog(dataDir);
     fresh.append({ tool: "audit_quarantine", args: { reason: v.detail, source: path.basename(bak) }, ok: false, error: v.detail });

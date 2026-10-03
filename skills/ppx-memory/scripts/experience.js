@@ -1,7 +1,24 @@
-// src/memory/experience.js - 经验库 (自学习)
+﻿// src/memory/experience.js - 经验库 (自学习)
 // 从每次任务结果中提炼经验, 供后续任务参考 (参考 openhanako experience)
+// 跨 agent 共享: 支持全局经验目录 (globalDataDir), 写入用文件锁防并发覆盖
+// v1.0.7: 同义经验相似合并 (bigram overlap, 词序/措辞变体命中合并而非新增)
 import path from "node:path";
-import { ensureDir, readJson, writeJson, nowISO } from "./store.js";
+import { ensureDir, readJson, writeJson, nowISO, withFileLock } from "./store.js";
+import { overlapCoefficient } from "./similarity.js";
+
+// 同义合并阈值: 经验 lesson 的 bigram overlap 达到此值视为同一条
+// 用真实生产变体校准: 同义改写 0.50-0.55, 相关但不同 0.29, 不相关 0.0 → 0.5 能抓同义不误伤
+const SIM_THRESHOLD = 0.5;
+
+// overlap 系数 (交集 / 较短者): 对词序变化容忍, 实现收敛到 utils/similarity
+// (与 FactStore._overlap 同思路, 但分词/阈值各自独立)
+export const lessonOverlap = overlapCoefficient;
+
+// 模板句判定: 去掉数字后完全相同 (如 "A 经验教训 0" vs "A 经验教训 1")
+// 这类"仅编号不同"的条目是不同内容, 不参与同义合并 (防误伤)
+function _isTemplateLike(a, b) {
+  return String(a).replace(/\d+/g, "#") === String(b).replace(/\d+/g, "#");
+}
 
 export class Experience {
   constructor(dataDir) {
@@ -22,10 +39,37 @@ export class Experience {
       uses: 0,
     };
     if (!entry.lesson || entry.lesson.length < 5) return null;
-    this.lessons.push(entry);
-    this._prune();
-    writeJson(this.file, this.lessons);
-    return entry;
+    // 内容去重: 同一 lesson 已存在则命中加分 (uses+1) 而非新增, 防高频学习路径写放大
+    // 归一化: 去首尾空白 + 折叠连续空白 (与 FactStore._norm 同策略)
+    const normKey = String(lesson).trim().replace(/\s+/g, " ");
+    // 锁内读-改-写: 防止多 agent 共享经验库时并发覆盖
+    return withFileLock(this.file, () => {
+      this.lessons = readJson(this.file, []);
+      const existing = this.lessons.find((l) => String(l.lesson || "").trim().replace(/\s+/g, " ") === normKey);
+      if (existing) {
+        existing.uses += 1;
+        existing.ts = nowISO(); // 刷新时间, 让近期命中经验排到 context 前面
+        writeJson(this.file, this.lessons);
+        return existing;
+      }
+      // 同义合并 (v1.0.7): 措辞/词序不同的变体 (逃过精确去重) 语义相似时合并, 防同义经验堆积
+      // 排除"仅编号不同"的模板句 (如 A 经验教训 0/1 → 视为不同条目)
+      const similar = this.lessons.find((l) => {
+        const la = String(l.lesson || "");
+        if (_isTemplateLike(la, entry.lesson)) return false;
+        return lessonOverlap(la, entry.lesson) >= SIM_THRESHOLD;
+      });
+      if (similar) {
+        similar.uses += 1;
+        similar.ts = nowISO();
+        writeJson(this.file, this.lessons);
+        return similar;
+      }
+      this.lessons.push(entry);
+      this._prune();
+      writeJson(this.file, this.lessons);
+      return entry;
+    });
   }
 
   recall(taskDesc) {
@@ -44,8 +88,29 @@ export class Experience {
   }
 
   use(id) {
-    const l = this.lessons.find((x) => x.id === id);
-    if (l) { l.uses += 1; writeJson(this.file, this.lessons); }
+    withFileLock(this.file, () => {
+      this.lessons = readJson(this.file, []);
+      const l = this.lessons.find((x) => x.id === id);
+      if (l) { l.uses += 1; writeJson(this.file, this.lessons); }
+    });
+  }
+
+  // 经验清单 (公开读 API): 默认按命中次数降序, 同次数按时间新→旧
+  // 供 fork 快照 / 外部观测使用 (调用方无需触碰 this.lessons 内部数组)
+  list({ limit = 0, sort = "uses" } = {}) {
+    const all = [...this.lessons];
+    if (sort === "uses") {
+      all.sort((a, b) => (b.uses || 0) - (a.uses || 0) || new Date(b.ts || 0) - new Date(a.ts || 0));
+    } else if (sort === "ts") {
+      all.sort((a, b) => new Date(b.ts || 0) - new Date(a.ts || 0));
+    }
+    const n = Number(limit) || 0;
+    return n > 0 ? all.slice(0, n) : all;
+  }
+
+  // 条目数 (可观测)
+  count() {
+    return this.lessons.length;
   }
 
   _prune() {
@@ -57,7 +122,12 @@ export class Experience {
   }
 
   context() {
-    const recent = [...this.lessons].sort((a, b) => new Date(b.ts) - new Date(a.ts)).slice(0, 5);
-    return recent.map((l) => `- 经验: ${l.lesson}`).join("\n") || "(暂无经验)";
+    // 优先命中次数 (高频教训浮上来, 让反复发生的硬拒绝/跨会话坑真正影响行为),
+    // 同次数按时间新→旧 (近期教训仍可见)。蒸馏接缝: B3 auto-self-review 教训 uses 随复发上涨,
+    // 从而在上下文里越来越突出, 形成「经验→长期准则」的浮升链路。
+    const picked = [...this.lessons]
+      .sort((a, b) => (b.uses || 0) - (a.uses || 0) || new Date(b.ts || 0) - new Date(a.ts || 0))
+      .slice(0, 5);
+    return picked.map((l) => `- 经验: ${l.lesson}`).join("\n") || "(暂无经验)";
   }
 }

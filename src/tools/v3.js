@@ -8,8 +8,66 @@ import { parseEditBlocks, applyAll, formatRetryFeedback } from "../edit/editbloc
 import { Snapshot } from "../edit/snapshot.js";
 import { runReview } from "../review/index.js";
 import { safePath } from "./builtin.js";
+import { generateWiki, checkStaleness } from "../wiki/index.js";
+import { debug } from "../utils/logger.js";
 
 export function registerV3Tools(catalog, { rootDir, agent = null }) {
+  // 0. repo_wiki — 代码库 Wiki (2026-10-02 吸收 ZCode repo-wiki): 架构文档 + file:line 绑定 + 敏感排除
+  catalog.register({
+    name: "repo_wiki",
+    // 陈旧时自动刷新写入 docs/WIKI.md → 有工作区副作用, 不能声明 readOnly (诚实声明, ZCode 教训)
+    capability: { riskLevel: "low", sideEffect: "workspace" },
+    description: "生成代码库 Wiki 架构文档: 按目录列出核心定义 (签名+file:line) + 模块依赖 mermaid 图; 敏感文件 (token/secret/credential/password 等) 自动排除。可选写入 docs/WIKI.md。",
+    parameters: {
+      type: "object",
+      properties: {
+        save: { type: "boolean", description: "是否写入 docs/WIKI.md (默认 false 只返回文本)" },
+      },
+    },
+    execute: async (args) => {
+      const out = path.join(rootDir, "docs", "WIKI.md");
+      // ZCode 语义: 源码变化后 wiki 陈旧, 自动重生成而非返回过期内容
+      const staleness = checkStaleness(out, rootDir);
+      const w = generateWiki(rootDir, {});
+      const summary = `文件 ${w.stats.files} · 定义 ${w.stats.defs} · 依赖边 ${w.stats.edges} · 敏感排除 ${w.sensitiveSkipped}`;
+      if (args.save || staleness.stale) {
+        fs.mkdirSync(path.dirname(out), { recursive: true });
+        fs.writeFileSync(out, w.text + "\n", "utf8");
+        return `Wiki 已刷新写入 docs/WIKI.md (此前状态: ${staleness.reason}; ${summary})\n\n${w.text}`;
+      }
+      return `Wiki 概况 (${summary}; 上次生成于 docs/WIKI.md, ${staleness.reason}):\n\n${w.text}`;
+    },
+  });
+  // 0b. usage_stats — 会话级使用统计 (2026-10-02 吸收 ZCode 使用统计: 模型消耗/调用次数)
+  catalog.register({
+    name: "usage_stats",
+    capability: { readOnly: true, riskLevel: "low", sideEffect: "none" },
+    description: "查看本会话 LLM 使用统计: 调用次数 / token 消耗 / 按模型分解。",
+    parameters: { type: "object", properties: {} },
+    execute: async () => {
+      const s = agent?.usageStats;
+      if (!s) return JSON.stringify({ calls: 0, tokens: 0, byModel: {} });
+      return JSON.stringify({ calls: s.calls, tokens: s.tokens, byModel: s.byModel });
+    },
+  });
+  // 0c. self_diagnose — 自诊断 (2026-10-03, "按症状下药"表自动化: 症状→根因→增强动作)
+  catalog.register({
+    name: "self_diagnose",
+    capability: { readOnly: true, riskLevel: "low", sideEffect: "none" },
+    description: "Agent 自诊断: 从审计链/失败案例库/使用统计/任务基线聚合信号, 按症状输出根因与增强动作 (零 LLM, 确定性)。",
+    parameters: { type: "object", properties: {} },
+    execute: async () => {
+      const { diagnoseAgent } = await import("../services/diagnose.js");
+      const d = diagnoseAgent({
+        dataDir: agent?.dataDir || path.join(rootDir, "data"),
+        rootDir,
+        usageStats: agent?.usageStats,
+        // 记忆管线健康度 (2026-10-03 接线): MemoryHealthMonitor 曾装配却零消费, 现作为诊断信号源
+        health: agent?.memoryHealth && typeof agent.memoryHealth.status === "function" ? agent.memoryHealth.status() : null,
+      });
+      return d.report;
+    },
+  });
   // 1. repo_map — 仓库地图 (PageRank 标识符排序, token 预算内渲染)
   catalog.register({
     name: "repo_map",
@@ -99,7 +157,7 @@ export function registerV3Tools(catalog, { rootDir, agent = null }) {
       const failed = results.filter((r) => !r.ok);
       // 任一失败 → 整体回滚 (aider: 原子性优先), 回灌反馈交给 LLM 修复
       if (failed.length) {
-        try { Snapshot.rollback(snap); } catch {}
+        try { Snapshot.rollback(snap); } catch (e) { debug(`[tools/v3] 已忽略异常: ${e && e.message ? e.message : e}`); }
         return JSON.stringify({ ok: false, rolled_back: true, results, retry_hint: "请根据 feedback 修正 SEARCH 块后重试" });
       }
       return JSON.stringify({ ok: true, files: results.length, blocks: blocks.length, results });

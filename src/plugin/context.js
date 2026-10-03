@@ -1,3 +1,4 @@
+import { debug } from "../utils/logger.js";
 // src/plugin/context.js - 轻量服务注册表 (零依赖插件系统核心)
 // 借鉴 deepseek-harness 的 Cordis "everything is a plugin" 理念, 但零依赖、同步、极简:
 //   - 插件 = (ctx) => void 函数, 通过 ctx.provide(key, value) 注册服务, ctx.consume(key) 消费服务
@@ -71,7 +72,7 @@ export class Context {
   // 卸载: 逆序执行所有 disposer
   async dispose() {
     for (const fn of [...this._disposers].reverse()) {
-      try { await fn(); } catch {}
+      try { await fn(); } catch (e) { debug(`[plugin/context] 已忽略异常: ${e && e.message ? e.message : e}`); }
     }
     this._disposers = [];
     this._services.clear();

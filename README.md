@@ -2,7 +2,7 @@
 
 **皮皮虾神经系（ANS）+ Harness 一体化智能体内核** —— 纯 Node.js、**零运行时依赖**的可审计自主智能体。
 
-一个会自我修复、自我学习、可审计验证的超级 Agent：**69 内置工具 · L0–L4 五层记忆 · SHA-256 审计哈希链 · 标准 MCP 服务端+客户端 · 多模型路由 · 自愈 7/7 · 918 测试全绿 · Web UI**。
+一个会自我修复、自我学习、可审计验证的超级 Agent：**85 内置工具 · L0–L4 五层记忆 + 事实有效期 · SHA-256 审计哈希链 · 标准 MCP 服务端+客户端 · 多模型路由 · 本地向量/ASR 可选 · 自愈 7/7 · 1014 测试全绿 · Web UI**。
 
 自带标准 MCP 服务（`POST /mcp`），Claude Desktop / Cursor / 任何 MCP 客户端**开箱即用**；支持各大模型 API + 本地模型，自由回退。
 
@@ -25,16 +25,48 @@
 | 🔌 **多渠道接入** | HTTP + 飞书 + 微信（加解密 + 主动推送 + 加密回包） |
 | 📄 **文档 + RAG + OCR** | read_document（txt/md/pdf/html）+ ingest_document 分块入库 + ocr_image（本地 tesseract / 云回退） |
 | 💬 **CLI 交互** | readline 历史 + /stop 中断 + /reset 清会话 + Ctrl+C 单次中断 |
-| 🧩 **MCP 客户端 + 服务端** | 零依赖 MCP 客户端（stdio + HTTP Streamable）接外部工具；`POST /mcp` 暴露 69 工具 + 记忆/轨迹/统计/会话资源 + 方法型 prompts + ppx.* 管理工具 |
+| 🧩 **MCP 客户端 + 服务端** | 零依赖 MCP 客户端（stdio + HTTP Streamable）接外部工具；`POST /mcp` 暴露 85 工具 + 记忆/轨迹/统计/会话资源 + 方法型 prompts + ppx.* 管理工具 |
 | ✅ **任务面板** | 任务队列 + 步骤状态推进 + 结果回填 + 技能模板 |
 | ✅ **可观测** | 工具轨迹 JSONL + 结构化事件流（traceId 贯穿）+ tool call result 大摘要 |
 | ✅ **场景系统** | 灵魂文件式场景，命中自动切换行为 |
 | ✅ **流式输出** | SSE 逐字流式 + Web UI 实时渲染 |
 | 🔐 **HTTP 认证** | Bearer Token，未配置自动生成随机 token 持久化 |
 
-**69 内置工具**（运行时实测）：
-- **47 内置**：文件/命令/搜索/HTTP/定时/记忆（读图/检索/入库）/文档（加载/OCR/入库）/场景/技能（加载/创建/提炼）/重构 refine /子 agent spawn + 治理运维（repo_map/apply_patch/review_code/goal_board/audit_verify/persona/selfheal_run 等）
+**85 内置工具**（运行时实测）：
+- **63 内置**：文件/命令（含 code_run 沙箱）/搜索/HTTP/定时/记忆（读图/检索/入库）/文档（加载/OCR/入库）/语音（ASR/TTS/VAD）/场景/技能（加载/创建/提炼）/重构 refine /子 agent spawn + 治理运维（repo_map/apply_patch/review_code/goal_board/audit_verify/persona/selfheal_run 等）
 - **22 × ppx.**\***：** chat.send/stream、sessions.\*、providers.(list/add/update/delete/test/reorder)、settings.get/update、task.(templates/create/list/update/step/delete/run)、session.reset
+
+> **工具渐进披露（上下文工程）**：59 个工具的完整 JSON schema 实测占 **6725 tok/请求**，
+> 而单个任务通常只用 3–5 个 —— 这是上下文里最大的一笔浪费。现在只把 **20 个核心工具**的
+> 完整 schema 发给 LLM，其余 39 个**只列名字**（约 240 tok）；agent 需要时 `enable_capability`
+> 加载，下一轮即可调用。未披露 ≠ 不可用（`catalog.call` 仍可调用任何已注册工具）。
+> 实测固定开销 **8172 → 3357 tok/请求（-59%）**。配置：`tools.progressive` / `tools.core`，
+> 设 `progressive: false` 恢复全量披露。用 `npm run bench:ctx` 可随时查看当前构成。
+
+> **语音能力（ASR / TTS）**：`voice_transcribe`（语音转文本）与 `voice_speak`（文本转语音），
+> 走 OpenAI 兼容端点（`/audio/transcriptions`、`/audio/speech`），multipart 用 Node 内置
+> `FormData` + `Blob` —— **依然零运行时依赖**。配 `config/ppx.json` 的 `voice.asr` / `voice.tts`
+> 即生效，兼容 OpenAI / 硅基流动 / 火山 / 智谱 / 本地 whisper.cpp server 等。
+
+> **内嵌记忆数据库（可选）**：`config.memory.backend` 设为 `"sqlite"` 可把记忆库换成
+> **Node 内置 `node:sqlite`**（Node ≥ 22.5）—— FTS5 全文索引 + WAL 事务，接口与 JSON 版完全对齐。
+> 实测**写入快 18.7 倍**（JSON 版每次 add 都要全量重写 + 重建索引），并带来崩溃恢复与多进程并发安全。
+> 默认仍是 JSON（零风险），环境不支持时自动回落。跑 `npm run bench:store` 看两后端对比。
+
+> **本地向量记忆（v3.1, 可选依赖）**：`config.embedding = { backend: "local" }` 可把语义检索换成
+> **本地 ONNX 向量模型**（transformers.js, `npm i @huggingface/transformers`）—— 离线可用、零 API 成本。
+> 默认 `Xenova/multilingual-e5-small`（384 维多语言，中文稳），首次使用自动从 HF Hub 下载并缓存。
+> 包未安装时自动降级（云端 embedding → BM25），主包依旧零运行时依赖。
+
+> **事实有效期（v3.1, 吸收 Zep/Graphiti）**：每条记忆可带 `validFrom`/`validTo` 时间窗，
+> 过期事实**默认不再被检索命中**（防"用户改主意后旧事实照常冒出来"），治理面仍可见可回溯。
+> `add(..., { supersedeId })` 一键把被取代的旧事实收口到当前时刻 —— "曾经为真"与"现在为真"分开存。
+
+> **内置 JS 沙箱 + VAD（v3.1, 零依赖）**：`code_run` 工具在 worker_threads + node:vm 双层隔离里
+> 跑 JS 纯计算（死循环强杀、无网络/文件/进程访问），CodeAct 式精确计算回灌工具循环。
+> `vad_detect` 语音活动检测：默认零依赖能量算法（16-bit PCM WAV），可选 Silero 神经网络后端
+> （需 `onnxruntime-node` + 模型）。本地 ASR：`voice.asr = { backend: "local" }` 走 whisper.cpp
+> 绑定（可选依赖 nodejs-whisper），离线转写零 API 成本。
 
 ---
 
@@ -80,14 +112,14 @@ npm run selfheal
 npm run chat          # 终端对话 CLI (ppx / ppxans)
 npm run serve         # 仅 HTTP 接口 (无界面): http://127.0.0.1:8899
 npm run web:check     # Web UI 静态自检 (图标/DOM id/语法解析/静态资源)
-npm test              # 全量测试 (918 项)
+npm test              # 全量测试 (1014 项)
 ```
 
 ### MCP 标准端点 (Streamable HTTP)
 
 `POST http://127.0.0.1:8899/mcp`（同 Bearer token 鉴权）。任何 MCP 客户端（Claude Desktop / Cursor / MCP Inspector 等）可直接接入：
 
-- `tools/list` + `tools/call` — 69 工具全量暴露
+- `tools/list` + `tools/call` — 85 工具全量暴露
 - resources：`memory://` `traces://` `stats://` `sessions://`
 - prompts：`humanize` / `plan` / `debug` / `verify` / `write_article`（方法型技能）
 - `ppx.chat.send` / `ppx.chat.stream`（对话工具，驱动完整工具循环）
@@ -116,14 +148,14 @@ npm test              # 全量测试 (918 项)
 ## 🧪 测试 / 评测 / CI
 
 ```bash
-npm test                # 全量 918 项 (0 失败)
+npm test                # 全量 1014 项 (0 失败)
 npm run eval            # 本地能力评测 (7 项, 无需 LLM)
 npm run eval -- --llm   # LLM 端到端评测 (需 provider)
 npm run bench           # 并发/长会话吞吐压测
 npm run audit:verify    # 审计哈希链完整性校验
 ```
 
-**GitHub Actions CI**：push/PR 自动跑全量测试 + Web 静态自检 + 本地评测。要启用 LLM 回归，在 Settings → Secrets 配置 `PPX_E2E_BASE_URL` / `PPX_E2E_API_KEY` / `PPX_E2E_MODEL`。
+**GitHub Actions CI**：push/PR 自动跑全量测试（Node 20/22 × Linux/Windows 矩阵）+ Web 静态自检 + 自愈基准 + 本地评测。要启用 LLM 回归，在 Settings → Secrets 配置 `PPX_E2E_BASE_URL` / `PPX_E2E_API_KEY` / `PPX_E2E_MODEL`。
 
 ---
 
@@ -161,13 +193,13 @@ PPXANS-Harness/
 │   ├── evidence/   [v3] 证据边界 + 目标看板 + manifest
 │   ├── commands/   [v3] 斜杠命令统一模型
 │   ├── plugin/     v3.js 五插件装配 (permissions/hooks/commands/evidence/protocol)
-│   ├── tools/      工具系统 (69 个 + v3 工具注册)
+│   ├── tools/      工具系统 (61 个 + v3 工具注册)
 │   ├── core/  services/  memory/  audit/  ans/  selfheal/  channels/  orchestrator/  llm/  utils/
 ├── public/         零依赖 Web UI (index.html/app.js/app.css, codex 风格)
 ├── bin/            ppx / ppxans / ppx-web / ppx-serve / ppx-channels 入口
 ├── data/           运行时数据 (不进 git)
 ├── references/     第三方项目来源登记
-├── test/           测试 (918 项, v3 新模块全覆盖)
+├── test/           测试 (1014 项, v3 新模块全覆盖)
 └── docs/           文档 (ARCHITECTURE-V3 / QUICKSTART / web-launch 等)
 ```
 

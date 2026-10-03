@@ -1,43 +1,44 @@
-/* 皮皮虾 v3.0 · codex 风格 UI —— 零依赖, 变量驱动, 浅色为主暗色可选 */
+/* 皮皮虾 v3.0 · Codex 风格 UI —— 零依赖, 变量驱动, 暗色优先(终端感), 浅色可选 */
+/* 2026-10-01: 对齐 OpenAI Codex 观感 — 近黑底/扁平 1px 边框/等宽标题/codex 橙点睛 */
 
-:root, html[data-theme="light"] {
-  --bg: #f7f7f5;            /* 应用底 */
-  --surface: #ffffff;       /* 卡片/面板 */
-  --surface2: #f1f1ee;      /* 次级面 */
+:root, html[data-theme="dark"] {
+  --bg: #0d0d0d;            /* 应用底 (近黑, 非纯黑) */
+  --surface: #161615;       /* 卡片/面板 */
+  --surface2: #1d1d1b;      /* 次级面 */
+  --hover: #242422;
+  --border: #262625;
+  --border2: #343431;
+  --text: #ececea;
+  --text2: #a0a09a;
+  --text3: #6e6e67;
+  --accent: #d97757;        /* codex 橙 */
+  --accent-soft: #2b201a;
+  --ok: #4ea75c;
+  --warn: #d97706;
+  --err: #e5484d;
+  --p0: #e5484d; --p1: #d97706; --p2: #a0a09a;
+  --mono: ui-monospace, "Cascadia Code", Consolas, "JetBrains Mono", monospace;
+  --sans: -apple-system, "Segoe UI", "Microsoft YaHei UI", "PingFang SC", sans-serif;
+  --shadow: 0 4px 16px rgba(0,0,0,.35);
+  --r: 10px;
+}
+html[data-theme="light"] {
+  --bg: #f7f7f5;
+  --surface: #ffffff;
+  --surface2: #f1f1ee;
   --hover: #ececea;
   --border: #e4e4e0;
   --border2: #d7d7d2;
   --text: #1f1f1e;
   --text2: #6d6d68;
   --text3: #9a9a94;
-  --accent: #d97757;        /* codex 橙 */
+  --accent: #d97757;
   --accent-soft: #faf0eb;
   --ok: #1a7f37;
   --warn: #b45309;
   --err: #b91c1c;
   --p0: #b91c1c; --p1: #b45309; --p2: #6d6d68;
-  --mono: ui-monospace, "Cascadia Code", Consolas, "JetBrains Mono", monospace;
-  --sans: -apple-system, "Segoe UI", "Microsoft YaHei UI", "PingFang SC", sans-serif;
   --shadow: 0 1px 3px rgba(0,0,0,.05), 0 8px 24px rgba(0,0,0,.06);
-  --r: 10px;
-}
-html[data-theme="dark"] {
-  --bg: #141413;
-  --surface: #1e1e1c;
-  --surface2: #262624;
-  --hover: #2c2c2a;
-  --border: #333330;
-  --border2: #40403c;
-  --text: #ececea;
-  --text2: #a8a8a2;
-  --text3: #77776f;
-  --accent: #e8845e;
-  --accent-soft: #33241d;
-  --ok: #4ea75c;
-  --warn: #d97706;
-  --err: #e5484d;
-  --p0: #e5484d; --p1: #d97706; --p2: #a8a8a2;
-  --shadow: 0 1px 3px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35);
 }
 
 * { box-sizing: border-box; }
@@ -57,7 +58,7 @@ input, textarea, select { font: inherit; color: inherit; }
 /* ============ 左栏 ============ */
 .side {
   width: 248px; min-width: 248px; display: flex; flex-direction: column;
-  background: var(--surface2); border-right: 1px solid var(--border);
+  background: var(--bg); border-right: 1px solid var(--border);
   transition: margin-left .18s ease, width .18s ease;
 }
 .side.collapsed { margin-left: -248px; }
@@ -69,7 +70,7 @@ input, textarea, select { font: inherit; color: inherit; }
 }
 .brand { display: flex; align-items: center; gap: 8px; padding: 14px 14px 8px; }
 .mark { color: var(--accent); display: grid; place-items: center; }
-.bname { font-weight: 650; letter-spacing: .2px; }
+.bname { font-family: var(--mono); font-weight: 650; font-size: 13px; letter-spacing: .2px; }
 .btag { font-size: 10px; color: var(--accent); border: 1px solid var(--accent); border-radius: 99px; padding: 0 6px; line-height: 15px; margin-left: auto; }
 .icobtn {
   width: 28px; height: 28px; border-radius: 7px; display: grid; place-items: center;
@@ -114,7 +115,7 @@ input, textarea, select { font: inherit; color: inherit; }
   display: flex; align-items: center; gap: 8px; padding: 10px 16px;
   border-bottom: 1px solid var(--border); background: var(--bg);
 }
-.topbar .title { font-weight: 600; max-width: 40ch; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.topbar .title { font-family: var(--mono); font-weight: 550; font-size: 12.5px; max-width: 40ch; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pill {
   display: inline-flex; align-items: center; gap: 5px; padding: 2px 9px;
   border: 1px solid var(--border); border-radius: 99px; color: var(--text2); font-size: 11.5px;
@@ -129,7 +130,7 @@ input, textarea, select { font: inherit; color: inherit; }
 .chips { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
 .chip {
   padding: 6px 14px; border: 1px solid var(--border2); border-radius: 99px;
-  background: var(--surface); color: var(--text2); font-size: 12.5px;
+  background: var(--surface); color: var(--text2); font-size: 12px; font-family: var(--mono);
 }
 .chip:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 
@@ -141,8 +142,8 @@ input, textarea, select { font: inherit; color: inherit; }
 .ev { margin-bottom: 14px; }
 .ev-user { display: flex; justify-content: flex-end; }
 .ev-user .bubble {
-  background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
-  border-radius: 14px 14px 4px 14px; padding: 9px 14px; max-width: 78%;
+  background: var(--surface2); border: 1px solid var(--border2);
+  border-radius: 12px; padding: 9px 14px; max-width: 78%;
   white-space: pre-wrap; word-break: break-word;
 }
 .ev-agent .who, .ev-plan .who {
@@ -252,7 +253,7 @@ input, textarea, select { font: inherit; color: inherit; }
 }
 .send:disabled { background: var(--surface2); color: var(--text3); cursor: default; }
 .send.stop { background: var(--text); }
-.footNote { text-align: center; color: var(--text3); font-size: 11px; margin-top: 6px; min-height: 15px; }
+.footNote { text-align: center; color: var(--text3); font-size: 11px; font-family: var(--mono); margin-top: 6px; min-height: 15px; }
 
 /* 命令面板 */
 .palette {
@@ -269,7 +270,7 @@ input, textarea, select { font: inherit; color: inherit; }
 /* ============ 右栏抽屉 ============ */
 .drawer {
   width: 340px; min-width: 340px; border-left: 1px solid var(--border);
-  background: var(--surface2); display: flex; flex-direction: column;
+  background: var(--bg); display: flex; flex-direction: column;
 }
 .dhead { display: flex; align-items: center; padding: 8px 10px 0 12px; border-bottom: 1px solid var(--border); }
 .tabs { display: flex; gap: 2px; flex: 1; }
@@ -352,4 +353,12 @@ input, textarea, select { font: inherit; color: inherit; }
 /* 窄屏 */
 @media (max-width: 980px) {
   .drawer { position: fixed; right: 0; top: 0; bottom: 0; z-index: 35; box-shadow: var(--shadow); }
+}
+
+/* 无障碍 (2026-10-01): 全局可见焦点环 + codex 橙选区 */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+::selection { background: color-mix(in srgb, var(--accent) 35%, transparent); }
+input:focus-visible, textarea:focus-visible, select:focus-visible { outline-offset: 0; }
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }

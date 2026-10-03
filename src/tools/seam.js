@@ -53,6 +53,13 @@ export function normalizeMeta(def = {}) {
     timeoutMs: Number(def.timeoutMs) || 0,   // 0 = 不限时
     idempotent: !!def.idempotent,            // 是否可安全重试
     enabled: def.enabled !== false,          // 默认启用
+    // 工具能力声明 (2026-10-02 吸收 ZCode PermissionToolCapability):
+    //   readOnly    只读不产生副作用
+    //   destructive 破坏性操作 (不可逆/删数据)
+    //   riskLevel   low | medium | high | critical
+    //   alwaysAsk   无论何种模式都需人工确认 (压过一切放行分支)
+    //   sideEffect  副作用域: "none" | "workspace" | "network" | "system"
+    capability: def.capability || null,
     execute: def.execute,
     // 工具钩子链 (吸收 OpenClaw before/after 钩子):
     //  before(args, ctx) -> undefined 继续 | 字符串短路 | throw 拒绝

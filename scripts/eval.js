@@ -127,7 +127,7 @@ async function llmE2E() {
     { name: "基础问答", prompt: "1+1 等于几？只回答数字。", expect: ["2"] },
     { name: "中文理解", prompt: "用一句话解释什么是「事件溯源」。", expect: ["事件", "日志", "历史"], any: true },
     { name: "工具-时间", prompt: "现在几点了？用 get_time 工具查。", expect: [String(new Date().getFullYear())], useTools: true },
-    { name: "工具-读文件", prompt: "读 package.json 第一行, 告诉我这个项目叫什么。", expect: ["ppx-agent"], useTools: true },
+    { name: "工具-读文件", prompt: "读 package.json 第一行, 告诉我这个项目叫什么。", expect: ["ppxans-harness", "ppx-agent"], any: true, useTools: true },
   ];
   const tools = [
     { type: "function", function: { name: "get_time", description: "获取当前日期和时间", parameters: { type: "object", properties: {}, required: [] } } },

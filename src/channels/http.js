@@ -24,6 +24,7 @@ import { TokenBucket } from "../utils/rate-limit.js";
 import { createMcpEndpoint } from "../mcp/http.js";
 import { createAdminTools } from "../mcp/admin.js";
 import { buildTree, readWorkspaceFile } from "./workspace.js";
+import { debug } from "../utils/logger.js";
 
 const MAX_BODY = 1024 * 1024;          // 请求体上限 1MB
 const RATE_PER_MIN = 60;               // 每 IP 每分钟最大请求数 (令牌桶)
@@ -108,6 +109,16 @@ export class HttpChannel extends Channel {
     // 配置后仅放行白名单 origin, 其余跨域请求 403 (token 泄露时降低任意跨站读取风险)
     this.corsOrigins = this._corsFromConfig();
     this._inFlight = 0; // 当前处理中的对话请求数
+    // 2026-10-03: 主动提醒 SSE 中枢 —— GET /events 长连接客户端集合;
+    // send() 广播 {type:"reminder"} 给所有在线 Web UI (修复 server.js broadcast 落 no-op 的断链)
+    this._sseClients = new Set();
+    this._sseBeat = null; // 心跳定时器 (有客户端时启动, 全部断开后自动清)
+    // 2026-10-03 接线 (P2): 协议总线 EQ 此前零消费者 —— 订阅后经 SSE /events 广播给
+    // Web UI 时间线 (TASK_TURN_*/APPROVAL_REQUESTED 等结构化事件实时到达前端)。
+    this._unsubBus = null;
+    if (this.agent?.protocolBus?.eq?.subscribe) {
+      this._unsubBus = this.agent.protocolBus.eq.subscribe((ev) => this._broadcastEvent(ev));
+    }
     // v2.6.0: MCP 标准端点 (Streamable HTTP) — 默认开启, 路径 /mcp
     const mcpCfg = (this.agent?.config?.channels?.http?.mcp) || {};
     this.mcpEnabled = mcpCfg.enabled !== false;
@@ -131,8 +142,11 @@ export class HttpChannel extends Channel {
           return false;
         },
         rateLimit: (req, res) => this._rateLimit(req, res),
-        // Origin 校验已由顶部统一 CORS 处理 (含白名单/默认 localhost), MCP handler 内不再二次拦截
-        skipOriginCheck: true,
+        // 2026-10-03 修复 (P2): 原 skipOriginCheck:true 被工厂吞参且语义本身危险 ——
+        // 宿主 _applyCors 对恶意 Origin 只是"不回显 ACAO"并不拒绝, 无法防 DNS rebinding;
+        // 真正防线是 handler 内 origin 校验。改为与宿主共享同一白名单 (未配置时 handler
+        // 走安全默认: 仅回环 Origin 放行)。
+        allowedOrigins: this.corsOrigins.length ? this.corsOrigins : undefined,
       });
       this.mcpServer = mcpServer;
       this.mcpHandler = mcpHandler;
@@ -167,9 +181,10 @@ export class HttpChannel extends Channel {
     return JSON.parse(body || "{}");
   }
 
-  // 统一错误响应
+  // 统一错误响应 (2026-10-03 修复): 原样回传 e.message 会把内部错误原文
+  // (ERR_HTTP_HEADERS_SENT / 文件路径等) 泄露给客户端, 统一过 publicErrorMessage 净化
   _fail(res, e, code = 400) {
-    this._json(res, code, { error: e.message });
+    this._json(res, code, { error: publicErrorMessage(e) });
   }
 
   // 对话类路由的公共前置 (原 /message 与 /message/stream 各抄一份):
@@ -227,14 +242,22 @@ export class HttpChannel extends Channel {
   // 因此对"下发 token"的路径追加两道浏览器侧的来源判据:
   //   1) Origin 头存在时, 其 hostname 必须是本机回环 (同源导航不带 Origin → 放行)
   //   2) Sec-Fetch-Site 为 cross-site → 一律拒绝 (现代浏览器的强信号)
+  // v3.0.1 (P1#9): 追加第 3 道判据 —— Origin 端口必须等于本服务端口。
+  //   原实现只看 hostname: 同机恶意端口 (127.0.0.1:9999) 的页面 hostname 也是 127.0.0.1, 被误判可信。
   _originTrusted(req) {
     const sfs = String(req.headers["sec-fetch-site"] || "").toLowerCase();
     if (sfs === "cross-site") return false;
     const origin = req.headers["origin"];
     if (!origin) return true; // 非浏览器请求 (curl/脚本) 或同源导航
     try {
-      const host = new URL(origin).hostname.replace(/^\[|\]$/g, "");
-      return host === "127.0.0.1" || host === "localhost" || host === "::1";
+      const u = new URL(origin);
+      const host = u.hostname.replace(/^\[|\]$/g, "");
+      if (!(host === "127.0.0.1" || host === "localhost" || host === "::1")) return false;
+      // 端口必须与本服务一致 (Origin 未写端口时按协议默认 80/443 折算)
+      const originPort = u.port || (u.protocol === "https:" ? "443" : "80");
+      const myPort = String(this.port || "");
+      if (myPort && originPort !== myPort) return false;
+      return true;
     } catch {
       return false; // Origin 畸形 → 不予信任
     }
@@ -266,6 +289,12 @@ export class HttpChannel extends Channel {
   bootstrapPayload(req) {
     const loopback = this._isLoopback(req);
     const trusted = this._isTrustedLocal(req);
+    // 2026-10-03: 补充 model/toolsCount/root —— 设置面板此前读 ag.llm.model / j.tools /
+    // j.root 三个 bootstrap 从未返回的字段, 永远显示 "-" (死绑定)。
+    let toolsCount = null;
+    try { toolsCount = this.agent?.tools?.list?.().length ?? null; } catch { toolsCount = null; }
+    const model = this.agent?.config?.providers?.[0]?.model
+      || this.agent?.config?.agent?.model_preference || "";
     return {
       app: "ppxans-harness",
       version: this._pkgVersion(),
@@ -280,6 +309,9 @@ export class HttpChannel extends Channel {
       tokenRequired: Boolean(this.authToken),
       mcpPath: this.mcpPath,
       legacyRest: this.mcpLegacyRest,
+      model,
+      toolsCount,
+      root: this.agent?.root || "",
       time: new Date().toISOString(),
     };
   }
@@ -305,7 +337,7 @@ export class HttpChannel extends Channel {
         const cfg = JSON.parse(fs.readFileSync(p, "utf8"));
         return (cfg.channels && cfg.channels.http && cfg.channels.http.auth_token) || "";
       }
-    } catch {}
+    } catch (e) { debug(`[channels/http] 已忽略异常: ${e && e.message ? e.message : e}`); }
     return "";
   }
 
@@ -364,6 +396,11 @@ export class HttpChannel extends Channel {
       this.server.once("error", reject);
       this.server.listen(this.port, this.host, resolve);
     });
+    // v3.0.1 (P1#9): port=0 (临时端口) 时回填真实端口 —— Origin 同端口判据依赖 this.port
+    try {
+      const addr = this.server.address();
+      if (addr && typeof addr === "object" && addr.port) this.port = addr.port;
+    } catch (e) { debug(`[channels/http] 已忽略异常: ${e && e.message ? e.message : e}`); }
     this.connected = true;
     return this;
   }
@@ -371,8 +408,8 @@ export class HttpChannel extends Channel {
   // 单入口分发: CORS/OPTIONS → MCP 端点 → webhook → 限流 → 业务路由, 最后兜底 404/500
   async _dispatch(req, res) {
     try {
-      if (!this._applyCors(req, res)) return;
       const reqPath = (req.url || "/").split("?")[0];
+      if (!this._applyCors(req, res, reqPath)) return;
 
       // v2.6.0: MCP 标准端点优先 (Streamable HTTP, 单端点 POST)
       if (this.mcpEnabled && this.mcpHandler && req.method === "POST" && reqPath === this.mcpPath) {
@@ -381,6 +418,10 @@ export class HttpChannel extends Channel {
       // v1.0.8: webhook 路由分发 (feishu/wechat 等): 匹配路径交给对应通道, 不走主逻辑
       const wh = this.webhookRoutes.get(reqPath);
       if (wh) return this._runHandler(wh, req, res);
+
+      // 2026-10-03: 主动提醒 SSE 端点 (GET /events)。独立于 /api/* 是因为 legacy_rest=false
+      // 时 API 全部 410, 而事件流是 Web UI 实时能力不属于退役面。长连接只建一次, 走正常限流。
+      if (req.method === "GET" && reqPath === "/events") return this._handleEvents(req, res);
 
       // 静态页面与 /health 不设限, 其余 API 限流
       const isOpenGet = req.method === "GET" && (reqPath === "/" || reqPath === "/index.html" || reqPath === "/health");
@@ -398,7 +439,7 @@ export class HttpChannel extends Channel {
       // 兜底: 路由内异常不应泄漏内部实现细节, 也不应让连接悬空
       try {
         if (!res.writableEnded) this._json(res, 500, { error: publicErrorMessage(e) });
-      } catch {}
+      } catch (e) { debug(`[channels/http] 已忽略异常: ${e && e.message ? e.message : e}`); }
     }
   }
 
@@ -409,24 +450,44 @@ export class HttpChannel extends Channel {
     } catch (e) {
       try {
         if (!res.writableEnded) this._json(res, 500, { error: e.message });
-      } catch {}
+      } catch (e) { debug(`[channels/http] 已忽略异常: ${e && e.message ? e.message : e}`); }
     }
   }
 
+  // 来源 host 是否本机回环 (不校验端口 —— 浏览器 MCP 客户端场景用, 见 _applyCors)
+  _loopbackOrigin(req) {
+    const origin = req.headers["origin"];
+    if (!origin) return false;
+    try {
+      const host = new URL(origin).hostname.replace(/^\[|\]$/g, "");
+      return host === "127.0.0.1" || host === "localhost" || host === "::1";
+    } catch { return false; }
+  }
+
   // 统一 CORS 响应头 (所有路由含 /mcp 共用)。返回 false 表示本次请求无需继续 (已响应或来源被拒)。
-  // v1.0.7 语义: 默认 * (兼容); 配置 cors_origin 白名单时校验浏览器来源
-  _applyCors(req, res) {
+  // v3.0.1 (P1#9) 收紧默认语义: 原默认 `*` 把所有 API 响应对任意跨域页面开放。
+  //   自带 Web UI 与服务同源, 根本不需要 ACAO; 非浏览器客户端没有 Origin 头, 也不需要。
+  //   现默认只回显「本机回环 + 同端口」来源 (即自带 UI);
+  //   例外: /mcp 端点对本机回环任意端口回显 —— 浏览器形态 MCP 客户端 (MCP Inspector 等)
+  //   是正当场景, 且 /mcp 有 Bearer 门禁, 跨域可读的只是 401 拒绝体, 不泄任何凭据。
+  //   其余跨域需求显式配 channels.http.cors_origin 白名单。
+  _applyCors(req, res, reqPath = "") {
     const reqOrigin = req.headers.origin;
-    let allowOrigin = "*";
+    let allowOrigin = null;
     if (this.corsOrigins.length) {
-      allowOrigin = !reqOrigin ? "*" : (this.corsOrigins.includes(reqOrigin) ? reqOrigin : null);
+      allowOrigin = reqOrigin && this.corsOrigins.includes(reqOrigin) ? reqOrigin : null;
+      if (reqOrigin && !allowOrigin) {
+        this._json(res, 403, { error: "origin not allowed" });
+        return false;
+      }
+    } else if (reqOrigin) {
+      if (this._originTrusted(req)) allowOrigin = reqOrigin;
+      else if (reqPath === this.mcpPath && this._loopbackOrigin(req)) allowOrigin = reqOrigin;
     }
-    if (!allowOrigin) {
-      this._json(res, 403, { error: "origin not allowed" });
-      return false;
+    if (allowOrigin) {
+      res.setHeader("Access-Control-Allow-Origin", allowOrigin);
+      res.setHeader("Vary", "Origin");
     }
-    res.setHeader("Access-Control-Allow-Origin", allowOrigin);
-    if (allowOrigin !== "*") res.setHeader("Vary", "Origin");
     res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, MCP-Protocol-Version, Mcp-Method, Mcp-Name");
     if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return false; }
@@ -502,22 +563,39 @@ export class HttpChannel extends Channel {
       if (!this._acquire(res)) return true;
       res.writeHead(200, SSE_HEADERS);
       if (typeof res.flushHeaders === "function") res.flushHeaders();
+      // v3.0.1 (P0#2): 客户端中途断连 → res 变 destroyed, 后续 write 触发 ERR_STREAM_DESTROYED
+      // 且 res 无 error 监听器 → 每个 delta 炸一次 uncaughtException (错误风暴)。
+      //   ① 挂 error 监听兜底; ② close 且响应未正常结束时中断上游生成 (按会话, P1#3);
+      //   ③ send 前检查 destroyed (writableEnded 不覆盖 destroy 场景)
+      res.on("error", (e) => debug(`[channels/http] SSE 流错误(已忽略): ${e && e.message ? e.message : e}`));
+      res.on("close", () => {
+        if (!res.writableEnded && typeof this.agent.interrupt === "function") {
+          try { this.agent.interrupt(sessionKey); } catch (e) { debug(`[channels/http] 已忽略异常: ${e && e.message ? e.message : e}`); }
+          debug("[channels/http] SSE 客户端断连, 已中断上游生成 (sessionKey=" + sessionKey + ")");
+        }
+      });
       try {
-        const send = (obj) => { if (!res.writableEnded) res.write("data: " + JSON.stringify(obj) + "\n\n"); };
+        const send = (obj) => {
+          if (res.writableEnded || res.destroyed) return false; // v3.0.1 (P0#2): 断连后静默丢弃
+          try { res.write("data: " + JSON.stringify(obj) + "\n\n"); return true; } catch (e) { debug(`[channels/http] 已忽略异常: ${e && e.message ? e.message : e}`); return false; }
+        };
         let full = "";
         const reply = await this.agent.chatStream(String(text), {
           sessionKey,
-          onDelta: (d) => { full += d; try { send({ type: "delta", content: d }); } catch {} },
-          onTool: (ev) => { try { send({ type: "tool", tool: ev.tool, id: ev.id, status: ev.type, args: ev.args, ok: ev.ok, durationMs: ev.durationMs }); } catch {} }, // 工具调用可视化
-          onStep: (ev) => { try { send({ type: "step", round: ev.round, maxRounds: ev.maxRounds }); } catch {} }, // turn/step 推理轮次进度
+          onDelta: (d) => { full += d; send({ type: "delta", content: d }); },
+          onTool: (ev) => { send({ type: "tool", tool: ev.tool, id: ev.id, status: ev.type, args: ev.args, ok: ev.ok, durationMs: ev.durationMs }); }, // 工具调用可视化
+          onStep: (ev) => { send({ type: "step", round: ev.round, maxRounds: ev.maxRounds }); }, // turn/step 推理轮次进度
         });
         const finalContent = full || reply;
-        send({ type: "done", content: finalContent, sessionId: sessionKey });
-        if (!res.writableEnded) res.end();
+        const usage = this.agent?.usageStats
+          ? { calls: this.agent.usageStats.calls, tokens: this.agent.usageStats.tokens }
+          : null;
+        send({ type: "done", content: finalContent, sessionId: sessionKey, usage, tokens: usage });
+        if (!res.writableEnded && !res.destroyed) res.end();
       } catch (e) {
         // 不外泄内部实现细节 (如 ERR_HTTP_HEADERS_SENT 之类)
-        try { res.write("data: " + JSON.stringify({ type: "error", error: publicErrorMessage(e) }) + "\n\n"); } catch {}
-        try { res.end(); } catch {}
+        send({ type: "error", error: publicErrorMessage(e) });
+        try { if (!res.destroyed) res.end(); } catch (e2) { debug(`[channels/http] 已忽略异常: ${e2 && e2.message ? e2.message : e2}`); }
       } finally { this._release(); }
       return true;
     }
@@ -560,7 +638,10 @@ export class HttpChannel extends Channel {
       //   于是"删除某个会话"实际删掉的是 default 主会话 (误删数据)。改为解析 JSON body。
       const data = await this._readJson(req, res);
       if (data === null) return true;
-      if (this.agent.sessionStore) this.agent.sessionStore.delete(data.key || "default");
+      // 2026-10-03 修复 (P0-2): 前端 delSession 发的是 { sessionKey }, 后端只读 data.key →
+      // 恒 undefined → || "default" 兜底把主会话误删 (9-18 修复只改了后端解析方式,
+      // 前端字段名没对齐, 缺陷原样存活)。现在两侧字段名兼容读取。
+      if (this.agent.sessionStore) this.agent.sessionStore.delete(data.key || data.sessionKey || "default");
       this._json(res, 200, { ok: true });
       return true;
     }
@@ -579,7 +660,8 @@ export class HttpChannel extends Channel {
       try {
         const data = JSON.parse(body || "{}");
         const sessionId = data.sessionId || "default";
-        if (typeof this.agent.interrupt === "function") this.agent.interrupt();
+        // v3.0.1 (P1#3): 按会话中断 —— 并发会话各断各的, 不再全进程一起停
+        if (typeof this.agent.interrupt === "function") this.agent.interrupt(sessionId);
         this._json(res, 200, { ok: true, interrupted: true, sessionId });
       } catch (e) {
         this._fail(res, e);
@@ -757,7 +839,7 @@ export class HttpChannel extends Channel {
       const body = await this._readBody(req, res);
       if (body === null) return true;
       let decision = "deny";
-      try { decision = JSON.parse(body || "{}").decision || "deny"; } catch {}
+      try { decision = JSON.parse(body || "{}").decision || "deny"; } catch (e) { debug(`[channels/http] 已忽略异常: ${e && e.message ? e.message : e}`); }
       const ok = agent.resolveApproval ? agent.resolveApproval(id, decision) : false;
       this._json(res, ok ? 200 : 404, { ok });
       return true;
@@ -781,7 +863,7 @@ export class HttpChannel extends Channel {
       if (body === null) return true;
       if (!agent.permissions) { this._json(res, 200, { ok: false, reason: "权限引擎未装配" }); return true; }
       let cfg = {};
-      try { cfg = JSON.parse(body || "{}"); } catch {}
+      try { cfg = JSON.parse(body || "{}"); } catch (e) { debug(`[channels/http] 已忽略异常: ${e && e.message ? e.message : e}`); }
       if (cfg.approvalMode) agent.permissions.approvalMode = cfg.approvalMode;
       if (cfg.sandbox) agent.permissions.sandbox = cfg.sandbox;
       if (cfg.networkAccess != null) agent.permissions.networkAccess = !!cfg.networkAccess;
@@ -930,7 +1012,61 @@ export class HttpChannel extends Channel {
     return true;
   }
 
-  async send(to, text) { return text; } // HTTP 是请求-响应, 直接返回
+  // 结构化事件广播 (EQ 订阅回调): 尽力而为, 任何异常不得影响事件流
+  _broadcastEvent(ev) {
+    if (!this._sseClients.size) return;
+    let frame;
+    try { frame = `data: ${JSON.stringify({ type: "event", event: ev })}\n\n`; } catch { return; }
+    for (const r of [...this._sseClients]) {
+      try { if (!r.writableEnded) r.write(frame); else this._sseClients.delete(r); }
+      catch { this._sseClients.delete(r); }
+    }
+  }
+
+  // ---- 主动提醒 SSE (2026-10-03) ----
+  // GET /events: 建立 text/event-stream 长连接。鉴权兼容两种方式:
+  //   ① Authorization: Bearer 头 (fetch/测试场景)
+  //   ② ?token= 查询参数 (EventSource 无法自定义请求头; 本机服务 + safeEqual 常量时间比较)
+  _handleEvents(req, res) {
+    if (!this._authed(req, res)) {
+      let q = null;
+      try { q = new URL(req.url || "/", "http://x").searchParams.get("token"); } catch { q = null; }
+      if (!q || !safeEqual(q, this.authToken)) { this._json(res, 401, { error: "unauthorized" }); return; }
+    }
+    // 先准入判定完再 writeHead (与 SSE 对话端点同一纪律: 拒绝不能返 200)
+    res.writeHead(200, SSE_HEADERS);
+    res.write("retry: 5000\n\n");
+    this._sseClients.add(res);
+    debug(`[channels/http] SSE 提醒客户端接入 (在线=${this._sseClients.size})`);
+    req.on("close", () => {
+      this._sseClients.delete(res);
+      if (!this._sseClients.size && this._sseBeat) { clearInterval(this._sseBeat); this._sseBeat = null; }
+    });
+    if (!this._sseBeat) {
+      this._sseBeat = setInterval(() => {
+        for (const r of [...this._sseClients]) {
+          try { if (!r.writableEnded) r.write(": ping\n\n"); else this._sseClients.delete(r); }
+          catch { this._sseClients.delete(r); }
+        }
+        if (!this._sseClients.size && this._sseBeat) { clearInterval(this._sseBeat); this._sseBeat = null; }
+      }, 25000);
+      this._sseBeat.unref?.(); // 不阻止进程退出
+    }
+  }
+
+  async send(to, text) {
+    // 2026-10-03 修复: 原为 no-op (`return text`), server.js 主动提醒 ticker 调
+    // manager.broadcast(payload.text) 时 Web UI 永远收不到。升级为 SSE 广播:
+    // 所有 GET /events 在线客户端实时收到 {type:"reminder", text}。无订阅者时静默。
+    if (this._sseClients.size) {
+      const frame = `data: ${JSON.stringify({ type: "reminder", text })}\n\n`;
+      for (const r of [...this._sseClients]) {
+        try { if (!r.writableEnded) r.write(frame); else this._sseClients.delete(r); }
+        catch { this._sseClients.delete(r); }
+      }
+    }
+    return text; // 保持 Channel 契约: 返回投递文本
+  }
 
   // 连通性测试: 用独立实例起临时 server 验证端口可绑定
   async test() {
@@ -944,6 +1080,10 @@ export class HttpChannel extends Channel {
   }
 
   async disconnect() {
+    if (this._unsubBus) { try { this._unsubBus(); } catch { /* 重复退订无副作用 */ } this._unsubBus = null; }
+    if (this._sseBeat) { clearInterval(this._sseBeat); this._sseBeat = null; }
+    for (const r of [...this._sseClients]) { try { r.end(); } catch { /* 客户端已断 */ } }
+    this._sseClients.clear();
     if (this.server) { await new Promise((r) => this.server.close(r)); this.server = null; }
     this.connected = false;
   }

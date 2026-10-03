@@ -1,78 +1,192 @@
-// ppx-memory CLI - 皮皮虾四层记忆引擎 (OpenClaw skill) v1.0
-// Windows 中文安全: 中文内容走 --spec <json文件> (UTF-8), 规避 argv/stdin GBK 乱码
-//   node cli.js --spec spec.json
-// spec.json: { cmd, content?, flags?: {...} }
-// ASCII 快捷命令: node cli.js facts|scenes|context|persona|query <ascii>
-import path from "node:path";
-import os from "node:os";
+#!/usr/bin/env node
+// skills/ppx-memory/scripts/cli.js - 皮皮虾记忆引擎「独立运行版」CLI
+// 不依赖主项目 src/, 直接对记忆库做增删查 (与主项目共享同一数据格式, 可用 PPX_DATA_DIR 共用)
+//
+// 用法:
+//   node cli.js add "内容" [--layer 1] [--importance 12] [--scope proj] [--type fact]
+//   node cli.js search "查询" [--limit 5]
+//   node cli.js context ["当前消息"]
+//   node cli.js session [--limit 50]
+//   node cli.js forget <id|内容> [--reason 原因]
+//   node cli.js restore <id>
+//   node cli.js deleted
+//   node cli.js stats
+//   node cli.js export [--no-deleted]
 import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { FactStore } from "./fact-store.js";
-import { L0Recorder } from "./l0.js";
-import { SceneStore } from "./l2.js";
-import { PersonaStore } from "./l3.js";
-import { MemoryTicker } from "./memory-ticker.js";
-import { Experience } from "./experience.js";
-import { scrubPII } from "./pii.js";
-import { SessionStore } from "./session.js";
 
-const DATA = process.env.PPX_MEMORY_DIR || path.join(os.homedir(), ".openclaw", "memory", "ppx");
-const facts  = new FactStore(DATA);
-const l0     = new L0Recorder(DATA);
-const scenes = new SceneStore(DATA);
-const persona= new PersonaStore(DATA);
-const ticker = new MemoryTicker(DATA, facts);
-const exper  = new Experience(DATA);
-const sessionStore = new SessionStore(DATA);
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+// 默认数据目录: 技能位于 <root>/skills/ppx-memory/scripts/, 回退三级到 <root>/data
+const DATA = process.env.PPX_DATA_DIR || path.resolve(HERE, "..", "..", "..", "data");
+
 const out = (o) => console.log(typeof o === "string" ? o : JSON.stringify(o, null, 2));
+const facts = new FactStore(DATA);
 
-// ---- HTTP 便捷封装不存在, 直接函数 ----
+// 极简参数解析: 位置参数 + --key value
+function parseArgs(argv) {
+  const positional = [];
+  const flags = {};
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a.startsWith("--")) {
+      const key = a.slice(2);
+      const next = argv[i + 1];
+      if (next === undefined || next.startsWith("--")) flags[key] = true;
+      else {
+        flags[key] = next;
+        i++;
+      }
+    } else positional.push(a);
+  }
+  return { positional, flags };
+}
+
 function addMemory(content, fl = {}) {
-  const scr = scrubPII(String(content || ""));
-  if (scr.detected.length) console.error("[PII] redacted:", scr.detected.join(","));
-  return facts.add(scr.cleaned, {
-    importance: Number(fl.importance || 10),
-    type: fl.type || "general",
-    source: fl.source || "manual",
+  const f = facts.add(content, {
+    layer: fl.layer ? Number(fl.layer) : undefined,
+    importance: fl.importance ? Number(fl.importance) : undefined,
+    type: fl.type || undefined,
+    scope: fl.scope || null,
+  });
+  if (!f) {
+    out("未写入 (内容为空, 或被归一化去重命中已有条目)");
+    return;
+  }
+  out({ ok: true, id: f.id, layer: f.layer, score: Math.round(f.score * 100) / 100, content: f.content });
+}
+
+function printFacts(list) {
+  if (!list.length) {
+    out("(无匹配)");
+    return;
+  }
+  for (const f of list) {
+    const s = typeof f.score === "number" ? Math.round(f.score * 100) / 100 : "-";
+    out(`[L${f.layer ?? 1}] (${s}) ${f.id}  ${f.content}`);
+  }
+}
+
+// 读取最近会话 (直接读 jsonl, 不依赖 SessionStore API)
+function readSession(limit = 50) {
+  const dir = path.join(DATA, "sessions");
+  if (!fs.existsSync(dir)) return [];
+  const files = fs
+    .readdirSync(dir)
+    .filter((f) => f.endsWith(".jsonl"))
+    .map((f) => ({ f, m: fs.statSync(path.join(dir, f)).mtimeMs }))
+    .sort((a, b) => b.m - a.m);
+  const lines = [];
+  for (const { f } of files) {
+    for (const line of fs.readFileSync(path.join(dir, f), "utf8").split("\n")) {
+      if (line.trim()) lines.push(line);
+      if (lines.length > limit * 4) break;
+    }
+    if (lines.length > limit * 4) break;
+  }
+  return lines.slice(-limit).map((l) => {
+    try {
+      const o = JSON.parse(l);
+      const d = o.data || {};
+      return { ts: o.ts, type: o.type, text: d.user || d.assistant || d.text || "" };
+    } catch {
+      return { raw: l };
+    }
   });
 }
-function run(cmd, content, fl = {}) {
-  switch (cmd) {
-    case "add":      return addMemory(content, fl);
-    case "query":    return facts.query(content || "", { limit: Number(fl.limit || 5) }).map((x) => ({ id: x.id, score: Math.round(x.effectiveScore), content: x.content }));
-    case "facts":    return facts.list();
-    case "scene":    return scenes.activeContext(content || "") || "(no scene matched)";
-    case "scenes":   return scenes.listWithDesc();
-    case "scene-create": return scenes.create({ name: fl.name, description: fl.desc, canHelp: fl.help, keywords: (fl.kw || "").split(",").filter(Boolean) });
-    case "persona":  return persona.buildUserPersona(facts.list(), { force: !!fl.force });
-    case "record":   { const l = l0.record({ role: fl.role || "user", content, sessionKey: fl.session || "default" }); return l ? "recorded" : "filtered"; }
-    case "tick":     return ticker.recordTurn(fl.u || "", fl.a || "");
-    case "context":  return ticker.context();
-    case "learn":    { const e = exper.learn({ task: fl.task, outcome: fl.outcome, lesson: content || fl.lesson, tags: (fl.tags || "").split(",").filter(Boolean) }); return e ?? "(lesson too short)"; }
-    case "lessons":  return exper.recall(content || "");
-    case "pii":      { const r = scrubPII(content || ""); return { detected: r.detected, cleaned: r.cleaned }; }
-    case "session-push":  { sessionStore.push(fl.session || "default", { role: fl.role || "user", content: content || "" }); return "saved"; }
-    case "session-load":  return sessionStore.load(content || "");
-    case "session-list":  return sessionStore.list();
-    default:         return "unknown cmd: " + cmd;
-  }
-}
-const help = `ppx-memory 四层记忆引擎
-  node cli.js --spec spec.json          中文操作(推荐, spec含cmd/content/flags)
-  node cli.js facts|scenes|context|persona|query <ascii>
-  spec.cmd: add/query/scene/scene-create/persona/record/tick/context/learn/lessons/pii
-数据目录: ${DATA}`;
 
-(async () => {
-  const [, , c1, c2, ...rest] = process.argv;
-  if (c1 === "--spec") {
-    const spec = JSON.parse(fs.readFileSync(c2, "utf8").replace(/^\uFEFF/, ""));
-    const r = await run(spec.cmd, spec.content || "", spec.flags || {});
-    out(r);
-  } else {
-    const cmd = c1;
-    if (cmd === "help" || !cmd) { out(help); }
-    else if (["facts","scenes","context","persona"].includes(cmd)) { out(run(cmd, "", {})); }
-    else if (cmd === "query") { out(run("query", [c2, ...rest].join(" "), {})); }
-    else { out(help); }
+const { positional, flags } = parseArgs(process.argv.slice(2));
+const [cmd, ...rest] = positional;
+
+switch (cmd) {
+  case "add":
+    addMemory(rest.join(" "), flags);
+    break;
+
+  case "search":
+  case "q": {
+    const q = rest.join(" ");
+    if (!q) {
+      out("需要查询关键词");
+      process.exit(1);
+    }
+    const limit = flags.limit ? Number(flags.limit) : 5;
+    const hits = facts.query(q, { limit });
+    hits.forEach((h) => facts.hit(h.id)); // 命中加分 (与主项目一致)
+    printFacts(hits);
+    break;
   }
-})();
+
+  case "context": {
+    // 组装: 高分事实 + 长期摘要 (today/longterm 由 MemoryTicker 维护, 此处轻量回退)
+    const q = rest.join(" ");
+    printFacts(facts.query(q, { limit: 8 }));
+    const lt = path.join(DATA, "memory", "longterm.md");
+    if (fs.existsSync(lt)) {
+      out("\n--- longterm ---");
+      out(fs.readFileSync(lt, "utf8").trim().slice(0, 2000));
+    }
+    break;
+  }
+
+  case "session": {
+    const limit = flags.limit ? Number(flags.limit) : 50;
+    const rows = readSession(limit);
+    if (!rows.length) out("(无会话记录)");
+    for (const r of rows) out(`${r.type || "?"}  ${String(r.text || r.raw || "").slice(0, 160)}`);
+    break;
+  }
+
+  case "forget": {
+    const target = rest.join(" ");
+    if (!target) {
+      out("需要 id 或内容片段");
+      process.exit(1);
+    }
+    const r = facts.forget(target, { reason: flags.reason || null });
+    out(r ? { ok: true, forgotten: r.id || target } : "未找到可遗忘的条目");
+    break;
+  }
+
+  case "restore": {
+    const id = rest.join(" ");
+    const r = facts.restore(id);
+    out(r ? { ok: true, restored: r.id || id } : "未找到该 id (或未被软删)");
+    break;
+  }
+
+  case "deleted": {
+    const all = facts.exportAll({ includeDeleted: true });
+    const list = (Array.isArray(all) ? all : all.facts || []).filter((f) => f.status === "deleted");
+    if (!list.length) out("(无已遗忘条目)");
+    for (const f of list) out(`${f.id}  ${f.content}  ← ${f.deletedReason || "无原因"}`);
+    break;
+  }
+
+  case "stats":
+    out(facts.stats());
+    break;
+
+  case "export": {
+    const all = facts.exportAll({ includeDeleted: flags["no-deleted"] !== true });
+    process.stdout.write(JSON.stringify(all, null, 2));
+    break;
+  }
+
+  default:
+    out(`皮皮虾记忆引擎 · 独立 CLI
+数据目录: ${DATA}
+
+用法:
+  add <内容> [--layer 1] [--importance 12] [--scope xxx]   写入一条记忆
+  search <关键词> [--limit 5]                              检索 (命中自动加分)
+  context [当前消息]                                       组装上下文 (高分事实 + 长期摘要)
+  session [--limit 50]                                     读取最近会话
+  forget <id|内容> [--reason 原因]                         软删 (可恢复)
+  restore <id>                                             回滚软删
+  deleted                                                  列出已遗忘条目
+  stats                                                    记忆库统计
+  export [--no-deleted]                                    导出 JSON`);
+    process.exit(cmd ? 1 : 0);
+}

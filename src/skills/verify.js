@@ -1,100 +1,95 @@
-﻿// src/skills/verify.js - 技能入库前确定性验证闸门
-// 背景 (DeepSeek-Harness 自进化四拼图之「可靠验证」):
-//   refineSkill 由 LLM 提炼技能后直接 create_skill 落盘, 无独立验收环节 —
-//   「完成是自报的, 没有独立验收者」。这会让半成品/幻觉技能污染 skills/。
-//   本模块提供确定性验收 (不依赖 LLM, 静态可测, 缺一即拒):
-//   - 结构验收: SKILL.md 必须含 ## 流程 + ## 验证
-//   - 落地接地: 内容必须真实引用提炼它的高频工具, 且该工具确有 ≥minFreq 条近期成功轨迹
-//   - held-out 回归: (P0② Self-Harness) 若提供 heldOutTraces, 要求接地工具在未见过的子集也有背书, 防过拟合
-// 用法: verifySkill({ name, content, hotTools, okTraces, minFreq, heldOutTraces })
-//   -> { ok: boolean, reason?: string, matchedTool?, traceCount?, heldOutCount? }
+// src/skills/verify.js - 技能入库/升级验证闸门 (零 LLM, 确定性)
+// 设计依据: self-evolution "reliable verification" —— gate before persist.
+//   入库闸门 (verifySkill):      结构(## 流程 + ## 验证) + 接地(正文引用高频工具) + 轨迹背书(该工具有足够成功调用)
+//   升级闸门 (verifyUpgradeSkill): 结构不缩水 + 正文不缩水(防退化) + 有实质变化
+// 目标: 幻觉技能/退化技能一律拦在落盘之前, 保证 skills/ 目录只进"被真实轨迹背书"的方法。
+import { parseSections } from "./loader.js";
 
-// 结构验收: 验收必需段落 (create_skill 契约为 流程/反合理化/验证; 至少 流程+验证 缺一不可)
-export function requiredSections(content) {
-  const c = String(content || "");
-  const need = ["## 流程", "## 验证"];
-  const missing = need.filter((s) => !c.includes(s));
-  return {
-    ok: missing.length === 0,
-    missing,
-    hasFlow: c.includes("## 流程"),
-    hasVerify: c.includes("## 验证"),
-  };
-}
+// 技能正文必须包含的章节 (与 learning-service 的 "## Process + ## Verify" 语义一致)
+export const requiredSections = ["流程", "验证"];
 
-// 落地接地: 技能内容是否真实基于提炼它的高频工具 (反幻觉)
+// 正文长度下限 (低于视为"只写了标题没写实质")
+export const MIN_CONTENT_LEN = 20;
+
+// 升级版相对旧版的最小长度比 (低于即判"缩水退步")
+export const MIN_UPGRADE_RATIO = 0.8;
+
+// 正文是否真实引用了高频工具 (按整词匹配, 避免子串误判)。命中返回工具名, 否则 null。
 export function groundedInTools(content, hotTools = []) {
-  const c = String(content || "");
-  const names = (Array.isArray(hotTools) ? hotTools : []).filter(Boolean);
-  if (names.length === 0) return { ok: false, reason: "无高频工具可核对" };
-  const hit = names.find((t) => c.toLowerCase().includes(String(t).toLowerCase()));
-  return { ok: !!hit, matchedTool: hit || null, hotTools: names.slice(0, 5) };
+  const text = String(content || "");
+  for (const t of hotTools) {
+    const name = String(t || "").trim();
+    if (!name) continue;
+    const esc = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (new RegExp(`(^|[^a-zA-Z0-9_])${esc}([^a-zA-Z0-9_]|$)`).test(text)) return name;
+  }
+  return null;
 }
 
-// 轨迹接地: 该工具确有 ≥minFreq 条近期成功轨迹
-export function traceBacked(tool, okTraces = [], minFreq = 2) {
-  const arr = Array.isArray(okTraces) ? okTraces : [];
-  if (!tool) return { ok: false, reason: "无工具名" };
-  const n = arr.filter((t) => t && String(t.tool) === tool).length;
-  return { ok: n >= minFreq, count: n, minFreq, tool };
+// 章节齐全性检查 → 缺失章节数组
+export function missingSections(content) {
+  const secs = parseSections(String(content || ""));
+  return requiredSections.filter((s) => !secs[s] || !String(secs[s]).trim());
 }
 
-// held-out 回归闸门 (Self-Harness: 候选改动必须在 held-out 子集也不退化才合并)
-// 用途: refineSkill 提炼的技能若只在训练轨迹接地、在未见过的 held-out 轨迹里不接地 = 过拟合 → 拒
-export function verifyHeldOut({ tool, heldOutTraces = [], minFreq = 2 } = {}) {
-  const need = Math.max(1, Math.floor(minFreq / 2));
-  if (!tool) return { ok: false, reason: "无工具名", need };
-  const n = (Array.isArray(heldOutTraces) ? heldOutTraces : []).filter((t) => t && String(t.tool) === tool).length;
-  return { ok: n >= need, count: n, need, tool };
-}
+// 入库闸门: 结构 + 接地 + 轨迹背书
+// opts: { name, content, hotTools, okTraces, minFreq, heldOutTraces }
+export function verifySkill({ name = "", content = "", hotTools = [], okTraces = [], minFreq = 2, heldOutTraces = null } = {}) {
+  const body = String(content || "").trim();
+  if (!body) return { ok: false, reason: "内容为空" };
 
-// 总闸门
-export function verifySkill({ name, content, hotTools, okTraces, minFreq = 2, heldOutTraces } = {}) {
-  // 1. 结构验收
-  const s = requiredSections(content);
-  if (!s.ok) {
-    return { ok: false, reason: `技能缺必需段落: ${s.missing.join(", ")} (SKILL.md 契约要求 ## 流程 + ## 验证)` };
+  // 1) 结构: 必需章节齐全
+  const missing = missingSections(body);
+  if (missing.length) return { ok: false, reason: "缺少必要章节: " + missing.join(" / ") };
+
+  // 2) 实质: 长度下限 (必须在接地检查之前 —— 空壳正文应报"太短"而非"未引用")
+  if (body.length < MIN_CONTENT_LEN) return { ok: false, reason: `内容太短 (< ${MIN_CONTENT_LEN} 字), 疑似空壳` };
+
+  // 3) 接地: 必须引用至少一个高频工具
+  const matchedTool = groundedInTools(body, hotTools);
+  if (!matchedTool) {
+    const list = (hotTools || []).filter(Boolean).slice(0, 6).join(", ") || "(无)";
+    return { ok: false, reason: `内容未引用任何高频工具, 疑似幻觉技能. 应引用的工具: ${list}` };
   }
-  // 内容太短 (只够段落标题没实质步骤) 也拒
-  const body = String(content || "").replace(/##\s*\S+/g, "").trim();
-  if (body.length < 20) {
-    return { ok: false, reason: "技能内容太短, 缺实质步骤/检查点" };
+
+  // 4) 轨迹背书: 该高频工具要有足够成功调用 (minFreq 为频次门槛)
+  const traceCount = (okTraces || []).filter((t) => t && t.tool === matchedTool).length;
+  if (traceCount < minFreq) {
+    return { ok: false, reason: `高频工具 ${matchedTool} 的成功轨迹不足 (${traceCount}/${minFreq})`, matchedTool, traceCount };
   }
-  // 2. 落地接地: 内容引用高频工具
-  const g = groundedInTools(content, hotTools);
-  if (!g.ok) {
-    return { ok: false, reason: `技能内容未引用提炼它的高频工具 (${g.hotTools.join(", ")})` };
-  }
-  // 3. 轨迹接地: 该工具有足够近期成功轨迹背书
-  const tb = traceBacked(g.matchedTool, okTraces, minFreq);
-  if (!tb.ok) {
-    return { ok: false, reason: `工具 ${g.matchedTool} 成功轨迹不足 (${tb.count}/${tb.minFreq})` };
-  }
-  // 4. held-out 回归: 若提供, 要求接地工具在 held-out 子集也有 ≥ceil(minFreq/2) 条成功轨迹背书 (防过拟合训练集)
-  if (heldOutTraces && Array.isArray(heldOutTraces)) {
-    const ho = verifyHeldOut({ tool: g.matchedTool, heldOutTraces, minFreq });
-    if (!ho.ok) {
-      return { ok: false, reason: `工具 ${g.matchedTool} held-out 回归轨迹不足 (${ho.count}/${ho.need}), 疑似过拟合训练集` };
+
+  // 5) held-out 回归 (可选): 样本够多时切出的未见子集也要有背书, 防过拟合
+  if (Array.isArray(heldOutTraces) && heldOutTraces.length) {
+    const heldCount = heldOutTraces.filter((t) => t && t.tool === matchedTool).length;
+    if (heldCount < 1) {
+      return { ok: false, reason: `held-out 子集中无 ${matchedTool} 的背书 (疑似过拟合)`, matchedTool, traceCount };
     }
   }
-  return { ok: true, matchedTool: g.matchedTool, traceCount: tb.count, heldOutCount: (heldOutTraces && Array.isArray(heldOutTraces)) ? traceBacked(g.matchedTool, heldOutTraces, 1).count : null };
+
+  return { ok: true, reason: null, matchedTool, traceCount, name };
 }
 
-// 技能升级专用验收 (用中自进化): 不重新做 grounding (创建时已接地验证),
-// 重点防止退化: 缺段落 / 正文缩水 / 变空。返回 { ok, reason, changed }
-export function verifyUpgradeSkill({ content, prevContent }) {
-  const c = String(content || "").replace(/^---[\s\S]*?---\s*/, ""); // 剥 frontmatter (skills.read 返回 ---meta--- 全文)
-  const p = String(prevContent || "").replace(/^---[\s\S]*?---\s*/, "");
-  // 1. 结构验收 (必须仍含 流程+验证)
-  const s = requiredSections(c);
-  if (!s.ok) return { ok: false, reason: "升级版缺必需段落: " + s.missing.join(", ") };
-  // 2. 正文不缩水 (去段落标题后比旧版短 = 退化)
-  const bodyNow = c.replace(/##\s*\S+/g, "").trim();
-  const bodyPrev = p.replace(/##\s*\S+/g, "").trim();
-  if (bodyNow.length < 20) return { ok: false, reason: "升级版内容太短" };
-  if (bodyPrev.length && bodyNow.length < bodyPrev.length * 0.6) {
-    return { ok: false, reason: "升级版正文缩水 (" + bodyNow.length + "<" + Math.ceil(bodyPrev.length * 0.6) + "), 疑似退化" };
+// 升级闸门: 防退化 (结构不缩水 + 正文不缩水) + 必须真的有变化
+// opts: { content, prevContent }
+export function verifyUpgradeSkill({ content = "", prevContent = "" } = {}) {
+  const next = String(content || "").trim();
+  const prev = String(prevContent || "");
+  if (!next) return { ok: false, reason: "升级结果为空" };
+
+  // 1) 结构: 不得丢掉必需章节 (防"改着改着把验证段删了")
+  const missing = missingSections(next);
+  if (missing.length) return { ok: false, reason: "升级版缺少必要章节: " + missing.join(" / ") };
+
+  // 2) 实质长度
+  if (next.length < MIN_CONTENT_LEN) return { ok: false, reason: `升级版内容太短 (< ${MIN_CONTENT_LEN} 字)` };
+
+  // 3) 缩水检测: 相对旧版大幅变短即判退化
+  if (prev.trim() && next.length < prev.trim().length * MIN_UPGRADE_RATIO) {
+    return { ok: false, reason: `升级版正文缩水 (${next.length} < ${prev.trim().length} × ${MIN_UPGRADE_RATIO})` };
   }
-  const changed = bodyNow !== bodyPrev;
-  return { ok: true, changed };
+
+  const changed = next !== prev.trim();
+  if (!changed) return { ok: false, reason: "升级版与旧版完全相同, 无实质变化", changed: false };
+
+  return { ok: true, reason: null, changed: true };
 }

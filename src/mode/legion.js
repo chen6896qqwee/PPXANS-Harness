@@ -42,8 +42,11 @@ export async function legionExecutor(agent, userMsg, { sessionKey = "default", l
 
   try {
     const results = await L.broadcast("chat", userMsg);
-    const ok = results.filter((r) => r.status === "fulfilled" && r.value && r.value.reply);
-    if (ok.length) return ok[0].value.reply;
+    // 真实 broadcast 返回形状: { agent, id, type:'reply', reply } 或 { agent, type:'error', error }
+    // (曾误写成 { status:'fulfilled', value:{ reply } } —— 那是测试桩伪造的形状, 导致此处恒为空,
+    //  军团 broadcast 模式在真实环境永远走兜底串)
+    const ok = results.filter((r) => r && r.type === "reply" && r.reply);
+    if (ok.length) return ok[0].reply;
   } catch (e) {
     warn("[legion] broadcast 失败:", e.message);
   }

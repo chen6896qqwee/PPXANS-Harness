@@ -6,6 +6,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { ensureDir } from "./store.js";
+import { debug } from "../utils/logger.js";
 
 export function walFileOf(file) {
   return file + ".wal";
@@ -34,5 +35,5 @@ export function readWal(walFile) {
 
 // 清空 WAL (compact 成功后调用; 与 append 同一锁内执行, 防丢事件)
 export function truncateWal(walFile) {
-  try { fs.rmSync(walFile, { force: true }); } catch {}
+  try { fs.rmSync(walFile, { force: true }); } catch (e) { debug(`[utils/wal] 已忽略异常: ${e && e.message ? e.message : e}`); }
 }

@@ -13,6 +13,29 @@ function write(root, rel, content) {
   fs.writeFileSync(p, content, "utf8");
 }
 
+// --- 签名渲染 (2026-10-02 深度优化): rank 数值 → 定义行签名 + file:line ---
+
+test("repo-map 渲染函数签名与 file:line 出处 (而非 rank 数值)", () => {
+  const root = tmpRoot("sig");
+  write(root, "src/calc.js", "export function calcDiscount(n){\n  return n * 0.9;\n}\nexport const RATE = 0.9;\n");
+  write(root, "app.js", "import { calcDiscount } from \"./src/calc.js\";\nconsole.log(calcDiscount(10));\n");
+  clearRepoMapCache();
+  const map = renderRepoMap(root, { tokenBudget: 1024 });
+  assert.ok(map.text.includes("export function calcDiscount(n)"), "应渲染签名原文");
+  assert.ok(map.text.includes("src/calc.js:1"), "应带 file:line 出处");
+  assert.ok(!map.text.includes("rank 0."), "不应再输出 rank 数值噪音");
+});
+
+test("repo-map 签名超长截断 + token 预算仍生效", () => {
+  const root = tmpRoot("siglong");
+  const longLine = "function " + "x".repeat(200) + "(){}";
+  write(root, "big.js", longLine + "\n");
+  clearRepoMapCache();
+  const map = renderRepoMap(root, { tokenBudget: 120 });
+  assert.ok(map.text.length < 2000, "预算内应截断");
+  assert.ok(!map.text.includes("x".repeat(130)), "签名应截到 120 字符内");
+});
+
 test("scanRepo: 递归收集 js 文件并提取互相引用的 def", () => {
   const root = tmpRoot("a");
   write(root, "a.js", "function alpha() { beta(); }\nmodule.exports = alpha;");

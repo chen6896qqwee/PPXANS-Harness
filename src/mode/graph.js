@@ -2,6 +2,7 @@
 // 显式工作流编排: 按节点顺序执行, 每个节点走 react 工具循环, 结果 checkpoint 到会话日志。
 // 适合: 企业级、可审计、可恢复的确定性流程。当前为顺序 DAG, 未来可扩展依赖/并行。
 import { buildMessages } from "./index.js";
+import { debug } from "../utils/logger.js";
 
 // 归一化 workflow 节点: 接受字符串数组或 { name, task } 对象数组
 export function normalizeNodes(workflow) {
@@ -34,7 +35,7 @@ export async function graphExecutor(agent, userMsg, { sessionKey = "default", wo
       r = `(节点 ${node.name} 失败: ${e.message})`;
     }
     // checkpoint: 节点结果落会话日志, 崩溃后可恢复/审计
-    try { agent.sessionStore.append(sessionKey, "tool/result", { content: `[workflow:${node.name}] ${r}` }); } catch {}
+    try { agent.sessionStore.append(sessionKey, "tool/result", { content: `[workflow:${node.name}] ${r}` }); } catch (e) { debug(`[mode/graph] 已忽略异常: ${e && e.message ? e.message : e}`); }
     results.push(`节点[${node.name}]:\n${r}`);
   }
   return results.join("\n\n");

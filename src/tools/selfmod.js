@@ -2,8 +2,10 @@
 // 参考 deepseek-harness 的 self-modification: agent 能检查/挂载/卸载自己的运行时能力
 // 这里落地为"能力级自修改": 枚举能力(工具+技能) / 启用 / 禁用 / 加载技能, 不破坏零依赖内核
 import { SkillLoader } from "../skills/loader.js";
+import { scoreSkills } from "../skills/search.js";
 import fs from "node:fs";
 import path from "node:path";
+import { debug } from "../utils/logger.js";
 
 function capErr(name, msg) {
   return `[工具错误] ${name}: ${msg}`;
@@ -39,15 +41,16 @@ export function registerSelfmodTools(catalog, { skillsDir }) {
     },
   });
 
-  // 2. 启用能力
+  // 2. 启用能力 (+ 按需披露: 让该工具的 schema 进入下一轮 LLM 请求)
   catalog.register({
     name: "enable_capability",
-    description: "启用一个已注册但被禁用的工具能力。name 为工具名。",
+    description: "启用并加载一个工具能力 (name 为工具名)。用于加载未默认携带的工具 —— 它们的功能已在【按需工具】清单里列出, 但完整参数说明需要先启用才能调用。",
     parameters: { type: "object", properties: { name: { type: "string" } }, required: ["name"] },
     category: "selfmod",
     power: "agent",
     execute: async (args) => {
       if (!catalog.enable(args.name)) return capErr("enable_capability", `未知工具: ${args.name}`);
+      catalog.expose(args.name); // 披露给 LLM: 下一轮请求即可见其参数 schema
       return `已启用: ${args.name}`;
     },
   });
@@ -77,8 +80,25 @@ export function registerSelfmodTools(catalog, { skillsDir }) {
       const content = loader.read(args.id);
       if (content === null) return capErr("load_skill", `未知技能: ${args.id}`);
       
-      if (loader && typeof loader.trackUse === "function") { try { loader.trackUse(args.id); } catch {} }
+      if (loader && typeof loader.trackUse === "function") { try { loader.trackUse(args.id); } catch (e) { debug(`[tools/selfmod] 已忽略异常: ${e && e.message ? e.message : e}`); } }
       return `# ${args.id}\n\n${content}`;
+    },
+  });
+
+  // 4.5 技能检索 (蓝皮书 2026: 发现机制是技能生态的瓶颈 — 给 agent 一个检索入口)
+  catalog.register({
+    name: "skill_search",
+    description: "按关键词检索已安装技能, 对 name/description 打分排序返回。面对任务不确定用哪个技能时先用它发现, 再用 load_skill 读取全文。",
+    parameters: { type: "object", properties: { query: { type: "string", description: "关键词 (中英文均可)" } }, required: ["query"] },
+    category: "selfmod",
+    power: "user",
+    idempotent: true,
+    execute: async (args) => {
+      const q = String(args.query || "").trim();
+      if (!q) return capErr("skill_search", "需要 query 关键词");
+      if (!loader) return capErr("skill_search", "技能目录未装配");
+      const results = scoreSkills(loader, q).slice(0, 8);
+      return JSON.stringify({ query: q, count: results.length, results });
     },
   });
 

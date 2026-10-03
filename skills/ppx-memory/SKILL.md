@@ -1,120 +1,91 @@
 ---
 name: ppx-memory
-description: 皮皮虾四层记忆引擎——当任务需要持久记忆、跨会话召回、场景激活、用户画像提炼时使用。腾讯式 L0原始→L1原子(高斯衰减遗忘)→L2场景(关键词聚类激活)→L3画像(频率统计) 四层架构，零依赖纯Node。处理"记住XX/上次聊过XX/这个人的偏好/场景上下文"等需求。仅在实际需要读写记忆、跨会话上下文时加载，纯对话闲聊不要加。
-origin: custom
-version: 1.0.0
+description: 皮皮虾记忆引擎（ppx-memory）的读写规程与独立 CLI 用法：五层记忆结构、什么时候记、记到哪层、怎么检索与安全遗忘。涉及长期记忆、用户偏好、跨会话召回时使用。
 ---
 
-# 皮皮虾四层记忆引擎 (ppx-memory)
+# 皮皮虾记忆引擎 (ppx-memory)
 
-把皮皮虾(ppx-agent)的腾讯式记忆内核搬进 OpenClaw。四层架构，零依赖，纯 Node ESM。
+五层结构（L0 对话 → L1 原子事实 → L2 场景 → L3 画像 → L4 程序性记忆），自带高斯衰减、软删回滚、版本链与 WAL 增量落盘。
 
-## 四层架构
+本技能附带 `scripts/cli.js`，是一个**不依赖主项目**的独立可运行版本，可直接对记忆库做增删查。
 
-| 层 | 文件 | 作用 |
-|----|------|------|
-| L0 | `scripts/l0.js` | 原始对话记录，每日一个 JSONL，自动过滤噪音/命令/寒暄 |
-| L1 | `scripts/fact-store.js` | 原子记忆，高斯衰减遗忘(score·exp(-λt²))，命中加分 |
-| L2 | `scripts/l2.js` | 场景记忆，中文关键词聚类，命中自动激活场景上下文 |
-| L3 | `scripts/l3.js` | 核心画像，从记忆提炼 user.persona.md / agent.persona.md |
-| - | `scripts/memory-ticker.js` | 水位线：today.md → daily/ → longterm.md，滚动压缩 |
-| - | `scripts/experience.js` | 经验库：任务→结果→教训，自学习召回 |
-| - | `scripts/pii.js` | PII/凭证自动脱敏（API key/私钥/身份证/卡号） |
+## 流程
 
-## 数据位置
+### 1. 判断该不该记
 
-- 默认：`~/.openclaw/memory/ppx/`（可用 `PPX_MEMORY_DIR` 覆盖）
-- 结构：`memory/l0/*.jsonl`、`memory/facts.json`、`memory/l2/scenes.json`、
-  `memory/l3/user.persona.md`、`memory/today.md`、`memory/longterm.md`、`experience/lessons.json`
+只记**跨会话仍然成立**的信息：偏好、约定、稳定事实。
+不记：寒暄、提问、一次性的中间结果。（引擎已做句式过滤，但边界情况要自己判——脏记忆会喂回上下文污染判断。）
 
-## 用法
+### 2. 写入（选层）
 
-```bash
-SCRIPT=~/.openclaw/skills/ppx-memory/scripts/cli.js
+| 内容类型 | 目标层 | 工具 |
+|---|---|---|
+| 用户偏好 / 稳定事实 | L1 | `memory_add` |
+| 可复用的方法 / 流程 | L4（衰减仅 L1 的 1/4） | `memory_add`（layer=4）或 `create_skill` |
+| 场景知识 | L2 | 由 `afterTurn` 自动聚类归档 |
 
-# 写入原子记忆（自动PII脱敏）
-node $SCRIPT add "兄弟偏好 A股主板+中小板+创业板，不碰科创板688和ST" --type preference --importance 15
+内容必须**自包含**——脱离当前上下文也能读懂，否则三个月后检索出来也不知道在说什么。
 
-# 检索（关键词 + 高斯衰减排序）
-node $SCRIPT query "止损规则"
+### 3. 检索
 
-# 场景激活（返回匹配场景的人设+能力上下文块）
-node $SCRIPT scene "帮我分析今天的资金流"
+- `memory_search` 走"粗召回（倒排索引）→ 精排（BM25 × 时间新鲜度 + 命中权重 + 重要性）"，门槛 1 分。
+- 需要更宽上下文时，同时取 L2 场景与 L3 画像（`persona_read`）。
+- 疑问句/多义词可用 `queryMulti` 的查询扩展（RRF 融合多路结果）。
 
-# 组装完整记忆上下文（today + longterm + topFacts）
-node $SCRIPT context
+### 4. 遗忘（可回滚）
 
-# 记录一轮对话到水位线
-node $SCRIPT tick u:"用户说的话" a:"助手回复"
-
-# 沉淀经验
-node $SCRIPT learn --task "跑资金流扫描" --outcome "东财被风控" --lesson "东财push2间歇HTTP000,用问财兜底" --tags "数据源,兜底"
-
-# 构建用户画像
-node $SCRIPT persona --force
+```
+memory_forget        → 软删（状态置 deleted，检索立即不可见，数据保留）
+memory_restore       → 回滚（恢复即视为一次访问，避免刚恢复就被衰减清空）
+memory_list_deleted  → 复核已遗忘条目（含原因与时间）
+memory_clear_layer   → 按层清理（默认软删，hard=true 才物理删除）
 ```
 
-## 集成到 OpenClaw 的时机
+**分不清该不该删时一律先软删。**
 
-1. **会话开始/唤醒**：跑 `node $SCRIPT context` 拿记忆上下文块注入 prompt
-2. **每次对话后**：`tick u:... a:...` 记入水位线；关键事实 `add`
-3. **跨会话查询**：`query "关键词"` 召回相关记忆
-4. **任务失败/踩坑**：`learn` 沉淀，下次同类任务 `lessons` 召回
-5. **定期**：`persona --force` 重炼用户画像
+### 5. 迁移
 
-## 安全
+`memory_export` / `memory_import` 用于换机或备份。导入前确认 `mode`：`merge`（按内容去重）还是 `replace`（整体替换，**会覆盖现有库**）。
 
-- 所有写入前自动过 `pii.js` 脱敏，检测到密钥/凭证会打 `[PII]` 日志并替换为 `[REDACTED]`
-- 数据全在本地 `~/.openclaw/memory/ppx/`，不上云
-- 高斯衰减：lambda 默认 0.02/天，长时间不访问的记忆自动淡出
-## ⚠️ Windows 中文编码铁律（重要）
-
-本机 PowerShell → node 传中文 **不可靠**（系统代码页 936/GBK，exec 传命令时好时坏）。
-**禁止**把中文直接写进 exec 命令/argv/stdin。
-
-### 可靠用法（写→验→重跑）
-1. 用 here-string 写 spec 文件（UTF-8）：`[System.IO.File]::WriteAllText(path, $spec, (New-Object System.Text.UTF8Encoding($false)))`
-2. **必须验证**：用 OpenClaw 的 `read` 工具读回 spec 文件，确认中文无损；或 node 读字节检测乱码（`/鍏|鍥|鐩|鏉/`）
-3. 若乱码 → 重写一次。exec 编码抽风，重写通常能过
-4. 再 `node cli.js --spec <file>`
-
-### 识别乱码
-- 正确中文：`兄弟偏好A股`
-- GBK 乱码特征：`鍏勫紵`、`浣犲ソ`、`杩欎釜`、`鐨勮`（UTF-8 被当 GBK 读）
-- 检测命令：`node -e "const s=require('fs').readFileSync('<file>','utf8');console.log(/鍏|鍥|鐩|鏉/.test(s)?'MANGLE':'ok')"`
-
-### 数据目录
-- 默认 `~/.openclaw/memory/ppx/`，可用 `PPX_MEMORY_DIR` 覆盖
-- 测试请用独立目录，避免污染生产数据
-## 会话持久化（解决"重启丢失历史"）
-
-每个 sessionKey 落盘为 `sessions/<key>.jsonl`，重启不丢。
+### 6. 独立 CLI 用法（不依赖主项目）
 
 ```bash
-# 追加一轮对话
-spec: { "cmd":"session-push", "content":"消息内容", "flags":{"session":"trading","role":"user"} }
-# 读取会话(最近50轮)
-spec: { "cmd":"session-load", "content":"trading" }
-# 列出所有会话
-spec: { "cmd":"session-list" }
+# 写入一条原子记忆（自动 PII 脱敏）
+node skills/ppx-memory/scripts/cli.js add "用户偏好深色主题"
+
+# 检索
+node skills/ppx-memory/scripts/cli.js search "主题偏好"
+
+# 组装完整上下文（今日 + 长期摘要 + 高分事实）
+node skills/ppx-memory/scripts/cli.js context
+
+# 读取最近会话
+node skills/ppx-memory/scripts/cli.js session --limit 50
+
+# 软删 / 回滚
+node skills/ppx-memory/scripts/cli.js forget <id>
+node skills/ppx-memory/scripts/cli.js restore <id>
 ```
 
-- 单会话最多 200 轮，超出滚动截断；单条消息截断 2000 字
-- sessionKey 仅允许字母数字 `_` `-`，其余自动替换为 `_`
+数据目录默认 `<root>/data`，可用环境变量 `PPX_DATA_DIR` 覆盖。
+
+### 7. 集成到 OpenClaw 的时机
+
+满足以下任一条时，把本技能的 `scripts/` 目录挂到目标 harness：
+- 目标 harness 没有持久记忆，但需要跨会话召回用户偏好；
+- 需要与主项目的记忆库**共享同一份数据**（同一 `PPX_DATA_DIR`）；
+- 只想用记忆能力、不想引入整个 Agent 内核。
+
+> 注意：独立版与主项目 `src/memory/` 共享数据格式。**同一数据目录不要被两个进程同时写入**（主项目有文件锁，独立 CLI 也有，但跨进程仍建议串行使用）。
 
 ## 反合理化
 
-- "这一步可以跳过，直接记住就行" → 反驳：不先 `query` 去重就 `add`，会重复记相同事实；先去重是记忆质量的前提。
-- "先不脱敏，内容没有敏感信息" → 反驳：PII 脱敏是自动的、零成本，跳过它等于把密钥写进明文记忆文件。
-- "中文直接写进 exec 命令更快" → 反驳：Windows 936 代码页会把 UTF-8 中文读成 GBK 乱码（鍏勫紵），必须先写 UTF-8 文件再读回验证。
+- "先记下来再说"——记忆越用越脏，且会喂回上下文。
+- "记了删不掉"——软删可回滚，别因为怕删就不敢记。
+- "把用户原话整段存进去"——提问和寒暄不该入库。
+- "L4 和 L1 一样处理"——技能应该长期留存，衰减率不同正是为此。
+- "直接改 facts.json 更快"——绕过锁会损坏 WAL 一致性，务必走工具或 CLI。
 
 ## 验证
 
-- [ ] 写入记忆后用 `query` 读回，确认内容无损（中文无乱码、无意外 `[REDACTED]`）
-- [ ] 检测到乱码特征（`/鍏|鍥|鐩|鏉/`）时已重写 UTF-8 文件
-- [ ] 测试用独立目录（`PPX_MEMORY_DIR`），未污染生产记忆
-
-## 已知限制（待改进）
-
-- **记忆检索仍为子串匹配**（FactStore.query 用 includes）——下一步接 OpenClaw 官方向量/语义检索
-- **web_search**：ppx 原 DDG HTML 正则脆弱——OpenClaw 底座下直接用 OpenClaw 的 tavily/brave，勿迁
+完成后必须确认：① 写入内容脱离上下文仍可读；② 软删→恢复可逆；③ 检索能命中刚写入的条目；④ 若用 CLI，跑完 `cli.js context` 能看到新条目。

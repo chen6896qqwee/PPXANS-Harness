@@ -16,6 +16,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { ensureDir, logicalDay } from "../utils/store.js";
+import { debug } from "../utils/logger.js";
 
 // 事件类型集 (对齐 dsh 事件域: user/assistant/tool/system)
 export const EVENTS = {
@@ -78,11 +79,11 @@ export class SessionStore {
     try {
       files = fs.readdirSync(this.dir)
         .filter((f) => f.endsWith(".jsonl") && (f === "default.jsonl" || this._isShard(f)));
-    } catch {}
+    } catch (e) { debug(`[memory/session] 已忽略异常: ${e && e.message ? e.message : e}`); }
     return files.map((f) => path.join(this.dir, f));
   }
   _removeDefaultFiles() {
-    for (const f of this._defaultFiles()) { try { fs.rmSync(f, { force: true }); } catch {} }
+    for (const f of this._defaultFiles()) { try { fs.rmSync(f, { force: true }); } catch (e) { debug(`[memory/session] 已忽略异常: ${e && e.message ? e.message : e}`); } }
   }
 
   // 读取单个 jsonl 文件的事件序列
@@ -90,9 +91,9 @@ export class SessionStore {
     const events = [];
     try {
       for (const l of fs.readFileSync(file, "utf8").split("\n").filter(Boolean)) {
-        try { const e = JSON.parse(l); if (e && e.seq && e.type && e.data) events.push(e); } catch {}
+        try { const e = JSON.parse(l); if (e && e.seq && e.type && e.data) events.push(e); } catch (e) { debug(`[memory/session] 已忽略异常: ${e && e.message ? e.message : e}`); }
       }
-    } catch {}
+    } catch (e) { debug(`[memory/session] 已忽略异常: ${e && e.message ? e.message : e}`); }
     return events;
   }
 
@@ -325,7 +326,7 @@ export class SessionStore {
       } else {
         fs.rmSync(this._file(k), { force: true });
       }
-    } catch {}
+    } catch (e) { debug(`[memory/session] 已忽略异常: ${e && e.message ? e.message : e}`); }
     this._bump();
   }
 
@@ -363,7 +364,7 @@ export class SessionStore {
       this._flushedSeq.set(k, evs[evs.length - 1].seq);
     } catch (e) {
       // v1.0.9: 落盘失败不再静默 (磁盘满/权限丢失消息不可见), 至少留日志
-      try { console.warn(`[session] 会话 ${k} 落盘失败: ${e.message}`); } catch {}
+      try { console.warn(`[session] 会话 ${k} 落盘失败: ${e.message}`); } catch (e) { debug(`[memory/session] 已忽略异常: ${e && e.message ? e.message : e}`); }
     }
   }
 

@@ -133,17 +133,19 @@ test("生命周期持久化: 状态落盘, 新实例恢复 stage/chats", () => {
   const root = tmp("lc3");
   const a1 = new PPXAgent({ root });
   for (let i = 0; i < 11; i++) a1._lifecycleTick(); // → mature, chats=11
-  a1.lifecycle.evolve(2);
-  a1.lifecycle.reproduce(1);
+  a1.lifecycle.evolve(2);     // 2026-10-03: evolve 现在是真阶段推进 mature → evolving
+  assert.equal(a1.lifecycle.stage, "evolving", "mature 后首次进化应推进到 evolving");
+  a1.lifecycle.reproduce(1);  // evolving → reproducing
+  assert.equal(a1.lifecycle.stage, "reproducing", "首次繁衍应推进到 reproducing");
   a1.shutdown();
   // 模拟重启: 重新构造 agent, 生命周期状态应从磁盘恢复
   const a2 = new PPXAgent({ root });
-  assert.equal(a2.lifecycle.stage, "mature", "重启后 stage 不归零");
+  assert.equal(a2.lifecycle.stage, "reproducing", "重启后 stage 不归零 (含新阶段语义)");
   assert.equal(a2.lifecycle.chats, 11, "重启后计数保持");
   assert.equal(a2.lifecycle.evolved, 2, "进化计数保持");
   assert.equal(a2.lifecycle.reproduced, 1, "繁衍计数保持");
   const st = a2.lifecycleStatus();
-  assert.equal(st.stage, "mature");
+  assert.equal(st.stage, "reproducing");
   a2.shutdown();
   fs.rmSync(root, { recursive: true, force: true });
 });

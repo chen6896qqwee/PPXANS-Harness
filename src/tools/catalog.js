@@ -31,10 +31,51 @@ export function consolidateDecisions(decisions) {
   return { decision: "allow", reason: null, priority: 0 };
 }
 
+// ---- 参数校验 (2026-10-03, "想记做学评"框架第 3 条: 参数要校验) ----
+// 工具声明了 JSON Schema 但此前运行时零校验 — 参数错误浪费一整轮 LLM 交互。
+// 轻量子集: required / type / enum (顶层), 未知键放行 (LLM 常带冗余键, 不因苛刻而误杀)。
+// 返回 null = 通过; 字符串 = 可行动错误信息。
+export function validateArgs(meta, args) {
+  const schema = meta?.parameters;
+  if (!schema || schema.type !== "object") return null;
+  const a = (args && typeof args === "object" && !Array.isArray(args)) ? args : {};
+  const problems = [];
+  for (const key of schema.required || []) {
+    const v = a[key];
+    if (v === undefined || v === null || (typeof v === "string" && !v.trim())) {
+      problems.push(`缺少必填参数 "${key}"`);
+    }
+  }
+  for (const [key, ps] of Object.entries(schema.properties || {})) {
+    const v = a[key];
+    if (v === undefined) continue;
+    const t = Array.isArray(v) ? "array" : typeof v;
+    if (ps.type && t !== ps.type) {
+      // 数字宽容: "42" 这类字符串数字自动转换语义提示, 不直接判死
+      if (ps.type === "number" && t === "string" && v.trim() !== "" && !isNaN(Number(v))) {
+        a[key] = Number(v);
+        continue;
+      }
+      problems.push(`参数 "${key}" 应为 ${ps.type}, 实际 ${t}`);
+      continue;
+    }
+    if (ps.enum && !ps.enum.includes(v)) {
+      problems.push(`参数 "${key}" 应为: ${ps.enum.join(" / ")}, 实际 "${v}"`);
+    }
+  }
+  return problems.length ? problems.join("; ") : null;
+}
+
 export class ToolCatalog {
   constructor() {
     this.tools = new Map(); // name -> meta (Definition + Provider)
     this.policySubscribers = []; // 策略订阅者: { fn(name,args,ctx)->Decision|null, priority, name }
+    // 工具披露策略 (2026-10-03, 上下文工程): 与 enabled **正交** —— 控制"给 LLM 看哪些",
+    // 不影响"能调用哪些"。动机: 59 个工具的 JSON schema 实测约占 6725 tok/请求,
+    // 占空会话固定开销的 82%, 而单个任务通常只用 3–5 个工具。
+    // 未披露的工具仍可被 catalog.call 调用 (内部链路与既有测试完全不受影响),
+    // 只是不出现在 toOpenAI() 的 tools 参数里; agent 可通过 enable_capability 动态披露。
+    this.exposeSet = null; // null = 全部披露 (向后兼容默认)
   }
 
   // ---- Definition + Provider 注册 ----
@@ -55,6 +96,17 @@ export class ToolCatalog {
     return had;
   }
 
+  // ---- 能力声明查询 (ZCode PermissionToolCapability 语义) ----
+  // 未声明时按 category/power 推断保守默认: system 域一律视为高风险
+  getCapability(name) {
+    const t = this.tools.get(name);
+    if (!t) return null;
+    if (t.capability) return t.capability;
+    if (t.category === "system") return { riskLevel: "high", destructive: true, sideEffect: "system" };
+    if (t.category === "net") return { riskLevel: "high", sideEffect: "network" };
+    return { riskLevel: "low", readOnly: true, sideEffect: "none" };
+  }
+
   // ---- 热挂载: 启用/禁用 ----
   enable(name) {
     const t = this.tools.get(name);
@@ -70,14 +122,42 @@ export class ToolCatalog {
     return true;
   }
 
-  // ---- OpenAI 兼容的 tools 格式 (给 LLM 用, 只含启用项) ----
+  // ---- OpenAI 兼容的 tools 格式 (给 LLM 用, 只含 启用且已披露 的项) ----
   toOpenAI() {
     return [...this.tools.values()]
-      .filter((t) => t.enabled)
+      .filter((t) => t.enabled && this.isExposed(t.name))
       .map((t) => ({
         type: "function",
         function: { name: t.name, description: t.description, parameters: t.parameters },
       }));
+  }
+
+  // ---- 披露策略 (与 enabled 正交) ----
+  // setExposure(["read_file", ...]) → 只把列出的工具给 LLM; setExposure(null) → 恢复全量
+  setExposure(names) {
+    if (names === null || names === undefined) {
+      this.exposeSet = null;
+      return;
+    }
+    this.exposeSet = new Set(names);
+  }
+
+  expose(name) {
+    if (this.exposeSet) this.exposeSet.add(name);
+    return this;
+  }
+
+  isExposed(name) {
+    return this.exposeSet === null || this.exposeSet.has(name);
+  }
+
+  // 已注册但未披露给 LLM 的工具名 (供 _context 生成"按需启用"提示)。只算 enabled 的 ——
+  // 被 tools.disabled 显式关掉的工具既不可调用也不该提示。
+  hiddenFromLLM() {
+    if (!this.exposeSet) return [];
+    return [...this.tools.values()]
+      .filter((t) => t.enabled && !this.exposeSet.has(t.name))
+      .map((t) => t.name);
   }
 
   // ---- 审计: 可选注入审计哈希链 (未注入时零开销, 保持向后兼容) ----
@@ -152,6 +232,14 @@ export class ToolCatalog {
     const meta = this.tools.get(name);
     if (!meta) {
       return `${TOOL_ERROR_PREFIX} 未知工具: ${name}`;
+    }
+    // 参数校验先行 (在权限/策略之前: 参数都错了就别问权限)
+    const argProblem = validateArgs(meta, args);
+    if (argProblem) {
+      const hint = Object.keys(meta.parameters?.properties || {}).length
+        ? ` 可用参数: ${Object.keys(meta.parameters.properties).join(", ")}`
+        : "";
+      return `${TOOL_ERROR_PREFIX} ${name}: 参数错误 — ${argProblem}.${hint}`;
     }
     info(`tool: ${name}(${JSON.stringify(args)})`);
     // P0: 策略链先行 (deny-wins) —— 免疫闸门/命令守卫/防注入在此拦截, 不可被旁路

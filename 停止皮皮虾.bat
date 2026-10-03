@@ -6,7 +6,9 @@ title Æ¤Æ¤Ïº Í£Ö¹·þÎñ
 cd /d "%~dp0"
 
 set "PORT="
-for /f "delims=" %%p in ('node "%~dp0bin\ppx-web.js" --print-port 2^>nul') do set "PORT=%%p"
+set "NODE=node"
+if exist "%~dp0runtime\node.exe" set "NODE=%~dp0runtime\node.exe"
+for /f "delims=" %%p in ('"%NODE%" "%~dp0bin\ppx-web.js" --print-port 2^>nul') do set "PORT=%%p"
 if "%PORT%"=="" set "PORT=8899"
 
 set "FOUND="

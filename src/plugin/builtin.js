@@ -2,15 +2,18 @@
 // 借鉴 deepseek-harness 的 "everything is a plugin": 每个模块是一个插件, 通过 ctx.provide 注册服务。
 // 装配顺序即依赖顺序 (依赖在前), 任何插件都可被用户插件替换或扩展。
 import path from "node:path";
-import { info } from "../utils/logger.js";
+import { info, warn } from "../utils/logger.js";
 import { Healer } from "../selfheal/healer.js";
 import { Persona } from "../persona/index.js";
-import { FactStore, MemoryTicker, Experience, L0Recorder, SceneStore, PersonaStore } from "../memory/index.js";
+import { FactStore, SqliteFactStore, MemoryTicker, Experience, L0Recorder, SceneStore, PersonaStore, LegionBoard } from "../memory/index.js";
 import { SessionStore } from "../memory/session.js";
 import {
   ToolCatalog, registerBuiltinTools, registerAdvancedTools, Scheduler,
   registerMethodTools, registerSelfmodTools, registerCustomTools, registerDocumentTools,
   registerGovernanceTools,
+  registerVoiceTools,
+  registerSandboxTools,
+  registerVadTools,
 } from "../tools/index.js";
 import { embedderFromConfig } from "../llm/embedder.js";
 import { LocalShellProvider } from "../seam/shell.js";
@@ -26,6 +29,8 @@ import { AssetHub } from "../memory/asset-hub.js";
 import { exportMemorySnapshot, mergeSnapshotBack, hasSnapshot } from "../memory/fork.js";
 // v3.0 (codex 对齐): 新工具 (repo_map/apply_patch/review_code/goal_board)
 import { registerV3Tools } from "../tools/v3.js";
+// v3.0.1 (GitHub 主流 Agent 对标): git 集成工具 (aider/Claude Code/OpenHands 标配, 带硬护栏)
+import { registerGitTools } from "../tools/git.js";
 
 // fork 工具 (供 ctx.consume("fork") 取用)
 const forkTools = { exportMemorySnapshot, mergeSnapshotBack, hasSnapshot };
@@ -72,12 +77,40 @@ export const personaPlugin = (ctx) => {
 
 export const factsPlugin = (ctx) => {
   const config = ctx.consume("config");
-  ctx.provide("facts", new FactStore(ctx.consume("dataDir"), config.memory || {}));
+  const dataDir = ctx.consume("dataDir");
+  // 记忆后端选择 (2026-10-03): "json" (默认, 向后兼容) | "sqlite" (内嵌库, FTS5+WAL) | "auto" (优先 sqlite)
+  // 选 sqlite 的收益: 增量写 (实测 800 条 18.7x 更快, JSON 版每次 add 都全量重写)、
+  //   事务级并发安全 (无文件锁忙等)、崩溃可恢复 (WAL)、数据量增大时检索不退化 (JSON 版全量重扫)。
+  // 代价: 文件体积更大 (FTS 索引+WAL), 依赖 Node >= 22.5 的 node:sqlite (不可用会自动回落 JSON)。
+  const backend = String(config.memory?.backend || "json").toLowerCase();
+  let facts = null;
+  if (backend === "sqlite" || backend === "auto") {
+    try {
+      facts = new SqliteFactStore(dataDir, config.memory || {});
+      info(`[memory] 记忆后端: SQLite 内嵌库 (FTS5=${facts.ftsReady}, WAL)`);
+    } catch (e) {
+      warn(`[memory] SQLite 后端不可用, 回落 JSON: ${e.message}`);
+    }
+  }
+  if (!facts) {
+    // 2026-10-03 深度优化 (P2 写放大): 主链路默认开启 FactStore WAL 增量落盘 ——
+    // 原默认每次变更全量原子重写 facts.json (高频对话下写放大显著, SQLite 注释自认 18.7x 差距)。
+    // WAL 模式: 变更走追加日志, 达阈值才 compact 全量写。仅主链路开启 (轻量构造/测试保持旧行为);
+    // config.memory.wal 可显式关。agent.shutdown 时 flush 兜底。
+    facts = new FactStore(dataDir, { wal: true, walThreshold: 50, ...(config.memory || {}) });
+    if (backend === "sqlite") warn("[memory] 显式指定了 sqlite 后端但不可用, 已回落 JSON");
+  }
+  ctx.provide("facts", facts);
 };
 
 export const experiencePlugin = (ctx) => {
   // 经验库走全局共享目录 (ANS 全局记忆): 跨 agent 共享经验, 写入用文件锁防并发覆盖
   ctx.provide("experience", new Experience(ctx.consume("globalDataDir") || ctx.consume("dataDir")));
+};
+
+export const legionBoardPlugin = (ctx) => {
+  // 军团共享记忆板 (2026-10-02): 走全局共享目录, 主 agent 与 worker 实时互通
+  ctx.provide("legionBoard", new LegionBoard(ctx.consume("globalDataDir") || ctx.consume("dataDir")));
 };
 
 export const sessionPlugin = (ctx) => {
@@ -150,11 +183,60 @@ export const toolsPlugin = (ctx) => {
   registerCustomTools(tools, customDir);
   // 文档加载器 (RAG: read_document / ingest_document)
   registerDocumentTools(tools, { rootDir: root });
+  // 语音能力 (ASR voice_transcribe / TTS voice_speak): 走 OpenAI 兼容端点, 零依赖
+  // v3.1: voice.asr 支持 backend:"local" (nodejs-whisper 可选依赖, 离线转写)
+  registerVoiceTools(tools, { config, rootDir: root });
+  // v3.1 新能力: 内置 JS 沙箱执行器 (CodeAct, 零依赖) + 语音活动检测 (VAD)
+  registerSandboxTools(tools, { rootDir: root });
+  registerVadTools(tools, { rootDir: root });
   // 向量化: 配了 config.embedding 则自动注入 embedder, 检索切 dense+BM25 RRF; 否则纯 BM25 兜底
   const embedder = embedderFromConfig(config);
   if (embedder) facts.setEmbedder(embedder);
+  // 军团共享记忆板 (2026-10-02): 所有 agent (主 + worker) 实时共享知识
+  const board = ctx.consume("legionBoard");
   // 多 agent 自主协作: spawn_agent 工具 (agent 自主派生子 agent 分工)
-  registerDelegateTools(tools, {});
+  // 传入军团记忆板: share_board 自动发布子任务结论 + 仲裁前自动读板
+  registerDelegateTools(tools, { board });
+  if (board) {
+    const fromName = () => ctx.consume("agent")?.config?.agent?.name || "main";
+    tools.register({
+      name: "board_publish",
+      description: "向军团共享记忆板发布一条知识/发现/结论, 所有 agent 实时可见。跨 agent 协作时用。",
+      parameters: {
+        type: "object",
+        properties: {
+          topic: { type: "string", description: "频道/主题 (如 数据分析/代码审查), 默认 general" },
+          content: { type: "string", description: "要共享的内容" },
+          tags: { type: "array", items: { type: "string" }, description: "检索标签, 可选" },
+        },
+        required: ["content"],
+      },
+      execute: async (args) => {
+        try {
+          const e = board.publish({ from: fromName(), topic: args.topic, content: args.content, tags: args.tags });
+          return JSON.stringify({ ok: true, id: e.id });
+        } catch (e) { return JSON.stringify({ error: e.message }); }
+      },
+    });
+    tools.register({
+      name: "board_query",
+      description: "查询军团共享记忆板: 看其他 agent 发布的知识/发现/结论 (实时, 跨进程)。",
+      parameters: {
+        type: "object",
+        properties: {
+          q: { type: "string", description: "关键词 (匹配内容/主题/标签)" },
+          topic: { type: "string", description: "按频道过滤, 可选" },
+          from: { type: "string", description: "按发布者过滤, 可选" },
+          limit: { type: "number", description: "返回条数, 默认 10" },
+        },
+      },
+      execute: async (args) => {
+        const rs = board.query(args);
+        if (!rs.length) return "(记忆板暂无匹配内容)";
+        return rs.map((r) => `- [${r.ts}] ${r.from}@${r.topic}: ${r.content}`).join("\n");
+      },
+    });
+  }
   // Shell 能力 seam: 命令执行解耦为可替换 provider (本地/未来沙箱/Docker)
   ctx.provide("shell", new LocalShellProvider());
   // 审计哈希链接入工具执行收口 (未启用时为 null, catalog 内部零开销跳过)
@@ -171,6 +253,8 @@ export const toolsPlugin = (ctx) => {
   });
   // v3.0 (codex 对齐): repo_map / apply_patch / review_code / goal_board
   registerV3Tools(tools, { rootDir: root, agent: ctx.consume("agent") });
+  // git 集成 (2026-10-01): status/diff/log/commit, 仅 add+commit, 禁 push/reset
+  registerGitTools(tools, { rootDir: root });
   ctx.provide("tools", tools);
   ctx.provide("toolsEnabled", config.tools?.enabled !== false);
 };
@@ -216,6 +300,7 @@ export const builtinPlugins = [
   personaPlugin,
   factsPlugin,
   experiencePlugin,
+  legionBoardPlugin, // 军团共享记忆板 (toolsPlugin 依赖, 必须在前)
   sessionPlugin,
   memoryPlugin,
   llmPlugin,

@@ -5,7 +5,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { ensureDir, readJson } from "../utils/store.js";
-import { info, warn } from "../utils/logger.js";
+import { info, warn, debug } from "../utils/logger.js";
 
 export class Healer {
   // dataDir 可选: 显式传入真实数据目录 (PPX_DATA_DIR 可能指向非默认位置)。
@@ -63,7 +63,7 @@ export class Healer {
         let st;
         try { st = fs.statSync(p); } catch { continue; } // 并发删除竞态容错
         if (st.isDirectory()) walk(p);
-        else if (f.endsWith(".tmp")) { try { fs.unlinkSync(p); } catch {} info(`cleaned tmp: ${f}`); }
+        else if (f.endsWith(".tmp")) { try { fs.unlinkSync(p); } catch (e) { debug(`[selfheal/healer] 已忽略异常: ${e && e.message ? e.message : e}`); } info(`cleaned tmp: ${f}`); }
       }
     };
 walk(this.dataDir);

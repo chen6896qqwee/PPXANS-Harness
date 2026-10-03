@@ -3,15 +3,26 @@
 //   每次失败存结构化 episode (错误类型/根因/修复/置信度), 下次相似故障检索历史辅助诊断, 自愈不再从零推理。
 // 与经验库 (Experience, L4) 互补: 经验库是"学到的教训", 本模块是"故障的结构化病历" (可检索、可回放)。
 // 纯代码可测, 检索用词法相似 (零依赖), 可升级 embedding。
-// ⚠ 接线状态 (2026-09-17 核对): 已由 evolvePlugin 装配为 ctx.provide("failures"), 但**无内置消费方**
-//   —— 没有代码在工具失败时写入 episode, 也没有代码在诊断时检索它。属"能力就绪、链路未接"。
-//   当前失败沉淀走的是经验库 (Experience) + refine 闭环; 本模块待接入才算生效。
+// ✅ 接线状态 (2026-10-03 已接入): agent/_runTool 在工具失败时 record() 写入病历,
+//   并在返回前 search() 检索历史同类故障, 把"已知根因/修法"附在错误结果后供模型参考
+//   (闭环: 失败 → 病历 → 下次同类失败直接带出历史结论, 不必从零推理)。
 import path from "node:path";
 import { ensureDir, readJson, writeJson } from "../utils/store.js";
 import { shortId } from "../utils/id.js";
 import { lexicalSimilarity } from "../evolve/playbook.js";
 
 export const FAILURE_CATEGORY = ["throttle", "network", "validation", "auth", "unknown"];
+
+// 按错误文本归类 (零依赖词法判据, 与 FAILURE_CATEGORY 一一对应)
+// 顺序即优先级: 限流/网络属瞬态, 鉴权/参数属确定性错误, 二者处置方式完全不同
+export function classifyFailure(text) {
+  const s = String(text || "").toLowerCase();
+  if (/429|rate.?limit|too many requests|限流|频率超限/.test(s)) return "throttle";
+  if (/econn|etimedout|eai_again|enotfound|socket hang up|network|timeout|超时|连接失败|网络/.test(s)) return "network";
+  if (/401|403|unauthor|forbidden|invalid.?(api.?)?key|鉴权|未授权|无权限|权限不足/.test(s)) return "auth";
+  if (/参数|校验|应为|必填|非法|invalid|required|schema|enum|validation/.test(s)) return "validation";
+  return "unknown";
+}
 
 export class FailureEpisodeStore {
   constructor(dataDir, { maxEpisodes = 500 } = {}) {

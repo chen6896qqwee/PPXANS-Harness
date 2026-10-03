@@ -6,7 +6,7 @@
 // 历史: v2.4.0 前支持 openclaw/dsh 外部引擎底座, v2.5.0 起全部移除, 只保留自研 http 底座。
 import { parseToolCalls } from "./fence.js";
 import { withRetry } from "./retry.js";
-import { warn } from "../utils/logger.js";
+import { warn, debug } from "../utils/logger.js";
 
 export class LLMClient {
   constructor(provider) {
@@ -177,7 +177,7 @@ export class LLMClient {
             const j = JSON.parse(data);
             const delta = j.choices?.[0]?.delta?.content;
             if (delta) { full += delta; onDelta && onDelta(delta); }
-          } catch {}
+          } catch (e) { debug(`[llm/client] 已忽略异常: ${e && e.message ? e.message : e}`); }
         }
       }
       return full;

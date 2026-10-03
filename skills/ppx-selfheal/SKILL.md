@@ -1,51 +1,24 @@
 ---
 name: ppx-selfheal
-description: 皮皮虾自愈引擎——当需要检查/修复记忆数据完整性、检测崩溃残留、重建损坏JSON时使用。启动体检(建目录/修损坏JSON)、崩溃检测(integrity.json)、tmp残留清理。配套 ppx-memory 数据目录做数据自愈。仅在需要自检/修复数据时加载。
-origin: custom
-version: 1.0.0
+description: 皮皮虾自愈引擎的使用与判读：启动体检、损坏数据修复、崩溃恢复、残留清理。出现数据异常、启动失败、疑似崩溃退出时使用。
 ---
 
 # 皮皮虾自愈引擎 (ppx-selfheal)
 
-把皮皮虾(ppx-agent)的 Healer 迁进 OpenClaw。零依赖纯 Node。对 ppx-memory 的记忆数据做完整性自愈。
+## 流程
 
-## 能力
+1. **跑体检**：`selfheal_run` 触发启动检查（补建缺失目录、修复损坏 JSON、清理残留）。
+2. **读结果**：关注 `integrity.json` 的 `clean` 字段 —— 上次 `clean === false` 说明上回是崩溃退出，本轮会做残留清理。
+3. **损坏隔离而非删除**：损坏的 `facts.json` 会被改名 `.corrupt-<ts>` 保留，修复后确认无用再手工清理。
+4. **阈值门禁**：发布前用 `npm run selfheal` 跑基准，`PPX_MIN_SELFHEAL` 可设通过阈值（默认 7/7）。
+5. **判读自诊断**：`self_diagnose` 聚合审计链与失败案例库，输出"症状 → 根因 → 处方"。
 
-| 功能 | 说明 |
-|------|------|
-| 启动体检 | 建缺失目录(memory/daily/experience/sessions/logs)、校验 facts.json 可解析 |
-| 损坏恢复 | facts.json 损坏时备份为 `.corrupt-<ts>` 后重建为 `[]` |
-| 崩溃检测 | 读 `integrity.json`，上次非干净退出则报警 + 清理 `.tmp` 残留 |
-| 干净标记 | heal 完成后 markClean，崩溃后 markDirty |
+## 反合理化
 
-## 数据位置
+- "重启一下就好了"——先看 integrity.json 弄清是崩溃还是正常退出，否则同一故障会反复。
+- "损坏文件直接删"——自愈的语义是隔离保留，绕过它等于放弃取证能力。
+- "自愈通过就万事大吉"——自愈保证的是数据可用，不代表业务逻辑正确。
 
-- 默认自愈 `~/.openclaw/memory/ppx/`（ppx-memory 的数据目录）
-- 可用 `PPX_MEMORY_DIR` 或 `--root <dir>` 覆盖
-- integrity.json 记录进程干净退出状态
+## 验证
 
-## 用法
-
-```bash
-SELFHEAL=~/.openclaw/skills/ppx-selfheal/scripts/cli.js
-
-# 完整自愈 (体检+修复+崩溃清理)
-node $SELFHEAL
-
-# 只检查不修复
-node $SELFHEAL --check
-
-# 指定数据目录
-node $SELFHEAL --root "C:\path\to\data"
-```
-
-## 集成时机
-
-1. **每次会话启动/唤醒**：跑 `node $SELFHEAL` 自愈记忆数据，再加载 context
-2. **记忆读写异常时**：跑 `--check` 定位损坏
-3. **崩溃后重启**：自动检测残留并清理
-
-## 与 OpenClaw 的关系
-
-- OpenClaw 有内置 healthcheck/doctor（检查配置/网关），本 skill 专注**记忆数据层的自愈**，两者互补不冲突
-- 数据全在本地，不依赖云端
+必须提供：① 自愈基准分数（`npm run selfheal`）；② 真实数据目录（非 `root/data`）已被体检的证据；③ 有损坏时的隔离文件名。

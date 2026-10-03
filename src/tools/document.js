@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import zlib from "node:zlib";
 import { ocrImage } from "./ocr.js";
+import { debug } from "../utils/logger.js";
 
 const MAX_CHARS = 20000; // 单文档返回上限
 
@@ -149,7 +150,7 @@ export async function readDocumentText(filePath, ocrOpts, _ocrFn = ocrImage) {
         for (let i = 0; i < jpegs.length; i++) {
           const tmp = path.join(tmpDir, `page-${i + 1}.jpg`);
           fs.writeFileSync(tmp, jpegs[i]);
-          try { parts.push(await _ocrFn(tmp, ocrOpts)); } catch {}
+          try { parts.push(await _ocrFn(tmp, ocrOpts)); } catch (e) { debug(`[tools/document] 已忽略异常: ${e && e.message ? e.message : e}`); }
         }
       } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });

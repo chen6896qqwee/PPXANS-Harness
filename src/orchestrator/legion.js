@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { EventEmitter } from "node:events";
-import { info, error } from "../utils/logger.js";
+import { info, error, warn, debug } from "../utils/logger.js";
 import { createLineReader, writeLine } from "../utils/ndjson.js";
 import { runDag } from "./dag.js";
 
@@ -37,6 +37,9 @@ export class Legion extends EventEmitter {
 
   // 创建一个 agent 子进程
   spawnAgent(name, { dataDir, globalDataDir, env = {} } = {}) {
+    // 未显式指定 dataDir → worker 退回默认 root(项目根) 的 data/, 即把运行数据写进生产目录。
+    // 2026-10-03: test/legion.test.js 曾因此污染真实 data/ (实测 139 个测试中唯一一个), 此处显式告警。
+    if (!dataDir) warn(`[legion] spawnAgent(${name}) 未指定 dataDir, worker 将写入默认数据目录 (可能是生产 data/)`);
     if (this.agents.has(name)) return this.agents.get(name);
     const env2 = { ...process.env, ...env };
     if (dataDir) env2.PPX_AGENT_DATA_DIR = dataDir;
@@ -57,7 +60,7 @@ export class Legion extends EventEmitter {
         // step 中间事件: 触发 onProgress 回调, 不消费 pending (等最终 reply)
         if (msg.type === "step" && msg.id && entry.pending.has(msg.id)) {
           const p = entry.pending.get(msg.id);
-          if (p && p.onProgress) { try { p.onProgress(msg); } catch {} }
+          if (p && p.onProgress) { try { p.onProgress(msg); } catch (e) { debug(`[orchestrator/legion] 已忽略异常: ${e && e.message ? e.message : e}`); } }
           return;
         }
         if (msg.id && entry.pending.has(msg.id)) {
@@ -66,7 +69,7 @@ export class Legion extends EventEmitter {
           if (msg.type === "error") reject(new Error(msg.error));
           else resolve(msg);
         }
-      } catch {}
+      } catch (e) { debug(`[orchestrator/legion] 已忽略异常: ${e && e.message ? e.message : e}`); }
     });
     proc.stdout.on("data", onLine);
     proc.on("error", (err) => {
@@ -128,21 +131,16 @@ export class Legion extends EventEmitter {
   }
 
   // 按角色分工: 把任务列表分给不同 agent
-  // ⚠️ 实验性 API: 生产代码无内置消费方 (详见 docs/ARCHITECTURE.md)。仅供在交互场景/测试里手动调用。
-  // 逐条串行派发, 吞吐低但稳定; 若需高并发的角色分工, 优先用 runDag。
+  // 2026-10-02: 串行 → 有界并行 (_mapBounded 背压, 同 broadcast/runDag 共享 maxConcurrent 口)
   async dispatch(type, tasks) {
     const names = [...this.agents.keys()];
-    const results = [];
-    for (let i = 0; i < tasks.length; i++) {
+    if (!names.length) throw new Error("军团为空, 先 spawnAgent");
+    return this._mapBounded(tasks, (task, i) => {
       const name = names[i % names.length];
-      try {
-        const r = await this.send(name, { type, message: tasks[i] });
-        results.push({ agent: name, task: tasks[i], ...r });
-      } catch (e) {
-        results.push({ agent: name, task: tasks[i], type: "error", error: e.message });
-      }
-    }
-    return results;
+      return this.send(name, { type, message: task })
+        .then((r) => ({ agent: name, task, ...r }))
+        .catch((e) => ({ agent: name, task, type: "error", error: e.message }));
+    });
   }
 
   // DAG 任务编排: 按依赖拓扑分层执行, 同层并行, 上游结果传入下游 (P3)
@@ -167,12 +165,12 @@ export class Legion extends EventEmitter {
   // v1.0.8: 先发 shutdown 优雅退出, 300ms 后兜底 kill 仍存活进程 (worker 无响应/卡死时不残留)
   async shutdownAll() {
     for (const [name] of [...this.agents]) {
-      try { this.send(name, { type: "shutdown" }).catch(() => {}); } catch {}
+      try { this.send(name, { type: "shutdown" }).catch(() => {}); } catch (e) { debug(`[orchestrator/legion] 已忽略异常: ${e && e.message ? e.message : e}`); }
     }
     // 等待退出
     await new Promise((r) => setTimeout(r, 300));
     for (const [name, entry] of [...this.agents]) {
-      try { entry.proc.kill(); } catch {}
+      try { entry.proc.kill(); } catch (e) { debug(`[orchestrator/legion] 已忽略异常: ${e && e.message ? e.message : e}`); }
     }
   }
 

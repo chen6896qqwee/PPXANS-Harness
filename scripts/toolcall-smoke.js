@@ -3,7 +3,11 @@
 // 用法: node scripts/toolcall-smoke.js   (默认 LM Studio 本地 gemma)
 import { LLMClient } from "../src/llm/client.js";
 
-const config = {
+// 2026-10-01: 默认取 config/ppx.json 首位 provider (向导写入), 免得写死 lmstudio
+import { loadConfig } from "../src/config/index.js";
+const _cfg = loadConfig(process.cwd());
+const _p = (_cfg.providers || []).find((x) => x.id === (process.env.PPX_SMOKE_PROVIDER || _cfg.providers?.[0]?.id)) || _cfg.providers?.[0];
+const config = _p ? { id: _p.id, base_url: _p.base_url, api_key: _p.api_key, model: _p.model, timeout_ms: 60000 } : {
   id: "lmstudio",
   base_url: "http://127.0.0.1:1234/v1",
   api_key: "lm-studio",

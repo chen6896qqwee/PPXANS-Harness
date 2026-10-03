@@ -44,6 +44,7 @@ const CONSUMED = {
   "providers": "src/plugin/builtin.js resolveAllLLMs + config/providers CRUD",
   // memory (decay/importance/forget 由 src/memory/fact-store.js snake 兼容读取)
   "memory.decay_per_day": "src/memory/fact-store.js FactStore 衰减率",
+  "memory.backend": "src/plugin/builtin.js factsPlugin 存储后端选择 (json/sqlite/auto)",
   "memory.hit_bonus": "src/memory/fact-store.js 命中加分",
   "memory.base_importance": "src/memory/fact-store.js 基础重要性",
   "memory.forget_speed": "src/memory/fact-store.js 遗忘速度",
@@ -57,6 +58,18 @@ const CONSUMED = {
   "tools.enabled": "src/plugin/builtin.js toolsEnabled",
   "tools.custom_dir": "src/plugin/builtin.js 自定义工具目录",
   "tools.disabled": "src/agent/index.js _applyDisabledTools + settings 启停",
+  "tools.progressive": "src/agent/index.js _applyToolExposure 渐进披露开关 (只把核心工具 schema 发给 LLM)",
+  "tools.core": "src/agent/index.js _applyToolExposure 核心工具白名单 + src/agent/prompts.js _toolsPrompt 按需清单",
+  // voice (ASR / TTS: 走 OpenAI 兼容端点, 零依赖)
+  "voice.enabled": "src/tools/voice.js voiceStatus 语音能力总开关",
+  "voice.asr.base_url": "src/tools/voice.js resolveVoice(asr) 转写端点",
+  "voice.asr.api_key_env": "src/tools/voice.js resolveVoice(asr) 密钥环境变量",
+  "voice.asr.model": "src/tools/voice.js resolveVoice(asr) 转写模型",
+  "voice.tts.base_url": "src/tools/voice.js resolveVoice(tts) 合成端点",
+  "voice.tts.api_key_env": "src/tools/voice.js resolveVoice(tts) 密钥环境变量",
+  "voice.tts.model": "src/tools/voice.js resolveVoice(tts) 合成模型",
+  "voice.tts.voice": "src/tools/voice.js resolveVoice(tts) 默认音色 (可被工具参数覆盖)",
+  "voice.tts.format": "src/tools/voice.js resolveVoice(tts) 默认输出格式",
   // plugins
   "plugins.dir": "src/agent/index.js 插件装配目录",
   // mcp

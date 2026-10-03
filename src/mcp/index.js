@@ -6,7 +6,7 @@
 // ]
 import { McpClient, extractToolResult, extractResourceText } from "./client.js";
 import { TOOL_ERROR_PREFIX } from "../tools/catalog.js";
-import { warn, info } from "../utils/logger.js";
+import { warn, info, debug } from "../utils/logger.js";
 
 // v1.0.8: MCP 工具名清洗 (只留 \w.-, 截断) — 防恶意服务器注册非法工具名/注入
 export function sanitizeMcpName(name) {
@@ -27,7 +27,7 @@ export function serverLabel(s) {
       const host = new URL(s.url).hostname.split(".").filter(Boolean);
       // 取二级域: mcp.example.com → example; www.google.com → google
       return sanitizeMcpName(host.length >= 2 ? host[host.length - 2] : host[0] || "mcp");
-    } catch {}
+    } catch (e) { debug(`[mcp/index] 已忽略异常: ${e && e.message ? e.message : e}`); }
   }
   return "mcp";
 }

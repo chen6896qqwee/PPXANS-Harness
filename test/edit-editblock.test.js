@@ -150,3 +150,34 @@ test("formatRetryFeedback: 无失败返回空串", () => {
   const r = applyAll("A", [{ path: "f", search: "A", replace: "B" }]);
   assert.equal(formatRetryFeedback(r.results, "x"), "");
 });
+
+// --- 最佳匹配窗口诊断 (2026-10-02 深度优化) ---
+
+test("not-found 附最佳匹配 hint: 行号+相似度", () => {
+  const content = "line1\nfunction calcTotal(n){\n  return n * 1.1;\n}\nline5\n";
+  // SEARCH 写错了一点 (calcTotal 写成 calcTotall, 缩进不同) → 精确/模糊都应失败, 但 hint 应指向第 2 行
+  const r = applyEditBlock(content, { search: "function calcTotall(n){\n  return n * 1.1;\n}", replace: "x" });
+  assert.equal(r.ok, false);
+  assert.equal(r.kind, "not-found");
+  assert.ok(r.hint, "应有 hint");
+  assert.equal(r.hint.line, 2, "应定位到第 2 行");
+  assert.ok(r.hint.score >= 0.5, `相似度应较高, 实际 ${r.hint.score}`);
+  assert.ok(/第 2 行附近/.test(r.error), "error 应含可行动指引");
+});
+
+test("not-found 无相似区域时 hint 为 null", () => {
+  const r = applyEditBlock("aaa\nbbb\nccc\n", { search: "xyz\n完全不同\n", replace: "x" });
+  assert.equal(r.ok, false);
+  assert.equal(r.hint, undefined, "无相似区域不应造 hint");
+});
+
+test("formatRetryFeedback: hint 带原文摘录 (±5 行带行号), 无 hint 回落首尾 20 行", () => {
+  const content = Array.from({ length: 30 }, (_, i) => `第${i + 1}行`).join("\n");
+  const results = [{ ok: false, path: "f.js", kind: "not-found", error: "未找到", search: "第10行", hint: { line: 10, score: 0.8 } }];
+  const fb = formatRetryFeedback(results, content);
+  assert.ok(fb.includes("第 5-15 行"), "应摘录 hint 附近区域");
+  assert.ok(fb.includes("10 | 第10行"), "应带行号前缀");
+  // 无 hint: 回落旧首尾 20 行模式
+  const fb2 = formatRetryFeedback([{ ok: false, path: "f", kind: "not-found", error: "x", search: "y" }], content);
+  assert.ok(fb2.includes("文件前 20 行"), "无 hint 应回落首尾模式");
+});

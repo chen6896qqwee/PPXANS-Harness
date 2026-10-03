@@ -1,151 +1,231 @@
-// src/skills/loader.js - Skill Catalog + Loader
-// 参考 deepseek-harness 的 skill package(catalog + loader): 可枚举、可发现、可加载的技能注册表
-// 扫描 <skillsDir>/*/SKILL.md, 解析 frontmatter(name/description), 提供 list/get/loadAll
+// src/skills/loader.js - 方法技能加载器 (SKILL.md 目录式)
+// 来源: Superpowers / addyosmani-agent-skills 模式 —— 技能=目录 + SKILL.md(frontmatter + ## 章节)
+// 设计要点:
+//  1) 签名缓存 (mtime+size): 内容修改/目录增删后 list()/get() 必须反映变化 (蓝皮书: 发现是生态瓶颈)
+//  2) readSection 按需读章节: 只把命中的章节喂给 LLM, 省 token
+//  3) 使用追踪 trackUse/useOf/usageAll: 用中自进化 (Hermes) 的前提是知道谁在用、谁闲置
 import fs from "node:fs";
 import path from "node:path";
-import { readJson, writeJson } from "../utils/store.js";
 
-// 解析 SKILL.md 顶部的 --- frontmatter ---
-// 支持简单 `key: value` 和 YAML 折叠块（`>` / `|`），保证多行 description 可被解析。
+// ---- frontmatter / 章节解析 (零依赖) ----
+
+// 解析 `---\nkey: value\n---` 头。无头返回 {}。
 export function parseFrontmatter(md) {
-  const m = md.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  const text = String(md || "").replace(/^\uFEFF/, "");
+  const m = text.match(/^\s*---\s*\r?\n([\s\S]*?)\r?\n\s*---\s*(?:\r?\n|$)/);
   if (!m) return {};
-  const meta = {};
-  const lines = m[1].split(/\r?\n/);
-  let key = null;
-  let block = null;
-  let blockLines = [];
-  const flush = () => {
-    if (key && block) {
-      meta[key] = block === ">"
-        ? blockLines.join(" ").replace(/\s+/g, " ").trim()
-        : blockLines.join("\n").trim();
+  const out = {};
+  for (const line of m[1].split(/\r?\n/)) {
+    const i = line.indexOf(":");
+    if (i <= 0) continue;
+    const k = line.slice(0, i).trim();
+    let v = line.slice(i + 1).trim();
+    if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+      v = v.slice(1, -1);
     }
-    key = null;
-    block = null;
-    blockLines = [];
+    if (k) out[k] = v;
+  }
+  return out;
+}
+
+// 去掉 frontmatter 后的正文
+export function stripFrontmatter(md) {
+  const text = String(md || "").replace(/^\uFEFF/, "");
+  const m = text.match(/^\s*---\s*\r?\n[\s\S]*?\r?\n\s*---\s*(?:\r?\n|$)/);
+  return m ? text.slice(m[0].length) : text;
+}
+
+// 解析二级标题章节: `## 流程` → { "流程": "正文(不含标题行)" }
+export function parseSections(md) {
+  const body = stripFrontmatter(md);
+  const out = {};
+  const lines = body.split(/\r?\n/);
+  let cur = null;
+  let buf = [];
+  const flush = () => {
+    if (cur === null) return;
+    out[cur] = buf.join("\n").trim();
   };
   for (const line of lines) {
-    const mm = line.match(/^([A-Za-z0-9_]+):\s*(.*)$/);
-    if (mm) {
+    const h = line.match(/^##\s+(.+?)\s*$/);
+    const h1 = line.match(/^#\s+(.+?)\s*$/);
+    if (h) {
       flush();
-      key = mm[1];
-      const val = mm[2].trim();
-      if (val === ">" || val === "|") {
-        block = val;
-      } else {
-        meta[key] = val;
-        key = null;
-      }
-    } else if (block && key) {
-      blockLines.push(line.trim());
+      cur = h[1].trim();
+      buf = [];
+    } else if (h1) {
+      // 一级标题不作为章节, 但结束当前章节
+      flush();
+      cur = null;
+      buf = [];
+    } else if (cur !== null) {
+      buf.push(line);
     }
   }
   flush();
-  return meta;
+  return out;
 }
 
-// 解析 SKILL.md 正文章节: "## 标题" -> 内容
-// 供按需加载 (渐进式披露): agent 可只读「反合理化」「验证」等特定段, 不用整篇读入
-export function parseSections(md) {
-  const sections = {};
-  const lines = String(md || "").split(/\r?\n/);
-  let cur = null;
-  for (const line of lines) {
-    const m = line.match(/^##\s+(.+)$/);
-    if (m) { cur = m[1].trim(); sections[cur] = ""; continue; }
-    if (cur) sections[cur] += line + "\n";
+const USAGE_FILE = ".usage.json";
+
+function readJsonSafe(file, fallback) {
+  try {
+    if (!fs.existsSync(file)) return fallback;
+    const raw = fs.readFileSync(file, "utf8");
+    if (!raw.trim()) return fallback;
+    const v = JSON.parse(raw);
+    return v && typeof v === "object" ? v : fallback;
+  } catch {
+    return fallback;
   }
-  for (const k of Object.keys(sections)) sections[k] = sections[k].trim();
-  return sections;
 }
 
 export class SkillLoader {
-  constructor(skillsDir) {
-    this.dir = skillsDir;
-    // 技能使用追踪 (source: Hermes "skill self-improves during use")
-    this.usageFile = path.join(skillsDir, ".usage.json");
-    this._usage = this._readUsage();
+  constructor(dir) {
+    this.dir = dir;
+    this._cache = new Map(); // id -> { sig, meta }
   }
 
-  _scan() {
-    if (!fs.existsSync(this.dir)) return {};
-    const out = {};
-    for (const entry of fs.readdirSync(this.dir, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue;
-      const skillMd = path.join(this.dir, entry.name, "SKILL.md");
-      if (!fs.existsSync(skillMd)) continue;
-      const raw = fs.readFileSync(skillMd, "utf8");
-      const meta = parseFrontmatter(raw);
-      out[entry.name] = {
-        id: entry.name,
-        name: meta.name || entry.name,
-        description: meta.description || "",
-        dir: path.join(this.dir, entry.name),
-        path: skillMd,
-      };
+  // 单技能签名: SKILL.md 的 mtime+size (变更即失效缓存)
+  _sigOf(file) {
+    try {
+      const st = fs.statSync(file);
+      return `${st.mtimeMs}:${st.size}`;
+    } catch {
+      return null;
+    }
+  }
+
+  _skillDirs() {
+    try {
+      return fs
+        .readdirSync(this.dir, { withFileTypes: true })
+        .filter((e) => e.isDirectory())
+        .map((e) => e.name)
+        .filter((n) => !n.startsWith(".") && n !== "node_modules");
+    } catch {
+      return [];
+    }
+  }
+
+  _load(id) {
+    const file = path.join(this.dir, id, "SKILL.md");
+    const sig = this._sigOf(file);
+    if (sig === null) {
+      this._cache.delete(id);
+      return null;
+    }
+    const hit = this._cache.get(id);
+    if (hit && hit.sig === sig) return hit.meta;
+    let raw = "";
+    try {
+      raw = fs.readFileSync(file, "utf8");
+    } catch {
+      this._cache.delete(id);
+      return null;
+    }
+    const fm = parseFrontmatter(raw);
+    const meta = {
+      id,
+      name: String(fm.name || id),
+      description: String(fm.description || ""),
+      frontmatter: fm,
+      body: stripFrontmatter(raw),
+      file,
+    };
+    this._cache.set(id, { sig, meta });
+    return meta;
+  }
+
+  // 列出全部技能 (id/name/description), 目录增删与内容修改都会反映
+  list() {
+    const ids = this._skillDirs().sort();
+    const keep = new Set(ids);
+    for (const k of [...this._cache.keys()]) if (!keep.has(k)) this._cache.delete(k);
+    const out = [];
+    for (const id of ids) {
+      const m = this._load(id);
+      if (m) out.push({ id: m.id, name: m.name, description: m.description });
     }
     return out;
   }
 
-  // 可枚举: 全部技能
-  list() {
-    return Object.values(this._scan());
-  }
-
-  // 可发现: 按 id 查
-  get(id) {
-    return this._scan()[id] || null;
-  }
-
   has(id) {
-    return !!this._scan()[id];
+    return this._load(String(id || "")) !== null;
   }
 
-  // 读取某个技能的完整 SKILL.md 内容
+  get(id) {
+    const m = this._load(String(id || ""));
+    if (!m) return null;
+    return { id: m.id, name: m.name, description: m.description, frontmatter: m.frontmatter };
+  }
+
+  // SKILL.md 正文 (去 frontmatter)。未知技能返回 null。
   read(id) {
-    const s = this.get(id);
-    if (!s) return null;
-    return fs.readFileSync(s.path, "utf8");
+    const m = this._load(String(id || ""));
+    return m ? m.body : null;
   }
 
-  // 按需读取某个技能的指定章节 (渐进式披露: 只读「反合理化」「验证」等段, 省 token)
+  // 按需读章节。章节不存在或技能不存在返回 null。
   readSection(id, section) {
-    const raw = this.read(id);
-    if (raw === null) return null;
-    const sections = parseSections(raw);
-    return sections[section] ?? null;
+    const body = this.read(id);
+    if (body === null) return null;
+    const s = parseSections(body);
+    const v = s[String(section || "")];
+    return v === undefined ? null : v;
+  }
+
+  // ---- 使用追踪 (落盘, 跨实例可读回) ----
+  _usageFile() {
+    return path.join(this.dir, USAGE_FILE);
   }
 
   _readUsage() {
-    const d = readJson(this.usageFile, null);
-    return (d && typeof d === "object") ? d : {};
+    return readJsonSafe(this._usageFile(), {});
   }
 
-  _saveUsage() {
-    try { writeJson(this.usageFile, this._usage); } catch { /* 用量统计落盘失败不影响主流程 */ }
+  _writeUsage(u) {
+    try {
+      fs.mkdirSync(this.dir, { recursive: true });
+      fs.writeFileSync(this._usageFile(), JSON.stringify(u, null, 2), "utf8");
+      return true;
+    } catch {
+      return false;
+    }
   }
 
-  // 记录一次技能使用 (load_skill 时调用)
   trackUse(id) {
-    this._usage = this._readUsage();
-    const u = this._usage[id] || { uses: 0, lastUsed: null };
-    u.uses = (u.uses || 0) + 1;
-    u.lastUsed = new Date().toISOString();
-    this._usage[id] = u;
-    this._saveUsage();
-    return u;
+    const key = String(id || "");
+    if (!key) return { uses: 0, lastUsed: null };
+    const u = this._readUsage();
+    const cur = u[key] && typeof u[key] === "object" ? u[key] : { uses: 0, lastUsed: null };
+    const next = { uses: Number(cur.uses || 0) + 1, lastUsed: new Date().toISOString() };
+    u[key] = next;
+    this._writeUsage(u);
+    return next;
   }
 
-  // 某技能使用统计
-  useOf(id) { const u = this._readUsage()[id]; return u ? { uses: u.uses || 0, lastUsed: u.lastUsed || null } : { uses: 0, lastUsed: null }; }
+  useOf(id) {
+    const u = this._readUsage();
+    const cur = u[String(id || "")];
+    if (!cur || typeof cur !== "object") return { uses: 0, lastUsed: null };
+    return { uses: Number(cur.uses || 0), lastUsed: cur.lastUsed || null };
+  }
 
-  // 全部技能使用统计
-  usageAll() { return this._readUsage(); }
+  usageAll() {
+    const u = this._readUsage();
+    const out = {};
+    for (const [k, v] of Object.entries(u)) {
+      if (!v || typeof v !== "object") continue;
+      out[k] = { uses: Number(v.uses || 0), lastUsed: v.lastUsed || null };
+    }
+    return out;
+  }
 
-  // 重置某技能使用计数 (用中自进化升级完成后调用, 防连跑)
   resetUse(id) {
-    this._usage = this._readUsage();
-    if (this._usage[id]) { this._usage[id].uses = 0; this._usage[id].lastUpgraded = new Date().toISOString(); this._saveUsage(); }
+    const key = String(id || "");
+    const u = this._readUsage();
+    delete u[key];
+    return this._writeUsage(u);
   }
 }

@@ -1,3 +1,743 @@
+## v3.2.0 (2026-10-03l) - 成本预算闸门: usageStats 金额化 + 支出上限 (发版节)
+
+> 本节起正式发布 **v3.2.0**（自 2026-10-02j 起的全部"未发布"节一并带入本版本）。全量测试 **1022 项：1018 通过 + 4 skip，0 失败**（本节新增 8 项守卫 `test/budget-cost.test.js`）。`npm pack` 干跑验证：187 文件 / 410.2 kB / 含 `skills/`。
+
+### 成本预算控制 (增强框架第 8 条收官)
+对照"Agent 变强"增强框架逐维盘点：评估/归因（eval + triage + diagnose）、上下文工程、工具重试（超时+错误双路）、规划验证（supervisor/反思闸门）、五层记忆、学习（refine/reward/playbook）、多 Agent（legion/supervisor/seam）、安全边界均已在位 —— 唯一缺口是 **usageStats 只记 token 数，无金额折算与支出上限**。本节补齐：
+- 新增 `src/llm/pricing.js`：内置常用模型价格表（USD/1M tokens，前缀最长匹配，glm-4-flash 不误入 glm-4 收费档），`config.budget.model_prices` 可覆盖（精确 > 前缀 > 内置）；未知模型 cost 记 0 **不编数字**；仅 total_tokens 无拆分时按 completion 价计（预算取保守侧）。
+- `usageStats` 增加 `cost`（USD）与 `byModel[m].cost` 维度，落盘 `usage-stats.json` 同步携带；配置了 `budget.usd` 时落盘附 `budget_usd` 快照。
+- **支出预算闸门**：`config.budget.usd`（USD，0/缺省 = 不限）达限后 `chat()/chatStream()` 拒绝继续调用模型并返回可操作的提示文案（含调整入口），tracer/bus 发出 `budget/exceeded` 事件。闸门只拦用户入口，不拦后台 refine/记忆提炼（小额，避免自学习链路断粮）。按进程累计、重启归零 —— 跨进程持久预算属外部计量职责，诚实不做。
+- 守卫测试 8 项：价格表前缀/覆盖优先级/金额折算/未知模型零编造/达限拦截 chat+chatStream/未配置零拦截/usd=0 语义。
+
+## 未发布 (2026-10-03k) - 第三轮深度优化: 剩余 P2 全清 + Supervisor 接线
+
+> 全量测试 **1014 项：1010 通过 + 4 skip，0 失败**（守卫累计 13 项 `test/audit-2026-10-03.test.js`）。
+
+### Supervisor 编排接线 (预留件清零)
+- `spawn_agent` 新增 `supervisor: true` 模式 (runSupervisor 首个产品入口)：同一任务派发多专家 (默认 2, 上限 4, 复用专家名册与只读防线) → 分歧检测 → 监督者 LLM 评审 (接受/打回带反馈重派) → 定稿整合；`fix_rounds` 控制最大轮数 (1-5)；编排后 lifecycle.reproduce 计数。
+- 至此三件预留骨架: playbook ✅ 接线 / supervisor ✅ 接线 / seam-registry 保留 (服务定位由 plugin/context 承担, 注释明示)。
+
+### 安全/正确性
+- **MCP Origin 校验修复 (重要)**: 原 `channels/http.js` 传 `skipOriginCheck: true` 且被工厂吞参 —— 双重失真。核查发现宿主 `_applyCors` 对恶意 Origin 仅"不回显 ACAO"并不拒绝, 无法独立防 DNS rebinding；改为宿主与 MCP handler **共享同一 cors 白名单** (handler 保留安全默认: 仅回环 Origin), rebinding 防线回归 handler 内。
+- **Auditor 账本哈希链化**: `verified.json` 从明文数组升级为 SHA-256 链式哈希 (对齐 audit-chain.js), 新增 `verify()` 完整性校验; guard/learning/refineSkill 全部写入方自动受益, 兼容旧账本 (legacy 前缀不算篡改)。
+- **前端流式事件配对**: `toolEls[ev.id || ev.tool]` 同名工具错配 → id 优先 + 无 id 同名 FIFO 队列串行配对。
+
+### 性能
+- **记忆写放大修复**: 主链路 FactStore 默认开启 WAL 增量落盘 (`wal: true, walThreshold: 50`, config.memory 可覆盖) —— 原每次记忆变更全量原子重写 facts.json; 变更走追加日志达阈值才 compact; `agent.shutdown` 时 flush 兜底。轻量构造/测试保持旧行为。
+
+### ANS 语义
+- **lifecycle evolving/reproducing 升为真阶段**: evolve()/reproduce() 达成时从 mature 推进 stage (原为"阶段名存在但永远不可达"的纯计数器); 持久化测试断言同步新语义。
+
+### UX / 打包
+- CLI busy 期输入从静默吞掉改为可判读提示 (`/stop` 引导); npm `files` 补 `skills/` (npm 用户技能加载不再靠 cwd 撞运气); `.gitignore` 清理死规则; a11y: toast `role="status"` + 命令面板 `listbox/option` 语义 + aria-selected 动态同步。
+
+## 未发布 (2026-10-03j) - 第二轮优化: 预留件接线 + Web UI 实时化
+
+> 落地"全部优化"轮。全量测试 **1014 项：1010 通过 + 4 skip，0 失败**（累计新增 13 项守卫 `test/audit-2026-10-03.test.js`）。
+
+### 接线 (预留件 → 真实消费链)
+- **语境 Playbook** (`src/evolve/playbook.js`): 引擎就绪但零消费 → 三线接线：
+  - `agent/index.js` 持有 `ctx.consume("playbook")`，`prompts.js` 新增 `_playbookPrompt()` 注入 system prompt（bullets 为空时返回空串，零 token 成本）；
+  - `LearningService.refine` 教训过闸后自动 `apply(ADD)` 沉淀为 playbook bullet（grow-and-refine 去重内置）。
+- **协议总线 EQ** (`src/protocol/index.js`): 零消费者 → `channels/http.js` 构造时 `eq.subscribe` → 经 SSE `/events` 广播结构化事件给 Web UI（`APPROVAL_REQUESTED` 到达即提示，不再只靠 5s 轮询）。
+- **协议总线 WAL**: `plugin/v3.js` 原硬编码 `walPath: null`（注释宣称默认落盘但从未开启）→ 默认落 `data/protocol/eq.wal.jsonl`（`config.protocol.wal_enabled=false` 可关），`replay()` 可用。
+
+### Web UI 主动提醒 (断链修复)
+- `HttpChannel.send` 原为 no-op（`return text`），server.js 主动提醒 ticker 的 `manager.broadcast` 到 Web UI 永远蒸发 → 新增 `GET /events` SSE 端点（鉴权兼容 Bearer 头与 `?token=` 查询参数，EventSource 无法自定义头），`send()` 广播 `{type:"reminder"}`；心跳 25s 防空闲断连，断连自动回收；前端 `connectEvents()` 订阅 + 8s 提醒横幅。
+
+### 前端死交互修复 (4 处)
+- 设置面板读 `ag.llm.model`/`j.tools`/`j.root`（bootstrap 从未返回）→ bootstrapPayload 补 `model`/`toolsCount`/`root` 字段，面板真实展示；
+- `updTokPill` 优先级 bug（total 为 0 时拼出 "undefined/undefined"）→ 显式分支；对话 done 帧补 `usage`（累计 calls/tokens），token 徽标复活；
+- token 手输死路（localStorage 读 `ppx_token` 但全站无写入点）→ 401 时 prompt 输入 token 存储并自动重试一次（同时补齐"401 无自助恢复"缺口）；
+- 工作区目录切换参数不匹配（前端发 `?path=`，后端读 `?root=`）→ 对齐为 `root`。
+
+### API 一致性
+- `memory_forget` / `memory_restore` 参数命名统一：两者均接受 `id` 与 `id_or_content`（互相兜底），schema 同步，消除同族工具参数口径不一。
+
+### 处置决策
+- **supervisor / seam-registry**：保留为预留骨架（文件头诚实标注接线状态、有单测覆盖、零运行时成本）；接线需产品拍板入口形态（supervisor 建议作为 spawn_agent 的编排模式或 CLI 命令，不在本轮擅自定）。
+
+## 未发布 (2026-10-03i) - 全面体检修复 (2×P0 + 9×P1)
+
+> 五路并行只读体检后落地修复。全量测试 **1007 项：1003 通过 + 4 skip，0 失败**（基线 1001 项零回归，新增 6 项守卫 `test/audit-2026-10-03.test.js`）。
+
+### 修复 - P0（均有实证复现）
+- **aml-server 直跑静默不启动**：入口判断正则误写 `/\\\\/g`（匹配双反斜杠），Windows argv1 单反斜杠永不匹配 → `node src/aml-server.js` 无输出退出。改用 `pathToFileURL` 规范比较。（src/aml-server.js）
+- **删除任意会话误删 default 主会话**：前端 delSession 发 `{ sessionKey }`，后端只读 `data.key` → 恒 undefined → 兜底删 default。9-18 的修复只改了后端解析、未对齐前端字段名。现在两侧字段兼容读取。（src/channels/http.js）
+
+### 修复 - P1
+- **tool 消息补标准 `tool_call_id`**：原只写非标 `_id`，严格 OpenAI 兼容后端（官方/vLLM）第二轮必 400。（src/core/policy.js）
+- **本地模型预设可用了**：lmstudio/ollama 预设 build 出的 provider 原先无 api_key → `LLMClient._request` 必抛。注入占位 key（`"local"`），与 ppx.json.example 手工模板行为对齐。（src/llm/presets.js）
+- **权限引擎异常改为 fail-closed**：原 catch 后放行（fail-open），引擎崩溃=防线全开，与 permissions 内核口径相反。现在拒绝执行并给可判读错误。（src/agent/index.js）
+- **打包不再泄漏明文密钥**：`npm run package` 原整目录复制 config/ → 会把含 api_key 的 ppx.json 打进发布物。打包时排除。（scripts/package.js）
+- **打包摆脱 python3/Info-ZIP 依赖**：解压改 PowerShell Expand-Archive、压缩改 Compress-Archive，裸 Windows 可跑。（scripts/package.js）
+- **HTTP 错误响应统一净化**：`_fail` 原样回传 e.message（含 ERR_* 内部细节），统一过 `publicErrorMessage`。（src/channels/http.js）
+- **MCP 任务失败不再僵尸 running**：`ppx.task.run` 的 agent.chat 抛错时回滚 status=failed。（src/mcp/admin.js）
+- **aml-server 加固四合一**：限流桶回收（防内存无界增长）、鉴权恒时比较、请求体 Buffer.concat 修复跨块 UTF-8 截断、非法 JSON 回 400（超限仍 413）、/health 免鉴权但仍受限流。（src/aml-server.js）
+- **桌面启动器修复**：「皮皮虾 Web.vbs」硬编码旧绝对路径 → 相对脚本定位（GBK 编码保留）；「高级菜单.bat」移除死选项 [7]（无 web/ 目录、无 web:build script）、版本横幅对齐 3.1.0。
+
+### 修复 - P2
+- **学习闭环对网络类失败失明**：`http_request` / `web_search` 的网络级失败（DNS 解析失败/连接拒绝/超时）原样返回优雅 JSON（`ok=true`），故障病历闭环（只认 `[工具错误]` 前缀）对这类最常见的执行失败完全不记录。改为统一 `[工具错误]` 前缀返回，对齐项目"工具永不 throw、错误编码进前缀"纪律。（src/tools/advanced.js）
+
+### 运行时配置
+- 补建 `config/ppx.json`（标准运行时配置，此前缺失）：智谱 glm-4-flash，`api_key_env: ZHIPU_API_KEY` 引用环境变量，**密钥零明文落盘**。注：环境中的 `DEEPSEEK_API_KEY` 实测 401 无效（key 本身问题，非本项目缺陷）。
+
+### 文档
+- README 测试数三口径（1001/989/1015）统一为实测 1007。
+
+## 未发布 (2026-10-03h) - 语音能力 + 内嵌记忆数据库 + 两处深度修复
+
+> 三件事: ① 加语音模型（ASR/TTS）② 加内嵌记忆数据库（SQLite）③ 继续深度修复。
+
+### 新增 - 语音能力（ASR + TTS），**零运行时依赖**
+- `src/tools/voice.js` → `voice_transcribe`（语音转文本）+ `voice_speak`（文本转语音）。
+- **零依赖实现**：走 OpenAI 兼容 HTTP 端点（`/audio/transcriptions`、`/audio/speech`），
+  multipart 用 Node 内置 `FormData` + `Blob`，**不引入任何 npm 包**。
+- 兼容 OpenAI / 硅基流动 / 火山 / 智谱 / 本地 whisper.cpp server 等任意 OpenAI 兼容端点。
+- 配置：`config/ppx.json` → `voice.asr { base_url, api_key_env, model }` +
+  `voice.tts { base_url, api_key_env, model, voice, format }`；未配置时工具返回**可行动的配法提示**。
+- 校验：音频格式白名单 + 25MB 上限 + 文本长度上限；错误信息指路。
+- 凭证零外泄：`api_key_env` 走环境变量，不落配置文件。
+
+### 新增 - 内嵌记忆数据库（SQLite，`config.memory.backend`）
+- `src/memory/sqlite-store.js`：基于 **Node 内置 `node:sqlite`**（Node ≥ 22.5）的内嵌库实现，
+  **接口与 FactStore 完全对齐**（19 个公开方法），可一键切换。
+- **中文检索**：FTS5 内置分词器对中文不友好（unicode61 把连续汉字当一个 token，trigram 又要求查询 ≥3 字符），
+  故采用「应用层 bigram 切分 → FTS5 存切分文本 → 查询同口径切分」，中文子串检索正常工作。
+- **WAL 模式**：读写不互斥、崩溃可恢复；事务级并发安全，不再依赖文件锁忙等。
+- 后端：`"json"`（默认，向后兼容）| `"sqlite"` | `"auto"`（优先 sqlite）；不可用时自动回落 JSON。
+- 装配点 `plugin/builtin.js:factsPlugin`；`agent.shutdown()` 会释放数据库句柄。
+
+**实测对比（800 条写入 / 200 次查询，`npm run bench:store`）**：
+
+| 后端 | 写入总耗时 | 单次查询 | 体积 |
+|---|---|---|---|
+| json | 7337 ms | 0.202 ms | 303 KB |
+| **sqlite** | **392 ms（18.7×）** | 0.467 ms | 4.6 MB |
+
+> 优化过程记录：初版 SQLite 查询 10.8ms/次（比 JSON 慢 52 倍）。逐层 profile 后定位到两处：
+> ① 精排里对每条候选重复调 `tokenize()`（改为落库 `toks` 列）；
+> ② **`ORDER BY bm25()` 与外层 JOIN 写在一起会让 SQLite 走错执行计划** ——
+> 把 bm25 排序隔离进子查询后，同样数据量从 16ms/次 降到 **0.16ms/次（100×）**。
+> 最终查询 0.467ms/次，写入快 18.7 倍。
+
+### 修复 - `_runTool` 上帝函数拆分（136 行 → 41 行）
+- 抽出 `_admitToolCall()`（PreToolUse 钩子链 + 权限引擎 + 审批缓存，50 行）与
+  `_processToolOutcome()`（注入扫描 + 事件/轨迹落库 + 故障病历回灌，51 行）。
+- 行为**逐行等价**（仅做搬移，不动语义），全量测试零回归。
+
+### 修复 - 95 处裸静默 catch 全部加固
+- `catch {}` / `catch (e) {}` → `catch (e) { debug(\`[<模块>] 已忽略异常: ${e?.message || e}\`); }`，
+  覆盖 35 个文件共 95 处；带注释的"有意静默"catch 一律跳过。
+- 动机：本会话**两次**被空 catch 咬 —— `agent/index.js` 用了 `fs` 却没 `import`（ReferenceError 被吞，
+  用量统计永不落盘）、`aml-server` 模块顶层副作用撞 ESM import 提升。
+- 新增守卫测试：`src/` 出现裸静默 catch 即失败（防新增）。
+- 注：脚本首次运行时自动插入的 logger import 相对层级算错（`src/tools/` → `src/utils/` 只需 `../`），
+  从备份还原后修正公式重跑。
+
+### 验证
+- 全量 **1015 项：1011 通过 + 4 skip + 0 失败**；自愈 7/7；eval 7/7；web:check 全过；skill-lint 11/11。
+- 内核工具数 **59 → 61**（+voice_transcribe / voice_speak）；`test/audit-2026-10-03.test.js` 增至 26 项。
+- 新增 `npm run bench:store`（存储后端对比）。全量测试后 `data/` 零残留。
+
+## 未发布 (2026-10-03g) - 失败归因闭环: 评测从"知道失败"升级到"知道为什么失败"
+
+> Agent 增强框架第 1 条说得很直白：「先建评估和日志，否则就是盲调 …… **对失败归因**」。
+> 项目的评测、轨迹、基线都有，唯独缺归因 —— 基线里 3 个失败任务清一色 90000ms 超时，
+> 但没有任何结构化结论说明"为什么卡住"，`self_diagnose` 只能写一句「需人工判定」。
+
+### 新增 - `src/services/triage.js` 失败归因模块（确定性，零 LLM）
+从执行轨迹判定根因，输出 `{cause, confidence, evidence[], action}`，`action` 直接对应
+"按症状下药"表的处方。八类根因：
+
+| 根因 | 判据 | 处方 |
+|---|---|---|
+| `llm_stall` | 跑满时限 + 工具调用 ≤2 | 单次 LLM 超时必须小于任务级时限 |
+| `loop` | 跑满时限 + 同一调用重复 ≥3 | 任务分解 + 验证器 + 重规划 |
+| `timeout_unknown` | 跑满时限 + 多次调用无重复 | 补全轨迹后重跑定位 |
+| `tool_use` | 有工具返回错误（参数/未知/权限/超时分类统计） | 结构化输出 + 参数校验 + 重试 + 沙箱 |
+| `planning` | 轮次逼近上限且无错误 | 任务分解 + 验证器 + 重规划 |
+| `verification` | 工具全成功、有产出，但判分失败 | 生成 → 验证 → 修正 |
+| `knowledge` | 几乎没查就作答 | RAG + 引用核验 + 工具查询 |
+| `unknown` | 轨迹不足以判定 | 采集更多样本 |
+
+附带 `summarizeCauses()`：按根因分布汇总，给出**主因 + 主因处方**。
+
+### 改造 - `scripts/taskbench.js` 采集轨迹并自动归因
+- `setToolEvent` 收集**工具调用序列**（tool / args / ok / error / durationMs）—— 这是三类
+  超时与工具类根因的判据来源；此前只记"成功/失败"，无从归因。
+- 失败任务自动跑 `triageFailure`，控制台即时打印 `↳ 归因[loop] 85% — 证据…`。
+- 结果与基线新增 `trace`（调用数/错误数/工具名序列）与 `triage` 字段；`--baseline` 合并时保留。
+- 汇总新增「失败归因」段：根因分布 + 主因处方。
+
+### 接线 - `self_diagnose` 消费归因
+基线失败项若带 `triage`，诊断报告直接给出确定性根因与处方，**不再回落「需人工判定」**；
+无归因数据时明确提示「重跑 taskbench 可自动归因」。
+
+### 验证
+- 全量 **1007 项：1003 通过 + 4 skip + 0 失败**。
+- `test/audit-2026-10-03.test.js` 增至 18 项（新增归因 8 类判定 / 汇总 / taskbench 代码路径守卫 /
+  self_diagnose 消费 4 项）。
+- 实测 `self_diagnose` 对当前 baseline 输出：`根因: 未归因 (重跑 taskbench 可自动归因)` —— 链路就绪，
+  只差一次真 LLM 运行即可产出确定性归因。
+
+## 未发布 (2026-10-03f) - 上下文工程: 工具渐进披露 (固定开销 -59%) + 配置隔离缺陷修复
+
+> 用「Agent 增强框架」(想/记/做/学/评 + 按症状下药) 做透镜体检，落在框架第 2 条（上下文工程）
+> 与成本症状（上下文压缩）上。实测发现**每请求 82% 的固定开销花在工具 schema 上**。
+
+### 新增 - 工具渐进披露（Progressive Tool Disclosure）
+- **诊断**：空会话下固定开销 ≈ **8172 tok/请求**，其中 `tools.toOpenAI()` 的 59 个工具 schema 占
+  **6725 tok（82%）**；而单个任务通常只用 3–5 个工具。最大浪费不在记忆、不在历史，在工具清单。
+- **实现**：`ToolCatalog` 新增**披露层**，与 `enabled` **正交** ——
+  `setExposure(list)` / `expose(name)` / `isExposed(name)` / `hiddenFromLLM()`；
+  `toOpenAI()` 改为输出「启用 **且** 已披露」的工具。
+- **关键不变式**：未披露 ≠ 不可调用。未披露的工具仍可被 `catalog.call` 调用，
+  内部链路与既有测试完全不受影响 —— 只是不进 LLM 的 `tools` 参数。
+- **按需加载**：`_context()` 新增【按需工具】清单（**只列名、不列参数**，约 240 tok），
+  agent 需要时 `enable_capability` 启用，该工具下一轮即进入 schema。
+- **配置**：`tools.progressive`（默认 true）+ `tools.core`（20 个核心工具白名单）；
+  设 `progressive: false` 可一键恢复全量披露。
+- **实测**：工具 schema **6725 → 1713 tok**，固定开销 **8172 → 3357 tok（-59%）**。
+
+### 修复 - 配置隔离缺陷（`deepMerge` 浅拷贝污染全局默认值）
+- `loadConfig` 的 `deepMerge` 用 `{ ...base }` 只做浅拷贝，**未被 override 覆盖的嵌套分支
+  沿用 `DEFAULT_CONFIG` 的同一个引用**。
+- 后果：任何实例级配置修改都会改写全局默认值 —— 实测 `c1.tools.progressive = false` 会让
+  `DEFAULT_CONFIG.tools.progressive` 一起变，且**同进程内后续所有实例与测试用例被带偏**
+  （多 agent 同进程、Web 多会话、`reloadSettings` 热改配置均中招）。
+- 修：改为先 `deepClone(base)` 再合并，实例配置与全局默认彻底隔离。
+
+### 新增 - 诊断工具
+- `npm run bench:ctx`：打印单请求上下文构成（工具 schema / 各注入段 / 合计），改工具后应重跑。
+- `npm run bench:audit`：审计链写入性能基准（守住 O(N²) 不回归）。
+
+### 验证
+- 全量 **1003 项：999 通过 + 4 skip + 0 失败**；自愈 7/7；eval 7/7；web:check 全过；skill-lint 11/11。
+- `test/audit-2026-10-03.test.js` 增至 14 项（新增渐进披露 3 项 + 配置隔离 1 项）。
+- 全量测试后生产 `data/` 零残留。
+
+## 未发布 (2026-10-03e) - 补全丢失的 skills 层 + 四项缺陷修复 + 性能与能力接线
+
+> 起点是一次完整性审计：该副本缺失 `src/skills/` **整层**，内核根本无法启动（71 个测试文件加载失败）。
+> 补齐后复测又揪出 4 个"测试全绿时潜伏"的真实缺陷，并把两个"装配了却零消费"的服务真正接上线。
+
+### 修复 - `src/skills/` 整层丢失（P0，内核不可启动）
+- 补回 `loader.js` / `search.js` / `verify.js` / `lint.js`。
+- 症状：`import('./src/agent/index.js')` → `ERR_MODULE_NOT_FOUND`；`npm test` 575 项 / 503 过 / **71 失败**；
+  Web / CLI / MCP / selfheal-bench / eval / skill-lint 全线崩溃。
+- 契约来源：完全由现有调用点（`agent/index.js:36`、`mode/router.js:5`、`tools/selfmod.js:4-5`、
+  `services/learning-service.js:14`）+ 8 个测试文件反推，零猜测。
+- 关键设计：`list()` 用 mtime+size 签名缓存（内容改动与目录增删必须实时反映）；
+  `verifySkill` 检查顺序必须是 结构→长度→接地→轨迹（否则空壳正文会误报"未引用工具"）；
+  `matchSkill` 需 ≥2 次命中且并列同分返回 null。
+
+### 补全 - `skills/` 技能目录（11 个技能 + 两套独立引擎脚本）
+- 11 个 SKILL.md：brainstorm / verify / plan / debug / ponytail / ppx-memory / ppx-selfheal /
+  prompt-depth-kit / session-naming / agent-professional-training / cupid-lover-comms。
+- `skills/ppx-memory/scripts/`（13 文件）：从 `src/memory` + `src/utils` 扁平化，import 改 `./`，
+  附 `cli.js`（add / search / context / session / forget / restore / deleted / stats / export），**不依赖主项目可独立运行**。
+- `skills/ppx-selfheal/scripts/`（4 文件）：同上，附 `cli.js`（check / crash / status / prune / heal）。
+- 实测：`node skills/ppx-memory/scripts/cli.js add "..."` → search / stats 全链路跑通。
+
+### 修复 - 军团 broadcast 契约错位（功能完全失效）
+- 生产 `orchestrator/legion.js:broadcast()` 返回 `{agent, id, type:'reply', reply}`，
+  而消费方 `mode/legion.js` 按 `{status:'fulfilled', value:{reply}}` 取值 —— 那是**测试桩伪造的形状**。
+- 后果：filter 恒空，军团 broadcast 100% 落兜底串；测试因桩喂虚构字段而一直全绿（test double drift）。
+- 修：消费方改匹配真实形状 + 桩改为真实形状 + 新增契约守卫（断言不得存在 `status` / `value` 字段）。
+
+### 修复 - 用量统计永不落盘（空 catch 掩盖 ReferenceError）
+- `agent/index.js` 调 `fs.writeFileSync` 却**从未 import fs**，ReferenceError 被空 catch 吞掉。
+- 修：补 import + 新增 shutdown 落盘回归守卫。
+
+### 修复 - 沙箱把 URL 当盘符路径
+- `permissions/index.js` 的盘符正则 `[A-Za-z]:[\\/]` 在 `curl http://x` 中匹配到 `p:/` → 判"路径越界"直接 deny。
+- 影响：`WORKSPACE_WRITE`（默认预设）下任何带 URL 的命令都跑不了，且报误导性的安全理由。
+- 修：扫描前先剔除 URL 字面量；真实越界路径仍照旧拦截（permissions 27/27 保持通过）。
+
+### 修复 - 测试污染生产 `data/`（ESM import 提升陷阱）
+- `src/aml-server.js` 在模块顶层 `const store = new FactStore(DATA, {})` —— ESM 静态 import 先于调用方代码执行，
+  于是测试里"先设 `PPX_AML_DATA` 再 `createAmlServer()`"完全无效，每跑一轮测试就往真实 `data/aml` 写 2 条记录。
+- `test/legion.test.js` 的 `spawnAgent` 不传 dataDir → worker 退回默认 root（项目根）的 `data/`，
+  把记忆库 / 审计链 / L3 画像 / 定时任务全写进生产目录（139 个测试文件中**唯一**一个）。
+- 修：aml-server 改懒初始化（import 零副作用）+ legion 测试补 tmp dataDir + `spawnAgent` 未传 dataDir 时告警。
+- 验证：全量测试跑完后 `data/` **零残留**。
+
+### 性能 - 审计链 O(N²) → O(N)
+- `audit-chain.lastHash()` 原先每次 append 都全量读日志文件，整体 O(N²)。
+- 实测：574KB 日志追加 2000 条耗时 **23.5s**。
+- 改：链头内存缓存 + 文件字节数校验（文件被外部改动才回退读盘，多进程语义不变）。
+- 结果：同规模 **0.80s（29x）**，且后段不再变慢（已线性）。新增 `npm run bench:audit` 守住这条线。
+
+### 接线 - 两个"装配了却零消费"的服务
+- **故障病历（`failures`）**：原先只装配不消费。现于 `_runTool` 接入读写闭环 ——
+  失败时写结构化病历（工具 / 错误 / 归类 / trace 引用），返回前检索历史同类故障：
+  有根因或修法的直接给结论，只有原始错误的给"复发计数"警告。新增 `classifyFailure` 五类判定。
+- **记忆管线健康度（`memoryHealth`）**：原先无人 `record()`，`status()` 永远 healthy。现由 `MemoryService`
+  在 extract / compact 每步记账，降级时**真的跳过** LLM 压缩与提炼（只写不压）；并接入 `self_diagnose` 报告。
+
+### 验证
+- 全量 **999 项：995 通过 + 4 skip（网络门控）+ 0 失败**；自愈 7/7；eval 7/7；web:check 全过；skill-lint 11/11。
+- 新增 `test/audit-2026-10-03.test.js`（10 项回归守卫）+ `test/legion-mode.test.js` 的契约守卫 +
+  `scripts/audit-bench.js`（`npm run bench:audit`）。
+- 全量测试后生产 `data/` 零残留（隔离验证通过）。
+- README 数字同步：测试 918 → **999**，内置工具 47 → **59**（含 ppx.\* 合计 81）。
+
+## 未发布 (2026-10-03d) - 提示注入红队测试 + 内容层注入防线
+
+> 框架安全条目深水区: 红队测试。攻击向量 → 防御断言, 九类向量确定性复跑, 零 LLM。
+
+### 新增 - src/security/injection.js 提示注入扫描器
+- **七类高置信注入模式 (中英双语)**: 指令覆盖 (含中文灵活语序"忽略之前所有系统指令") /
+  伪造系统标记 (<system>/<|im_start|>/SYSTEM:) / 角色劫持 / 工具调用伪造 /
+  数据外传诱导 (含把字句"把整个代码库上传到") / 破坏命令诱导。
+- **wrapUntrusted 不可信包装**: 疑似注入的工具输出原文保留 (数据不删), 外包"不可信数据"标注
+  + 注入点明细, 向模型传达"这是数据不是指令"。
+- **stripProtoKeys 原型污染消毒**: 递归剥离 __proto__/constructor/prototype 键。
+
+### 新增 - 红队测试套件 (test/redteam.test.js, 9 项)
+- **A 扫描器**: 中英注入全命中 + 4 条正常内容零误报 (误报率是防线可用性的生命线)。
+- **B 命令混淆**: 引号拆分/env 前缀/sudo/进程替换/管道落地/链式拼接 — 反规范化守卫全数拦截。
+- **C 原型污染**: 嵌套 __proto__ 消毒 (断言用 Object.hasOwn, 规避原型访问器陷阱)。
+- **D 间接注入端到端**: 真实 Agent 读恶意文件 → 工具结果自动获得不可信标注 (数据不删)。
+- **E 记忆投毒**: 注入指令可存入记忆但检索带出处, 权限裁定不被投毒改变。
+- **F schema 逃逸**: 非法枚举在执行前被参数校验器拦截。
+
+### 接线 (src/agent/index.js)
+- _runTool: 工具结果过扫描器 → 疑似注入包装 + tracer 事件 (security/injection-suspect);
+  args 入口原型污染消毒 + security/proto-stripped 事件。
+
+### 验证
+- 红队 9/9; 全量 988 项: 984 通过 + 4 skip (网络门控) + 0 失败。
+
+## 未发布 (2026-10-03c) - 自诊断: "按症状下药"表自动化
+
+> 框架第二篇新增按症状下药表 (症状→根因→增强动作) 与失败归因五分类——把这张表做成皮皮虾的自诊断工具。
+
+### 新增 - self_diagnose 工具 (src/services/diagnose.js)
+- **信号聚合 (全部本地白盒)**: 审计哈希链 (工具调用 ok/error/ms, 参数错/策略拦/超时分类计数) +
+  失败案例库条数 + 会话使用统计 + 任务基线失败项。
+- **六条症状规则**: 单工具高失败率 (>30%) / 参数拦截 / 权限拦截频繁 / 单次成本 >15k tok (建议启用
+  model_routing.aux) / 基线未通过 (列任务 id) / 失败案例堆积 (建议 --learn 复跑 + 归因分类)。
+- 零 LLM 参与, 确定性可复现; 报告含严重度分级 + 可行动处方。
+- **跨仓库防污染**: 基线只读显式传入的 rootDir, 不回落 cwd。
+
+### 实测
+- 对皮皮虾自身诊断: 正确读出 47 次调用 / 715000 tok / 基线 3 项未通过, 并开出"启用分层路由"处方
+  (它推荐的正是上一轮刚建的 model_routing.aux)。
+
+### 验证
+- 新增 test/diagnose.test.js 3 项守卫 (空数据不误报/高失败率与参数拦截/基线+案例库联动)。
+- 全量 979 项: 975 通过 + 4 skip (网络门控) + 0 失败。
+
+## 未发布 (2026-10-03b) - "想记做学评"框架对齐: 工具参数校验 + 单位成本度量 + 失败案例库联动
+
+> 用户提供了 Agent 强化框架 (想/记/做/学/评, 七维公式), 以其为审计透镜盘点皮皮虾并补齐最弱环节。
+
+### 框架审计结论
+- 已强: 评估 (taskbench/基线/验收)、记忆 (五层+经验库+失败病历)、规划 (plan-exec+反思+仲裁)、
+  多智能体 (军团+审查循环)、安全 (DSH 预设/能力门/命令守卫)。
+- **最弱环节 = 工具杠杆: 声明了 JSON Schema 但运行时零参数校验** — 参数错误浪费一整轮 LLM 交互。
+
+### 新增 - 工具参数校验器 (框架第 3 条: 参数要校验)
+- **validateArgs** (catalog 层): required / type / enum 三查; 字符串数字自动转换 (宽容);
+  未知键放行 (LLM 冗余键不误杀); 校验先于权限/策略链 (参数都错了就别问权限)。
+- 错误文案可行动: 指明缺什么/该是什么 + 列出可用参数, LLM 一轮自修正。
+- 附带收益: enum 类错误 (如 code_act 非法语言) 在工具执行前即拦截。
+
+### 新增 - 度量与学习闭环 (框架第 1/5 条)
+- **单位成本成功率**: summarize 新增 costEfficiency (通过任务数/10万 token), 汇总行展示。
+- **失败案例库联动**: taskbench --learn 将失败任务写入 FailureEpisodeStore (rootCause 含回复片段),
+  接通"评估失败 → 反思原因 → 写入记忆"的学习循环。
+
+### 验证
+- 新增 3 项守卫 (校验三查+宽容/实弹不执行/codeact 文案升级)。
+- 全量 976 项: 972 通过 + 4 skip (网络门控) + 0 失败。
+
+## 未发布 (2026-10-03a) - ZCode 吸收第三波: Wiki 陈旧感知 + 会话使用统计
+
+### 新增
+- **Wiki 陈旧检测** (checkStaleness): 源码 mtime 晚于 wiki → 标记陈旧; repo_wiki 调用时
+  陈旧自动重生成而非返回过期内容 (ZCode repo-wiki 的对话轮次自动刷新语义)。
+- **repo_wiki 能力诚实化**: 陈旧刷新会写 docs/WIKI.md → 撤销 readOnly 声明 (sideEffect: workspace)。
+- **会话使用统计**: agent._installUsageTracking 零侵入包装全部 provider (apiChat+chat),
+  累计调用次数/token/按模型分解; `usage_stats` 工具查询; shutdown 落盘 data/usage-stats.json。
+
+### 验证
+- wiki 测试 4/4 (新增陈旧检测三态: 未生成/同步/变更); usage 闭环实测 (累计→工具→落盘)。
+- 全量 974 项: 970 通过 + 4 skip (网络门控) + 0 失败。
+- 补记: 上一轮 CHANGELOG (10-02r) 因编辑与提交竞态未入库, 本轮一并提交。
+
+## 未发布 (2026-10-02r) - ZCode 深度吸收第二波: Wiki 生成器 + 数据流白盒披露
+
+> 用户诉求: 继续吸收并深度优化, 阅读两篇 ZCode 协作文章。微信原文被验证墙拦截, 改用镜像全文
+> (博客园 GLM-5.3 官方 Harness 全解析) 完成调研, 提炼出两项 ppx 尚未覆盖的机制。
+
+### 新增 - 代码库 Wiki 生成器 (ZCode repo-wiki 对齐)
+- **src/wiki/index.js**: 按目录生成架构文档 — 核心定义签名 + file:line 绑定 + mermaid 模块依赖图
+  (相对 import 解析为内部边, 节点限幅)。
+- **敏感文件排除** (ZCode 同款语义): 文件名含 token/secret/credential/password/api-key/pem/key 等一律不读不引;
+  未入扫描扩展名的文件 (txt/pem) 天然双重排除。
+- **噪音治理三级过滤**: json 键值不进正文 / md 只留一二级标题 / function·class 优先于裸 const 赋值。
+- **repo_wiki 工具** (readOnly, 可 save 写入 docs/WIKI.md) + **scripts/wiki.js** CLI。
+- 实测: 皮皮虾自身 220 文件 / 5258 定义 / 307 依赖边。
+
+### 新增 - 数据流透明披露 (ZCode NOTICE.md 模式)
+- **docs/DATA-FLOWS.md**: 按业务场景列全 7 类出站数据流 (触发条件/数据范围/去向), 审计方法可复现;
+  明确声明不做的事 (无代码快照上传/无遥测/无网关转发); 用户自担部分按 ZCode NOTICE 同款措辞。
+- 差异化定位: ZCode 用 NOTICE 重建信任, 皮皮虾从第一天就把白盒披露当作架构不变量。
+
+### 验证
+- 新增 test/wiki.test.js 3 项守卫 (敏感排除/源码绑定/mermaid 边)。
+- 全量 973 项: 969 通过 + 4 skip (网络门控) + 0 失败。
+
+## 未发布 (2026-10-02q) - 吸收智谱 ZCode: 声明式工具能力门
+
+> 用户诉求: 智谱 ZCode 开源了 (zai-org/ZCode), 吸收到皮皮虾。调研其权限子系统
+> (PermissionService/broker/approval-gate/plan-mode-policy), 选定最有架构价值的
+> 「声明式工具能力元数据」机制落地, 其余 (ask/never 预设、fail closed) 与上一轮 DSH 对齐重合。
+
+### 背景 — ZCode 权限设计精髓
+- 工具注册时自带 PermissionToolCapability: readOnly / destructive / riskLevel / alwaysAsk / sideEffect。
+- PermissionService 按元数据裁定: alwaysAsk 压过一切放行分支 (yolo/白名单直通都要问);
+  riskLevel critical/high 分级; plan 模式只允许只读非破坏工具。
+- 教训: ZCode 曾因静默上传用户代码库+Git 历史引发维权后整改开源 — 高权限工具必须显式声明能力边界。
+
+### 新增 - 声明式工具能力门
+- **ToolCatalog.getCapability(name)**: 工具→能力元数据; 未声明时按 category 保守推断 (system=high, net=high, 其他=low 只读)。
+- **9 个内建工具完成声明**: read_file/list_dir/get_time/memory_search (readOnly/low),
+  write_file/append_file (medium), delete_file/run_command (destructive/high)。
+- **引擎能力门 (b2 段)**: capabilityGate + getCapability + planEnabled + autoApproveHighRisk,
+  全部可运行时热切换; alwaysAsk/critical 必问, high 默认问, plan 模式只读直通破坏性拒绝,
+  high+never 降级拒绝 (高危不可静默放行 — CVE 教训)。
+- **agent 接线**: config.agent.capability_gate (默认开) / auto_approve_high_risk (默认关)。
+
+### 兼容性
+- capabilityGate=false 时行为与旧版逐位一致 (守卫锁定); 默认开启后唯一语义变化:
+  NEVER 模式下高风险工具由"静默放行"改为"降级拒绝" — 有意的安全收紧。
+
+### 验证
+- permissions 测试 27/27 (新增 4 项: high ask/直通、never 降级拒绝、plan 模式进退、关闸向后兼容)。
+- 全量 970 项: 966 通过 + 4 skip (网络门控) + 0 失败。
+
+## 未发布 (2026-10-02p) - 沙箱权限对齐 DeepSeek Harness (DSH)
+
+> 用户诉求: ppx 沙箱权限参考 DeepSeek 的 agent。调研 deepseek-ai/deepseek-harness 开源仓库及其
+> 沙箱/审批文档 (runoob 教程、腾讯云开发者解析、PresetSpec README), 提炼三个 ppx 缺失的机制级设计。
+
+### 调研结论 — DSH 核心设计
+- **两个独立 knob**: sandbox/mode (read-only / workspace-write / danger-full-access, 只管文件效果)
+  × approval/policy (ask / never), 权限预设层捆绑成具名预设 (PresetSpec) 供客户端单选。
+- **Fail Closed**: 应答者缺失/不负责/抛异常 → unavailable → 调用方一律拒绝; 沙箱后端缺失 →
+  SandboxUnavailableError, 静默无隔离透传永远不合法。
+- **一次性提权**: 已批准的显式模式胜过会话策略, 单次重试消费后自动还原; 提权只放宽沙箱不改审批。
+- **审批≠沙箱**: 审批是人机交接班 (高危/提权问人), 沙箱是能力边界 (文件效果隔离); 审计事件只进日志不进模型 transcript。
+- **CVE-2026-82533 教训**: 常规 bash 执行绕过审批 = 架构级漏洞, 命令执行必须在守卫管线内。
+
+### 新增 - src/permissions/index.js (DSH 对齐)
+- **PERMISSION_PRESETS 具名预设**: workspace-write+on-request (默认) / read-only+on-request /
+  danger-full-access+never (捆绑全自动, 只配可丢弃环境 — DSH 事故复盘语义)。
+  `applyPreset(engine, name)` 一键应用 + `currentPreset(engine)` 折叠 (非预设组合 → "custom")。
+- **requestEscalation(mode, {oneShot})**: 一次性提权 — check 时显式模式胜过会话沙箱策略,
+  oneShot 消费后自动还原; 提权不接管审批策略 (审批是审批, 沙箱是沙箱)。
+- **onAsk 应答者链**: check 的 ask 决策可交给异步应答者; 应答者异常/空值 → deny (fail closed);
+  NEVER 模式不进应答者链 (never 在分发前强制执行, DSH 语义)。
+
+### 已对齐项 (无需改动)
+沙箱三档与 DSH 同构; 审批四档比 DSH ask/never 更细; 命令守卫反混淆 + 硬黑名单 (CVE 教训已覆盖);
+审计哈希链独立于模型可见层。
+
+### 验证
+- permissions 测试 23/23 (新增 4 项: 预设捆绑折叠/一次性提权消费还原/应答者链三态/never 旁路)。
+- 全量 966 项: 962 通过 + 4 skip (网络门控) + 0 失败。
+
+## 未发布 (2026-10-02o) - 可选分层路由: 辅助任务走便宜模型 (不配置零影响)
+
+> 用户约束: 不强制用户必须填 — 不配置时辅助调用跟随主模型, 零配置零门槛。
+
+### 新增 - model_routing.aux (可选)
+- **配置**: `config.model_routing.aux = "<providerId>"` 或 `ppx-setup --aux deepseek` / `--aux off`。
+- **生效范围**: 记忆提取/摘要/压缩/查询扩展/学习服务等辅助调用走 aux 厂商 (主对话/工具循环/军团不变)。
+- **三级回落保障**: 不配置 → 主模型; 配错 id → 启动 warn + 主模型; 厂商不可用 (占位 Key) → 主模型。
+- 实现: agent.auxLLM 解析自 allProviders (providerId 匹配), MemoryService/LearningService 的
+  getLlm 闭包改为 `() => this.auxLLM || this.llm` — 热重载语义保持 (实时取当前 provider)。
+
+### 文档
+- docs/MODEL-SETUP.md 增补「可选: 分层路由」节。
+
+### 验证
+- 新增 test/model-routing.test.js 4 项守卫 (配置生效/未配置回落/配错回落/占位 Key 回落)。
+- 全量 963 项: 959 通过 + 4 skip (网络门控) + 0 失败。
+
+## 未发布 (2026-10-02n) - repo-map 签名化: rank 噪音换函数骨架
+
+### 优化 - src/repomap/index.js
+- **渲染升级**: 定义节点从 `名字 (rank 0.0123)` → **定义行签名原文 + file:line 出处**
+  (如 `export function calcDiscount(n){ // src/calc.js:1`)。rank 只做排序依据不再展示——
+  对 LLM 而言函数骨架的信息密度远高于一个无意义的分数。
+- 签名取定义行原文 (trim, 120 字符截断), token 预算机制不变, PageRank 排序不变。
+
+### 验证
+- 新增 2 项守卫 (签名+出处渲染/超长截断+预算), repomap 测试 6/6。
+- 全量 959 项: 955 通过 + 4 skip (网络门控) + 0 失败。
+
+## 未发布 (2026-10-02m) - 编辑失败诊断: 从瞎蒙到精准自修正
+
+### 优化 - editblock 最佳匹配窗口
+- **not-found 时自动定位"最像 SEARCH 的区域"**: 逐行归一化比较 (相等 1 分/包含 0.6 分),
+  给出行号 + 相似度百分比, 随失败信息回灌 LLM——agent 拿着原文改 SEARCH 块, 一轮命中, 不再拿
+  "未找到+首尾 20 行"瞎蒙。
+- **formatRetryFeedback 升级**: 有 hint 时摘录最佳匹配区域原文 (±5 行带行号前缀),
+  无相似区域回落旧首尾模式; apply_patch 整体回滚后 LLM 拿到的就是可直接对照的上下文。
+
+### 验证
+- 新增 3 项守卫 (hint 定位/无相似不造 hint/feedback 摘录+回落), 编辑块测试 16/16。
+- 全量 957 项: 953 通过 + 4 skip (网络门控) + 0 失败。
+
+## 未发布 (2026-10-02l) - 文件操作工具面补齐 (基线暴露缺口)
+
+### 新增
+- **append_file**: 末尾追加不覆盖原内容, 无换行结尾自动补 \\n, 不存在则创建。
+- **delete_file**: 删除工作区内文件, 目录拒绝 + safePath 防逃逸。
+- 两者补齐基线暴露的工具面缺口: 之前 agent 无追加/删除能力, 只能整体重写或绕道。
+
+### 基线更新
+- append-file 由失败翻绿: **基线 16/20 → 17/20 (85%)**。剩余 find-symbol / delete-file / extract-field
+  三项在云沙箱反复复跑均被平台掐断 (>5s 的工具调用被杀), 判定无效需在稳定环境 (用户本地 Windows 直连)
+  复跑 `node scripts/taskbench.js --only find-symbol,delete-file,extract-field --baseline` 定论。
+- 全量 954 项: 950 通过 + 4 skip (网络门控) + 0 失败。
+
+## 未发布 (2026-10-02k) - 任务级评测基准: 让「变强」可测量
+
+> 用户诉求: 按杠杆清单推进第一优先——建立外部可复现的任务成功率, 区别于自评。
+
+### 新增 - bench/ 任务级评测基准
+- **bench/tasks.js**: 20 个可确定性验证的任务, 5 大分类:
+  检索 (读配置/数文件/找符号/算数/列结构) · 文件 (创建/追加/JSON改/删/Markdown) ·
+  代码 (语法修复/逻辑修复/写函数/重构改名, node --check + ESM 求值判分) ·
+  协作 (board 往返/memory 闭环) · 多步 (读数→写报告/条件写入/JSON 生成)。
+  判分全部确定性 (文件存在/内容匹配/语法可执行/数值正确), **不用 LLM 评审**, 可复现。
+- **scripts/taskbench.js** 运行器: 沙箱隔离 (mkdtemp, 不污染仓库) · token 记账 (包装全部 provider 的
+  chat+apiChat, 工具循环走 apiChat 的坑已踩平) · 单任务 90s 护栏 (LLM 卡死不拖垮整场) ·
+  --only/--limit/--full/--baseline 参数 · summarize 汇总 (成功率/分类/token/失败明细)。
+- **bench/baseline.json**: 基线文件 (--baseline 写入), 以后每次大改动跑对比防能力退化。
+
+### 意义
+守卫型单测回答「功能没坏」; 任务级基准回答「真能干活」。这是 T0 排名话语权 (SWE-bench 式) 的地基,
+也是后续所有优化的量化标尺。
+
+### 验证
+- test/taskbench.test.js 4 项守卫 (任务集完整性/判分正反例/汇总聚合)。
+- 实弹冒烟: 3 任务 3/3 通过, 16s, 54219 tok (检索 13k / 文件 20k / 代码 20k)。
+
+## 未发布 (2026-10-02j) - 专家名册: 固化分工 (MetaGPT 式)
+
+> 用户诉求: 像多专家项目一样固化角色——代码交给代码专家, 设计交给设计专家, 各司其职。
+
+### 新增 - src/orchestrator/experts.js
+- **9 大专家名册**: code(代码)/architect(架构)/review(代码审查·只读)/test(测试)/security(安全·只读)/
+  design(设计)/docs(文档)/data(数据)/product(产品)。每个专家 = 中文名 + 专属视角 (注入 worker 对抗同质失败)。
+- **只读专家**: review/security spawn 时自动置 PPX_AGENT_READONLY=1, 禁修改类工具。
+- **resolveExpert 双向匹配**: 英文 id (code) / 中文名 (代码专家) / 简称模糊 (设计→设计专家) / 整句包含;
+  未命中返回 null, spawn_agent 静默降级为普通角色, 不炸委派。
+
+### spawn_agent 新参数
+- **expert**: 单任务指派专家; **experts**: 与 tasks 一一对应分派 (优先于 expert)。
+  专家生效优先级: 显式 perspectives > 专家视角; 显式 role > 专家中文名 (worker 命名/发板署名用专家名)。
+- 工具描述内嵌名册摘要 (listExperts), LLM 自主协作时可直接点专家名。
+
+### 验证
+- 新增 test/experts.test.js 3 项守卫 (双向匹配/只读标记/名册完整性)。
+- 全量 948 项: 944 通过 + 4 skip (网络门控) + 0 失败。
+- 三专家实弹演练通过 (scripts/expert-drill.mjs, 128s): 代码专家指出 spawnAgent 健壮性风险 / 设计专家给出
+  API Key 掩码建议 / 数据专家超时 1 项 (如实记录)。**查证**: 代码专家的 Critical 为误报——exit/error 监听、
+  pending 拒绝与 agents 清理在 v1.0.8 已实现 (src/orchestrator/legion.js), 无需改动; 评审发现须验证后再动手。
+
+## 未发布 (2026-10-02i) - 军团实弹演练通过 + 中文角色名修复
+
+> 用户诉求: 真实端到端军团演练——3 并行侦察兵走真方舟 API, 验证发板→仲裁读板全链路。
+
+### 新增
+- **scripts/legion-e2e.js**: 军团模式实弹演练脚本 (可复用验收)。真 LLM 派 3 个并行侦察兵
+  (读 README / 数 src/memory 模块 / 解析 package.json) → share_board 自动发板 → arbitrate 自动读板聚合,
+  校验板条目数 ≥ 子任务数, 全程计时。
+
+### 修复
+- **中文角色名被清洗** (实弹演练暴露): role 清洗正则 `[^\w-]` 把「侦察兵」洗成「___」,
+  记忆板 topic/from 全变下划线导致查询落空。改为保留 CJK: `[^\w\u4e00-\u9fff-]`。
+  (中文向导项目, 中文角色名是常态——这类缺陷只有真 LLM 端到端能暴露, 单测的 mock 全用英文。)
+
+### 演练结果 (真方舟 API)
+- 委派+仲裁 ~20s; 仲裁简报准确 (14 个记忆模块全数列出含新增 legion-board.js, 版本/协议/入口无误)。
+- 发板验证: 3 子任务结论自动上板, from=侦察兵_i_xxx, topic=侦察兵; 全量 945 项: 941 + 4 skip + 0 失败。
+
+## 未发布 (2026-10-02h) - share_board: 共享记忆从可用变默认协作习惯
+
+> 用户诉求: 把军团共享记忆板从「手动可用」升级为「自动协作习惯」——并行子任务结束自动发板, 仲裁前自动读板。
+
+### 新增 - spawn_agent 接入记忆板
+- **share_board 参数** (默认 true, 显式 false 关闭):
+  - **发板**: 每个并行子任务结束自动发布结论 (topic=角色, from=执行 agent, 成功/失败/熔断状态标注, 任务截 120 字+结论截 400 字);
+    review 循环在通过/熔断停放后同样发布, 熔断条目带「熔断停放」状态提示主 agent 复核。
+  - **读板**: arbitrate=true 时主 agent 仲裁提示自动注入「军团记忆板 (本角色近期发布)」上下文 (最近 20 条),
+    仲裁者能看到军团累积知识而非只看本次结果。
+- **publishToBoard / arbitrateWithBoard** (delegate.js 导出): 发布永不阻塞委派 (板满/IO 异常静默吞掉),
+  板空/无板时仲裁退化为原行为, 零破坏。
+
+### 验证
+- 新增 2 项守卫: publishToBoard (正常可见/null 板/异常吞掉) + arbitrateWithBoard (上下文注入/空板不注入/无板退化)。
+- 全量 945 项: 941 通过 + 4 skip (既有网络门控) + 0 失败。
+- 修复接线顺序 bug: registerDelegateTools 曾在 board 声明前引用 (TDZ), 已移正。
+
+## 未发布 (2026-10-02g) - 悬空修复闭环 + 军团共享记忆板
+
+> 用户诉求: 修复上轮平台故障冻结的 2 个 P0 + 视觉 E2E; 深度加强多 agent 协作军团模式, 每个 agent 共享记忆。
+
+### 修复 (悬空 P0 清偿)
+- **scripts/acceptance.js 记忆断言**: 原断言要求回复含 ok/true, 但成功文案是「好, 记下了: ...」必假失败。
+  升级为双重验证: 回复非失败文案 + 记忆库真实检索命中刚写入事实 (落库闭环)。验收 23/23 全绿。
+- **scripts/multimodal-smoke.js**: 硬编码本机截图路径 → 仓库内置测试图 (scripts/assets/test-vision.png, node 零依赖生成,
+  CRC 校验通过); provider 选择单选硬退 → 候选链降级 (本地 → vision 厂商 → 其余, 探活失败自动切换);
+  新增可行动诊断: 区分「模型不支持图像」(exit 2, 给出配置视觉模型的具体指引) 与「视觉识别失败」。
+- **config/ppx.json**: volc-coding 的 vision 标记实测修正为 false (方舟 Coding Plan 端点仅编程特化模型, 不含视觉;
+  deepseek-v4-flash 收图后报「数据不完整」, /models 列表实锤无视觉模型, 见 docs/MODEL-SETUP.md)。
+- 视觉链路验证结论: 图片传输/请求格式/降级链路全部打通 (模型真实收到并尝试解码), 唯一阻塞是 Key 权益, 非代码缺陷。
+
+### 新增 - 军团共享记忆板 (每个 agent 共享记忆)
+- **src/memory/legion-board.js LegionBoard**: 跨 agent 实时共享知识层。全局共享目录 (globalDataDir),
+  每次读/写走盘 + 文件锁, 锁内「重读→改→写」防陈旧覆盖 (并发模式对齐 Experience)。
+  与 FactStore (内存快照, 各 agent 私有) 有意区分: 私有事实不串台, 协作知识走记忆板。
+  支持 topic 频道 / tags 标签 / 发布者过滤, 容量 FIFO 裁剪 (maxEntries=500) + TTL 过期 (ttlDays=7)。
+- **board_publish / board_query 工具** (toolsPlugin): 所有 agent (主 + worker) 默认可用,
+  发布者名取 agent.config.agent.name; worker 经 PPX_AGENT_GLOBAL_DATA_DIR 与主 agent 共享同一板文件, 实时互通。
+- 实测: 主 agent 发布 → worker 独立实例立即检索命中, 反向亦通; 4 实例 × 10 并发发布 0 丢失。
+
+### 优化 - dispatch 并行化
+- **src/orchestrator/legion.js dispatch**: 串行逐条派发 → 有界并行 (_mapBounded 背压, 与 broadcast/runDag
+  共享 maxConcurrent 口), 原「实验性 API/吞吐低」注释移除, 补空军团守卫。
+
+### 验证
+- 新增 test/legion-board.test.js 4 项守卫 (跨实例实时可见 / 过滤排序 / 并发不丢 / 容量裁剪)。
+- 全量 943 项: 939 通过 + 4 skip (既有网络门控用例, 云环境无外网) + 0 失败。验收 23/23。
+
+## 未发布 (2026-10-01f) - 模型配置主流化 + MCP 统一接口
+
+> 用户诉求: 内置多家模型 API 预设, 只输 Key 即完成配置; 配置流程引导化; 集成接口统一 MCP 协议。
+
+### 新增
+- **src/llm/presets.js**: 12+ 主流厂商预设库 (DeepSeek/智谱/通义/Kimi/火山/OpenAI/Anthropic/Gemini/OpenRouter/Groq/硅基流动 + LM Studio/Ollama 本地)。
+  全部 OpenAI 兼容协议直连, 预设含 base_url/api_key_env/默认模型/Key 获取地址; buildProvider 生成与 providers 配置完全一致的对象。
+- **bin/ppx-setup.js 配置向导** (npm run setup): 选厂商 → 输入 Key (回车=用环境变量) → 自动探活 → 写入 config/ppx.json
+  (providers 首位=默认厂商, 同 id 幂等覆盖); 支持 --list / --provider --key --model 非交互模式 (CI 友好); ppx-setup 全局命令。
+- **docs/MODEL-SETUP.md**: 厂商预设总表 + 向导用法 + MCP 统一接口声明 + Claude Desktop/Cursor 一段式接入配置。
+
+### 设计
+- 接口统一收敛 MCP: 服务端 http://127.0.0.1:8899/mcp (现代流式+legacy 双兼容), tools/list + tools/call 覆盖全部能力,
+  客户端宿主 (Claude Desktop/Cursor/Cline) 一段 JSON 即接入; 亦可作 MCP 客户端挂载外部工具。
+- Key 优先写配置文件, 留空则回落 api_key_env 环境变量 (不强制落盘密钥)。
+
+### 验证
+- 新增 test/model-presets.test.js 3 项守卫 (完备性/buildProvider/幂等合并); 全量 939 项 0 失败。
+
+## 未发布 (2026-10-01e) - Git 集成工具 (GitHub 主流 Agent 对标轮)
+
+> 对标 aider 自动提交 / Claude Code / OpenHands / Cline: 版本控制是编码 Agent 的标配一等工具。
+> PPXANS 此前只有通用 run_command, 无结构化输出与防误操作护栏 — 本轮补齐。
+
+### 新增
+- **src/tools/git.js** 四工具 (category=vcs):
+  - git_status: 分支 + 结构化变更清单 (clean/entries);
+  - git_diff: 未提交/已暂存改动, 可限文件, 输出截断 4000 字符;
+  - git_log: 最近提交历史 (默认 10, 上限 50, 空仓库返回空数组);
+  - git_commit: 唯一写操作 — 仅 add+commit, message ≤500 字符, 无改动时返回可读错误。
+- 已接入 plugin/builtin.js 装配链。
+
+### 硬护栏 (设计原则)
+- 不提供 git_push / git_reset / rebase / clean / force — 无此工具即无此能力;
+- 全部 execFile 参数数组, 不经 shell, 命令注入不可能;
+- 非仓库目录返回可读错误, 不抛异常。
+
+### 验证
+- 新增 test/git-tools.test.js 6 项守卫 (临时仓库实测提交闭环); 全量 936 项 0 失败, 自愈基准 7/7。
+
+## 未发布 (2026-10-01d) - Skill 发现与路由优化 (《Skill 蓝皮书 2026》/中科大/上交大/微软 AI 课程吸收轮)
+
+> 阅读四篇资料 (ilearnai.online: JasonZhu《Skill 蓝皮书 2026》/ 中科大 ai-agent-book / 上交大 dive-into-llms / 微软 AI for Beginners)
+> 后对照项目技能体系的落地优化。核心吸收: 蓝皮书「description 是触发路由的唯一依据, 发现机制是技能生态瓶颈」+
+> 中科大「上下文工程/持续进化是一等公民」。
+
+### 新增
+- **src/skills/search.js**: 技能发现与路由打分器一等化 — name 命中加权 ×3, description 命中 ×1;
+  matchSkill 高置信阈值 (≥2 分且严格高于次高分, 并列=歧义不押注), 替代原"单 bigram 即触发"的低精度路由。
+- **skill_search 工具** (selfmod): agent 可按关键词检索技能目录 (排序返回), 三层渐进加载补上"发现"入口。
+
+### 优化
+- **SkillLoader 签名缓存**: _scan 改为 mtime+size 签名命中复用, 每条消息的 _context 不再全量重读解析全部 SKILL.md
+  (内容修改/条目增删仍即时生效)。
+- **技能目录注入加预算** (prompts._skillsPrompt): 常用优先 (usage 降序) + 描述截断 120 字 + top-16 上限,
+  其余提示用 skill_search 发现 — 目录层保持轻量, 随技能数增长不再线性膨胀。
+- **router 路径补全自进化闭环**: 复用 agent.skills (原每条消息 new loader 全量重扫) + 命中即 trackUse
+  (原路由路径绕过使用统计, auto_skill/升级闸门因此少计数)。
+- **发布门禁接入 skill-lint** (release.js 步骤 0.5): 元数据质量不达标的技能阻止发布 (评估驱动闭环)。
+
+### 验证
+- 新增 test/skills-search.test.js 4 项守卫; 全量 930 项 0 失败, 自愈基准 7/7;
+- skill-lint 现状: 3 全过 / 7 告警 / 0 不合格 (门禁可安全接入);
+- 真实目录实测: "帮我记住这个偏好"→ppx-memory (3 分) 命中, "做红烧肉" null (噪音不触发)。
+
+## 未发布 (2026-10-01c) - 安装器中文化 + Codex 风格 UI
+
+### 变更
+- **安装器全中文界面**: chcp 65001 + UTF-8, 任意系统区域正常显示; 四步中文向导 (解包/安装/快捷方式/卸载器),
+  安装完成按任意键自动启动皮皮虾; 失败分支中文提示。PowerShell 命令行内字符串保持 ASCII 防代码页串扰。
+- **前端 UI 对齐 OpenAI Codex 观感** (public/app.css token 重构):
+  - 暗色为默认主题 (近黑 #0d0d0d 底, 非纯黑), 浅色降为可选;
+  - Codex 调色板精修: surface #161615 / border #262625 / codex 橙 #d97757 点睛;
+  - 扁平化: 侧栏/抽屉与主区同底色, 靠 1px 边框分层 (去重色填充);
+  - 顶栏标题/品牌名/快捷指令/底注等宽字体化 (终端感);
+  - 用户消息去气泡化: 改为 Codex 式扁平圆角卡片 (去 accent 底色与不对称圆角);
+  - 无障碍补课: 全局 :focus-visible 焦点环 + accent 选区色 + prefers-reduced-motion (修审计 P1 焦点缺失)。
+- app.js: 未设置主题偏好时默认 dark。
+
+### 验证
+- 全量测试 926 项 0 失败, 自愈基准 7/7;
+- 无头浏览器实测: 暗色默认渲染 / 浅色切换 / 对话气泡 / 会话列表 / 未配置模型错误分支均正常;
+- 安装包重建自校验通过 (payload SHA-256 回读一致)。
+
+## 未发布 (2026-10-01b) - PC 端打包 + 启动器重构
+
+### 新增
+- **scripts/package.js**: 零依赖 PC 端打包 — Windows 便携版 zip (内置 Node 运行时, ~31MB)
+  + 单文件自解压安装器 Setup-win64.cmd (~41MB, 系统 PowerShell 解压, 装至 %LOCALAPPDATA%,
+  桌面/开始菜单快捷方式 + 卸载器, 不写注册表, 无需管理员)。
+  运行时下载带官方 SHA-256 校验, 安装器写入带 payload 回读自校验。
+  npm 快捷命令: package / package:portable / package:installer。详见 docs/PACKAGING.md。
+
+### 重构
+- 启动器统一「内置运行时优先, 系统兜底」: runtime\node.exe 存在则用之 (便携版/安装包免装 Node), 否则回退系统 node。涉及 启动皮皮虾.bat / 停止皮皮虾.bat。
+- 高级菜单.bat 版本号 v2.7.0 -> v3.0.0 (与 package.json 对齐)。
+- scripts/release.js 修复: web/ (Next.js 深度定制 UI) 子项目缺失时优雅跳过, 不再必然报错 (GitHub 仓库不含 web/)。
+
+### 验证
+- 全量测试 926 项 0 失败; 打包 payload 解包后内核冒烟 (HTTP 200 + /api/bootstrap 正常)。
+
+## 未发布 (2026-10-01) - 跨平台安全不变量 + 工具循环并发化
+
+> 外部实测轮: 全量测试 922 项 (Linux 上 1 失败暴露跨平台安全差异), 修复 + 性能优化, 新增 4 项回归守卫。
+
+### 安全
+- **safePath 跨平台盘符拒绝**: Windows 盘符路径 (C:\... / C:/... / D:...) 此前在 POSIX 宿主上会被当作普通相对路径放行
+  (可在工作区创建名为 C:\Windows 的怪异文件, 且 Windows 宿主语义与 Linux 宿主不一致)。现统一在 safePath 入口拒绝,
+  write_file / apply_patch / read_document / repo_map 等所有路径防护工具共享同一跨平台安全不变量。
+
+### 性能
+- **同轮独立工具调用并发执行** (审计 P1 遗留项): LLM 一轮返回 N 个相互独立的 tool_calls 时原先串行排队,
+  延迟线性叠加。现默认 Promise.all 并发执行, Promise 保序保证 tool 消息回传顺序与 errors 汇总顺序不变,
+  下游 recordTurn 重复检测 / 错误喂回语义不变。配置 agent.parallel_tool_calls=false 可回退串行。
+
+### 测试
+- 新增 test/parallel-tools.test.js 4 项: 并发加速 / 回传保序 / 串行回退 / 盘符路径拒绝。
+
 # CHANGELOG
 
 ## v3.0.0 (2026-09-18) — codex 对齐整体重构: 九大新层 + codex 风格 Web UI

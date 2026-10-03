@@ -1,5 +1,5 @@
 ﻿<!DOCTYPE html>
-<html lang="zh-CN" data-theme="light">
+<html lang="zh-CN" data-theme="dark">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -137,7 +137,7 @@
 
     <!-- 输入区 -->
     <div class="composer-wrap">
-      <div class="palette" id="palette" hidden></div>
+      <div class="palette" id="palette" role="listbox" aria-label="命令面板" hidden></div>
       <div class="composer" id="composer">
         <textarea id="inp" rows="1" placeholder="给皮皮虾发消息…  (/ 唤起命令)"></textarea>
         <button class="send" id="btnSend" disabled title="发送 (Enter)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><use href="#i-send"/></svg></button>
@@ -206,7 +206,7 @@
   </aside>
 </div>
 
-<div class="toast" id="toast" hidden></div>
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 <script src="/app.js"></script>
 </body>
 </html>

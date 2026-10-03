@@ -7,7 +7,7 @@ Dim fso, sh, root, bat, code
 Set fso = CreateObject("Scripting.FileSystemObject")
 Set sh  = CreateObject("WScript.Shell")
 
-root = "C:\Users\chen\Desktop\智能体项目\PPXANS-Harness"
+root = fso.GetParentFolderName(WScript.ScriptFullName)
 bat = root & "\启动皮皮虾.bat"
 
 If Not fso.FileExists(bat) Then

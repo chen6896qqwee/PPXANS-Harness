@@ -5,7 +5,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { readJson, readText } from "../utils/store.js";
-import { warn } from "../utils/logger.js";
+import { warn, debug } from "../utils/logger.js";
 import { isPlaceholder } from "./placeholder.js";
 
 // ---- 默认配置 (用户未写的字段用这些兜底) ----
@@ -41,6 +41,9 @@ export const DEFAULT_CONFIG = {
   providers: [],
   memory: {
     enabled: true,
+    // 记忆存储后端: "json" (默认, 纯文件+WAL) | "sqlite" (内嵌库, 需 Node>=22.5) | "auto" (优先 sqlite)
+    // sqlite 收益: 增量写 (800 条实测 18.7x 更快) / 事务并发 / 崩溃可恢复 / 规模增长不退化
+    backend: "json",
     token_budget: 2500,
     decay_per_day: 0.02,
     hit_bonus: 5,
@@ -57,7 +60,38 @@ export const DEFAULT_CONFIG = {
   experience: { enabled: true },
   // selfheal.max_restart_attempts 已在 v1.1.0 移除: 代码无任何消费 (死配置)
   selfheal: { enabled: true, check_interval_ms: 60000 },
-  tools: { enabled: true, custom_dir: "custom-tools", disabled: [] },
+  tools: {
+    enabled: true,
+    custom_dir: "custom-tools",
+    disabled: [],
+    // 工具披露策略 (2026-10-03, 上下文工程): 只把核心工具的**完整 schema** 随请求发给 LLM,
+    // 其余工具只列名不列参数, agent 需要时用 enable_capability 加载。
+    // 实测: 59 工具全量 schema ≈ 6725 tok/请求, 占空会话固定开销的 82%; 核心 20 个 ≈ 1900 tok。
+    // 与 tools.disabled 正交 —— 未披露的工具仍可被 catalog.call 调用, 只是不进 LLM 的 tools 参数。
+    // 设 progressive: false 可恢复"全量披露"(旧行为)。
+    progressive: true,
+    core: [
+      // 文件 / 系统
+      "read_file", "write_file", "append_file", "delete_file", "list_dir", "run_command",
+      // 网络
+      "web_search", "fetch_page", "http_request",
+      // 记忆
+      "memory_add", "memory_search", "memory_forget",
+      // 技能与元能力 (元能力必须常驻, 否则无法加载其余工具)
+      "load_skill", "skill_search",
+      "list_capabilities", "enable_capability", "disable_capability",
+      // 基础
+      "get_time", "clarify", "notify",
+    ],
+  },
+  // 语音能力 (ASR 语音转文本 + TTS 文本转语音): 走 OpenAI 兼容 HTTP 端点, 零运行时依赖。
+  // 留空时 voice_transcribe / voice_speak 会返回"未配置"提示并给出配法; 填 base_url + api_key_env 即生效。
+  // 兼容 OpenAI / 硅基流动 / 火山 / 智谱 / 本地 whisper.cpp server 等任意 OpenAI 兼容端点。
+  voice: {
+    enabled: true,
+    asr: { base_url: "", api_key_env: "", model: "whisper-1" },
+    tts: { base_url: "", api_key_env: "", model: "tts-1", voice: "alloy", format: "mp3" },
+  },
   plugins: { dir: "plugins" },
   mcp: { servers: [], auto_connect: false },
   channels: {
@@ -70,9 +104,25 @@ export const DEFAULT_CONFIG = {
   security: { allow_all: false, command_timeout_ms: 30000, code_act: false, deny: [] },
 };
 
+// 深拷贝 (只处理 JSON 可表达的值, 配置树足够了)
+function deepClone(v) {
+  if (Array.isArray(v)) return v.map(deepClone);
+  if (v && typeof v === "object") {
+    const o = {};
+    for (const k of Object.keys(v)) o[k] = deepClone(v[k]);
+    return o;
+  }
+  return v;
+}
+
 // 深度合并: override 优先, base 缺字段用默认值 (数组/标量直接覆盖)
+// ⚠ 2026-10-03 修复: 原实现 `{ ...base }` 只做浅拷贝, 未被 override 覆盖的嵌套分支
+//   (对象/数组) 会**沿用 DEFAULT_CONFIG 的同一个引用**。后果: 任何实例级配置修改都会
+//   污染全局默认值 —— 实测 `c1.tools.progressive = false` 会让 `DEFAULT_CONFIG` 一起变,
+//   且同进程内后续所有实例、乃至其他测试用例都被带偏 (同进程多 agent 场景同样中招)。
+//   改为先深拷贝 base 再合并, 保证实例配置与全局默认彻底隔离。
 function deepMerge(base, override) {
-  const out = Array.isArray(base) ? [...base] : { ...base };
+  const out = deepClone(base);
   for (const key of Object.keys(override || {})) {
     const bv = out[key];
     const ov = override[key];
@@ -137,7 +187,7 @@ function parseYaml(file) {
 
   function parseScalar(v) {
     if (v === "") return "";
-    if (/^[\[{]/.test(v)) { try { return JSON.parse(v.replace(/'/g, '"')); } catch {} }
+    if (/^[\[{]/.test(v)) { try { return JSON.parse(v.replace(/'/g, '"')); } catch (e) { debug(`[config/index] 已忽略异常: ${e && e.message ? e.message : e}`); } }
     if (/^-?\d+(\.\d+)?$/.test(v)) return Number(v);
     if (v === "true") return true;
     if (v === "false") return false;

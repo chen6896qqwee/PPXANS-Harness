@@ -67,6 +67,15 @@
     return fetch(S.base + path, opts).then(function (r) {
       if (!r.ok) {
         return r.json().catch(function () { return null; }).then(function (j) {
+          // 401 自助恢复 (2026-10-03): bootstrap 未注入 token 时允许手输一次并重试 ——
+          // 原 token 手输是死路: localStorage 读了 ppx_token 但全站无写入点, 401 后无恢复路径。
+          if (r.status === 401 && !localStorage.getItem("ppx_token")) {
+            var input = window.prompt("需要访问令牌 (服务端 http-token):", "");
+            if (input) {
+              localStorage.setItem("ppx_token", input.trim());
+              return req(path, opts); // 重试一次 (递归时已有 token, 不会再 prompt)
+            }
+          }
           throw new Error((j && j.error) || ("HTTP " + r.status));
         });
       }
@@ -94,7 +103,7 @@
   /* ================= 主题 ================= */
   function applyTheme() {
     var t = localStorage.getItem("ppx_theme");
-    if (!t) t = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+    if (!t) t = "dark"; /* 2026-10-01: 默认暗色 (Codex 风格) */
     document.documentElement.setAttribute("data-theme", t);
     $("btnTheme").innerHTML = ico(t === "dark" ? "sun" : "moon", 16);
   }
@@ -242,6 +251,8 @@
 
   /* 工具卡 */
   var toolEls = {};
+  var _toolSeq = 0;         // 无 id 事件的唯一键序号 (2026-10-03 配对修复)
+  var _nameQueue = {};      // tool 名 -> 无 id 卡片 key 的 FIFO (同名工具串行配对)
   function agentColor(name) {
     var colors = ["#d97757", "#5b8def", "#3aa76d", "#c78a2d", "#9b6dd6", "#3ba8a0", "#d05f8f", "#7a86c9"];
     var h = 0;
@@ -265,11 +276,24 @@
       + '<div class="tcbody">' + esc(JSON.stringify(ev.args || {}, null, 2)) + "</div></div>";
     var card = d.querySelector(".toolcard");
     card.querySelector(".head").onclick = function () { card.classList.toggle("open"); };
-    toolEls[ev.id || ev.tool] = { ev: d, card: card, body: card.querySelector(".tcbody") };
+    // 2026-10-03 配对修复: 原回退 `ev.id || ev.tool` 用工具名作键 —— 同名工具并发/连续两次时,
+    // finishTool 会把状态写到第一张卡。改为 id 优先, 无 id 入同名 FIFO 队列串行配对。
+    var key;
+    if (ev.id != null) key = "id:" + ev.id;
+    else {
+      key = "anon:" + (++_toolSeq);
+      (_nameQueue[ev.tool] || (_nameQueue[ev.tool] = [])).push(key);
+    }
+    toolEls[key] = { ev: d, card: card, body: card.querySelector(".tcbody") };
     toBottom();
   }
   function finishTool(ev) {
-    var t = toolEls[ev.id || ev.tool];
+    var key = ev.id != null ? "id:" + ev.id : null;
+    if (!key) {
+      var q = _nameQueue[ev.tool];
+      if (q && q.length) key = q.shift(); // 无 id: 取最早打开的同名卡 (串行语义)
+    }
+    var t = key ? toolEls[key] : null;
     if (!t) return;
     var st = t.card.querySelector(".st");
     st.className = "st " + (ev.ok === false ? "fail" : "ok");
@@ -408,7 +432,8 @@
                 full = j.content || full;
                 clearStep();
                 body.innerHTML = renderMd(full);
-                if (j.tokens) { S.lastTokens = j.tokens; updTokPill(); }
+                if (j.usage) { S.lastTokens = j.usage; updTokPill(); }
+                else if (j.tokens) { S.lastTokens = j.tokens; updTokPill(); }
                 if (j.diff) evDiff(j.diff);
               }
               else if (j.type === "tool") { if (j.status === "start") addTool(j); else finishTool(j); }
@@ -448,9 +473,17 @@
   }
 
   function updTokPill() {
-    if (!S.lastTokens) return;
+    var t = S.lastTokens;
+    if (!t) return;
+    // 2026-10-03 修复: 原 `(total || input+"/"+output || "—")` 优先级错误 ——
+    // total 为 0 时回退到拼接, 两者都缺时字符串拼接出 "undefined/undefined"。改为显式分支。
+    var label;
+    if (t.total != null) label = t.total;
+    else if (t.tokens != null) label = t.tokens;
+    else if (t.input != null && t.output != null) label = t.input + "/" + t.output;
+    else return;
     $("tokPill").hidden = false;
-    $("tokTxt").textContent = (S.lastTokens.total || S.lastTokens.input + "/" + S.lastTokens.output || "—");
+    $("tokTxt").textContent = label;
   }
 
   /* ================= 命令面板 ================= */
@@ -469,7 +502,7 @@
     if (!list.length) { hidePalette(); return; }
     palSel = 0;
     el.innerHTML = list.slice(0, 20).map(function (c, i) {
-      return '<button class="pitem' + (i === 0 ? " sel" : "") + '" data-name="' + esc(c.name) + '">'
+      return '<button class="pitem' + (i === 0 ? " sel" : "") + '" role="option" aria-selected="' + (i === 0 ? "true" : "false") + '" data-name="' + esc(c.name) + '">'
         + '<span class="pname">/' + esc(c.name) + '</span>'
         + '<span class="pdesc">' + esc(c.description || "") + "</span>"
         + (c.argumentHint ? '<span class="phint">' + esc(c.argumentHint) + "</span>" : "") + "</button>";
@@ -489,7 +522,7 @@
     var items = $("palette").querySelectorAll(".pitem");
     if (!items.length) return;
     palSel = (palSel + dir + items.length) % items.length;
-    items.forEach(function (b, i) { b.classList.toggle("sel", i === palSel); });
+    items.forEach(function (b, i) { b.classList.toggle("sel", i === palSel); b.setAttribute("aria-selected", i === palSel ? "true" : "false"); });
     items[palSel].scrollIntoView({ block: "nearest" });
   }
 
@@ -521,7 +554,7 @@
 
   /* --- 文件树 --- */
   function loadTree() {
-    var url = "/api/workspace/tree" + (S.wsRoot ? "?path=" + encodeURIComponent(S.wsRoot) : "");
+    var url = "/api/workspace/tree" + (S.wsRoot ? "?root=" + encodeURIComponent(S.wsRoot) : "");
     get(url).then(function (j) {
       var tree = (j && (j.tree || j.items)) || [];
       S.wsRoot = j && j.root ? j.root : S.wsRoot;
@@ -616,7 +649,9 @@
       var ag = j.agent || j.config || {};
       $("setApproval").value = ag.approval_mode || S.perm;
       $("setSandbox").value = ag.sandbox || "";
-      $("setInfo").textContent = "模型: " + ((ag.llm && ag.llm.model) || "-") + " · 工具 " + ((j.tools && j.tools.length) || "-") + " 个 · 工作区 " + (j.root || "-");
+      $("setInfo").textContent = "模型: " + (j.model || (ag.llm && ag.llm.model) || "-")
+        + " · 工具 " + (j.toolsCount != null ? j.toolsCount : "-") + " 个"
+        + " · 工作区 " + (j.root || "-");
     }).catch(function () {
       $("setInfo").textContent = "引导信息不可用";
     });
@@ -712,6 +747,36 @@
   });
 
   /* ================= 启动 ================= */
+  // 主动提醒 SSE (2026-10-03): 订阅 GET /events, 收到服务端主动推送时弹提醒。
+  // EventSource 不能带 Authorization 头 → token 走查询参数 (bootstrap 注入或 localStorage)。
+  function showReminder(text) {
+    var t = $("toast");
+    t.textContent = text;
+    t.className = "toast";
+    t.hidden = false;
+    clearTimeout(t._tm);
+    t._tm = setTimeout(function () { t.hidden = true; }, 8000);
+  }
+  function connectEvents() {
+    if (!window.EventSource) return; // 老 IE 无视
+    var boot = window.__PPX_BOOTSTRAP__ || {};
+    var tok = boot.authToken || localStorage.getItem("ppx_token") || "";
+    try {
+      var es = new EventSource("/events" + (tok ? "?token=" + encodeURIComponent(tok) : ""));
+      es.onmessage = function (ev) {
+        try {
+          var d = JSON.parse(ev.data);
+          if (d && d.type === "reminder" && d.text) showReminder(String(d.text));
+          // 协议总线 EQ 结构化事件 (2026-10-03 接线): 审批请求到达时立即提示 (原靠 5s 轮询兜底)
+          else if (d && d.type === "event" && d.event && d.event.type === "APPROVAL_REQUESTED") {
+            showReminder("收到新的审批请求, 请在审批面板处理");
+            if (typeof pollApprovals === "function") pollApprovals();
+          }
+        } catch (e) { /* 非 JSON 心跳帧忽略 */ }
+      };
+      es.onerror = function () { /* EventSource 自带 retry: 5s 重连, 无需手动 */ };
+    } catch (e) { /* SSE 不可用时静默降级 */ }
+  }
   function init() {
     applyTheme();
     setSide(localStorage.getItem("ppx_side") === "1");
@@ -731,6 +796,7 @@
     loadCommands();
     loadLifecycle();
     pollApprovals();
+    connectEvents();
     S.lifeTimer = setInterval(loadLifecycle, 30000);
     S.apprTimer = setInterval(pollApprovals, 5000);
     $("inp").focus();
