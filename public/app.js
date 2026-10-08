@@ -85,20 +85,6 @@
   function get(path) { return req(path); }
   function post(path, body) { return req(path, { method: "POST", body: JSON.stringify(body || {}) }); }
 
-  function mcpCall(method, params) {
-    return post("/mcp", { jsonrpc: "2.0", id: "ui_" + Date.now(), method: method, params: params || {} })
-      .then(function (r) {
-        if (r && r.error) throw new Error(r.error.message || "MCP error");
-        return r && r.result;
-      });
-  }
-  function mcpTool(name, args) {
-    return mcpCall("tools/call", { name: name, arguments: args || {} }).then(function (r) {
-      var c = (r && r.content) || [];
-      var txt = c.filter(function (x) { return x && x.type === "text"; }).map(function (x) { return x.text; }).join("\n");
-      try { return JSON.parse(txt); } catch (e) { return txt; }
-    });
-  }
 
   /* ================= 主题 ================= */
   function applyTheme() {
@@ -151,6 +137,9 @@
       var b = document.createElement("button");
       b.className = "sess" + (s.key === S.session ? " on" : "");
       var title = s.title || s.name || s.key || "(未命名)";
+      // 2026-10-07 修复 (P0-3): 会话搜索原先查 [data-key] 但按钮从未写入该属性 → 死代码。补上。
+      b.setAttribute("data-key", s.key);
+      b.setAttribute("data-title", title);
       b.innerHTML = ico("file", 13) + '<span class="t">' + esc(title) + '</span><span class="del">' + ico("trash", 13) + "</span>";
       b.title = title + (s.ts ? " · " + fmtTs(s.ts) : "");
       b.onclick = function (e) {
@@ -186,19 +175,68 @@
   }
   function clearStream() { $("stream").innerHTML = ""; }
 
+  // 2026-10-07 修复 (P0-1): switchSession() 一直调用 loadHistory(key), 但全文件从未定义 →
+  //   点击任意历史会话抛 ReferenceError, 历史消息永远加载不出来 (会话列表的主用法)。
+  //   后端已备: GET /sessions/:key/history → { messages: [{role, content}] } (sessionStore.deriveMessages)。
+  function loadHistory(key) {
+    if (!key) return;
+    get("/sessions/" + encodeURIComponent(key) + "/history").then(function (j) {
+      var msgs = (j && j.messages) || [];
+      clearStream();
+      if (!msgs.length) { $("hero").hidden = false; $("stream").hidden = true; return; }
+      msgs.forEach(function (m) {
+        if (!m) return;
+        if (m.role === "user") evUser(m.content || "");
+        else {
+          var body = evAgent();
+          body.innerHTML = renderMd(m.content || "");
+        }
+      });
+      toBottom(true);
+    }).catch(function (e) { toast("历史加载失败: " + e.message, true); });
+  }
+
   $("btnNew").onclick = newSession;
   $("btnSessRefresh").onclick = loadSessions;
+
+  // 2026-10-07 (P2-19): 会话重命名 / 清空。后端一直有 (/sessions/rename, /reset),
+  //   前端此前只用了 list / delete / 新会话 —— 重命名与清空缺失。
+  $("btnSessRename").onclick = function () {
+    if (!S.session) return;
+    var to = prompt("重命名会话 (新 key):", S.session);
+    if (to == null) return;
+    to = to.trim();
+    if (!to || to === S.session) return;
+    post("/sessions/rename", { from: S.session, to: to }).then(function (j) {
+      if (j && j.ok === false) { toast("重命名失败 (目标 key 已存在?)", true); return; }
+      S.session = to;
+      $("sessTitle").textContent = to;
+      localStorage.setItem("ppx_session", to);
+      toast("已重命名");
+      loadSessions();
+    }).catch(function (e) { toast(e.message, true); });
+  };
+  $("btnSessReset").onclick = function () {
+    if (!S.session) return;
+    if (!confirm("清空当前会话的消息记录? (不可撤销)")) return;
+    post("/reset", { sessionId: S.session }).then(function () {
+      clearStream();
+      $("hero").hidden = false;
+      $("stream").hidden = true;
+      toast("已清空");
+      loadSessions();
+    }).catch(function (e) { toast(e.message, true); });
+  };
   $("btnSessSearch").onclick = function () {
-    var q = prompt("搜索会话:");
+    var q = prompt("搜索会话 (留空显示全部):");
     if (q == null) return;
-    q = q.toLowerCase();
-    S.sessions.forEach(function (s) {
-      var el = $("sessList").querySelector('[data-key="' + s.key + '"]');
-    });
-    // 简单实现: 过滤当前列表
+    q = q.trim().toLowerCase();
+    // 2026-10-07 修复 (P0-3): 原实现的 S.sessions.forEach(...[data-key]...) 恒不命中 (属性从未写入),
+    //   是死代码; 真正的过滤是紧随其后的文本筛查。现按 data-title 过滤, 语义明确。
     var items = $("sessList").querySelectorAll(".sess");
     items.forEach(function (it) {
-      var txt = it.querySelector(".t").textContent.toLowerCase();
+      var txt = (it.getAttribute("data-title") || "").toLowerCase();
+      if (!txt && it.querySelector(".t")) txt = it.querySelector(".t").textContent.toLowerCase();
       it.style.display = !q || txt.indexOf(q) !== -1 ? "" : "none";
     });
   };
@@ -315,6 +353,7 @@
       + '<div class="ahead">' + ico("shield", 15) + "需要你的批准" + '<span class="akind">' + esc(kind) + "</span></div>"
       + '<div class="abody">' + esc(body) + "</div>"
       + '<div class="aacts"><button class="btn primary" data-act="approve">' + ico("check", 13) + "批准</button>"
+      + '<button class="btn" data-act="always">始终允许此类</button>'
       + '<button class="btn danger" data-act="deny">' + ico("close", 13) + "拒绝</button></div></div>";
     var card = d.querySelector(".approval");
     card.querySelectorAll("[data-act]").forEach(function (b) {
@@ -329,7 +368,7 @@
       card.classList.add("done");
       var v = document.createElement("div");
       v.className = "verdict";
-      v.textContent = decision === "approve" ? "✓ 已批准" : "✗ 已拒绝";
+      v.textContent = decision === "deny" ? "✗ 已拒绝" : (decision === "always" ? "✓ 已批准 (此类命令本会话不再询问)" : "✓ 已批准");
       card.appendChild(v);
     }).catch(function (e) { toast(e.message, true); });
   }
@@ -388,6 +427,7 @@
     $("inp").value = "";
     autosize();
     hidePalette();
+    hideFilePick();
     doSend(t);
   }
 
@@ -549,7 +589,12 @@
     if (tab === "files") loadTree();
     else if (tab === "goal") loadGoal();
     else if (tab === "review") loadReview();
+    else if (tab === "task") loadTasks();
+    else if (tab === "memory") loadMemory();
+    else if (tab === "ops") loadOps();
     else if (tab === "settings") loadSettings();
+    else if (tab === "models") loadProviders();
+    else if (tab === "cap") loadCapabilities();
   }
 
   /* --- 文件树 --- */
@@ -575,9 +620,21 @@
         var kids = document.createElement("div");
         kids.className = "kids";
         kids.hidden = depth > 0;
-        d.onclick = function () { kids.hidden = !kids.hidden; };
         container.appendChild(kids);
-        if (depth < 2) renderTree(kids, n.children || n.items || [], depth + 1);
+        // 2026-10-07 修复 (P2-11): 原实现硬编码 `depth < 2` → 第 3 层以上目录展开恒为空。
+        //   现前两层照旧递归预渲染; 更深的目录在首次展开时按需拉取子树
+        //   (后端 buildTree 支持 root + maxDepth=1..8)。
+        var childNodes = n.children || n.items || [];
+        if (depth < 2 && childNodes.length) { renderTree(kids, childNodes, depth + 1); kids._loaded = true; }
+        d.onclick = function () {
+          kids.hidden = !kids.hidden;
+          if (!kids.hidden && !kids._loaded) {
+            kids._loaded = true;
+            if (childNodes.length) renderTree(kids, childNodes, depth + 1);
+            else if (n.path) loadSubTree(n.path, kids);
+            else kids.innerHTML = '<div class="empty">空目录</div>';
+          }
+        };
       } else {
         var f = document.createElement("button");
         f.className = "f";
@@ -587,15 +644,82 @@
       }
     });
   }
+  // 按需展开: 拉取某目录子树 (root = 工作区相对路径)
+  function loadSubTree(rel, container) {
+    container.innerHTML = '<div class="empty">加载中…</div>';
+    get("/api/workspace/tree?maxDepth=2&root=" + encodeURIComponent(rel)).then(function (j) {
+      var nodes = (j && j.tree && j.tree.children) || [];
+      container.innerHTML = "";
+      if (!nodes.length) { container.innerHTML = '<div class="empty">空目录</div>'; return; }
+      renderTree(container, nodes, 1);
+    }).catch(function (e) { container.innerHTML = '<div class="empty">' + esc(e.message) + "</div>"; });
+  }
+  var fvCurrent = "";   // 当前打开文件的路径 (供保存回写)
   function openFile(path) {
+    fvCurrent = path;
     get("/api/workspace/read?path=" + encodeURIComponent(path)).then(function (j) {
       $("fileView").hidden = false;
-      $("fvPath").textContent = path;
+      $("fvPath").textContent = path + (j && j.truncated ? " (已截断)" : "");
       $("fvBody").textContent = (j && (j.content || j.text)) || "(空)";
+      $("fvBody").hidden = false;
+      $("fvEditBox").hidden = true;
+      $("fvSave").hidden = true;
+      // 截断文件禁止编辑: 后端只回了前 256KB, 若存回会用截断内容覆盖整文件 (丢数据)。
+      $("fvEdit").hidden = !!(j && j.truncated);
     }).catch(function (e) { toast(e.message, true); });
   }
+  // 2026-10-07 (P2-11): 文件面板此前完全只读。现支持编辑 + 保存回写。
+  $("fvEdit").onclick = function () {
+    $("fvEditBox").value = $("fvBody").textContent;
+    $("fvBody").hidden = true;
+    $("fvEditBox").hidden = false;
+    $("fvSave").hidden = false;
+    $("fvEdit").hidden = true;
+    $("fvEditBox").focus();
+  };
+  $("fvSave").onclick = function () {
+    if (!fvCurrent) return;
+    post("/api/workspace/write", { path: fvCurrent, content: $("fvEditBox").value }).then(function () {
+      $("fvBody").textContent = $("fvEditBox").value;
+      $("fvBody").hidden = false;
+      $("fvEditBox").hidden = true;
+      $("fvSave").hidden = true;
+      $("fvEdit").hidden = false;
+      toast("已保存 " + fvCurrent);
+    }).catch(function (e) { toast(e.message, true); });
+  };
   $("fvClose").onclick = function () { $("fileView").hidden = true; };
   $("btnWsRefresh").onclick = loadTree;
+  // 文件搜索 (2026-10-07): 非空时用后端 searchWorkspace 结果替代文件树
+  var wsSearchTimer = null;
+  $("wsSearch").addEventListener("input", function () {
+    clearTimeout(wsSearchTimer);
+    var q = $("wsSearch").value.trim();
+    wsSearchTimer = setTimeout(function () {
+      if (!q) {
+        $("fileView").hidden = true;
+        $("wsTree").hidden = false;
+        $("wsSearchRes").hidden = true;
+        return;
+      }
+      $("wsTree").hidden = true;
+      $("fileView").hidden = true;
+      var box = $("wsSearchRes");
+      box.hidden = false;
+      box.innerHTML = '<div class="empty">搜索中…</div>';
+      get("/api/workspace/search?limit=60&q=" + encodeURIComponent(q)).then(function (j) {
+        var rs = (j && j.results) || [];
+        if (!rs.length) { box.innerHTML = '<div class="empty">无匹配</div>'; return; }
+        box.innerHTML = rs.map(function (r) {
+          return '<button class="f" data-path="' + esc(r.path) + '">' + ico("file", 13) + '<span class="nm">' + esc(r.path) + "</span>"
+            + (r.match === "content" ? '<span class="fsub">:' + r.line + " " + esc(r.snippet || "") + "</span>" : "") + "</button>";
+        }).join("");
+        box.querySelectorAll(".f").forEach(function (b) {
+          b.onclick = function () { openFile(b.getAttribute("data-path")); };
+        });
+      }).catch(function (e) { box.innerHTML = '<div class="empty">' + esc(e.message) + "</div>"; });
+    }, 220);
+  });
   $("btnWsRoot").onclick = function () {
     var p = prompt("工作区目录:", S.wsRoot || "");
     if (p) { S.wsRoot = p; loadTree(); }
@@ -609,15 +733,43 @@
       if (!goals.length) { el.innerHTML = '<div class="empty">暂无目标 · 发送 /goal 创建</div>'; return; }
       el.innerHTML = goals.map(function (g) {
         var pr = g.priority ? '<span class="badge p' + esc(String(g.priority).replace(/^p/i, "")) + '">' + esc(String(g.priority).toUpperCase()) + "</span>" : "";
+        var st = g.status || "pending";
+        // 2026-10-07 (P2-12): 看板从只读升级为可写 (后端 POST /api/goalboard).
+        var acts = "";
+        if (st !== "in_progress") acts += '<button class="btn xs" data-gst="in_progress" data-gid="' + esc(g.id) + '">推进</button>';
+        if (st !== "done") acts += '<button class="btn xs" data-gst="done" data-gid="' + esc(g.id) + '">完成</button>';
+        if (st !== "blocked") acts += '<button class="btn xs" data-gst="blocked" data-gid="' + esc(g.id) + '">阻塞</button>';
+        var opts = ["P0", "P1", "P2"].map(function (p) {
+          return '<option value="' + p + '"' + (String(g.priority).toUpperCase() === p ? " selected" : "") + ">" + p + "</option>";
+        }).join("");
         return '<div class="goal"><div class="gt"><span class="gid">' + esc(g.id || "") + "</span>" + pr
-          + '<span class="gsts ' + esc(g.status || "pending") + '">' + esc(g.status || "pending") + "</span></div>"
-          + '<div class="gmeta">' + esc(g.title || "") + "</div></div>";
+          + '<span class="gsts ' + esc(st) + '">' + esc(st) + '</span><span class="flex1"></span>'
+          + '<select class="gpri" data-gid="' + esc(g.id) + '">' + opts + "</select></div>"
+          + '<div class="gmeta">' + esc(g.title || "") + "</div>"
+          + (acts ? '<div class="gacts">' + acts + "</div>" : "") + "</div>";
       }).join("");
+      el.querySelectorAll("[data-gst]").forEach(function (b) {
+        b.onclick = function () { goalAction(b.getAttribute("data-gid"), { status: b.getAttribute("data-gst") }); };
+      });
+      el.querySelectorAll(".gpri").forEach(function (s) {
+        s.onchange = function () { goalAction(s.getAttribute("data-gid"), { priority: s.value }); };
+      });
     }).catch(function () {
       $("goalBoard").innerHTML = '<div class="empty">看板服务未启动</div>';
     });
   }
+  function goalAction(id, patch) {
+    post("/api/goalboard", Object.assign({ op: "update", id: id }, patch))
+      .then(function () { loadGoal(); }).catch(function (e) { toast(e.message, true); });
+  }
   $("btnGoalRefresh").onclick = loadGoal;
+  $("btnGoalAdd").onclick = function () {
+    var title = prompt("目标标题:");
+    if (!title) return;
+    var pr = (prompt("优先级 P0/P1/P2 (默认 P2):", "P2") || "P2").toUpperCase();
+    post("/api/goalboard", { op: "add", title: title.trim(), priority: pr })
+      .then(function () { loadGoal(); toast("已添加"); }).catch(function (e) { toast(e.message, true); });
+  };
 
   /* --- 审查报告 --- */
   function loadReview() {
@@ -637,24 +789,43 @@
       $("reviewBody").innerHTML = '<div class="empty">审查服务未启动</div>';
     });
   }
+  // 2026-10-07 (P2-13): 原实现只把 "/review" 填进输入框当聊天发。现直接打审查 API。
   $("btnReviewRun").onclick = function () {
-    $("inp").value = "/review";
-    send();
+    $("btnReviewRun").disabled = true;
+    $("reviewBody").innerHTML = '<div class="empty">审查中…</div>';
+    post("/api/review/run", {}).then(function (j) {
+      toast("审查完成: " + ((j && j.total) || 0) + " 个问题");
+      loadReview();
+    }).catch(function (e) { toast(e.message, true); loadReview(); })
+      .then(function () { $("btnReviewRun").disabled = false; });
   };
 
   /* --- 设置 --- */
   function loadSettings() {
+    // 2026-10-07 修复 (P0-2): 原实现把 /api/bootstrap 的 `agent` 当对象读 (ag.approval_mode / ag.sandbox),
+    //   但 bootstrap.agent 是【agent 名字字符串】→ 两个下拉恒拿到 undefined, 显示的不是真实配置;
+    //   且 setSandbox.value="" 匹配不到任何 option → 沙箱永远停在 read-only。
+    //   权限真值只有一个来源: GET /api/permissions (引擎当前态)。bootstrap 只用来填只读信息。
     get("/api/bootstrap").then(function (j) {
       if (!j) return;
-      var ag = j.agent || j.config || {};
-      $("setApproval").value = ag.approval_mode || S.perm;
-      $("setSandbox").value = ag.sandbox || "";
-      $("setInfo").textContent = "模型: " + (j.model || (ag.llm && ag.llm.model) || "-")
+      $("setInfo").textContent = "模型: " + (j.model || "-")
         + " · 工具 " + (j.toolsCount != null ? j.toolsCount : "-") + " 个"
         + " · 工作区 " + (j.root || "-");
     }).catch(function () {
       $("setInfo").textContent = "引导信息不可用";
     });
+    get("/api/permissions").then(function (p) {
+      if (!p || p.ok === false) return;
+      if (p.approvalMode) {
+        S.perm = p.approvalMode;
+        $("setApproval").value = p.approvalMode;
+        $("modeTxt").textContent = p.approvalMode;
+      }
+      if (p.sandbox) $("setSandbox").value = p.sandbox;
+      // 2026-10-07 (P2-18): 计划模式真值 (引擎 planEnabled)。前端此前只能手打 /plan。
+      $("setPlan").value = p.planEnabled ? "on" : "off";
+    }).catch(function () {});
+    loadGeneralSettings();
   }
   $("setApproval").onchange = function () {
     S.perm = $("setApproval").value;
@@ -664,18 +835,394 @@
   $("setSandbox").onchange = function () {
     post("/api/permissions", { sandbox: $("setSandbox").value }).catch(function () {});
   };
+  $("setPlan").onchange = function () {
+    var on = $("setPlan").value === "on";
+    post("/api/permissions", { planEnabled: on, sessionKey: S.session || undefined }).then(function () {
+      toast(on ? "计划模式已开启 (本会话)" : "计划模式已关闭");
+    }).catch(function (e) { toast(e.message, true); });
+  };
+
+  /* --- 模型 / 供应商配置 (2026-10-07 新增) ---
+     后端早已就绪: GET/POST/PUT/DELETE /api/providers, POST /api/providers/test,
+     POST /api/providers/reorder; 前端此前零接线 (设置面板里只有一行只读模型名)。
+     约定: providers 数组第 0 个 = 默认供应商; key 明文永不回传, 后端只给 api_key_set 标志。 */
+  var provState = { providers: [], editing: null };
+
+  function loadProviders() {
+    get("/api/providers").then(function (j) {
+      provState.providers = (j && j.providers) || [];
+      if (provState.editing && provState.editing !== "__new__"
+        && !provState.providers.some(function (p) { return p.id === provState.editing; })) {
+        closeProvForm();
+      }
+      renderProviders();
+    }).catch(function (e) {
+      $("provList").innerHTML = '<div class="empty">读取失败: ' + esc(e.message) + "</div>";
+    });
+  }
+
+  function renderProviders() {
+    var el = $("provList");
+    var list = provState.providers;
+    if (!list.length) { el.innerHTML = '<div class="empty">暂无供应商 · 点右上 ＋ 新增</div>'; return; }
+    el.innerHTML = list.map(function (p, i) {
+      var acts = '<button class="btn xs" data-act="test" data-id="' + esc(p.id) + '">测试</button>';
+      if (i > 0) acts += '<button class="btn xs" data-act="default" data-id="' + esc(p.id) + '">设为默认</button>';
+      acts += '<button class="btn xs" data-act="edit" data-id="' + esc(p.id) + '">编辑</button>'
+        + '<button class="btn xs danger" data-act="del" data-id="' + esc(p.id) + '">删除</button>';
+      return '<div class="prov' + (provState.editing === p.id ? " on" : "") + '" data-id="' + esc(p.id) + '">'
+        + '<div class="phead"><span class="pid">' + esc(p.id) + "</span>"
+        + (i === 0 ? '<span class="badge p0">默认</span>' : "")
+        + (p.vision ? '<span class="badge p2">vision</span>' : "")
+        + '<span class="flex1"></span>'
+        + '<span class="pkey' + (p.api_key_set ? " ok" : "") + '">' + (p.api_key_set ? "key ✓" : "未设 key") + "</span></div>"
+        + '<div class="pmeta">' + esc(p.model || "(未设模型)") + " · " + esc(p.base_url || "(未设 base_url)")
+        + (p.timeout_ms ? " · " + p.timeout_ms + "ms" : "") + "</div>"
+        + '<div class="pacts">' + acts + '<span class="presult" data-res="' + esc(p.id) + '"></span></div>'
+        + "</div>";
+    }).join("");
+    el.querySelectorAll("[data-act]").forEach(function (b) {
+      b.onclick = function () { provAction(b.getAttribute("data-act"), b.getAttribute("data-id")); };
+    });
+  }
+
+  function provAction(act, id) {
+    if (act === "test") return testProvider(id);
+    if (act === "edit") return openProvForm(id);
+    if (act === "del") return deleteProvider(id);
+    if (act === "default") return setDefaultProvider(id);
+  }
+
+  function provResult(id, text, isErr) {
+    var el = $("provList").querySelector('[data-res="' + id + '"]');
+    if (el) { el.textContent = text; el.className = "presult" + (isErr ? " err" : " ok"); }
+  }
+
+  function testProvider(id) {
+    provResult(id, "测试中…");
+    post("/api/providers/test", { id: id }).then(function (j) {
+      var ok = j && j.healthy;
+      provResult(id, ok ? "✓ 连通" : "✗ " + ((j && j.detail) || "探测失败"), !ok);
+    }).catch(function (e) { provResult(id, "✗ " + e.message, true); });
+  }
+
+  function deleteProvider(id) {
+    if (!confirm("删除供应商 " + id + " ?")) return;
+    req("/api/providers", { method: "DELETE", body: JSON.stringify({ id: id }) }).then(function () {
+      toast("已删除 " + id);
+      loadProviders();
+    }).catch(function (e) { toast(e.message, true); });
+  }
+
+  function setDefaultProvider(id) {
+    var order = provState.providers.map(function (p) { return p.id; });
+    order = [id].concat(order.filter(function (x) { return x !== id; }));
+    post("/api/providers/reorder", { order: order }).then(function () {
+      toast(id + " 已设为默认");
+      loadProviders();
+    }).catch(function (e) { toast(e.message, true); });
+  }
+
+  function closeProvForm() { provState.editing = null; $("provForm").hidden = true; renderProviders(); }
+
+  function openProvForm(id) {
+    var p = id ? provState.providers.find(function (x) { return x.id === id; }) : null;
+    provState.editing = id || "__new__";
+    $("provForm").hidden = false;
+    $("pvTitle").textContent = p ? "编辑 " + p.id : "新增供应商";
+    $("pvId").value = p ? p.id : "";
+    $("pvId").disabled = !!p;
+    $("pvBase").value = p ? (p.base_url || "") : "";
+    $("pvModel").value = p ? (p.model || "") : "";
+    $("pvKey").value = "";
+    $("pvKey").placeholder = p && p.api_key_set ? "已设置 · 留空不改" : "api_key";
+    $("pvEnv").value = p ? (p.api_key_env || "") : "";
+    $("pvVision").checked = !!(p && p.vision);
+    $("pvTimeout").value = p && p.timeout_ms ? p.timeout_ms : "";
+    renderProviders();
+  }
+
+  function saveProvForm() {
+    var id = $("pvId").value.trim();
+    var base = $("pvBase").value.trim();
+    if (!id) return toast("请填 id", true);
+    if (!/^[a-zA-Z][a-zA-Z0-9_-]{0,29}$/.test(id)) return toast("id 需字母开头, 仅字母/数字/横线/下划线, 2-30 字符", true);
+    if (!base) return toast("请填 base_url", true);
+    var fields = { id: id, backend: "http", base_url: base, model: $("pvModel").value.trim(), vision: $("pvVision").checked };
+    var key = $("pvKey").value;
+    if (key) fields.api_key = key; // 留空 = 不改动 (后端把空串视为清空, 这里只在填写时才带)
+    fields.api_key_env = $("pvEnv").value.trim();
+    var to = parseInt($("pvTimeout").value, 10);
+    if (Number.isFinite(to) && to >= 1000) fields.timeout_ms = to;
+    var editing = provState.editing;
+    var p = editing === "__new__"
+      ? post("/api/providers", { provider: fields })
+      : req("/api/providers", { method: "PUT", body: JSON.stringify({ id: editing, patch: fields }) });
+    p.then(function () { toast("已保存"); closeProvForm(); loadProviders(); })
+      .catch(function (e) { toast(e.message, true); });
+  }
+
+  $("btnProvRefresh").onclick = loadProviders;
+  $("btnProvAdd").onclick = function () { openProvForm(null); };
+  $("btnProvCancel").onclick = closeProvForm;
+  $("btnProvSave").onclick = saveProvForm;
+
+  /* --- 通用设置 (2026-10-07: /api/settings 此前前端一个控件都没有) --- */
+  function loadGeneralSettings() {
+    get("/api/settings").then(function (j) {
+      var s = j && j.settings;
+      if (!s) return;
+      if (s.user) $("setUser").value = s.user.name || "";
+      if (s.agent) { $("setAgentName").value = s.agent.name || ""; $("setAgentMode").value = s.agent.mode || ""; }
+      if (s.http) $("setPort").value = s.http.port != null ? s.http.port : "";
+      if (s.security) $("setAllowAll").checked = !!s.security.allow_all;
+    }).catch(function () {});
+  }
+  $("btnSetSave").onclick = function () {
+    var patch = { user: {}, agent: {}, security: { allow_all: $("setAllowAll").checked } };
+    var un = $("setUser").value.trim();
+    if (un) patch.user.name = un;
+    var an = $("setAgentName").value.trim();
+    if (an) patch.agent.name = an;
+    var am = $("setAgentMode").value.trim();
+    if (am) patch.agent.mode = am; // 空串会触发后端 mode 正则校验失败, 故仅在非空时下发
+    var port = Number($("setPort").value);
+    if (Number.isInteger(port) && port >= 1 && port <= 65535) patch.http = { port: port };
+    req("/api/settings", { method: "PUT", body: JSON.stringify({ patch: patch }) }).then(function () {
+      toast("设置已保存");
+    }).catch(function (e) { toast(e.message, true); });
+  };
+
+  /* --- 能力面板 (2026-10-07: 技能/专家/工具/MCP; 后端 /api/skills|experts|tools|mcp 同步新增) --- */
+  var capState = { seg: "skills" };
+  var CAP_URL = { skills: "/api/skills", experts: "/api/experts", tools: "/api/tools", mcp: "/api/mcp" };
+
+  function loadCapabilities(seg) {
+    seg = seg || capState.seg;
+    capState.seg = seg;
+    $("capBody").innerHTML = '<div class="empty">加载中…</div>';
+    get(CAP_URL[seg]).then(function (j) { renderCapSeg(seg, j); }).catch(function (e) {
+      $("capBody").innerHTML = '<div class="empty">' + esc(e.message) + "</div>";
+    });
+  }
+
+  function capItem(head, desc, meta, compact) {
+    return '<div class="capitem' + (compact ? " compact" : "") + '"><div class="ci-head">' + head + "</div>"
+      + (desc ? '<div class="ci-desc">' + desc + "</div>" : "")
+      + (meta ? '<div class="ci-meta">' + meta + "</div>" : "") + "</div>";
+  }
+
+  function renderCapSeg(seg, j) {
+    var el = $("capBody");
+    if (seg === "skills") {
+      var list = (j && j.skills) || [];
+      if (!list.length) { el.innerHTML = '<div class="empty">暂无技能</div>'; return; }
+      el.innerHTML = '<div class="capcount">' + list.length + " 个技能 · " + Object.keys((j && j.domains) || {}).length + " 个领域</div>"
+        + list.map(function (s) {
+          var head = '<span class="ci-name">' + esc(s.name || s.id) + '</span>'
+            + '<span class="badge p2">' + esc(s.domain) + "</span><span class=\"flex1\"></span>"
+            + '<span class="ci-use">' + (s.uses ? "用 " + s.uses + " 次" : "未用") + "</span>";
+          return capItem(head, esc(s.description || ""), esc(s.id) + (s.source ? " · " + esc(s.source) : ""), false);
+        }).join("");
+      return;
+    }
+    if (seg === "experts") {
+      var ex = (j && j.experts) || [], packs = (j && j.packs) || [];
+      var html = '<div class="capcount">' + ex.length + " 位内置专家 · " + packs.length + " 个专家包</div>";
+      html += ex.map(function (e) {
+        var head = '<span class="ci-name">' + esc(e.name) + '</span>'
+          + '<span class="badge p2">' + esc(e.domain) + "</span>"
+          + (e.readonly ? '<span class="badge p1">只读</span>' : "")
+          + (e.requiresHuman ? '<span class="badge p0">需人工</span>' : "")
+          + '<span class="flex1"></span><span class="ci-use">' + esc(e.id) + "</span>";
+        return capItem(head, esc(e.perspective || ""), "", false);
+      }).join("");
+      if (packs.length) {
+        html += '<div class="capgroup">专家包</div>' + packs.map(function (p) {
+          var head = '<span class="ci-name">' + esc(p.name || p.id) + '</span>'
+            + '<span class="badge p2">' + esc(p.category || p.domain || "") + '</span><span class="flex1"></span>'
+            + '<span class="ci-use">' + esc(p.id || "") + "</span>";
+          return capItem(head, esc(p.description || ""), "", false);
+        }).join("");
+      }
+      el.innerHTML = html;
+      return;
+    }
+    if (seg === "tools") {
+      var tools = (j && j.tools) || [];
+      var groups = {};
+      tools.forEach(function (t) { (groups[t.category] = groups[t.category] || []).push(t); });
+      var h = '<div class="capcount">' + (j && j.enabled != null ? j.enabled : tools.length) + " / " + tools.length + " 个工具启用</div>";
+      Object.keys(groups).sort().forEach(function (cat) {
+        h += '<div class="capgroup">' + esc(cat) + " (" + groups[cat].length + ")</div>";
+        h += groups[cat].map(function (t) {
+          var head = '<span class="ci-name mono">' + esc(t.name) + '</span><span class="flex1"></span>'
+            + '<span class="ci-use ' + (t.enabled ? "ok" : "off") + '">' + (t.enabled ? "启用" : "禁用") + "</span>";
+          return capItem(head, esc(t.description || ""), "", true);
+        }).join("");
+      });
+      el.innerHTML = h;
+      return;
+    }
+    // mcp
+    var servers = (j && j.servers) || [];
+    var h2 = '<div class="capcount">' + (j && j.connected ? "已连接 · " + j.tools + " 个工具" : "未连接")
+      + (j && j.autoConnect ? " · 自动连接开" : " · 自动连接关") + "</div>";
+    if (!servers.length) h2 += '<div class="empty">config 未配置 MCP 服务器</div>';
+    else h2 += servers.map(function (s) {
+      var head = '<span class="ci-name">' + esc(s.name) + "</span>"
+        + (s.prefix ? '<span class="badge p2">' + esc(s.prefix) + "</span>" : "")
+        + '<span class="flex1"></span><span class="ci-use">' + (s.env_set ? "env ✓" : "") + "</span>";
+      return capItem(head, "", esc(s.command || s.url || "") + (s.args && s.args.length ? " " + esc(s.args.join(" ")) : ""), false);
+    }).join("");
+    el.innerHTML = h2;
+  }
+
+  document.querySelectorAll("#capSeg .segb").forEach(function (b) {
+    b.onclick = function () {
+      document.querySelectorAll("#capSeg .segb").forEach(function (x) { x.classList.remove("on"); });
+      b.classList.add("on");
+      loadCapabilities(b.getAttribute("data-seg"));
+    };
+  });
+  $("btnCapRefresh").onclick = function () { loadCapabilities(capState.seg); };
+
+  /* --- 任务面板 (2026-10-07 新增: 后端 /api/tasks 复用 MCP ppx.task.* 的 TaskBoard) --- */
+  function loadTasks() {
+    $("taskBody").innerHTML = '<div class="empty">加载中…</div>';
+    get("/api/tasks").then(function (j) {
+      if (!j || j.ok === false) {
+        $("taskBody").innerHTML = '<div class="empty">任务面板不可用' + (j && j.reason ? ": " + esc(j.reason) : "") + "</div>";
+        return;
+      }
+      renderTasks(j);
+    }).catch(function (e) { $("taskBody").innerHTML = '<div class="empty">' + esc(e.message) + "</div>"; });
+  }
+  function taskBadge(st) { return st === "done" ? "p2" : st === "failed" ? "p0" : st === "running" ? "p1" : "p2"; }
+  function renderTasks(j) {
+    var tasks = (j && j.tasks) || [], counts = (j && j.counts) || {};
+    var el = $("taskBody");
+    var html = '<div class="capcount">待办 ' + (counts.todo || 0) + " · 进行 " + (counts.running || 0)
+      + " · 完成 " + (counts.done || 0) + " · 失败 " + (counts.failed || 0) + "</div>";
+    if (!tasks.length) { el.innerHTML = html + '<div class="empty">暂无任务 · 点右上 ＋ 新建</div>'; return; }
+    html += tasks.map(function (t) {
+      var steps = (t.steps || []).map(function (s, i) {
+        return '<div class="tstep"><span class="tst ' + esc(s.status || "pending") + '"></span>'
+          + '<span class="tsname">' + esc(s.title) + "</span><span class=\"flex1\"></span>"
+          + (s.status === "done" ? "" : '<button class="btn xs" data-op="step-done" data-task="' + esc(t.id) + '" data-step="' + i + '">完成</button>') + "</div>";
+      }).join("");
+      return '<div class="capitem"><div class="ci-head"><span class="ci-name">' + esc(t.title) + "</span>"
+        + '<span class="badge ' + taskBadge(t.status) + '">' + esc(t.status) + '</span><span class="flex1"></span>'
+        + (t.status === "done" ? "" : '<button class="btn xs" data-op="complete" data-task="' + esc(t.id) + '">完成</button>')
+        + '<button class="btn xs danger" data-op="delete" data-task="' + esc(t.id) + '">删除</button></div>'
+        + (t.description ? '<div class="ci-desc">' + esc(t.description) + "</div>" : "")
+        + (steps ? '<div class="tsteps">' + steps + "</div>" : "")
+        + (t.result ? '<div class="ci-meta">结果: ' + esc(String(t.result).slice(0, 300)) + "</div>" : "")
+        + "</div>";
+    }).join("");
+    el.innerHTML = html;
+    el.querySelectorAll("[data-op]").forEach(function (b) {
+      b.onclick = function () { taskAction(b.getAttribute("data-op"), b.getAttribute("data-task"), b.getAttribute("data-step")); };
+    });
+  }
+  function taskAction(op, id, stepIndex) {
+    var payload;
+    if (op === "delete") { if (!confirm("删除任务 " + id + " ?")) return; payload = { op: "delete", id: id }; }
+    else if (op === "complete") payload = { op: "complete", id: id };
+    else if (op === "step-done") payload = { op: "step", id: id, index: Number(stepIndex), status: "done" };
+    else return;
+    post("/api/tasks", payload).then(function (j) { renderTasks(j); }).catch(function (e) { toast(e.message, true); });
+  }
+  $("btnTaskRefresh").onclick = loadTasks;
+  $("btnTaskNew").onclick = function () {
+    var title = prompt("新任务标题:");
+    if (!title) return;
+    var raw = prompt("步骤 (可选, 用 ; 分隔):", "");
+    var steps = raw ? raw.split(";").map(function (s) { return s.trim(); }).filter(Boolean) : [];
+    post("/api/tasks", { op: "create", title: title.trim(), steps: steps }).then(function (j) { renderTasks(j); toast("已创建"); })
+      .catch(function (e) { toast(e.message, true); });
+  };
+
+  /* --- 记忆面板 (2026-10-07: 原实现把 /api/memory 的 JSON 直接 dump 进聊天流) --- */
+  function loadMemory() {
+    $("memBody").innerHTML = '<div class="empty">加载中…</div>';
+    get("/api/memory").then(function (j) {
+      var facts = (j && j.facts) || [], scenes = (j && j.scenes) || [];
+      var html = '<div class="capcount">' + facts.length + " 条事实 (L1) · " + scenes.length + " 个场景 (L2)</div>";
+      if (facts.length) {
+        html += '<div class="capgroup">事实</div>' + facts.map(function (f) {
+          return capItem('<span class="ci-name">' + esc(String(f.content || "").slice(0, 220)) + "</span>"
+            + '<span class="flex1"></span><span class="ci-use">' + esc(f.type || "") + (f.score != null ? " · " + Number(f.score).toFixed(2) : "") + "</span>", "", "", true);
+        }).join("");
+      }
+      if (scenes.length) {
+        html += '<div class="capgroup">场景</div>' + scenes.map(function (s) {
+          var txt = typeof s === "string" ? s : (s.desc || s.summary || s.title || JSON.stringify(s));
+          return capItem('<span class="ci-name">' + esc(String(txt).slice(0, 220)) + "</span>", "", "", true);
+        }).join("");
+      }
+      if (!facts.length && !scenes.length) html += '<div class="empty">暂无记忆</div>';
+      $("memBody").innerHTML = html;
+    }).catch(function (e) { $("memBody").innerHTML = '<div class="empty">' + esc(e.message) + "</div>"; });
+  }
+  $("btnMemRefresh").onclick = loadMemory;
+
+  /* --- 运行状态面板 (2026-10-07: /api/stats|traces|proactive|lifecycle 此前全无界面) --- */
+  function loadOps() {
+    $("opsBody").innerHTML = '<div class="empty">加载中…</div>';
+    Promise.all([
+      get("/api/stats").catch(function () { return null; }),
+      get("/api/traces?limit=30").catch(function () { return null; }),
+      get("/api/proactive").catch(function () { return null; }),
+      get("/api/lifecycle").catch(function () { return null; }),
+    ]).then(function (r) {
+      var stats = r[0], traces = r[1], pro = r[2], life = r[3];
+      var html = "";
+      if (stats) html += '<div class="capgroup">统计</div>' + kvBlock(stats);
+      if (life && Object.keys(life).length) html += '<div class="capgroup">生命周期</div>' + kvBlock(life);
+      if (pro) {
+        var items = pro.items || [];
+        html += '<div class="capgroup">主动提醒 (' + items.length + ")</div>";
+        if (pro.message) html += '<div class="capitem compact"><div class="ci-desc">' + esc(pro.message) + "</div></div>";
+        html += items.map(function (it) {
+          return capItem('<span class="ci-name">' + esc(it.title || it.text || JSON.stringify(it)) + "</span>", "", esc(it.id || ""), true);
+        }).join("");
+      }
+      var evs = (traces && (traces.events || traces)) || [];
+      if (evs.length) {
+        html += '<div class="capgroup">最近轨迹 (' + evs.length + ")</div>" + evs.slice(0, 30).map(function (e) {
+          return capItem('<span class="ci-name mono">' + esc(e.name || e.event || e.type || "?") + "</span>"
+            + '<span class="flex1"></span><span class="ci-use">' + esc(fmtTs(e.ts || e.time)) + "</span>", "", "", true);
+        }).join("");
+      }
+      $("opsBody").innerHTML = html || '<div class="empty">暂无可观测数据</div>';
+    }).catch(function (e) { $("opsBody").innerHTML = '<div class="empty">' + esc(e.message) + "</div>"; });
+  }
+  function kvBlock(obj) {
+    var rows = "";
+    (function walk(o, prefix) {
+      Object.keys(o || {}).forEach(function (k) {
+        var v = o[k];
+        var key = prefix ? prefix + "." + k : k;
+        if (v && typeof v === "object" && !Array.isArray(v)) walk(v, key);
+        else rows += '<div class="kv"><span class="kvk">' + esc(key) + '</span><span class="kvv">' + esc(Array.isArray(v) ? v.length + " 项" : String(v)) + "</span></div>";
+      });
+    })(obj, "");
+    return '<div class="kvbox">' + (rows || '<div class="empty">—</div>') + "</div>";
+  }
+  $("btnOpsRefresh").onclick = loadOps;
 
   /* ================= 侧栏能力入口 ================= */
   $("capFiles").onclick = function () { setDrawer(true); switchTab("files"); };
   $("capGoal").onclick = function () { setDrawer(true); switchTab("goal"); };
   $("capReview").onclick = function () { setDrawer(true); switchTab("review"); };
-  $("capMemory").onclick = function () {
-    get("/api/memory").then(function (j) {
-      evAgent().innerHTML = renderMd("## 记忆\n```json\n" + JSON.stringify(j, null, 2).slice(0, 3000) + "\n```");
-      toBottom(true);
-    }).catch(function (e) { toast(e.message, true); });
-  };
+  // 2026-10-07 (P2-15): 记忆不再把 JSON dump 进聊天流, 改开抽屉记忆面板。
+  $("capMemory").onclick = function () { setDrawer(true); switchTab("memory"); };
+  $("capTasks").onclick = function () { setDrawer(true); switchTab("task"); };
+  $("capOps").onclick = function () { setDrawer(true); switchTab("ops"); };
   $("capSettings").onclick = function () { setDrawer(true); switchTab("settings"); };
+  $("capModels").onclick = function () { setDrawer(true); switchTab("models"); };
+  $("capAbility").onclick = function () { setDrawer(true); switchTab("cap"); };
   function switchTab(tab) {
     var t = document.querySelector('.tab[data-tab="' + tab + '"]');
     if (t) t.click();
@@ -691,6 +1238,54 @@
     }).catch(function () {});
   }
 
+  /* ================= @ 文件引用 (2026-10-07, P2-11) ================= */
+  // 输入框里打 @<关键词> → 拉 /api/workspace/search 弹候选, 点击插入 @路径。
+  var filePick = { open: false, items: [], token: "", at: -1 };
+  var _fpTimer = null;
+  function maybeFilePick() {
+    var i = $("inp");
+    var before = i.value.slice(0, i.selectionStart);
+    var at = before.lastIndexOf("@");
+    if (at === -1 || /\s/.test(before.slice(at + 1))) { hideFilePick(); return; }
+    var q = before.slice(at + 1);
+    if (!q.length) { hideFilePick(); return; }
+    filePick.at = at;
+    filePick.token = q;
+    clearTimeout(_fpTimer);
+    _fpTimer = setTimeout(function () {
+      get("/api/workspace/search?limit=8&q=" + encodeURIComponent(q)).then(function (j) {
+        filePick.open = true;
+        filePick.items = (j && j.results) || [];
+        renderFilePick();
+      }).catch(function () { hideFilePick(); });
+    }, 160);
+  }
+  function renderFilePick() {
+    var el = $("filePick");
+    if (!filePick.open || !filePick.items.length) { el.hidden = true; return; }
+    el.hidden = false;
+    el.innerHTML = filePick.items.map(function (r, i) {
+      return '<div class="pitem' + (i === 0 ? " sel" : "") + '" data-path="' + esc(r.path) + '">'
+        + ico("file", 13) + '<span class="pname">' + esc(r.path) + "</span>"
+        + (r.match === "content" ? '<span class="pdesc">:' + r.line + " " + esc(r.snippet || "") + "</span>" : "") + "</div>";
+    }).join("");
+    el.querySelectorAll(".pitem").forEach(function (it) {
+      it.onclick = function () { insertFileRef(it.getAttribute("data-path")); };
+    });
+  }
+  function insertFileRef(p) {
+    var i = $("inp");
+    var v = i.value;
+    var before = v.slice(0, filePick.at);
+    var after = v.slice(filePick.at + 1 + filePick.token.length);
+    i.value = before + "@" + p + " " + after.replace(/^\s+/, "");
+    hideFilePick();
+    i.focus();
+    autosize();
+    $("btnSend").disabled = !i.value.trim();
+  }
+  function hideFilePick() { filePick.open = false; var el = $("filePick"); if (el) el.hidden = true; }
+
   /* ================= 输入框 ================= */
   function autosize() {
     var i = $("inp");
@@ -703,6 +1298,7 @@
     var v = $("inp").value;
     if (v.charAt(0) === "/" && !S.streaming) showPalette(v.slice(1).split(/\s/)[0]);
     else hidePalette();
+    if (!S.streaming) maybeFilePick(); else hideFilePick();
   });
   $("inp").addEventListener("keydown", function (e) {
     if (!$("palette").hidden) {
@@ -719,6 +1315,7 @@
   });
   document.addEventListener("keydown", function (e) {
     if (e.key === "Escape") {
+      if (!$("filePick").hidden) { hideFilePick(); return; }
       if (!$("palette").hidden) { hidePalette(); return; }
       if (S.streaming) stopGen();
     }

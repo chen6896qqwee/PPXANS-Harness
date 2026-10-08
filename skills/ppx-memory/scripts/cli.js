@@ -158,9 +158,11 @@ switch (cmd) {
 
   case "deleted": {
     const all = facts.exportAll({ includeDeleted: true });
-    const list = (Array.isArray(all) ? all : all.facts || []).filter((f) => f.status === "deleted");
+    // v2026-10-04 (P2#15 同步): 两个后端的 exportAll 形状已收敛为 { items } (非 { facts }),
+    // 软删原因字段是 deleteReason (非 deletedReason) —— 旧读法恒为空, deleted 命令列不出条目
+    const list = (Array.isArray(all) ? all : all.items || []).filter((f) => f.status === "deleted");
     if (!list.length) out("(无已遗忘条目)");
-    for (const f of list) out(`${f.id}  ${f.content}  ← ${f.deletedReason || "无原因"}`);
+    for (const f of list) out(`${f.id}  ${f.content}  ← ${f.deleteReason || "无原因"}`);
     break;
   }
 

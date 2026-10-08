@@ -17,11 +17,16 @@ const HARD_PATTERNS = [
   { name: "url_secret", regex: /([?&](?:token|key|secret|api[_-]?key|access[_-]?token|auth|sign|sig|password)=)[^&#\s"']*/gi, redact: (m, pre) => pre + "[REDACTED]" },
 ];
 
-export function scrubPII(text) {
+// opts.keep: 名单内的模式跳过脱敏 (默认全脱)。
+// 用途: 长期记忆层需要保留"用户主动让记住"的联系方式 (email/phone),
+// 但凭证类 (api_key/inline_secret/private_key/...) 任何路径都不得留原文。
+export function scrubPII(text, opts = {}) {
   if (!text) return { cleaned: text, detected: [] };
+  const keep = new Set((opts && opts.keep) || []);
   const detected = [];
   let cleaned = text;
   for (const { name, regex, redact } of HARD_PATTERNS) {
+    if (keep.has(name)) continue;
     regex.lastIndex = 0;
     if (regex.test(cleaned)) {
       detected.push(name);

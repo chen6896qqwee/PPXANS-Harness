@@ -64,11 +64,15 @@ export class FeishuChannel extends Channel {
   mount(server, httpChannel = null) {
     const register = this._registrar(server, httpChannel);
     register(this.webhookPath, async (req, res) => {
-      const body = await this._readBody(req);
+      // 鉴权先于读体: 未鉴权请求不应消耗/接收整个 body (也防大 body DoS)
+      const denied = this._webhookSecretGate(this.verifyToken);
+      if (denied) return this._sendJson(res, 403, { error: denied });
       // 飞书事件订阅用请求头 X-Lark-Request-Token 携带 verify_token (body 内 token 极少存在, 仅作纵深)
+      // 到这里 verifyToken 必非空, 除非操作者显式开了 allow_unauthenticated_webhooks (本地调试) —— 那时跳过比对
       if (this.verifyToken && req.headers["x-lark-request-token"] !== this.verifyToken) {
         return this._sendJson(res, 403, { error: "invalid token" });
       }
+      const body = await this._readBody(req);
       try {
         return this._sendJson(res, 200, await this.handleWebhook(body));
       } catch (e) {
@@ -80,6 +84,8 @@ export class FeishuChannel extends Channel {
   // 处理飞书 webhook 事件 (事件订阅回调)
   async handleWebhook(body) {
     // 校验 verify_token (纵深防御; 主校验在 mount 的 X-Lark-Request-Token 头)
+    const denied = this._webhookSecretGate(this.verifyToken);
+    if (denied) return { code: 1, msg: denied };
     const data = typeof body === "string" ? JSON.parse(body) : body;
     if (data.token && data.token !== this.verifyToken) {
       return { code: 1, msg: "invalid token" };

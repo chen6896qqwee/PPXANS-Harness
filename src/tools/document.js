@@ -166,6 +166,8 @@ export function registerDocumentTools(catalog, { rootDir }) {
   // 1. 读文档 (加载器, PDF 扫描件自动 OCR)
   catalog.register({
     name: "read_document",
+    // 只读: safePath 锁工作区 + 解析文本返回, 不写盘 (扫描件分支的 OCR 也只是"取文字", 无状态变更)
+    capability: { riskLevel: "low", readOnly: true, destructive: false, sideEffect: "none" },
     description: "读取本地文档并转纯文本。支持 .txt/.md/.json/.csv/.html/.pdf (文字型 PDF 直接提取, 扫描件 PDF 自动 OCR)。用于读文档/报告/数据文件后回答问题。",
     parameters: {
       type: "object",
@@ -192,6 +194,10 @@ export function registerDocumentTools(catalog, { rootDir }) {
   // 2. OCR 识别图片/扫描件文字
   catalog.register({
     name: "ocr_image",
+    // 判定说明: 它跑的是**固定**二进制 (tesseract) 或可选云 OCR, 执行的不是模型现写的代码,
+    // 也不改任何状态 → 与 read_document/vad_detect 同档 (readOnly:true)。
+    // 与 code_act/code_run (模型现写脚本 → 非只读) 的区分点在这里。
+    capability: { riskLevel: "low", readOnly: true, destructive: false, sideEffect: "none" },
     description: "识别图片或扫描件里的文字 (OCR)。需系统安装 tesseract (含中文语言包) 或配置 config.ocr 云 key。用于 read_image/read_document 读到图片却无法理解文字时。",
     parameters: {
       type: "object",
@@ -221,6 +227,8 @@ export function registerDocumentTools(catalog, { rootDir }) {
   // 3. 文档入库 (RAG): 读文档 → 分块 → 存记忆 (带 scope 隔离)
   catalog.register({
     name: "ingest_document",
+    // RAG 入库: 分块后批量写长期记忆 (持久状态变更) → 非只读; medium (增量写入, 可用 memory_forget 逐条撤)
+    capability: { riskLevel: "medium", readOnly: false, destructive: false, sideEffect: "memory" },
     description: "读取文档, 分块后写入长期记忆 (RAG 入库), 之后可被语义检索命中。scope 用于隔离文档来源 (如 '公司制度'/'项目文档'), 避免与其他记忆混淆。",
     parameters: {
       type: "object",

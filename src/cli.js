@@ -14,12 +14,16 @@ ensureUTF8Console();
 installCrashGuard({ tag: "ppx-cli" });
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const agent = new PPXAgent({ root: ROOT });
+// 2026-10-05: 终端聊天有人在场 (能接住 clarify 的反问), 但没有 Web 审批面 —— 单独标记,
+// 让 clarify 在 CLI 保持原行为; 审批链路不受此标记影响 (仍按 hasApprovalSurface 走)。
+agent.markHumanChannel(true);
 
 console.log("======================================");
 console.log("  皮皮虾 (PPX) - 自我修复·自我学习 Agent");
 console.log(`  记忆:${agent.facts.count()}条 | 经验:${agent.experience.lessons.length}条`);
 console.log(`  模型: ${agent.llm ? "已配置" : "未配置(离线记忆模式)"}`);
 console.log("  命令: quit/exit 退出 | /stop 中断当前任务 | /reset 清空会话");
+console.log("        /plan 进入计划模式(只读) | /do 退出计划模式恢复执行");
 console.log("        /proactive 主动提醒(扫描记忆待办) | /proactive-done <id> 标记待办完成 | ↑↓ 浏览历史 | Ctrl+C 中断(再按一次退出)");
 console.log("======================================");
 
@@ -29,6 +33,13 @@ const rl = readline.createInterface({
   prompt: "皮皮虾> ",
   terminal: true,
 });
+
+// 模式可见 (2026-10-05 /plan 修复): 提示符实时显示当前计划模式, 用户不会"不知不觉卡在 plan 里"。
+// 状态在 agent 侧按会话存 (CLI 单会话 = "default"), 这里只读展示, 不改判定口径。
+function refreshPrompt() {
+  try { rl.setPrompt(agent.isPlanMode("default") ? "皮皮虾[plan]> " : "皮皮虾> "); } catch { /* 提示符刷新失败不影响对话 */ }
+}
+refreshPrompt();
 
 let busy = false; // 防止任务执行中重复输入
 
@@ -54,7 +65,7 @@ rl.on("line", async (line) => {
 
   // 退出
   if (["quit", "exit", "q"].includes(text.toLowerCase())) {
-    agent.shutdown();
+    await agent.shutdown(); // 军团子进程回收是异步的, 不 await 就是紧随其后的 exit 的孤儿
     console.log("皮皮虾 收工, 已保存记忆。");
     process.exit(0);
   }
@@ -67,6 +78,7 @@ rl.on("line", async (line) => {
   // 清空会话
   if (text === "/reset") {
     agent.resetSession("default");
+    refreshPrompt(); // 全新会话: 计划态一并清零, 提示符同步
     console.log("(会话已清空)");
     return rl.prompt();
   }
@@ -106,16 +118,17 @@ rl.on("line", async (line) => {
     console.log("\n[错误] " + e.message + "\n");
   } finally {
     busy = false;
+    refreshPrompt(); // /plan /do 都经由这里落到 agent.chat, 提示符随之反映模式
   }
   rl.prompt();
 });
 
 // Ctrl+C: 第一次中断任务, 第二次退出
 let ctrlC = 0;
-rl.on("SIGINT", () => {
+rl.on("SIGINT", async () => {
   ctrlC += 1;
   if (ctrlC >= 2) {
-    agent.shutdown();
+    await agent.shutdown();
     console.log("\n皮皮虾 收工。");
     process.exit(0);
   }

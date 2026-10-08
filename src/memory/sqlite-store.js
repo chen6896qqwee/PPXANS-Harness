@@ -14,6 +14,14 @@ import path from "node:path";
 import { createRequire } from "node:module";
 import { ensureDir, nowISO } from "../utils/store.js";
 import { setJaccard, setOverlap } from "../utils/similarity.js";
+import { scrubPII } from "../utils/pii.js";
+import { debug } from "../utils/logger.js";
+import { importJsonIntoSqlite } from "./backend-migrate.js";
+// v2026-10-XX (来源分级): 与 JSON 后端共用同一套判定规则 (provenance.js), 保证跨后端同口径
+import {
+  resolveWriteTier, tierOfRecord, normalizeTier, rankOf, canSupersede, isQuarantined, stripTierTags,
+  matchesTierSelector,
+} from "./provenance.js";
 
 // node:sqlite 用**惰性 require** 加载, 不做静态 import ——
 // 静态 import 会在任何 import 了本模块的进程里立刻加载 node:sqlite,
@@ -24,6 +32,8 @@ const require = createRequire(import.meta.url);
 export const LAYER_L1 = 1;
 export const LAYER_L4 = 4;
 export const SCHEMA_VERSION = 1;
+// 墓碑行数与容量上限的倍数 —— 与 fact-store.js 的 FactStore.TOMBSTONE_FACTOR 同值 (json/sqlite 同口径)
+const TOMBSTONE_FACTOR = 4;
 
 const SNAKE_TO_CAMEL = {
   decay_per_day: "decayPerDay",
@@ -73,11 +83,21 @@ export class SqliteFactStore {
       baseImportance: 10,
       forgetSpeed: 1.0,
       maxFacts: 1000,
+      // F4 同口径 (fact-store.js): 墓碑 (status=deleted/archived) 回收参数
+      purgeGraceDays: 30,  // 时效扫描里的墓碑物理保留期 (天); 0 = 不按年龄物理清理
+      maxTombstones: 0,    // 墓碑行数上限; 0 = 按 maxFacts × TOMBSTONE_FACTOR 推导
       ...normOpts,
     };
     this.embedder = null;
     this._embedCache = new Map();
     this._open();
+    // v2026-10-04 (P2#sqlite-parity): 后端切换一次性迁移 —— 空库 + 同目录存在 facts.json 时导入,
+    // best-effort, 永不抛错 (详见 backend-migrate.js)
+    importJsonIntoSqlite(this);
+    // v2026-10-XX (来源分级 · 存量回灌): 空 provenance 的存量行按 source 登记表一次性落 tier。
+    //   判定不依赖这一步 (_row2fact 读缺值时会即时回退), 这一步只让磁盘列本身可审计、可 SQL 统计。
+    //   放在迁移之后: json→sqlite 导进来的行也一起被回灌 (迁移映射逐字保留 provenance, 见 backend-migrate)。
+    this.backfillProvenance();
   }
 
   _open() {
@@ -107,6 +127,9 @@ export class SqliteFactStore {
         deleted_reason TEXT,
         deleted_at INTEGER,
         ttl_days INTEGER,
+        valid_from INTEGER,
+        valid_to INTEGER,
+        provenance TEXT,
         meta TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_facts_status ON facts(status);
@@ -116,6 +139,14 @@ export class SqliteFactStore {
       CREATE INDEX IF NOT EXISTS idx_facts_access ON facts(last_access);
       CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
     `);
+    // v2026-10-04 (P2#sqlite-parity): valid_from/valid_to 是后补的 TTL 时效窗口列 ——
+    // CREATE TABLE IF NOT EXISTS 对存量旧库不生效, 必须走 ALTER TABLE 补列 (与 fact-store.js 的窗口语义对齐)
+    const cols = new Set(this.db.prepare("PRAGMA table_info(facts)").all().map((c) => c.name));
+    if (!cols.has("valid_from")) this.db.exec("ALTER TABLE facts ADD COLUMN valid_from INTEGER");
+    if (!cols.has("valid_to")) this.db.exec("ALTER TABLE facts ADD COLUMN valid_to INTEGER");
+    // 来源分级 (v2026-10-XX): 与 valid_* 同一套存量库补列路径 —— 分级上线前建好的库没有这列,
+    //   不补列则每次写入都要先炸一次 "no such column" (sqlite 对未知列是硬错, 不是忽略)。
+    if (!cols.has("provenance")) this.db.exec("ALTER TABLE facts ADD COLUMN provenance TEXT");
     // FTS5 索引表: 存"切分后的 token 文本", 检索时同口径切分。
     // 用标准 (非 contentless) 表 —— content='' 的表不支持普通 DELETE, 增量更新会失效。
     try {
@@ -151,6 +182,8 @@ export class SqliteFactStore {
       content: r.content,
       type: r.type,
       source: r.source,
+      // 来源分级: 列缺值 (存量行/旧版本写入) 时即时按 source 登记表回退, 使判定不依赖回灌是否跑过
+      provenance: tierOfRecord({ provenance: r.provenance, source: r.source }),
       importance: r.importance,
       score: r.score,
       created: new Date(r.created).toISOString(),
@@ -161,9 +194,54 @@ export class SqliteFactStore {
       status: r.status,
       prevId: r.prev_id,
       supersededBy: r.superseded_by,
-      deletedReason: r.deleted_reason,
-      meta: r.meta ? JSON.parse(r.meta) : null,
+      // deleteReason 而非 deletedReason: 与 fact-store.js 的字段名对齐 (governance 工具按此显示)
+      deleteReason: r.deleted_reason ?? null,
+      deletedAt: r.deleted_at ? new Date(r.deleted_at).toISOString() : null,
+      ttlDays: r.ttl_days ?? null,
+      validFrom: r.valid_from ? new Date(r.valid_from).toISOString() : null,
+      validTo: r.valid_to ? new Date(r.valid_to).toISOString() : null,
+      meta: this._parseMeta(r.meta),
     };
+  }
+
+  // v2026-10-04 (P2#sqlite-parity #4): meta 损坏 (手工编辑/半写入的行) 不再炸掉整库加载 ——
+  // 坏值按空处理, 该行其余字段照常返回
+  _parseMeta(raw) {
+    if (raw == null || raw === "") return null;
+    try {
+      return JSON.parse(raw);
+    } catch (e) {
+      debug(`[memory/sqlite-store] meta 解析失败, 按空处理 (行保留): ${e && e.message ? e.message : e}`);
+      return null;
+    }
+  }
+
+  // 时效窗口 (对齐 fact-store.js _normTime/_isCurrent): 存毫秒 epoch, 读取侧转 ISO
+  _normTimeMs(v) {
+    if (v == null || v === "") return null;
+    const t = v instanceof Date ? v.getTime() : new Date(v).getTime();
+    return Number.isFinite(t) ? t : null;
+  }
+
+  _isCurrent(r, nowMs = Date.now()) {
+    if (r.valid_from && nowMs < r.valid_from) return false; // 尚未生效
+    if (r.valid_to && nowMs >= r.valid_to) return false; // 已失效
+    return true;
+  }
+
+  setValidity(id, { validFrom = undefined, validTo = undefined } = {}) {
+    const row = this.db.prepare("SELECT * FROM facts WHERE id = ?").get(String(id || ""));
+    if (!row) return null;
+    // 时效只影响检索可见性, 不改 status (与 fact-store.js 同口径)
+    if (validFrom !== undefined) this.db.prepare("UPDATE facts SET valid_from = ? WHERE id = ?").run(this._normTimeMs(validFrom), row.id);
+    if (validTo !== undefined) this.db.prepare("UPDATE facts SET valid_to = ? WHERE id = ?").run(this._normTimeMs(validTo), row.id);
+    const r = this.db.prepare("SELECT * FROM facts WHERE id = ?").get(row.id);
+    return { id: row.id, validFrom: r.valid_from ? new Date(r.valid_from).toISOString() : null, validTo: r.valid_to ? new Date(r.valid_to).toISOString() : null };
+  }
+
+  listOutOfWindow(scope = null) {
+    const rows = this.db.prepare("SELECT * FROM facts WHERE status = 'active' AND (? IS NULL OR scope = ?)").all(scope, scope);
+    return rows.filter((r) => !this._isCurrent(r)).map((r) => this._row2fact(r));
   }
 
   _lambdaOf(f) {
@@ -202,9 +280,16 @@ export class SqliteFactStore {
   add(content, {
     importance = this.opts.baseImportance, type = "general", source = "manual",
     dedupe = true, scope = null, meta = null, similarThreshold = 0,
-    layer = LAYER_L1, ttlDays = null,
+    layer = LAYER_L1, ttlDays = null, validFrom = null, validTo = null, supersedeId = null,
+    provenance = null,
   } = {}) {
-    const clean = this._norm(content);
+    // v2026-10-04 (P2#secrets-parity): 与 fact-store.js add() 同点脱密 (scrub→norm, keep email/phone)。
+    //   sqlite 后端不走 add() 之外还有 update/importAll 两条独立落盘路径, 三处各自脱, 口径与 JSON 对齐;
+    //   scrubPII 幂等, 迁移二次脱敏无害。缺此步则翻转 backend 到 sqlite 会重开凭证泄漏口 (记忆回注 prompt 且可导出)。
+    // v2026-10-XX (来源分级 · 与 JSON 后端逐条同口径): 未声明 provenance 且 source 不在登记表 → unknown 隔离;
+    //   写入侧剥伪装来源标签 (标签文本只来自 provenance.js 的闭集常量, 不来自 content)。
+    const tier = resolveWriteTier({ provenance, source });
+    const clean = this._norm(stripTierTags(scrubPII(String(content ?? ""), { keep: ["email", "phone"] }).cleaned));
     if (!clean) return null;
     const key = this._normKey(clean);
 
@@ -212,21 +297,20 @@ export class SqliteFactStore {
       const hit = this.db.prepare(
         "SELECT * FROM facts WHERE norm_key = ? AND status = 'active' AND (scope IS ? OR scope = ?) LIMIT 1",
       ).get(key, scope, scope);
-      if (hit) {
-        this.db.prepare(
-          "UPDATE facts SET hits = hits + 1, score = score + ?, last_access = ? WHERE id = ?",
-        ).run(this.opts.hitBonus, Date.now(), hit.id);
-        this._ftsUpsert({ id: hit.id, content: hit.content });
-        return this._row2fact(this.db.prepare("SELECT * FROM facts WHERE id = ?").get(hit.id));
-      }
+      if (hit) return this._onDedupeHit(hit, tier);
     }
 
     if (similarThreshold > 0) {
       const sim = this.findSimilar(clean, { threshold: similarThreshold, scope });
       if (sim) {
+        // 跨 tier: 低权限写入不得给高权限记录加分 (与 fact-store.js _onDedupeHit 同规则)
+        if (!canSupersede(tier, tierOfRecord(sim))) return sim;
         this.db.prepare("UPDATE facts SET hits = hits + 1, score = score + ?, last_access = ? WHERE id = ?")
           .run(this.opts.hitBonus, Date.now(), sim.id);
-        return sim;
+        if (rankOf(tier) > rankOf(tierOfRecord(sim))) {
+          this.db.prepare("UPDATE facts SET provenance = ? WHERE id = ?").run(tier, sim.id);
+        }
+        return this._row2fact(this.db.prepare("SELECT * FROM facts WHERE id = ?").get(sim.id));
       }
     }
 
@@ -237,6 +321,7 @@ export class SqliteFactStore {
       // 切分结果随行落库: 查询精排时直接读, 避免对每条候选重复切分 (实测这是查询慢 50x 的主因)
       toks: tokenize(clean).join(" "),
       type, source,
+      provenance: tier,
       importance: Number(importance) || this.opts.baseImportance,
       score: Number(importance) || this.opts.baseImportance,
       created: Date.now(),
@@ -246,14 +331,24 @@ export class SqliteFactStore {
       layer: Number(layer) || LAYER_L1,
       status: "active",
       ttlDays: ttlDays == null ? null : Number(ttlDays),
+      validFrom: this._normTimeMs(validFrom),
+      validTo: this._normTimeMs(validTo),
       meta: meta ? JSON.stringify(meta) : null,
     };
     this.db.prepare(`
-      INSERT INTO facts(id,content,norm_key,toks,type,source,importance,score,created,last_access,hits,scope,layer,status,ttl_days,meta)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-    `).run(f.id, f.content, f.normKey, f.toks, f.type, f.source, f.importance, f.score, f.created, f.lastAccess, f.hits, f.scope, f.layer, f.status, f.ttlDays, f.meta);
+      INSERT INTO facts(id,content,norm_key,toks,type,source,provenance,importance,score,created,last_access,hits,scope,layer,status,ttl_days,valid_from,valid_to,meta)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    `).run(f.id, f.content, f.normKey, f.toks, f.type, f.source, f.provenance, f.importance, f.score, f.created, f.lastAccess, f.hits, f.scope, f.layer, f.status, f.ttlDays, f.validFrom, f.validTo, f.meta);
 
     this._ftsUpsert({ id: f.id, content: f.content });
+    // v3.1 同口径 (fact-store.js): supersedeId 指定被本条取代的旧事实 → 其 validTo 收口到当前 (旧条不删, 只是不再命中)
+    // 跨 tier 取代规则: 低权限写入不得收口高权限记录 (否则一次抓取就能静默"遗忘"用户事实)
+    if (supersedeId && supersedeId !== f.id) {
+      const old = this.db.prepare("SELECT * FROM facts WHERE id = ? AND valid_to IS NULL").get(supersedeId);
+      if (old && canSupersede(tier, tierOfRecord(old))) {
+        this.db.prepare("UPDATE facts SET valid_to = ? WHERE id = ? AND valid_to IS NULL").run(Date.now(), supersedeId);
+      }
+    }
     this._prune();
     return this._row2fact(this.db.prepare("SELECT * FROM facts WHERE id = ?").get(f.id));
   }
@@ -262,31 +357,120 @@ export class SqliteFactStore {
     return this.add(message, { source: "message", type: "message" });
   }
 
+  // 去重命中的跨 tier 规则 (与 fact-store.js _onDedupeHit 逐条同口径, 调用方必须已传入刚读到的行):
+  //   低权限写入撞高权限记录 → 原样返回, 不改 hits/score (隔离带刷不出用户事实的热度);
+  //   同权或更高 → 照旧加分, 严格更高时把该行 provenance 晋级 (来源只会向上)。
+  _onDedupeHit(hitRow, tier) {
+    const cur = tierOfRecord(hitRow);
+    if (!canSupersede(tier, cur)) return this._row2fact(hitRow);
+    this.db.prepare(
+      "UPDATE facts SET hits = hits + 1, score = score + ?, last_access = ? WHERE id = ?",
+    ).run(this.opts.hitBonus, Date.now(), hitRow.id);
+    if (rankOf(tier) > rankOf(cur)) {
+      this.db.prepare("UPDATE facts SET provenance = ? WHERE id = ?").run(tier, hitRow.id);
+    }
+    this._ftsUpsert({ id: hitRow.id, content: hitRow.content });
+    return this._row2fact(this.db.prepare("SELECT * FROM facts WHERE id = ?").get(hitRow.id));
+  }
+
+  /**
+   * 存量库来源分级回灌 (与 fact-store.js 同名 API, 两端可互换调用)。
+   * 单事务: 要么全灌要么不灌, 中途崩溃不会留下"半灌"的库 (半灌不影响判定, 但会让 by_provenance 读数失真)。
+   * 只碰 provenance 为 NULL/空 的行 —— 已声明的值绝不重算 (用户晋级过的 tier 不会被回灌洗掉)。
+   * @returns {{total:number, stamped:number, byTier:Object, quarantined:number, dryRun:boolean}}
+   */
+  backfillProvenance({ dryRun = false } = {}) {
+    const rows = this.db.prepare("SELECT id, source, provenance FROM facts").all();
+    const byTier = {};
+    let quarantined = 0;
+    const todo = [];
+    for (const r of rows) {
+      const t = tierOfRecord(r);
+      byTier[t] = (byTier[t] || 0) + 1;
+      if (isQuarantined(t)) quarantined++;
+      if (r.provenance == null || String(r.provenance).trim() === "" || r.provenance !== t) todo.push({ id: r.id, t });
+    }
+    if (dryRun) return { total: rows.length, stamped: 0, byTier, quarantined, dryRun: true };
+    if (todo.length) {
+      this.db.exec("BEGIN");
+      try {
+        const upd = this.db.prepare("UPDATE facts SET provenance = ? WHERE id = ?");
+        for (const x of todo) upd.run(x.t, x.id);
+        this.db.exec("COMMIT");
+      } catch (e) {
+        try { this.db.exec("ROLLBACK"); } catch { /* 事务已结束 */ }
+        debug(`[memory/sqlite-store] provenance 回灌事务回滚 (判定不依赖它, 行为不变): ${e && e.message ? e.message : e}`);
+        return { total: rows.length, stamped: 0, byTier, quarantined, dryRun: false, failed: true };
+      }
+    }
+    return { total: rows.length, stamped: todo.length, byTier, quarantined, dryRun: false };
+  }
+
   // 容量裁剪: 超 maxFacts 时按「衰减分 × 重要性」淘汰最弱 (与 JSON 版同口径)
+  // 2026-10-04 (F4): 同时给墓碑行数设上限 (maxFacts × TOMBSTONE_FACTOR) —— 软删/归档行不占
+  // maxFacts 名额, 但一直躺在表里让库文件与 COUNT(*) 只增不减; 按删除时钟升序回收最老的。
   _prune() {
     const max = Number(this.opts.maxFacts);
-    if (!max || max <= 0) return 0;
-    const { n } = this.db.prepare("SELECT COUNT(*) AS n FROM facts WHERE status = 'active'").get();
-    if (n <= max) return 0;
-    const now = Date.now();
-    const rows = this.db.prepare("SELECT * FROM facts WHERE status='active'").all();
-    const ranked = rows.map((r) => {
-      const days = Math.max(0, (now - r.last_access) / 86400000);
-      const eff = this._decay(r.score, days, r.layer) * (0.5 + 0.5 * Math.min(r.importance || 0, 20) / 20);
-      return { id: r.id, eff };
-    }).sort((a, b) => a.eff - b.eff);
-    const drop = ranked.slice(0, n - max);
-    const del = this.db.prepare("DELETE FROM facts WHERE id = ?");
-    for (const d of drop) {
-      this._ftsDelete(d.id);
-      del.run(d.id);
+    const explicitCap = Number(this.opts.maxTombstones) || 0;
+    if ((!max || max <= 0) && explicitCap <= 0) return 0;
+    let dropped = 0;
+    if (max && max > 0) {
+      const { n } = this.db.prepare("SELECT COUNT(*) AS n FROM facts WHERE status = 'active'").get();
+      if (n > max) {
+        const now = Date.now();
+        const rows = this.db.prepare("SELECT * FROM facts WHERE status='active'").all();
+        const ranked = rows.map((r) => {
+          const days = Math.max(0, (now - r.last_access) / 86400000);
+          const eff = this._decay(r.score, days, r.layer) * (0.5 + 0.5 * Math.min(r.importance || 0, 20) / 20);
+          // 来源分级 (fact-store.js _prune 同口径): 隔离带先出局, 抓取洪水不该挤掉用户事实。
+          //   同类内部保持原「衰减分×重要性」升序, 单来源场景的淘汰次序逐字不变。
+          return { id: r.id, eff, promotable: isQuarantined(tierOfRecord(r)) ? 0 : 1 };
+        }).sort((a, b) => (b.promotable - a.promotable) || (a.eff - b.eff));
+        const drop = ranked.slice(0, n - max);
+        const del = this.db.prepare("DELETE FROM facts WHERE id = ?");
+        for (const d of drop) {
+          this._ftsDelete(d.id);
+          del.run(d.id);
+        }
+        dropped += drop.length;
+      }
     }
-    return drop.length;
+    const cap = explicitCap > 0 ? explicitCap : (max && max > 0 ? max * TOMBSTONE_FACTOR : 0);
+    if (cap > 0) {
+      dropped += this._purgeTombstones({ cap, olderThanMs: 0 }).length;
+    }
+    return dropped;
+  }
+
+  // 墓碑物理回收 (JSON/sqlite 同口径): 按删除时钟升序, 只保留最近 cap 条 / 或只留保留期内的那些。
+  //   olderThanMs > 0  = 只删"早于该时间戳"的墓碑 (时效扫描用的年龄口径, 时间不靠墙钟之外的东西)
+  //   cap > 0          = 只留最近的 cap 条墓碑 (容量口径)
+  //   tier             = 来源分级选择器 (provenance.js matchesTierSelector); 缺省 null = 不分档,
+  //                      传 "quarantined" 时 tombstone 回收也只碰隔离带 —— 让 sweepExpired({tier})
+  //                      的语义闭合: "只动这一档", 不会顺手把用户事实的墓碑也清了。
+  // 返回被回收的 id 列表 (与 JSON 后端的 purgedIds 同形)
+  _purgeTombstones({ cap = 0, olderThanMs = 0, limit = 0, tier = null } = {}) {
+    // deleted_at 只有软删才有; 归档行 (status='archived') 退到 last_access, 再退到 created
+    const rows = this.db.prepare(
+      "SELECT id, provenance, source, COALESCE(deleted_at, last_access, created) AS clock FROM facts WHERE status IN ('deleted','archived') ORDER BY clock ASC",
+    ).all();
+    let doomed = rows.filter((r) => matchesTierSelector(tierOfRecord(r), tier));
+    if (olderThanMs > 0) doomed = doomed.filter((r) => Number(r.clock) <= olderThanMs);
+    if (cap > 0) doomed = doomed.slice(0, Math.max(0, doomed.length - cap));
+    else if (limit > 0) doomed = doomed.slice(0, limit);
+    const del = this.db.prepare("DELETE FROM facts WHERE id = ?");
+    const ids = [];
+    for (const r of doomed) {
+      this._ftsDelete(r.id);
+      del.run(r.id);
+      ids.push(r.id);
+    }
+    return ids;
   }
 
   // ---- 检索 ----
   // 粗召回走 FTS5 (C 实现, 远快于内存全扫), 精排复用 JSON 版公式, 保证结果口径一致
-  query(q, { limit = 5, minScore = 1, scope = null } = {}) {
+  query(q, { limit = 5, minScore = 1, scope = null, includeExpired = false } = {}) {
     const ql = String(q || "").toLowerCase();
     const toks = tokenize(ql);
     let rows = [];
@@ -298,9 +482,10 @@ export class SqliteFactStore {
         // 从 0.16ms/次 劣化到 16ms/次 (100 倍)。子查询形式让"先按 bm25 取 rowid"和
         // "按 rowid 取列"两件事各自走最优路径。
         rows = this.db.prepare(`
-          SELECT f.id, f.content, f.toks, f.type, f.source, f.importance, f.score,
+          SELECT f.id, f.content, f.toks, f.type, f.source, f.provenance, f.importance, f.score,
                  f.created, f.last_access, f.hits, f.scope, f.layer, f.status,
-                 f.prev_id, f.superseded_by, f.deleted_reason, f.meta
+                 f.prev_id, f.superseded_by, f.deleted_reason, f.deleted_at, f.ttl_days,
+                 f.valid_from, f.valid_to, f.meta
           FROM facts f
           WHERE f.status = 'active' AND (? IS NULL OR f.scope = ?)
             AND f.rowid IN (
@@ -316,6 +501,8 @@ export class SqliteFactStore {
         "SELECT * FROM facts WHERE status='active' AND (? IS NULL OR scope = ?) AND lower(content) LIKE ? LIMIT 300",
       ).all(scope, scope, like);
     }
+    // 时效窗口过滤 (v3.1 / fact-store.js 同口径): 已失效/未生效的事实默认不命中, includeExpired=true 供治理检视
+    if (!includeExpired) rows = rows.filter((r) => this._isCurrent(r));
     if (!rows.length) return [];
 
     const now = Date.now();
@@ -345,8 +532,8 @@ export class SqliteFactStore {
     return scored.slice(0, limit).map((x) => ({ ...this._row2fact(x.r), effectiveScore: x.s }));
   }
 
-  queryMulti(queries, { limit = 5, scope = null, minScore = 1 } = {}) {
-    const lists = (queries || []).filter(Boolean).map((q) => this.query(q, { limit: Math.max(limit * 2, 10), scope, minScore }));
+  queryMulti(queries, { limit = 5, scope = null, minScore = 1, includeExpired = false } = {}) {
+    const lists = (queries || []).filter(Boolean).map((q) => this.query(q, { limit: Math.max(limit * 2, 10), scope, minScore, includeExpired }));
     const K = 60;
     const acc = new Map();
     for (const list of lists) {
@@ -372,16 +559,29 @@ export class SqliteFactStore {
 
   setEmbedder(fn) {
     this.embedder = typeof fn === "function" ? fn : null;
+    this._embedCache.clear(); // 换模型后旧向量与新模型不同空间, 必须作废 (与 JSON 后端同口径)
   }
 
-  async _embed(text) {
+  // role ("query"|"passage"): 非对称模型 (e5) 的查询侧/文档侧前缀不同, 缓存键必须带上 role,
+  //   否则同一串文本在两侧共用一条向量, 精度悄悄劣化 (2026-10-04)
+  async _embed(text, role = "query") {
     if (!this.embedder) return null;
-    if (this._embedCache.has(text)) return this._embedCache.get(text);
+    const key = role + "\u0000" + text;
+    if (this._embedCache.has(key)) {
+      const cached = this._embedCache.get(key);
+      this._embedCache.delete(key);
+      this._embedCache.set(key, cached); // 命中即挪到队尾 = 真 LRU (旧实现满 1000 整体清空)
+      return cached;
+    }
     try {
-      const v = await this.embedder(text);
+      const v = await this.embedder(text, role);
       if (Array.isArray(v) && v.length) {
-        if (this._embedCache.size > 1000) this._embedCache.clear();
-        this._embedCache.set(text, v);
+        this._embedCache.set(key, v);
+        while (this._embedCache.size > 1000) {
+          const oldest = this._embedCache.keys().next();
+          if (oldest.done) break;
+          this._embedCache.delete(oldest.value);
+        }
         return v;
       }
     } catch { /* 向量化失败回落词法检索 */ }
@@ -391,12 +591,12 @@ export class SqliteFactStore {
   async querySemantic(q, { limit = 5, scope = null } = {}) {
     const lexical = this.query(q, { limit: limit * 2, scope });
     if (!this.embedder) return lexical.slice(0, limit);
-    const qv = await this._embed(q);
+    const qv = await this._embed(q, "query");
     if (!qv) return lexical.slice(0, limit);
     const rows = this.db.prepare("SELECT * FROM facts WHERE status='active' AND (? IS NULL OR scope = ?) LIMIT 500").all(scope, scope);
     const dense = [];
     for (const r of rows) {
-      const v = await this._embed(r.content);
+      const v = await this._embed(r.content, "passage");
       if (!v) continue;
       dense.push({ ...this._row2fact(r), effectiveScore: cosine(qv, v) });
     }
@@ -421,13 +621,17 @@ export class SqliteFactStore {
   }
 
   // ---- 治理 ----
-  forget(idOrContent, { reason = null } = {}) {
+  // 来源分级 (fact-store.js forget 同口径): 默认不带 provenance = 治理动作不额外设闸;
+  //   声明了来源则低权限声明不得删高权限记录 (防"抓来的内容唆使 agent 忘掉用户事实")。
+  forget(idOrContent, { reason = null, provenance = null } = {}) {
     const key = String(idOrContent || "");
     let row = this.db.prepare("SELECT * FROM facts WHERE id = ?").get(key);
     if (!row) row = this.db.prepare("SELECT * FROM facts WHERE norm_key = ? AND status='active' LIMIT 1").get(this._normKey(key));
     if (!row) return null;
     // 已软删则不覆盖原 reason (幂等)
     if (row.status !== "deleted") {
+      if (provenance != null && String(provenance).trim() !== ""
+        && !canSupersede(normalizeTier(provenance), tierOfRecord(row))) return null;
       this.db.prepare("UPDATE facts SET status='deleted', deleted_reason=?, deleted_at=? WHERE id=?")
         .run(reason || null, Date.now(), row.id);
     }
@@ -450,34 +654,82 @@ export class SqliteFactStore {
   update(id, patch = {}) {
     const row = this.db.prepare("SELECT * FROM facts WHERE id = ?").get(String(id || ""));
     if (!row) return null;
-    const content = patch.content != null ? this._norm(patch.content) : row.content;
+    // 跨 tier 取代规则 (fact-store.js update 同口径): 覆盖内容 = 最强形态的取代, 低权限写入直接拒绝。
+    //   未声明 provenance 时按 patch.source (若给) 或该行现有 source 登记表定级, 登记不上 = unknown。
+    const tier = resolveWriteTier({ provenance: patch.provenance, source: patch.source ?? row.source });
+    if (!canSupersede(tier, tierOfRecord(row))) return null;
+    // v2026-10-04 (P2#secrets-parity): 更新内容同样脱密 (对齐 fact-store.js update);
+    //   row.content 是已脱敏存量, 不重复处理。
+    const content = patch.content != null
+      ? this._norm(stripTierTags(scrubPII(String(patch.content), { keep: ["email", "phone"] }).cleaned))
+      : row.content;
     if (!content) return null;
     // 版本链: 旧条归档 + 新条指回 (只保留一层历史, 与 JSON 版一致)
     const newId = cryptoRandomId();
     this.db.prepare("UPDATE facts SET status='archived', superseded_by=? WHERE id=?").run(newId, row.id);
     this.db.prepare(`
-      INSERT INTO facts(id,content,norm_key,toks,type,source,importance,score,created,last_access,hits,scope,layer,status,prev_id,meta)
-      VALUES(?,?,?,?,?,?,?,?,?,?,0,?,?, 'active', ?, ?)
+      INSERT INTO facts(id,content,norm_key,toks,type,source,provenance,importance,score,created,last_access,hits,scope,layer,status,prev_id,ttl_days,valid_from,valid_to,meta)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,0,?,?, 'active', ?,?,?,?,?)
     `).run(
       newId, content, this._normKey(content), tokenize(content).join(" "),
       patch.type ?? row.type, patch.source ?? row.source,
+      // 晋级只向上 (canSupersede 已保证 tier 不低于现值); 同权保留现声明, 避免无谓 churn
+      rankOf(tier) > rankOf(tierOfRecord(row)) ? tier : tierOfRecord(row),
       patch.importance ?? row.importance, patch.importance ?? row.score,
-      Date.now(), Date.now(), row.scope, row.layer, row.id, row.meta,
+      Date.now(), Date.now(), row.scope, row.layer, row.id,
+      // 时效窗口/TTL 随演化继承到新条 (fact-store.js 同口径: update 不换窗口)
+      row.ttl_days ?? null, row.valid_from ?? null, row.valid_to ?? null, row.meta,
     );
     this._ftsUpsert({ id: newId, content });
     return this._row2fact(this.db.prepare("SELECT * FROM facts WHERE id = ?").get(newId));
   }
 
-  sweepExpired({ ttlDays = 90, layer = null, dryRun = false } = {}) {
-    const cutoff = Date.now() - Number(ttlDays) * 86400000;
+  // TTL 扫描 (fact-store.js 同口径): 逐条 ttl_days 优先于全局 ttlDays; 软归档而非硬删, 可 restore 回滚;
+  // 返回 { swept, ids, dryRun, purged, purgedIds } (src/agent/index.js sweepMemoryTtl 按 swept 计数)
+  // 2026-10-04 (F4) 同口径: 同一次扫描里顺带物理回收超过保留期 (purgeGraceDays) 的墓碑 ——
+  //   归档行先由 TTL 规则软删 (扫描条件 status != 'deleted' 本就覆盖它们), 再过保留期才真删,
+  //   所以"被取代但仍需审计"的版本链不会提前消失。时效窗口 (valid_from/valid_to) 不参与回收判定。
+  // 来源分级 (v2026-10-XX) 新增可选 tier 选择器: 只扫该档的记录 (如 tier:"quarantined" = 只清抓来的
+  //   证据, 用户事实不受波及)。缺省 null = 全量, 与旧调用方逐字同行为。
+  sweepExpired({ ttlDays = 90, layer = null, dryRun = false, purgeGraceDays = null, tier = null } = {}) {
+    const nowD = Date.now() / 86400000;
     const rows = this.db.prepare(
-      "SELECT * FROM facts WHERE status='active' AND last_access < ? AND (? IS NULL OR layer = ?)",
-    ).all(cutoff, layer, layer);
-    if (!dryRun) {
-      const st = this.db.prepare("UPDATE facts SET status='deleted', deleted_reason=?, deleted_at=? WHERE id=?");
-      for (const r of rows) st.run(`ttl 超期 (${ttlDays}天未访问)`, Date.now(), r.id);
+      "SELECT * FROM facts WHERE status != 'deleted' AND (? IS NULL OR layer = ?)",
+    ).all(layer == null ? null : Number(layer), layer == null ? null : Number(layer));
+    const targets = [];
+    for (const r of rows) {
+      if (!matchesTierSelector(tierOfRecord(r), tier)) continue;
+      const ttl = Number(r.ttl_days || ttlDays);
+      if (!ttl || ttl <= 0) continue;
+      const days = Math.max(0, nowD - (r.last_access || nowD) / 86400000);
+      if (days >= ttl) targets.push(r.id);
     }
-    return { count: rows.length, ids: rows.map((r) => r.id) };
+    const grace = purgeGraceDays == null ? Number(this.opts.purgeGraceDays) : Number(purgeGraceDays);
+    const purgeDays = Number.isFinite(grace) && grace > 0 ? grace : 0;
+    const cutoffMs = purgeDays ? Date.now() - purgeDays * 86400000 : 0;
+    const purgeableIds = () => purgeDays ? this.db.prepare(
+      "SELECT id, provenance, source FROM facts WHERE status IN ('deleted','archived') AND COALESCE(deleted_at, last_access, created) <= ?",
+    ).all(cutoffMs).filter((r) => matchesTierSelector(tierOfRecord(r), tier)).map((r) => r.id) : [];
+    if (dryRun) {
+      const ids = purgeableIds();
+      return { swept: targets.length, ids: targets, dryRun: true, purged: ids.length, purgedIds: ids };
+    }
+    if (!targets.length && !purgeDays) {
+      return { swept: 0, ids: targets, dryRun: false, purged: 0, purgedIds: [] };
+    }
+    // 单事务: 软归档 + 墓碑回收一起提交 (SQLite 事务级并发, 不需要文件锁)
+    this.db.exec("BEGIN");
+    try {
+      const st = this.db.prepare("UPDATE facts SET status='deleted', deleted_reason=?, deleted_at=? WHERE id=? AND status != 'deleted'");
+      let n = 0;
+      for (const id of targets) n += st.run(`TTL ${ttlDays} 天未访问自动归档`, Date.now(), id).changes;
+      const purgedIds = purgeDays ? this._purgeTombstones({ cap: 0, olderThanMs: cutoffMs, tier }) : [];
+      this.db.exec("COMMIT");
+      return { swept: n, ids: targets, dryRun: false, purged: purgedIds.length, purgedIds };
+    } catch (e) {
+      try { this.db.exec("ROLLBACK"); } catch { /* 忽略 */ }
+      throw e;
+    }
   }
 
   clearLayer(layer = LAYER_L1, { hard = false } = {}) {
@@ -496,28 +748,72 @@ export class SqliteFactStore {
     const rows = includeDeleted
       ? this.db.prepare("SELECT * FROM facts ORDER BY created").all()
       : this.db.prepare("SELECT * FROM facts WHERE status='active' ORDER BY created").all();
-    return { version: SCHEMA_VERSION, exportedAt: nowISO(), count: rows.length, facts: rows.map((r) => this._row2fact(r)) };
+    // items (非 facts): 与 fact-store.js exportAll 同形 —— governance memory_export 产物
+    // 需可被任一后端的 importAll 直接回灌 (v2026-10-04 parity 修复)
+    return { version: SCHEMA_VERSION, exportedAt: nowISO(), count: rows.length, items: rows.map((r) => this._row2fact(r)) };
   }
 
   importAll(data, { mode = "merge" } = {}) {
-    const list = Array.isArray(data) ? data : (data && Array.isArray(data.facts) ? data.facts : []);
+    const list = Array.isArray(data)
+      ? data
+      : (data && Array.isArray(data.items) ? data.items : (data && Array.isArray(data.facts) ? data.facts : null));
+    if (!list) return { ok: false, reason: "导入数据格式非法 (需数组或 {items:[]})" };
     if (mode === "replace") {
       const ids = this.db.prepare("SELECT id FROM facts").all().map((r) => r.id);
       for (const id of ids) this._ftsDelete(id);
       this.db.exec("DELETE FROM facts");
     }
-    let added = 0;
-    for (const f of list) {
-      if (!f || !f.content) continue;
-      const exists = this.db.prepare("SELECT id FROM facts WHERE norm_key = ? LIMIT 1").get(this._normKey(f.content));
-      if (exists && mode === "merge") continue;
-      this.add(f.content, {
-        importance: f.importance, type: f.type, source: f.source,
-        scope: f.scope, layer: f.layer, dedupe: false, meta: f.meta,
-      });
-      added++;
+    // merge 去重键 = norm_key 全表 (含软删/归档, 与 fact-store.js 的 seen 集合同口径); replace 不去重
+    const seen = mode === "replace" ? null : new Set(this.db.prepare("SELECT content FROM facts").all().map((r) => this._normKey(r.content)));
+    let imported = 0, skipped = 0;
+    for (const it of list) {
+      // 导入路径脱密 (与 fact-store.js _normalizeFact 对称): 外部 JSON / 其他后端导出可能夹带凭证。
+      //   _insertImported 是本函数唯一的直插写入者, 在此归一前脱即覆盖 importAll + 后端切换迁移全路径。
+      // 来源分级同口径: 同样剥伪装来源标签 (memory_import 是攻击者可控面最大的入口)。
+      const content = this._norm(stripTierTags(scrubPII(String(it?.content ?? ""), { keep: ["email", "phone"] }).cleaned));
+      if (!content) { skipped++; continue; }
+      const k = this._normKey(content);
+      if (seen && seen.has(k)) { skipped++; continue; }
+      if (seen) seen.add(k);
+      this._insertImported({ ...it, content });
+      imported++;
     }
-    return { mode, added, total: list.length };
+    return { ok: true, mode, imported, skipped };
+  }
+
+  // 导入直插: 保留源条目的 id/时间戳/status/scope/版本链/TTL 时效窗口 (后端切换迁移的前提,
+  // 走 add() 会重新生成 id 并丢窗口)。INSERT OR REPLACE 按 id 幂等。
+  _insertImported(it) {
+    const nowMs = Date.now();
+    const iso2ms = (v) => {
+      if (v == null) return null;
+      const t = typeof v === "number" ? v : new Date(v).getTime();
+      return Number.isFinite(t) ? t : null;
+    };
+    const createdMs = iso2ms(it.created) ?? nowMs;
+    const lastMs = iso2ms(it.lastAccess) ?? createdMs;
+    const importance = Number(it.importance ?? this.opts.baseImportance) || this.opts.baseImportance;
+    const status = it.status === "deleted" || it.status === "archived" ? it.status : "active";
+    const id = it.id || cryptoRandomId();
+    this.db.prepare(`
+      INSERT OR REPLACE INTO facts(id,content,norm_key,toks,type,source,provenance,importance,score,created,last_access,hits,scope,layer,status,prev_id,superseded_by,deleted_reason,deleted_at,ttl_days,valid_from,valid_to,meta)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    `).run(
+      id, it.content, this._normKey(it.content), tokenize(it.content).join(" "),
+      it.type || "general", it.source || "import",
+      // 来源分级逐字过迁移通道 (backend-migrate 两端同用此函数): 已声明的保留原值,
+      //   旧行/外部 JSON 按 source 登记表回退, 登记不上一律 unknown 隔离 —— 绝不默认 user-stated。
+      tierOfRecord({ provenance: it.provenance, source: it.source || "import" }),
+      importance, Number(it.score ?? importance) || importance, createdMs, lastMs,
+      it.hits || 0, it.scope ?? null,
+      Number(it.layer) === LAYER_L4 ? LAYER_L4 : LAYER_L1, status,
+      it.prevId ?? null, it.supersededBy ?? null,
+      it.deleteReason ?? it.deletedReason ?? null, iso2ms(it.deletedAt),
+      it.ttlDays ? Number(it.ttlDays) : null,
+      this._normTimeMs(it.validFrom), this._normTimeMs(it.validTo),
+      it.meta ? JSON.stringify(it.meta) : null,
+    );
+    this._ftsUpsert({ id, content: it.content });
   }
 
   list({ limit = 50, status = "active" } = {}) {
@@ -525,6 +821,8 @@ export class SqliteFactStore {
       .all(status, limit).map((r) => this._row2fact(r));
   }
 
+  // 表内总行数 (含 status=deleted/archived 的墓碑), 与 fact-store.js 的 count() 同口径。
+  // "还能用的条数"是 countLive() —— 治理/展示要分开报, 否则遗忘越多这个数字越虚高 (F4)。
   count() {
     return this.db.prepare("SELECT COUNT(*) AS n FROM facts").get().n;
   }
@@ -542,12 +840,29 @@ export class SqliteFactStore {
     for (const r of this.db.prepare("SELECT layer, COUNT(*) AS n FROM facts WHERE status='active' GROUP BY layer").all()) byLayer[String(r.layer)] = r.n;
     const bySource = {};
     for (const r of this.db.prepare("SELECT source, COUNT(*) AS n FROM facts WHERE status='active' GROUP BY source").all()) bySource[r.source || "unknown"] = r.n;
+    // 来源分级可观测 (键名与 fact-store.js 一致): 按 (provenance, source) 分组后再归一, 让
+    //   回灌前留下的 NULL provenance 也能按 source 登记表算出正确 tier (读数不失真)。
+    const byProvenance = {};
+    for (const r of this.db.prepare("SELECT provenance, source, COUNT(*) AS n FROM facts WHERE status='active' GROUP BY provenance, source").all()) {
+      const t = tierOfRecord({ provenance: r.provenance, source: r.source });
+      byProvenance[t] = (byProvenance[t] || 0) + r.n;
+    }
+    const quarantined = Object.keys(byProvenance)
+      .filter((t) => isQuarantined(t))
+      .reduce((acc, t) => acc + byProvenance[t], 0);
     const size = fs.existsSync(this.file) ? fs.statSync(this.file).size : 0;
     return {
       total, active, deleted, archived,
+      // F4 同口径 (fact-store.js): rows=表内行数, tombstones=行数-活跃 (软删+归档)
+      rows: total,
+      tombstones: deleted + archived,
       max_facts: this.opts.maxFacts,
+      max_tombstones: Number(this.opts.maxTombstones) || (this.opts.maxFacts ? this.opts.maxFacts * TOMBSTONE_FACTOR : 0),
+      purge_grace_days: Number(this.opts.purgeGraceDays) || 0,
       by_layer: byLayer,
       by_source: bySource,
+      by_provenance: byProvenance,
+      quarantined,
       file: this.file,
       bytes: size,
       backend: "sqlite",

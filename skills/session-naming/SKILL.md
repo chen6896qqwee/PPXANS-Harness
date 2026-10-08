@@ -1,6 +1,7 @@
 ---
 name: session-naming
 description: 会话自动命名模板。把首轮对话压缩成 4-12 字的可辨识标题，避免会话列表全是"新对话"。需要给会话/任务起名、批量整理标题时使用。
+domain: meta
 ---
 
 # 会话命名模板（Session Naming Kit）

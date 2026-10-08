@@ -35,3 +35,7 @@ bench-results/
 .idea/
 .vscode/*
 !.vscode/extensions.json
+
+# (2026-10-08) timestamped backups + stray temp files
+*.bak-*
+/do

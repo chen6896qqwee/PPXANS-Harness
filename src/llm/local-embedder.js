@@ -11,7 +11,7 @@
 //   Xenova/all-MiniLM-L6-v2       384 维, 英文为主,   ~25MB   (轻量英文)
 //
 // config.embedding = { backend: "local", model?, batch?, prefix_query?, prefix_passage? }
-import { info, warn, debug } from "../utils/logger.js";
+import { warn, debug } from "../utils/logger.js";
 
 // 模块级单例: pipeline 加载一次复用 (模型加载秒级, 不能每条记忆都加载)
 let _pipelinePromise = null;
@@ -63,32 +63,14 @@ export function createLocalEmbedder(config = {}) {
     return out;
   };
 
-  return async function embed(text) {
-    const [v] = (await embedTexts([text], pq)) || [null];
+  return async function embed(text, role = "query") {
+    // role 决定前缀 (2026-10-04 修复): e5 是**非对称**检索模型, query 和 passage 必须分别加
+    //   "query: " / "passage: "。旧实现单条入口一律用 pq, 而 FactStore.querySemantic 既用它编
+    //   查询也用它编事实正文 —— 于是所有事实都被当成查询, e5 的检索精度直接掉下来
+    //   (曾经的批量入口固定用 pp, 与单条入口口径互相不一致; 因无任何调用者, 已随本次清理移除)。
+    //   云端 embedder 忽略第二个参数 (OpenAI 兼容端点无前后缀概念), 上层无需分支。
+    const prefix = role === "passage" ? pp : pq;
+    const [v] = (await embedTexts([text], prefix)) || [null];
     return v && v.length ? v : null;
-  };
-}
-
-// 批量接口 (ingest_document 等场景用): texts -> (number[]|null)[]
-export function createLocalBatchEmbedder(config = {}) {
-  const single = createLocalEmbedder(config);
-  const model = String(config.model || "Xenova/multilingual-e5-small");
-  const isE5 = /e5/i.test(model);
-  const pp = config.prefix_passage ?? (isE5 ? "passage: " : "");
-  return async function embedBatch(texts) {
-    const pipe = await _getPipeline(model);
-    if (!pipe) return texts.map(() => null);
-    const out = [];
-    for (const t of texts) {
-      try {
-        const r = await pipe(pp + String(t).slice(0, 4000), { pooling: "mean", normalize: true });
-        out.push(Array.from(r.data));
-      } catch (e) {
-        warn(`[local-embedder] 批量向量化单条失败: ${e.message}`);
-        out.push(null);
-      }
-    }
-    void single; // 保留单例管道复用
-    return out;
   };
 }

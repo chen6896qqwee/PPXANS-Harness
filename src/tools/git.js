@@ -45,6 +45,8 @@ export function registerGitTools(catalog, { rootDir } = {}) {
   // 1. git_status — 分支 + 变更清单 (结构化)
   catalog.register({
     name: "git_status",
+    // 只读: execFileSync 跑 rev-parse/status, 无写盘 (参数数组, 不经 shell → 无注入面)
+    capability: { riskLevel: "low", readOnly: true, destructive: false, sideEffect: "none" },
     description: "查看 git 仓库状态: 当前分支与变更文件清单 (结构化 JSON)。提交前先看这里。",
     parameters: { type: "object", properties: {}, required: [] },
     category: "vcs",
@@ -70,6 +72,7 @@ export function registerGitTools(catalog, { rootDir } = {}) {
   // 2. git_diff — 查看改动内容
   catalog.register({
     name: "git_diff",
+    capability: { riskLevel: "low", readOnly: true, destructive: false, sideEffect: "none" },
     description: "查看未提交改动 (git diff)。staged=true 只看已暂存区; path 可限定单个文件。",
     parameters: {
       type: "object",
@@ -94,6 +97,7 @@ export function registerGitTools(catalog, { rootDir } = {}) {
   // 3. git_log — 最近提交历史
   catalog.register({
     name: "git_log",
+    capability: { riskLevel: "low", readOnly: true, destructive: false, sideEffect: "none" },
     description: "查看最近提交历史 (默认 10 条, 上限 50)。",
     parameters: { type: "object", properties: { n: { type: "number" } }, required: [] },
     category: "vcs",
@@ -118,6 +122,11 @@ export function registerGitTools(catalog, { rootDir } = {}) {
   // 4. git_commit — 受限提交 (唯一写操作; 无 push/reset/rebase 能力)
   catalog.register({
     name: "git_commit",
+    // F1 定档: medium + 非只读。写的是本地仓库历史 (可 reset 回退, 工具本身禁 push/reset),
+    // 与工作区内 write_file 同一风险量级 —— 声明 high 会让默认模式下每次提交都弹窗,
+    // 而今天 write_file 都免审批, 口径不自洽。但必须非只读: plan 模式拒绝,
+    // 「只读巡检」按能力升级审批 (旧实现连 git_commit 都静默放行)。
+    capability: { riskLevel: "medium", readOnly: false, destructive: false, sideEffect: "vcs" },
     description: "提交当前改动 (仅 add+commit)。add_all=true 时先暂存全部改动。禁止也不支持 push/reset 等危险操作。",
     parameters: {
       type: "object",

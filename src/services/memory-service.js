@@ -148,9 +148,22 @@ export class MemoryService {
   }
 
   // L3 画像刷新: 跨天触发 (原 agent._maybeRefreshPersona, 状态 _personaBuilt 移入本服务)
+  // 前缀缓存修复 (2026-10-05): 日期档除内存外还落盘 (l3/meta.json)。旧实现 _personaBuilt 只在内存,
+  // 同一天重启也会 force 重建画像 —— 而画像文本注入在缓存静态区, 于是「学习一条记忆 + 重启」
+  // 就让下一次会话整个前缀作废 (scripts/cache-audit.js 学习→重启探针的确证)。本方法的既有语义
+  // 注释写的就是「跨天触发」: 现在才真正跨进程成立 —— 同天重启不重建, 学习事件当日不动静态区;
+  // 画像正文已无日期 (见 memory/l3.js), 跨天但内容未变时重建也是逐字节同文, 前缀依旧命中。
   refreshPersona() {
     const today = logicalDay();
     if (this._personaBuilt === today) return;
+    let days = null;
+    try {
+      if (typeof this.personaStore.personaDays === "function") days = this.personaStore.personaDays();
+    } catch { days = null; } // 桩/旧版 personaStore 无此方法 → 退回原「每进程首刷」行为
+    if (days && days.user === today && days.agent === today) {
+      this._personaBuilt = today;
+      return;
+    }
     this._personaBuilt = today;
     try {
       this.personaStore.buildUserPersona(this.facts.list(), { force: true });

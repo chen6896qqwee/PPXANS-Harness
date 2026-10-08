@@ -92,3 +92,59 @@ export function readWorkspaceFile(wsRoot, rel) {
   if (truncated) buf = buf.subarray(0, MAX_READ);
   return { path: String(rel || ""), size: st.size, truncated, content: buf.toString("utf8") };
 }
+
+// 写入工作区内单个文件 (2026-10-07): 复用 resolveInside 做越界/symlink 校验, 父目录自动创建。
+// 返回 { path, size }。
+export function writeWorkspaceFile(wsRoot, rel, content) {
+  if (!rel || !String(rel).trim()) throw new Error("缺少 path");
+  const file = resolveInside(wsRoot, rel);
+  const st = fs.statSync(file, { throwIfNoEntry: false });
+  if (st && st.isDirectory()) throw new Error("目标是一个目录");
+  const text = content == null ? "" : String(content);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, text, "utf8");
+  return { path: String(rel), size: Buffer.byteLength(text, "utf8") };
+}
+
+// 搜索工作区 (2026-10-07): 先按文件名匹配, 否则按内容匹配 (文本文件, 限大小)。
+// 跳过 SKIP_DIRS (node_modules/.git/data ...) 与隐藏项。返回 { results, truncated }。
+export function searchWorkspace(wsRoot, query, { limit = 50 } = {}) {
+  const q = String(query || "").toLowerCase().trim();
+  if (!q) return { results: [], truncated: false };
+  const wsRootAbs = path.resolve(wsRoot);
+  const cap = Math.max(1, Math.min(Number(limit) || 50, 200));
+  const results = [];
+  let truncated = false;
+  const walk = (dir) => {
+    if (results.length >= cap) { truncated = true; return; }
+    let entries = [];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const ent of entries) {
+      if (results.length >= cap) { truncated = true; return; }
+      if (ent.name.startsWith(".")) continue;
+      const abs = path.join(dir, ent.name);
+      if (ent.isDirectory()) {
+        if (!SKIP_DIRS.has(ent.name)) walk(abs);
+        continue;
+      }
+      if (!ent.isFile()) continue;
+      const rel = path.relative(wsRootAbs, abs).split(path.sep).join("/");
+      if (ent.name.toLowerCase().includes(q)) { results.push({ path: rel, name: ent.name, match: "name" }); continue; }
+      try {
+        const st = fs.statSync(abs);
+        if (st.size > MAX_READ) continue;
+        const txt = fs.readFileSync(abs, "utf8");
+        const idx = txt.toLowerCase().indexOf(q);
+        if (idx !== -1) {
+          results.push({
+            path: rel, name: ent.name, match: "content",
+            line: txt.slice(0, idx).split("\n").length,
+            snippet: txt.slice(Math.max(0, idx - 40), idx + 80).replace(/\s+/g, " "),
+          });
+        }
+      } catch { /* 二进制/不可读 → 跳过 */ }
+    }
+  };
+  walk(wsRootAbs);
+  return { results, truncated };
+}

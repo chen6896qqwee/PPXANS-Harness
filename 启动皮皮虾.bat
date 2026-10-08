@@ -43,7 +43,7 @@ if defined OLD (
 
 REM ---- 后台最小化启动 (内核与界面同进程同端口) ----
 echo   [启动] 内核 + 界面 (单进程, 端口 %PORT%)
-start "皮皮虾 Web" /min %ComSpec% /k "%NODE%" "%~dp0bin\ppx-web.js" --port %PORT%
+start "皮皮虾 Web" /min "%NODE%" "%~dp0bin\ppx-web.js" --port %PORT%
 
 REM ---- 轮询就绪 (最多约 30 秒) ----
 set /a N=0

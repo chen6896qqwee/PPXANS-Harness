@@ -1,6 +1,7 @@
 ---
 name: verify
 description: 交付前证据核验：任何"做完了"的结论都必须附可复现证据。改代码、修缺陷、跑任务收尾时使用。
+domain: meta
 ---
 
 # verify — 完成前核验

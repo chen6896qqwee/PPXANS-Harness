@@ -12,6 +12,8 @@ function tmp(n) { return fs.mkdtempSync(path.join(os.tmpdir(), `ppx-b2-${n}-`));
 // 构造 agent + 注入返回 ask 的权限引擎 + 拦截 _requestApproval 计数
 function makeAgent(mode = "approve", cfgExtra = {}) {
   const agent = new PPXAgent({ root: tmp("agent") });
+  // 登记审批可达面: 否则 headless 快速拒绝会抢在 _requestApproval 之前生效 (见 hardening 测试)
+  agent.registerApprovalSurface("test");
   let asks = 0;
   agent._requestApproval = async () => { asks += 1; return mode === "approve" ? {} : null; };
   agent.permissions = { check: async () => ({ decision: "ask", reason: "测试 ask" }) };

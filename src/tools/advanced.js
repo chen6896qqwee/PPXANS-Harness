@@ -1,7 +1,9 @@
 // src/tools/advanced.js - 进阶工具集 (搜索 / HTTP / 定时任务)
-// 全部零依赖: 用 Node 原生 fetch + timers
+// 全部零依赖: 用 Node 原生 http/https + timers
 import net from "node:net";
 import dns from "node:dns/promises";
+import http from "node:http";
+import https from "node:https";
 import path from "node:path";
 import { ensureDir, readJson, writeJson } from "../utils/store.js";
 import { debug } from "../utils/logger.js";
@@ -123,34 +125,82 @@ export function isPrivateIP(ip) {
   return false;
 }
 
-async function assertPublicUrl(url) {
-  const u = new URL(url);
+// v3.2.3 (P2#14): 解析并校验一次, 返回 {u, ip} —— 校验通过的 IP 直接交给 _pinnedFetch 连接。
+// 原实现 assertPublicUrl 校验后交给 fetch() **重新解析 DNS**, 两次解析之间攻击者的权威 DNS
+// 可以换答案 (公网 → 内网), 即 DNS rebinding TOCTOU。新方案: 校验哪个 IP 就连哪个 IP,
+// 校验与连接之间不存在第二次解析, rebinding 窗口关闭。
+async function _resolvePublic(urlStr) {
+  const u = new URL(urlStr);
   if (u.protocol !== "http:" && u.protocol !== "https:") throw new Error("仅允许 http/https");
   const hostname = u.hostname.replace(/^\[|\]$/g, "");
   if (net.isIP(hostname)) {
     if (isPrivateIP(hostname)) throw new Error("SSRF 拒绝: 内网地址 " + hostname);
-    return;
+    return { u, ip: hostname };
   }
   const addrs = await dns.lookup(hostname, { all: true, verbatim: true });
   for (const { address } of addrs) {
     if (isPrivateIP(address)) throw new Error("SSRF 拒绝: " + hostname + " 解析到内网 " + address);
   }
+  return { u, ip: addrs[0].address };
 }
 
-// 带 SSRF 校验的安全 fetch: 手动跟随重定向, 并对每一跳(含首发)都做 assertPublicUrl 校验。
+// 用 node:http/https 直连校验过的 IP: Host 头保持原域名 (虚拟主机路由不变),
+// https 的 SNI/证书校验仍按原域名 (servername + 默认 rejectUnauthorized), TLS 安全性不放松。
+// 返回 fetch Response 的最小同构子集: {status, ok, headers:{has,get}, text()} —— 供
+// _fetchWithSsrSafe 的重定向循环与 httpRequest 的读取路径无感切换。
+function _pinnedFetch(urlStr, { method = "GET", headers = {}, body, signal, timeoutMs = 15000 }) {
+  return _resolvePublic(urlStr).then(({ u, ip }) => new Promise((resolve, reject) => {
+    const isHttps = u.protocol === "https:";
+    const mod = isHttps ? https : http;
+    const reqHeaders = { ...headers, host: u.host }; // host=原域名[:port], 连接目标是已校验 IP
+    if (body !== undefined && reqHeaders["content-length"] === undefined) {
+      reqHeaders["content-length"] = Buffer.byteLength(body, "utf8");
+    }
+    const req = mod.request({
+      host: ip,
+      port: u.port || (isHttps ? 443 : 80),
+      path: u.pathname + u.search,
+      method,
+      headers: reqHeaders,
+      servername: isHttps ? u.hostname : undefined, // SNI 按原域名, 证书校验不放松
+      signal, // AbortController 透传 (Node ≥16 支持 options.signal)
+    }, (res) => {
+      const chunks = [];
+      let size = 0;
+      res.on("data", (c) => { size += c.length; if (size <= 1048576) chunks.push(c); }); // 1MB 上限, 与原 resultBudget 截断一致
+      res.on("end", () => {
+        const text = Buffer.concat(chunks).toString("utf8");
+        resolve({
+          status: res.statusCode,
+          ok: res.statusCode >= 200 && res.statusCode < 300,
+          headers: {
+            has: (k) => res.headers[String(k).toLowerCase()] !== undefined,
+            get: (k) => res.headers[String(k).toLowerCase()] ?? null,
+          },
+          text: async () => text,
+        });
+      });
+    });
+    req.on("error", reject);
+    req.setTimeout(timeoutMs, () => req.destroy(new Error("请求超时: " + urlStr)));
+    if (body !== undefined) req.write(body);
+    req.end();
+  }));
+}
+
+// 带 SSRF 校验的安全 fetch: 手动跟随重定向, 每一跳(含首发)都解析→校验→**直连校验过的 IP**。
 // fetch 默认 redirect:"follow" 会在每次跳转时重新解析 DNS —— 攻击者用一个公网 URL 302→内网
-// (如 http://127.0.0.1:x 或 http://169.254.169.254/)即可绕过单次 assertPublicUrl。
-// 这里改用 redirect:"manual" 逐跳校验后再继续, 堵住"302 到内网/云元数据"的绕过。
+// (如 http://127.0.0.1:x 或 http://169.254.169.254/)即可绕过单次校验; 这里逐跳校验 + IP 钉死,
+// 同时堵住 "302 到内网" 与 "DNS rebinding" 两类绕过。
 async function _fetchWithSsrSafe(url, { method = "GET", headers = {}, body, signal, maxRedirects = 5 } = {}) {
   let current = url;
   for (let hop = 0; hop <= maxRedirects; hop++) {
-    await assertPublicUrl(current);
-    const resp = await fetch(current, {
+    const resp = await _pinnedFetch(current, {
       method,
       headers,
       body: body !== undefined ? (typeof body === "string" ? body : JSON.stringify(body)) : undefined,
-      redirect: "manual",
       signal,
+      timeoutMs: 15000,
     });
     if (resp.status >= 300 && resp.status < 400 && resp.headers.has("location")) {
       const loc = resp.headers.get("location");
@@ -283,6 +333,9 @@ export class Scheduler {
 export function registerAdvancedTools(catalog, { dataDir, scheduler, onMemoryNote }) {
   catalog.register({
     name: "web_search",
+    // GET-only 远程读取: 不改本地/远端状态, 故 readOnly:true; 联网这一轴由
+    // permissions 的 networkAccess + HTTP_TOOLS 裁定 (关网时升级审批), 不由能力门重复设卡。
+    capability: { riskLevel: "low", readOnly: true, destructive: false, sideEffect: "network" },
     description: "搜索互联网, 返回网页标题+链接+摘要。",
     parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
     execute: async (args) => {
@@ -299,6 +352,9 @@ export function registerAdvancedTools(catalog, { dataDir, scheduler, onMemoryNot
 
   catalog.register({
     name: "http_request",
+    // F1: 支持 POST/PUT/DELETE —— 能改远端状态, 不是只读工具 (旧兜底把它报成 readOnly:true)。
+    // medium 而非 high: 网络访问的开关在 networkAccess 档位上, 默认模式下不因此新增弹窗。
+    capability: { riskLevel: "medium", readOnly: false, destructive: false, sideEffect: "network" },
     description: "发送 HTTP 请求 (GET/POST/PUT/DELETE), 返回状态码和响应体。",
     parameters: {
       type: "object",
@@ -324,6 +380,8 @@ export function registerAdvancedTools(catalog, { dataDir, scheduler, onMemoryNot
 
   catalog.register({
     name: "notify",
+    // 对外发面动作 (往用户通道推消息), 不是只读: plan/只读巡检下升级审批
+    capability: { riskLevel: "medium", readOnly: false, destructive: false, sideEffect: "message" },
     description: "主动向用户通道发送通知消息 (用于长任务或异步完成提醒)。",
     parameters: { type: "object", properties: { message: { type: "string", description: "要发送的通知内容" } }, required: ["message"] },
     execute: async (args, ctx) => {
@@ -335,6 +393,8 @@ export function registerAdvancedTools(catalog, { dataDir, scheduler, onMemoryNot
 
   catalog.register({
     name: "add_schedule",
+    // 写入调度器持久化状态 (jobs.json), 且到点会自行触发副作用 → 非只读
+    capability: { riskLevel: "medium", readOnly: false, destructive: false, sideEffect: "memory" },
     description: "添加定时任务。cron 支持 'HH:MM'(每日) 或 'after:秒数'(N秒后执行一次)。",
     parameters: {
       type: "object",
@@ -353,6 +413,7 @@ export function registerAdvancedTools(catalog, { dataDir, scheduler, onMemoryNot
 
   catalog.register({
     name: "list_schedules",
+    capability: { riskLevel: "low", readOnly: true, destructive: false, sideEffect: "none" },
     description: "列出所有定时任务。",
     parameters: { type: "object", properties: {} },
     execute: async () => {
@@ -364,6 +425,8 @@ export function registerAdvancedTools(catalog, { dataDir, scheduler, onMemoryNot
 
   catalog.register({
     name: "fetch_page",
+    // GET-only 远程读取 (转纯文本返回), 与 web_search 同档; 联网轴仍归 networkAccess 管
+    capability: { riskLevel: "low", readOnly: true, destructive: false, sideEffect: "network" },
     description: "抓取一个网页的正文并转成纯文本 (截断到 20000 字符)。用于读文章/文档/新闻内容后回答问题。",
     parameters: {
       type: "object",

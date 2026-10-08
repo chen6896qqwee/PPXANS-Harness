@@ -1,6 +1,7 @@
 ---
 name: agent-professional-training
 description: Agent 专业训练规程（Universal Agent Training Playbook）。以"想/记/做/学/评"五环为骨架的通用训练与审计框架，含七维公式、评估指标与回归门禁。训练、调优、给 Agent 做能力体检时使用。
+domain: meta
 ---
 
 # Agent 专业训练规程（Universal Agent Training Playbook）

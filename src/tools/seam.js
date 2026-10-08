@@ -3,7 +3,10 @@
 //   Service Definition(声明/元数据) / Service Provider(execute 实现) / Consumer(runWithPolicy 统一策略入口)
 // 零依赖, 纯 Node 原生。保留皮皮虾原有错误语义, 追加超时门禁/禁用门禁/追踪回调。
 
-export const TOOL_ERROR_PREFIX = "[工具错误]";
+// 定义已下沉到 src/core/errors.js (L1) —— core 与 verify 都要用它, 放在 tools 层会形成
+// 反向依赖边并构成环。这里保留同名 re-export, 对外契约不变 (44 处引用无需改动)。
+import { TOOL_ERROR_PREFIX } from "../core/errors.js";
+export { TOOL_ERROR_PREFIX };
 
 // ---- B1: 工具结果标准化 (吸收 codex format_exec_output_for_model) ----
 // 命令类工具返回统一元数据头, 模型不靠猜判断成败:
@@ -39,6 +42,23 @@ export function countLines(text) {
 export const POWER_LEVEL = { user: 0, agent: 1, super: 2 };
 
 // ---- Definition 层: 元数据归一化 + 校验 ----
+// 弃用声明归一化: 字符串 = 替代工具名 (最常用); 对象 = 完整信息
+export function normalizeDeprecated(d) {
+  if (!d) return null;
+  if (typeof d === "string") return { since: "", replacedBy: d, note: "" };
+  if (typeof d === "object") {
+    return { since: String(d.since || ""), replacedBy: String(d.replacedBy || ""), note: String(d.note || "") };
+  }
+  return null;
+}
+
+// 给 LLM 看的弃用标记。只在真有工具被弃用时才出现 (当前 0 个 → 对上下文预算零影响)。
+export function deprecatedHint(dep) {
+  if (!dep) return "";
+  if (dep.replacedBy) return `【已弃用, 请改用 ${dep.replacedBy}】`;
+  return "【已弃用】";
+}
+
 export function normalizeMeta(def = {}) {
   if (!def || typeof def.name !== "string" || !def.name) {
     throw new Error("能力缝 Definition 失败: 需 name");
@@ -60,6 +80,12 @@ export function normalizeMeta(def = {}) {
     //   alwaysAsk   无论何种模式都需人工确认 (压过一切放行分支)
     //   sideEffect  副作用域: "none" | "workspace" | "network" | "system"
     capability: def.capability || null,
+    // 工具版本化 (2026-10-07 评估报告 P1-8): 工具签名变了没有 deprecation 通道, 外部 MCP
+    // 客户端会静默断 —— 它们按 tools/list 缓存 schema, 工具一改名就是 "no such tool"。
+    // 声明方式两种: `deprecated: "new_name"` 或 `deprecated: { since, replacedBy, note }`。
+    // 效果: 描述里加弃用标记 (LLM 会避开) + 调用时 warn 一次 (自己人能看见), 但**不阻断** ——
+    // 弃用期还要让存量链路跑完, 硬报错等于当天就断。
+    deprecated: normalizeDeprecated(def.deprecated),
     execute: def.execute,
     // 工具钩子链 (吸收 OpenClaw before/after 钩子):
     //  before(args, ctx) -> undefined 继续 | 字符串短路 | throw 拒绝

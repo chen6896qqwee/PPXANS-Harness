@@ -25,7 +25,11 @@ export const CAUSE = {
 
 // 每类根的处方 (对齐框架"按症状下药"表)
 const PRESCRIPTION = {
-  [CAUSE.LLM_STALL]: "单次 LLM 超时 (provider.timeout_ms) 必须小于任务级时限; 并给工具循环加「心跳超时」",
+  // 处方随现实更新 (2026-10-05): 「单次超时 < 任务时限」已在基准侧落地
+  // (scripts/taskbench.js benchLlmGuard: 单次=预算/3, 重试封顶再留 1/3), 该倒挂不再是可开药方的缺口。
+  // 仍判 llm_stall = 护栏内的慢调用连续烧完预算 (provider 整体变慢/深度推理超时上限),
+  // 药应下在 TASK_BUDGET_MS/模型档, 而不是进程级 timeout_ms (真实深推理需要 >60s)。
+  [CAUSE.LLM_STALL]: "taskbench 已强制单次 LLM 超时=任务预算/3 且含重试封顶<预算 (见 scripts/taskbench.js benchLlmGuard); 仍 stall → 连续慢调用烧穿预算, 查 provider 延迟/换更快模型档或调大 TASK_BUDGET_MS, 勿调低进程级 timeout_ms",
   [CAUSE.LOOP]: "任务分解 + 验证器 + 重规划; 检查探索熔断阈值是否过松",
   [CAUSE.TIMEOUT_UNKNOWN]: "补全轨迹采集后重跑定位 (当前轨迹不足以归因)",
   [CAUSE.TOOL_USE]: "结构化输出 + 参数校验 + 失败重试 + 沙箱; 优先修该工具的 schema 与示例",

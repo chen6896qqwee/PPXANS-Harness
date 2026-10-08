@@ -15,6 +15,9 @@ import { FactStore } from "./memory/fact-store.js";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PORT = Number(process.env.PPX_AML_PORT || 8900);
+// P0 (2026-10-04): 默认只绑回环。原 server.listen(PORT) 不传 host = 0.0.0.0,
+//   叠加鉴权默认 none, 等于把可读写记忆的服务开放给整个局域网/公网。
+const HOST = process.env.PPX_AML_HOST || "127.0.0.1";
 const AUTH_SCHEME = (process.env.PPX_AML_AUTH || "none").toLowerCase();
 const AUTH_VALUE = process.env.PPX_AML_AUTH_VALUE || "";
 const MAX_BODY = 1024 * 1024; // 1MB 请求体上限, 防滥用
@@ -81,6 +84,8 @@ function safeEqual(a, b) {
 
 function authOk(req) {
   if (AUTH_SCHEME === "none") return true;
+  // fail-closed: 声明了鉴权方式却没给密钥, 一律拒绝 (原实现会拿空串比对, "Token " 头即可通过)
+  if (!AUTH_VALUE) return false;
   if (AUTH_SCHEME === "token") return safeEqual(req.headers.authorization, "Token " + AUTH_VALUE);
   if (AUTH_SCHEME === "bearer") return safeEqual(req.headers.authorization, "Bearer " + AUTH_VALUE);
   if (AUTH_SCHEME === "x-api-key") return safeEqual(req.headers["x-api-key"], AUTH_VALUE);
@@ -189,9 +194,16 @@ export function createAmlServer() {
 // 正则写成了 /\\\\/g (匹配两个连续反斜杠), Windows argv1 是单反斜杠 → 替换不生效 →
 // 条件恒 false → `node src/aml-server.js` 静默退出。改用 pathToFileURL 规范比较。
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  const server = createAmlServer();
-  server.listen(PORT, () => {
-    console.log(`[aml-server] listening on :${PORT} | auth=${AUTH_SCHEME} | data=${amlDataDir()}`);
-    console.log(`  POST /v1/memories/add    POST /v1/memories/search    GET /health`);
-  });
+  const loopback = HOST === "127.0.0.1" || HOST === "localhost" || HOST === "::1";
+  if (!loopback && AUTH_SCHEME === "none") {
+    console.error(`[aml-server] 拒绝启动: 绑定非回环地址 ${HOST} 却未配鉴权 (PPX_AML_AUTH=none)。`
+      + ` 请设 PPX_AML_AUTH=token + PPX_AML_AUTH_VALUE, 或用默认 PPX_AML_HOST=127.0.0.1`);
+    process.exitCode = 1;
+  } else {
+    const server = createAmlServer();
+    server.listen(PORT, HOST, () => {
+      console.log(`[aml-server] listening on ${HOST}:${PORT} | auth=${AUTH_SCHEME} | data=${amlDataDir()}`);
+      console.log(`  POST /v1/memories/add    POST /v1/memories/search    GET /health`);
+    });
+  }
 }

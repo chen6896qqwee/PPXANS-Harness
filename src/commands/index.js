@@ -64,6 +64,11 @@ export const BUILTIN_COMMANDS = [
     run: () => ({ type: "intent", action: "compact" }) },
   { name: "plan", description: "进入计划模式(先出计划再执行)", argumentHint: "", isEnabled: () => true,
     run: () => ({ type: "intent", action: "enter_plan_mode" }) },
+  // /plan 的配对出口 (2026-10-05): 命令列表此前没有任何退出名, plan 模式一旦开启就无处可退
+  // (lock-in)。claude-code 用 Shift+Tab 循环, codex 用审批升级 —— ppx 的既有惯例是斜杠命令,
+  // 故出口命名为 /do (与 /plan 对偶: 先 plan 后 do)。消费方: src/agent/index.js 准入集成层。
+  { name: "do", description: "退出计划模式(恢复正常执行与审批语义)", argumentHint: "", isEnabled: () => true,
+    run: () => ({ type: "intent", action: "exit_plan_mode" }) },
   { name: "review", description: "对当前变更执行分级代码审查", argumentHint: "[path|diff]", isEnabled: () => true,
     run: (_ctx, args) => ({ type: "intent", action: "review", target: args || "." }) },
   { name: "init", description: "初始化项目上下文/记忆(PPX.md)", argumentHint: "", isEnabled: () => true,

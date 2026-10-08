@@ -498,7 +498,7 @@ score(t) = score × exp(-λ · days²)
 | 回滚 | `memory_restore` | 恢复即视作一次访问（避免恢复后被立刻衰减清空） |
 | 复核 | `memory_list_deleted` | 列出已遗忘条目（含原因与时间） |
 | 版本链 | `update()` | 旧版转 `archived` + `supersededBy`，新条 `prevId` 指回 —— **只保留一层历史** |
-| TTL 归档 | `sweepExpired()` | 超 `memory_ttl_days`（90）未访问软归档，支持 `dryRun` 预演 |
+| TTL 归档 | `sweepExpired()` | 超 `memory.ttl_days`（90）未访问软归档，支持 `dryRun` 预演 |
 | 按层清理 | `memory_clear_layer` | 默认软删，`hard=true` 才物理删除 |
 | 迁移 | `memory_export` / `memory_import` | 导出含软删/归档条目；`merge` 按内容去重 / `replace` 整体替换 |
 
@@ -588,7 +588,7 @@ quarantineBroken(): 备份损坏段 → 重建空链 → 记录隔离事件
 | `agent` | `name` / `max_tool_rounds` / `tool_result_budget` / `max_tool_error_retry` / `model_preference` / `proactive` / `evolve` | 皮皮虾 / 8 / 4000 / 2 / local / `{enabled:true, interval_ms:3600000}` / `{enabled:true, every_calls:20}` |
 | `user` | `name` | 兄弟 |
 | `providers` | 6 个：openai / deepseek / dashscope / **qwen-vl（vision）** / lmstudio / **zhipu（vision）** | 各带 `timeout_ms: 180000` + `context_window` |
-| `memory` | `token_budget` 2500 / `decay_per_day` 0.02 / `hit_bonus` 5 / `base_importance` 10 / `compile_threshold` 4.5 / `forget_speed` 1 / `memory_ttl_days` 90 | |
+| `memory` | `backend` json / `decay_per_day` 0.02 / `hit_bonus` 5 / `base_importance` 10 / `forget_speed` 1 / `max_facts` 1000 / `ttl_days` 90 / `history_token_budget` 4000 / `session_max_age_days` 30 | |
 | `audit` | `enabled` | true |
 | `embedding` | `base_url` / `model` | 本地 lmstudio + `text-embedding-nomic-embed-text-v1.5` |
 | `experience` / `selfheal` / `tools` | `enabled` | 均 true |

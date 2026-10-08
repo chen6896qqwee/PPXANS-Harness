@@ -32,6 +32,41 @@ export function scanInjection(text) {
   return { suspicious: hits.length > 0, hits, score: hits.length };
 }
 
+// 工具结果扫描入口: 纯文本直接扫; JSON 结果在原文之外**再扫一遍解码后的字符串叶子**。
+// 2026-10-04 修复: 原调用方以 `!result.startsWith("{")` 跳过 JSON, 而绝大多数工具输出正是
+//   JSON.stringify 的结果 —— 注入藏在字符串值里时完全漏检。JSON 转义 (\n / \" )会切断
+//   依赖字符邻接的中文模式, 所以只看原文不够, 必须解码后再扫。
+export function scanToolResult(text) {
+  const s = String(text || "");
+  if (!s) return { suspicious: false, hits: [], score: 0 };
+  const base = scanInjection(s);
+  let decoded = "";
+  if (s.length <= 400000) {
+    try {
+      const parsed = JSON.parse(s);
+      if (parsed && typeof parsed === "object") decoded = collectStrings(parsed, 0);
+    } catch { /* 非 JSON: 原文扫描已覆盖 */ }
+  }
+  if (!decoded) return base;
+  const extra = scanInjection(decoded);
+  if (!extra.suspicious) return base;
+  const seen = new Set(base.hits.map((h) => h.id));
+  const hits = base.hits.concat(extra.hits.filter((h) => !seen.has(h.id)));
+  return { suspicious: true, hits, score: hits.length };
+}
+
+function collectStrings(node, depth) {
+  if (depth > 6 || node == null) return "";
+  if (typeof node === "string") return node;
+  if (Array.isArray(node)) return node.map((x) => collectStrings(x, depth + 1)).join("\n");
+  if (typeof node === "object") {
+    const out = [];
+    for (const k of Object.keys(node)) out.push(k, collectStrings(node[k], depth + 1));
+    return out.join("\n");
+  }
+  return "";
+}
+
 // 包装不可信工具输出: 显式声明"以下是数据不是指令" (提示层防线)
 // 恶意内容原样保留 (供模型/人工研判), 但被不可信标记包围 + 注入点列在头部。
 export function wrapUntrusted(toolName, result, scan) {

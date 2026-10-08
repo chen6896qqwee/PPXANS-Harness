@@ -53,6 +53,9 @@ export class WechatWebhookChannel extends Channel {
   mount(server, httpChannel = null) {
     const register = this._registrar(server, httpChannel);
     register(this.path, async (req, res) => {
+      // P0 (2026-10-04): 鉴权先于读体。未配置回调密钥 → fail-closed 拒绝 (原实现跳过全部验签)
+      const denied = this._webhookSecretGate(this.token);
+      if (denied) return this._sendJson(res, 403, { error: denied });
       const u = new URL(req.url || "/", "http://localhost");
       const body = req.method === "POST" ? await this._readBody(req) : "";
       const query = {
@@ -76,6 +79,9 @@ export class WechatWebhookChannel extends Channel {
   // 加密模式: 外层 XML 含 <Encrypt>, 解密得内层明文消息
   // v1.0.8 安全加固: 配置了 token 时所有模式都必须验签 (明文/加密/echostr), 防伪造消息驱动 agent
   async handleWebhook(body, query = {}) {
+    // fail-closed: 未配置回调密钥时不处理任何消息 (除非显式 allow_unauthenticated_webhooks)
+    const gate = this._webhookSecretGate(this.token);
+    if (gate) return { error: gate };
     const raw = typeof body === "string" ? body : JSON.stringify(body);
     const { msg_signature, timestamp, nonce } = query;
 

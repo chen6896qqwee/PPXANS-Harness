@@ -1,6 +1,7 @@
 ---
 name: cupid-lover-comms
 description: 可自定义角色沟通素材库（Role-based Chatting Kit）。按关系阶段组织话术与话题引子，含好话术/坏话术对照。需要设计拟人角色的对话风格、陪伴型文案时使用。
+domain: content
 ---
 
 # 丘比特 · 可自定义角色沟通素材库（Role-based Chatting Kit）

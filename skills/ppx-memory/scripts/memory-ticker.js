@@ -2,9 +2,21 @@
 // 架构: 会话事件日志 (SessionStore) 为唯一事实源; 今日视图由它派生
 // 不再独立维护 today.md 对话原文 (原 l0/session/today 三处重复, 已收敛到 session)
 // 今日视图 -> 滚动压缩 -> longterm.md (长期记忆)
+// 2026-10-06 同步 src: recordTurn 增加第三参数 (可选 {evidence, drafts, sessionKey}) +
+//   memory/turns/YYYY-MM-DD.jsonl 可重建上下文档 (工具调用/回执摘要 + 轮内中间草稿)。
+//   本副本沿用独立版形态: 无 utils/logger (debug 级降级为空 catch), 保留期清理只有 turns 一支
+//   (src 侧 longterm/daily/traces 的清扫在 src 的 _rollDay 里, 本副本未跟进该批治理)。
 import fs from "node:fs";
 import path from "node:path";
-import { ensureDir, readText, writeText, readJson, writeJson, logicalDay } from "./store.js";
+import { ensureDir, appendText, readText, writeText, readJson, writeJson, logicalDay, withFileLock } from "./store.js";
+// v2026-10-04 (同步 src 2026-10-04 治理批次): 独立版无 utils/logger 模块, debug 级日志降级为空 catch
+import { scrubPII } from "./pii.js";
+// v2026-10-XX (同步 src 来源分级批次, 2026-10-05): 本轮 tier 与 turns 档的读写标注都走 provenance.js
+//   (零依赖、与 src/memory/provenance.js 逐字同源), 满足"技能副本整体可拷出"约束。
+import {
+  normalizeTier, tierOfRecord, isQuarantined, tierFromEvidence, untrustedToolsIn, tierOfTurn,
+  TIER_MODEL,
+} from "./provenance.js";
 
 const TURNS_PER_SUMMARY = 10;
 const COMPACT_THRESHOLD = 50;   // 今日事件超此条数触发滚动压缩
@@ -20,7 +32,30 @@ function _renderLines(sessionStore, day) {
   });
 }
 
+// 归档写入专用: 带 seq 的当天事件 (eventsByDay 的投影没有 seq, 无法做游标)
+// 三处 longterm 写入 (日终归档 / 滚动 / rollup 压缩) 共用同一个 seq 游标,
+// 否则同一段对话会被写第二遍 —— 旧实现 _compileDaily 无视滚动游标, 每次跨天把
+// 上一日**全文**再追加一遍, longterm.md 因此成倍膨胀并把重复内容回灌进每轮 context。
+function _dayEvents(sessionStore, day) {
+  if (!sessionStore || typeof sessionStore.replayDay !== "function") return [];
+  try { return sessionStore.replayDay(day) || []; } catch { return []; }
+}
+
+function _lineOfEvent(e) {
+  const who = e.type === "user/message" ? "用户" : "皮皮虾";
+  return `- [${new Date(e.ts).toISOString()}] ${who}: ${String(e.data?.content || "").slice(0, 200)}`;
+}
+
 export class MemoryTicker {
+  // ==== 每轮"做过什么"的可重建上下文档 (2026-10-06 交接项, 与 src 同源) ====
+  // memory/turns/YYYY-MM-DD.jsonl: 工具调用/回执摘要 + 轮内中间草稿。三条边界写死:
+  //   ① 蒸馏 (extractor/addMemory) 只看 user + 最终回复; ② context()/longterm 的派生链从不读它;
+  //   ③ 只追加不改写, 单条折叠 + 每类条数 + 单行字节三重封顶, 天龄有保留期。
+  static TURN_ARCHIVE_RETAIN_DAYS = 30;   // memory/turns/*.jsonl 保留期
+  static TURN_ARCHIVE_ITEMS = 12;         // 每类条目最多存条数
+  static TURN_ARCHIVE_ITEM_CHARS = 600;   // 单条折叠上限 (与 src/agent/context.js foldText 同形)
+  static TURN_ARCHIVE_LINE_BYTES = 8192;  // 单轮 JSON 行硬上限
+
   constructor(dataDir, factStore, summarizer = null, sessionStore = null) {
     this.summarizer = summarizer;
     this.extractor = null; // P1#9: LLM 结构化提炼器 (agent 注入), 提取关键事实/偏好/待办
@@ -43,7 +78,9 @@ export class MemoryTicker {
   }
 
   _saveState() {
-    writeJson(this.stateFile, this.state);
+    // 游标与归档必须同锁序: 状态文件写坏 (半截 JSON) 会让下次 _loadState 回落默认值,
+    // 游标归零 → 整日原文再追加一遍, 所以这里也走文件锁 (writeJson 本身是原子写, 锁防读-改-写竞态)
+    withFileLock(this.stateFile, () => writeJson(this.stateFile, this.state));
   }
 
   _rollDay() {
@@ -53,27 +90,68 @@ export class MemoryTicker {
       this.state.day = today;
       this._saveState();
     }
-  }
-
-  // 跨天: 把上一日事件归档到 daily/ 并滚入 longterm (从 session 派生, 非 today.md)
-  _compileDaily() {
-    const day = this.state.day;
-    const lines = _renderLines(this.sessionStore, day);
-    const dailyFile = path.join(this.dir, "daily", `${day}.md`);
-    writeText(dailyFile, `# ${day}
-
-${lines.join("\n")}\n`);
-    if (lines.length) {
-      let longterm = readText(this.longtermMd) || "";
-      longterm += `\n## ${day}\n${lines.join("\n")}\n`;
-      writeText(this.longtermMd, longterm);
+    // 轮次上下文档 (memory/turns) 的保留期清理: 挂在已有的按天边界上, 一天最多真跑一次
+    if (this.state.lastTurnsSweepDay !== today) {
+      const removed = this._sweepTurnArchive(today);
+      this.state.lastTurnsSweepDay = today;
+      if (removed) this.state.turns_swept = removed;
+      this._saveState();
     }
   }
 
-  async recordTurn(user, assistant) {
+  // 跨天: 把上一日事件归档到 daily/ 并滚入 longterm (从 session 派生, 非 today.md)
+  // longterm 段只追加"滚动游标之后"的事件 —— 已经由 _compileDaily_Rolling 写过的不再写第二遍
+  _compileDaily() {
+    const day = this.state.day;
+    const evs = _dayEvents(this.sessionStore, day);
+    const lines = evs.map(_lineOfEvent);
+    writeText(path.join(this.dir, "daily", `${day}.md`), `# ${day}
+
+${_scrub(lines.join("\n"))}\n`);
+    if (!lines.length) return;
+    const afterSeq = this.state.lastRolledDay === day ? (this.state.lastRolledSeq || 0) : 0;
+    const pending = evs.filter((e) => e.seq > afterSeq);
+    if (pending.length) {
+      // v3.2.3 (P2#10): 追加写替代全量重写 (readText 拼接 writeText 在 longterm 增长后
+      // 每次归档都 O(N) 全文件读写); 语义等价 —— 内容与格式逐字节一致, 仅写方式不同
+      this._appendLongterm(pending.length === evs.length
+        ? `\n## ${day}\n${_scrub(lines.join("\n"))}\n`
+        : `\n## ${day} (补齐)\n${_scrub(pending.map(_lineOfEvent).join("\n"))}\n`);
+    }
+    this.state.lastRolledDay = day;
+    this.state.lastRolledSeq = evs[evs.length - 1].seq;
+    this._saveState();
+  }
+
+  // longterm.md 的唯一追加入口 (2026-10-04): 加跨进程文件锁 —— 军团多进程共用 dataDir 时
+  // 裸 appendFileSync 在 Windows 上可能交错写坏行; 游标推进必须紧随成功追加, 防重复写。
+  _appendLongterm(chunk) {
+    withFileLock(this.longtermMd, () => appendText(this.longtermMd, chunk));
+  }
+
+  // 第三参数是**可选对象** (与 src 同源): 旧的两参数调用方行为逐字不变
+  // (opts 缺省 = 无证据无草稿 = 一行都不写)。证据/草稿只落 memory/turns 的可重建上下文,
+  // 下面的蒸馏输入 (extractor / addMemory) 仍然只有 user + 最终回复。
+  async recordTurn(user, assistant, opts = {}) {
     this._rollDay();
     this.state.turnCount += 1;
     this._saveState();
+    // 来源分级 (v2026-10-XX, 与 src 同口径): 本轮 tier = 声明级 与 证据级 的**最弱**者 ——
+    //   抓过外部内容的轮次里, 蒸馏出的任何事实都只能是 tool-fetched (隔离带), 无论调用方怎么声明。
+    //   判定只看证据里的工具名 (调用点事实), 不看文本。
+    const turnTier = tierOfTurn({
+      provenance: opts && opts.provenance,
+      source: "extract",           // 本层的默认声明: LLM 蒸馏 = 模型推断
+      evidence: opts && opts.evidence,
+    });
+    this._archiveTurnContext({
+      evidence: opts && opts.evidence,
+      drafts: opts && opts.drafts,
+      sessionKey: opts && opts.sessionKey,
+      assistant,
+      turn: this.state.turnCount,
+      provenance: turnTier,
+    });
     // 对话原文已由 session 事件日志保存; 今日视图由 session 派生
     if (this.state.turnCount % TURNS_PER_SUMMARY === 0) this._compileDaily_Rolling();
     await this._compactIfNeeded();
@@ -88,12 +166,173 @@ ${lines.join("\n")}\n`);
         if (facts && facts.length) {
           // similarThreshold=0.6: LLM 提炼的字面变体 (同义不同词) 与已有事实语义相似时命中加分,
           // 防「三件套」这类反复提炼的变体污染记忆库
-          for (const f of facts) this.factStore.add(f, { source: "extract", similarThreshold: 0.6 });
+          // provenance=本轮 tier (v2026-10-XX): 蒸馏输入虽然只有 user + 最终回复, 但"最终回复"可能
+          //   复述了本轮抓来的内容 —— 所以只要本轮跑过外部工具, 蒸馏结论就一律降为隔离带。
+          //   用户原话仍由下面的 addMemory 以 user-stated 入库, 两条通道互不削弱。
+          for (const f of facts) this.factStore.add(f, { source: "extract", provenance: turnTier, similarThreshold: 0.6 });
           return;
         }
       } catch {}
     }
     if (user) this.factStore.addMemory(user);
+  }
+
+  // 本轮证据 + 轮内草稿 -> memory/turns/YYYY-MM-DD.jsonl 的一行 (追加写 + 跨进程文件锁, 临界区全同步)
+  // 与 longterm 的分工: longterm 是"读得下去"的散文归档 (只认 user/assistant);
+  //   turns 是"重建得出来"的结构化档, 永不进 context() 也不进蒸馏输入。
+  _archiveTurnContext({ evidence = null, drafts = null, sessionKey = null, assistant = "", turn = 0, provenance = null } = {}) {
+    // 折叠口径与 src/agent/context.js 的 foldText 同形 (头 70% + 尾 30% + 可见占位);
+    // 写成局部闭包: 本文件的符号集需与 src 同源, 而 foldText 从未被导出。
+    const CAP = MemoryTicker.TURN_ARCHIVE_ITEM_CHARS;
+    const fold = (s, cap = CAP) => {
+      const str = String(s == null ? "" : s).replace(/\r/g, "");
+      if (str.length <= cap) return str;
+      const head = Math.max(0, Math.floor(cap * 0.7));
+      const tail = Math.max(0, cap - head);
+      return str.slice(0, head) + `…[已折叠, 原 ${str.length} 字符]…` + (tail ? str.slice(-tail) : "");
+    };
+    // 凭证类路径的正文一律不落记忆文件: 只丢正文, 不丢"这个工具跑过"这一事实
+    const CRED = /(^|[^\w.-])\.env[\w.-]*|secrets?[\\/.]|credential|\.git-credentials|id_(?:rsa|ed25519)|private[-_]?key|token[\\/._-]?store/i;
+    const capOf = (d) => String(d.args ?? d.input ?? d.path ?? d.command ?? "");
+    const evs = Array.isArray(evidence) ? evidence : [];
+    const dfs = Array.isArray(drafts) ? drafts : [];
+    if (!evs.length && !dfs.length) return null;   // 普通闲聊轮: 零增长
+    const credTurn = evs.some((e) => {
+      const d = (e && typeof e === "object" && e.data && typeof e.data === "object") ? e.data : e;
+      return CRED.test(capOf(d));
+    });
+    const items = [];
+    for (const e of evs) {
+      if (!e || typeof e !== "object") continue;
+      const d = (e.data && typeof e.data === "object") ? e.data : e;
+      const type = e.type || (("ok" in d || "digest" in d || "result" in d || "error" in d) ? "tool/result" : "tool/call");
+      const tool = String(d.tool || d.name || "tool").slice(0, 40);
+      const callId = d.callId == null ? null : String(d.callId).slice(0, 40);
+      if (type === "tool/call") {
+        const args = fold(d.args ?? d.input ?? "");
+        items.push({ k: "call", tool, callId, args, cred: CRED.test(args) ? true : undefined });
+        continue;
+      }
+      const body = d.digest ?? d.content ?? d.result ?? d.error ?? "";
+      items.push({
+        k: "result", tool, callId,
+        ok: d.ok !== false,
+        ms: Number(d.durationMs) || 0,
+        out: credTurn || CRED.test(String(body)) ? "" : fold(body),
+        omitted: credTurn ? "凭证类入参, 正文未存" : (CRED.test(String(body)) ? "正文含凭证特征, 未存" : undefined),
+      });
+    }
+    for (const raw of dfs) {
+      if (raw == null) continue;
+      const isObj = raw && typeof raw === "object";
+      const text = fold(isObj ? (raw.content ?? raw.text ?? "") : raw);
+      // 只留工具**名** (绝不落工具入参值, 与 name-only 日志口径一致)
+      const names = isObj && Array.isArray(raw.tools) ? raw.tools.map((t) => String(t).slice(0, 40)).filter(Boolean)
+        : (isObj && Array.isArray(raw.tool_calls) ? raw.tool_calls.map((c) => String(c?.function?.name || c?.name || "").slice(0, 40)) : []);
+      if (!text && !names.length) continue;
+      items.push({ k: "draft", text, tools: names.length ? names.slice(0, MemoryTicker.TURN_ARCHIVE_ITEMS) : undefined });
+    }
+    if (!items.length) return null;
+    const MAX = Math.max(1, MemoryTicker.TURN_ARCHIVE_ITEMS);
+    const evOnly = items.filter((x) => x.k !== "draft");
+    const draftOnly = items.filter((x) => x.k === "draft");
+    let dropped = Math.max(0, evOnly.length - MAX) + Math.max(0, draftOnly.length - MAX);
+    let body = [...evOnly.slice(-MAX), ...draftOnly.slice(-MAX)]
+      .filter((x) => !(x.k === "draft" && x.text && x.text === String(assistant || "").replace(/\r/g, "").trim()));
+    const rec = {
+      // v:2 —— 新增 prov/untrusted 两个来源分级字段 (v:1 = 无分级标注的存量行, 读取侧按工具名重算)
+      v: 2, ts: Date.now(), day: logicalDay(),
+      sessionKey: String(sessionKey == null ? "" : sessionKey).slice(0, 80),
+      turn,
+      counts: { evidence: evOnly.length, drafts: draftOnly.length },
+      // 来源标注 (与 src 同口径): 这一行里存的是**抓来的正文**, 所以它自己就是不可信输入。
+      //   写清 tier + 污点工具名, 未来的读者 (经验蒸馏/审计/回放) 一眼能判定"要不要包 wrapUntrusted",
+      //   不必回头猜工具白名单。
+      prov: String(provenance || TIER_MODEL),
+      untrusted: untrustedToolsIn(evidence).slice(0, 8),
+    };
+    const lineOf = (arr, drop) => JSON.stringify(drop > 0 ? { ...rec, dropped: drop, items: arr } : { ...rec, items: arr });
+    let line = lineOf(body, dropped);
+    while (Buffer.byteLength(line, "utf8") > MemoryTicker.TURN_ARCHIVE_LINE_BYTES && body.length > 1) {
+      body = body.slice(1);
+      dropped++;
+      line = lineOf(body, dropped);
+    }
+    const file = path.join(this.dir, "turns", `${rec.day}.jsonl`);
+    try {
+      ensureDir(path.dirname(file));   // 锁文件与数据文件同目录, 缺目录时 wx 抢锁必失败
+      withFileLock(file, () => appendText(file, _scrub(line) + "\n"));
+    } catch { return null; }           // 落档失败不影响蒸馏主链
+    return { file, bytes: Buffer.byteLength(line, "utf8"), items: body.length, dropped };
+  }
+
+  // 读回某天的轮次上下文 (尾窗读 + 逐行解析, 坏行跳过不抛)。结果从不注入 prompt。
+  //
+  // 来源分级 (v2026-10-XX, 与 src 同口径): 返回的每一行都带 prov / untrusted / quarantined 三个
+  //   判定字段, 读取方**不需要**再去猜工具白名单:
+  //     · v≥2 的行按写入时记下的 prov;
+  //     · v:1 的存量行按 items 里的工具名确定性重算 (只看工具名 = 调用点事实, 不看正文, provDerived=true 可见)。
+  //   quarantined=true 的行里存的是外部抓取正文: 任何把它写进 system prompt 的调用方必须再过一层
+  //   src/security/injection.js 的 wrapUntrusted —— 本层保证"必须包裹"这件事是可判定的, 而不是靠约定。
+  _labelArchiveRow(r) {
+    const items = Array.isArray(r.items) ? r.items : [];
+    const declared = r.prov ? normalizeTier(r.prov) : null;
+    const prov = declared || (tierFromEvidence(items) || TIER_MODEL);
+    r.prov = prov;
+    r.quarantined = isQuarantined(prov);
+    if (!Array.isArray(r.untrusted)) r.untrusted = untrustedToolsIn(items).slice(0, 8);
+    if (!declared) r.provDerived = true; // 存量行的 tier 是算出来的, 不是写下来的 (诚实标注来源链)
+    return r;
+  }
+
+  turnArchive({ day = null, sessionKey = null, limit = 20, tailBytes = 65536 } = {}) {
+    const d = day ? String(day).slice(0, 10) : logicalDay();
+    const file = path.join(this.dir, "turns", `${d}.jsonl`);
+    const TAIL = Math.max(1024, Number(tailBytes) || 65536);
+    const out = [];
+    let size = 0;
+    try { size = fs.statSync(file).size; } catch { return out; }
+    let fd;
+    try {
+      const len = Math.min(size, TAIL);
+      fd = fs.openSync(file, "r");
+      const buf = Buffer.alloc(len);
+      const got = fs.readSync(fd, buf, 0, len, size - len);
+      const lines = buf.slice(0, got).toString("utf8").split("\n");
+      if (size > TAIL) lines.shift();   // 窗口起点落在某行中间: 半截行不可解析
+      for (const l of lines) {
+        const s = l.trim();
+        if (!s) continue;
+        try {
+          const r = JSON.parse(s);
+          if (!r || typeof r !== "object") continue;
+          if (sessionKey != null && String(r.sessionKey || "") !== String(sessionKey)) continue;
+          out.push(this._labelArchiveRow(r));
+        } catch { /* 交错/半截行: 跳过 */ }
+      }
+    } catch { /* 读失败: 返回已解析部分 */ } finally {
+      if (fd !== undefined) { try { fs.closeSync(fd); } catch {} }
+    }
+    return out.slice(-Math.max(1, Number(limit) || 20));
+  }
+
+  // 轮次上下文档的保留期清理 (挂在按天边界上, 一天最多真跑一次; 与 src 同口径的 turns 一支)
+  _sweepTurnArchive(today) {
+    const retainDays = MemoryTicker.TURN_ARCHIVE_RETAIN_DAYS;
+    if (retainDays <= 0) return 0;
+    const DAY_MS = 86400000;
+    const dir = path.join(this.dir, "turns");
+    let names = [];
+    try { names = fs.readdirSync(dir); } catch { return 0; }
+    let n = 0;
+    for (const name of names) {
+      const m = /^(\d{4}-\d{2}-\d{2})\.jsonl$/.exec(name);
+      if (!m || m[1] === today) continue;                 // 非按日命名的文件一律不碰
+      const t = Date.parse(`${m[1]}T00:00:00`);
+      if (!Number.isFinite(t) || Math.floor((Date.now() - t) / DAY_MS) < retainDays) continue;
+      try { fs.rmSync(path.join(dir, name), { force: true }); n++; } catch {}
+    }
+    return n;
   }
 
   // P1#9: 注入 LLM 结构化提炼器 (agent 调 setExtractor)
@@ -109,20 +348,12 @@ ${lines.join("\n")}\n`);
     const afterSeq = st.lastRolledSeq || 0;
     const rows = [];
     let maxSeq = afterSeq;
-    const dayEvents = this.sessionStore && typeof this.sessionStore.replayDay === "function"
-      ? this.sessionStore.replayDay(today)
-      : [];
-    for (const e of dayEvents) {
+    for (const e of _dayEvents(this.sessionStore, today)) {
       if (e.seq <= afterSeq) continue;
-      const who = e.type === "user/message" ? "用户" : "皮皮虾";
-      rows.push(`- [${new Date(e.ts).toISOString()}] ${who}: ${String(e.data?.content || "").slice(0, 200)}`);
+      rows.push(_lineOfEvent(e));
       if (e.seq > maxSeq) maxSeq = e.seq;
     }
-    if (rows.length) {
-      let longterm = readText(this.longtermMd) || "";
-      longterm += `\n## ${today} (滚动)\n${rows.join("\n")}\n`;
-      writeText(this.longtermMd, longterm);
-    }
+    if (rows.length) this._appendLongterm(`\n## ${today} (滚动)\n${_scrub(rows.join("\n"))}\n`);
     st.lastRolledSeq = maxSeq;
     this._saveState();
   }
@@ -132,9 +363,12 @@ ${lines.join("\n")}\n`);
   async _compactIfNeeded() {
     const now = Date.now();
     if (now - (this._lastCompactAt || 0) < COMPACT_MIN_INTERVAL_MS) return;
-    const lines = _renderLines(this.sessionStore, logicalDay());
-    if (lines.length < COMPACT_THRESHOLD) return;
-    const compactedLines = lines.slice(0, -COMPACT_KEEP);
+    const today = logicalDay();
+    const evs = _dayEvents(this.sessionStore, today);
+    if (evs.length < COMPACT_THRESHOLD) return;
+    const compacted = evs.slice(0, -COMPACT_KEEP); // 最旧区间: 聚合压缩进 longterm, 近期保留
+    if (!compacted.length) return;
+    const compactedLines = compacted.map(_lineOfEvent);
     const userMsgs = compactedLines
       .filter((li) => li.indexOf("用户:") !== -1)
       .map((li) => li.split("用户:")[1].trim())
@@ -144,18 +378,22 @@ ${lines.join("\n")}\n`);
       try {
         const raw = compactedLines.slice(0, 60).join("\n");
         const s = await this.summarizer(raw);
-        summary = "[" + logicalDay() + " llm-summary] " + (s || "(空)");
+        summary = "[" + today + " llm-summary] " + (s || "(空)");
       } catch {
-        summary = "[" + logicalDay() + " thin] archived " + compactedLines.length + " lines (llm fail)";
+        summary = "[" + today + " thin] archived " + compactedLines.length + " lines (llm fail)";
       }
     } else if (userMsgs.length) {
-      summary = "[" + logicalDay() + " thin] " + userMsgs.length + " rounds archived: " + userMsgs.slice(0, 12).join(" | ") + (userMsgs.length > 12 ? " | ..." : "");
+      summary = "[" + today + " thin] " + userMsgs.length + " rounds archived: " + userMsgs.slice(0, 12).join(" | ") + (userMsgs.length > 12 ? " | ..." : "");
     } else {
-      summary = "[" + logicalDay() + " thin] archived " + compactedLines.length + " lines";
+      summary = "[" + today + " thin] archived " + compactedLines.length + " lines";
     }
-    let longterm = readText(this.longtermMd) || "";
-    longterm += "\n## " + logicalDay() + " (rollup)\n" + summary + "\n";
-    writeText(this.longtermMd, longterm);
+    // v3.2.3 (P2#10): 追加写替代全量重写, 语义等价 (见 _compileDaily 注释)
+    this._appendLongterm("\n## " + today + " (rollup)\n" + _scrub(summary) + "\n");
+    // 游标对齐 (2026-10-04): 这段对话已由 rollup 承载, 滚动/日终归档不得再追加原文,
+    //   否则同一天既有摘要又有逐行原文 (双写)。取 max: 滚动已写得更远时不回退游标。
+    if (this.state.lastRolledDay !== today) { this.state.lastRolledDay = today; this.state.lastRolledSeq = 0; }
+    this.state.lastRolledSeq = Math.max(this.state.lastRolledSeq || 0, compacted[compacted.length - 1].seq);
+    this._saveState();
     this._lastCompactAt = now; // 节流: 压缩完成后记录, 60s 内不再压缩
   }
 
@@ -204,8 +442,13 @@ ${topFacts || "(暂无)"}
   stats() {
     let longtermBytes = 0;
     try { longtermBytes = fs.statSync(this.longtermMd).size; } catch {}
+    // 与 src 同口径: turns 档是唯一会因"本轮做过什么"而增长的文件, 报出来才看得见
+    let turnsBytes = 0;
+    try { turnsBytes = fs.statSync(path.join(this.dir, "turns", `${logicalDay()}.jsonl`)).size; } catch {}
     return {
       longterm_bytes: longtermBytes,
+      turns_bytes_today: turnsBytes,
+      turns_retain_days: MemoryTicker.TURN_ARCHIVE_RETAIN_DAYS,
       events_today: _renderLines(this.sessionStore, logicalDay()).length,
     };
   }
@@ -222,6 +465,13 @@ function _longtermExcludingToday(text, today) {
     if (!inToday) out.push(l);
   }
   return out.join("\n").trim();
+}
+
+// P0 (2026-10-04): 落盘前脱密。longterm.md / daily/*.md 是原文归档, 会长期驻留、
+//   逐日增长并回灌进每轮 context (还会发给云端 provider) —— 凭证/密钥绝不能进。
+//   保留 email/phone: 用户主动要求记住的联系方式是记忆的正常用途; 其余 PII 一律 REDACTED。
+function _scrub(text) {
+  return scrubPII(String(text ?? ""), { keep: ["email", "phone"] }).cleaned;
 }
 
 // P1#9: 记忆信号预筛 - 命中关键词或长度信号才触发 LLM 提炼 (省成本)

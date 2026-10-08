@@ -64,7 +64,10 @@ export function createSubmissionQueue() {
 }
 
 // EventQueue: 结构化事件出队 + 订阅回调 + WAL 回放
-export function createEventQueue({ walPath = null } = {}) {
+// maxEvents (2026-10-04): 内存历史的环形上限。原实现 events 只增不减 —— ppx-serve 这类长跑进程
+//   每轮至少推 turn 起止 + 每个工具 2 条 + 审批事件, 一天几万条带 payload 的记录常驻堆里直到 OOM。
+//   完整事实源始终是 WAL (replay 读盘), 内存只保留最近 N 条供 UI 快照。0/负数 = 不限 (旧行为)。
+export function createEventQueue({ walPath = null, maxEvents = 2000 } = {}) {
   let _seq = 0;
   const events = [];   // 内存历史
   const subs = [];     // 订阅回调
@@ -90,6 +93,8 @@ export function createEventQueue({ walPath = null } = {}) {
     if (walPath) {
       fs.appendFileSync(walPath, JSON.stringify(full) + "\n", "utf8");
     }
+    // 环形裁剪 (2026-10-04): 防内存历史无界增长, 只保留最近 maxEvents 条
+    if (maxEvents > 0 && events.length > maxEvents) events.splice(0, events.length - maxEvents);
     // 同步通知订阅回调 (单个回调异常不影响事件流)
     for (const fn of subs) {
       try { fn(full); } catch { /* 订阅回调不应中断事件流 */ }

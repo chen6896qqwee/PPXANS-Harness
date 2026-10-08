@@ -16,8 +16,16 @@ const ok = (m) => console.log("  ✓ " + m);
 
 // 1) 图标: defs 里定义 vs 被引用
 const defined = new Set([...html.matchAll(/<g id="(i-[a-z-]+)"/g)].map((m) => m[1]));
-const used = new Set([...(html + js).matchAll(/href="#(i-[a-z-]+)"/g)].map((m) => m[1]));
-const missIcon = [...used].filter((u) => !defined.has(u));
+const hrefRefs = new Set([...(html + js).matchAll(/href="#(i-[a-z-]+)"/g)].map((m) => m[1]));
+const used = new Set(hrefRefs);
+// 2026-10-07: app.js 里经 ico("name") 动态拼的图标也要算引用 —— 否则静态扫描会把
+// 大量在 ico() 里使用的图标误报成"未使用" (假阳性), 反过来诱导误删。
+// 取每个 ico( ... ) 调用括号内的所有字符串字面量 (含三元/dir 变量以外的字面量), 避免"引号紧贴 ico(" 的窄匹配漏掉 ico(cond ? "a" : "b") 这类写法。
+for (const m of js.matchAll(/\bico\(([^)]*)\)/g)) {
+  for (const s of m[1].matchAll(/"([a-z-]+)"/g)) used.add("i-" + s[1]);
+}
+// 未定义检查只看 href 字面引用 (ico() 参数里的比较字符串如 "dark" 不是图标名, 会误报)
+const missIcon = [...hrefRefs].filter((u) => !defined.has(u));
 if (missIcon.length) fail("引用了未定义的图标: " + missIcon.join(", "));
 else ok(`图标定义 ${defined.size} 个, 引用 ${used.size} 个, 全部命中`);
 

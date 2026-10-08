@@ -191,7 +191,7 @@ export function registerVoiceTools(catalog, { config = {}, rootDir = process.cwd
     },
     category: "net",
     power: "user",
-    capability: { riskLevel: "low", sideEffect: "filesystem+network" },
+    capability: { riskLevel: "low", readOnly: false, destructive: false, sideEffect: "filesystem+network" },
     execute: async (args) => {
       const v = resolveVoice(config, "tts");
       if (!v) {

@@ -181,3 +181,80 @@ test("formatRetryFeedback: hint 带原文摘录 (±5 行带行号), 无 hint 回
   const fb2 = formatRetryFeedback([{ ok: false, path: "f", kind: "not-found", error: "x", search: "y" }], content);
   assert.ok(fb2.includes("文件前 20 行"), "无 hint 应回落首尾模式");
 });
+
+// --- 路径可选语法 (2026-10-05 修复: 旧解析器无条件吞 SEARCH 后首行当路径) ---
+
+test("无路径普通形式: 首行代码完整留在 search, path 为 null", () => {
+  const blocks = parseEditBlocks(
+    "<<<<<<< SEARCH\nexport async function fetchData()\n=======\nexport async function loadData()\n>>>>>>> REPLACE");
+  assert.equal(blocks.length, 1);
+  assert.equal(blocks[0].path, null);
+  assert.equal(blocks[0].search, "export async function fetchData()");
+  assert.equal(blocks[0].replace, "export async function loadData()");
+});
+
+test("无路径多行块: 首行即使短也不是路径 (空白判据不吃代码行)", () => {
+  const blocks = parseEditBlocks("<<<<<<< SEARCH\nconst v = parse(x)\nreturn v\n=======\nreturn v\n>>>>>>> REPLACE");
+  assert.equal(blocks[0].path, null);
+  assert.equal(blocks[0].search, "const v = parse(x)\nreturn v");
+});
+
+test("行内路径行后紧跟 =======: 该行按内容处理, search 非空 (良构块 search 恒非空)", () => {
+  // 单行 SEARCH + 行内路径约定在这里天然歧义 —— 保 search 不保路径, 路径由 args.path 兜底
+  const blocks = parseEditBlocks("<<<<<<< SEARCH\nutils.js\n=======\nhelpers.js\n>>>>>>> REPLACE");
+  assert.equal(blocks[0].path, null);
+  assert.equal(blocks[0].search, "utils.js");
+});
+
+test("aider 约定: 文件名在 <<<<<<< SEARCH 的上一行", () => {
+  const blocks = parseEditBlocks("src/a.js\n<<<<<<< SEARCH\nconst x = 1;\n=======\nconst x = 2;\n>>>>>>> REPLACE");
+  assert.equal(blocks[0].path, "src/a.js");
+  assert.equal(blocks[0].search, "const x = 1;");
+});
+
+test("aider 约定容错: @@@ 装饰 / 反引号包裹 / 尾冒号", () => {
+  const b1 = parseEditBlocks("@@@ rename-me.js\n<<<<<<< SEARCH\nfetchData\n=======\nloadData\n>>>>>>> REPLACE");
+  assert.equal(b1[0].path, "rename-me.js");
+  assert.equal(b1[0].search, "fetchData");
+  const b2 = parseEditBlocks("`notes.md`:\n<<<<<<< SEARCH\n旧\n=======\n新\n>>>>>>> REPLACE");
+  assert.equal(b2[0].path, "notes.md");
+});
+
+test("aider 多文件: 每块各带前置文件名, 散文前缀不误判为路径", () => {
+  const text = [
+    "把 a.js 改掉:",
+    "src/a.js",
+    "<<<<<<< SEARCH", "A", "=======", "B", ">>>>>>> REPLACE",
+    "src/b.js",
+    "<<<<<<< SEARCH", "C", "=======", "D", ">>>>>>> REPLACE",
+  ].join("\n");
+  const blocks = parseEditBlocks(text);
+  assert.equal(blocks.length, 2);
+  assert.equal(blocks[0].path, "src/a.js");
+  assert.equal(blocks[1].path, "src/b.js");
+  assert.equal(blocks[1].search, "C");
+});
+
+test("新建文件: 空 SEARCH + 前置路径 / 空 SEARCH + 无路径两种形式", () => {
+  const withPath = parseEditBlocks("src/new.js\n<<<<<<< SEARCH\n=======\ncontent\n>>>>>>> REPLACE");
+  assert.equal(withPath[0].path, "src/new.js");
+  assert.equal(withPath[0].search, "");
+  const noPath = parseEditBlocks("<<<<<<< SEARCH\n=======\ncontent\n>>>>>>> REPLACE");
+  assert.equal(noPath[0].path, null);
+  assert.equal(noPath[0].search, "");
+});
+
+test("CRLF 输入按行拆分, 新语法同样成立", () => {
+  const blocks = parseEditBlocks("x.js\r\n<<<<<<< SEARCH\r\nold line\r\n=======\r\nnew line\r\n>>>>>>> REPLACE");
+  assert.equal(blocks.length, 1);
+  assert.equal(blocks[0].path, "x.js");
+  assert.equal(blocks[0].search, "old line");
+});
+
+test("前置行是块结束标记时不误判为路径", () => {
+  const blocks = parseEditBlocks(
+    "<<<<<<< SEARCH\nf.js\nA\n=======\nB\n>>>>>>> REPLACE\n<<<<<<< SEARCH\nC\n=======\nD\n>>>>>>> REPLACE");
+  assert.equal(blocks.length, 2);
+  assert.equal(blocks[0].path, "f.js");
+  assert.equal(blocks[1].path, null, "第二块前置是 >>>>>>> REPLACE, 不是文件名");
+});

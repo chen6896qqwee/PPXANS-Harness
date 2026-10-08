@@ -79,11 +79,27 @@ test("FactStore.add(similarThreshold): 同义变体命中加分而非新增", ()
   const a = new PPXAgent({ root: tmpRoot("addsim") });
   a.facts.add("一个完整的任务必须包含三件套：目标（干什么）、涉及的资源（文件、服务、数据）和验收标准（做完什么样算完）", { source: "manual" });
   const before = a.facts.count();
+  // 同级写入 (manual user-stated 撞 user-stated): 命中加分
+  a.facts.add("一个完整的任务必须包含目标（干什么）、涉及的资源（文件、服务、数据）和验收标准（做完什么样算完）这三件套", { source: "manual", similarThreshold: 0.6 });
+  assert.equal(a.facts.count(), before, "同义变体不新增");
+  const all = a.facts.list();
+  assert.equal(all.length, 1, "仍只有 1 条");
+  assert.ok(all[0].hits >= 1, "同级命中 hits 加分");
+  a.shutdown();
+  fs.rmSync(a.dataDir, { recursive: true, force: true });
+});
+
+test("FactStore.add(similarThreshold): 低权来源撞高权记录只回'已存在'不加分 (防注入抬分)", () => {
+  // provenance 分级语义: 隔离带/低权写入 (extract=model-inferred) 命中一条可晋级的用户事实时,
+  // 不得改 hits/score —— 否则反复抓同一页就能抬高某条用户事实的检索分 (另一种注入 + 可观测反馈)。
+  const a = new PPXAgent({ root: tmpRoot("addsimlow") });
+  a.facts.add("一个完整的任务必须包含三件套：目标（干什么）、涉及的资源（文件、服务、数据）和验收标准（做完什么样算完）", { source: "manual" });
+  const before = a.facts.count();
   a.facts.add("一个完整的任务必须包含目标（干什么）、涉及的资源（文件、服务、数据）和验收标准（做完什么样算完）这三件套", { source: "extract", similarThreshold: 0.6 });
   assert.equal(a.facts.count(), before, "同义变体不新增");
   const all = a.facts.list();
   assert.equal(all.length, 1, "仍只有 1 条");
-  assert.ok(all[0].hits >= 1, "hits 加分");
+  assert.equal(all[0].hits || 0, 0, "低权来源命中不加分");
   a.shutdown();
   fs.rmSync(a.dataDir, { recursive: true, force: true });
 });
@@ -117,8 +133,8 @@ test("FactStore.add(similarThreshold): 松散变体经 overlap 兜底命中加�
   const a = new PPXAgent({ root: tmpRoot("ovladd") });
   a.facts.add("用户在提出任务时，需要提供详细的任务内容，而不是仅仅使用编号，以提高处理效率。", { source: "manual" });
   const before = a.facts.count();
-  // 词序变化大, Jaccard 0.58 <0.6, 但 overlap 0.78 >=0.6, 应被兜底命中
-  a.facts.add("用户提出的任务时，需要提供具体的任务内容，而不是仅仅使用编号，以提高效率。", { source: "extract", similarThreshold: 0.6 });
+  // 词序变化大, Jaccard 0.58 <0.6, 但 overlap 0.78 >=0.6, 应被兜底命中 (同级写入 → 加分)
+  a.facts.add("用户提出的任务时，需要提供具体的任务内容，而不是仅仅使用编号，以提高效率。", { source: "manual", similarThreshold: 0.6 });
   assert.equal(a.facts.count(), before, "松散变体不新增");
   const all = a.facts.list();
   assert.ok(all[0].hits >= 1, "hits 加分");

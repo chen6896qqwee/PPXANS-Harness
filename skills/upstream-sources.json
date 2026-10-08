@@ -1,0 +1,54 @@
+{
+  "$comment": "可信上游技能源清单 (离线随包分发)。用途: skill_import 不给 repo 时列出可装来源, 或按 name (源 id / 技能名) 解析出仓库引用 —— 让'装技能'从'你得先知道 GitHub 上有个 repo'变成'说个名字'。零依赖: 这个文件是手工维护 + 逐个验证过的白名单, 不做任何在线搜索 (在线搜索意味着任意第三方代码可被一句话拉进来)。",
+  "version": 1,
+  "updated": "2026-10-07",
+  "sources": [
+    {
+      "id": "anthropics",
+      "name": "Anthropic 官方技能库",
+      "repo": "anthropics/skills",
+      "license": "MIT",
+      "verified": true,
+      "imported": 18,
+      "note": "官方目录式 SKILL.md 技能包, 覆盖文档/设计/测试/前端。本项目已内置导入 18 个 (见 skills/office|content|code 等域)。"
+    },
+    {
+      "id": "addyosmani",
+      "name": "addyosmani/agent-skills",
+      "repo": "addyosmani/agent-skills",
+      "license": "MIT",
+      "verified": true,
+      "imported": 0,
+      "note": "生产级工程技能集 (为 coding agent 设计), 偏工程实践与代码质量。102k★。"
+    },
+    {
+      "id": "wshobson",
+      "name": "wshobson/agents",
+      "repo": "wshobson/agents",
+      "license": "MIT",
+      "verified": false,
+      "imported": 0,
+      "note": "多 harness 插件市场 (Claude Code / Codex / Cursor / OpenCode / Copilot / Antigravity)。40k★。结构为多 harness 混合, 导入前建议先 dry_run 看清单 —— 部分技能针对特定 harness 的命令语法, 皮皮虾用不上。"
+    }
+  ],
+  "known_skills": {
+    "mcp-builder": "anthropics",
+    "webapp-testing": "anthropics",
+    "docx": "anthropics",
+    "pdf": "anthropics",
+    "pptx": "anthropics",
+    "xlsx": "anthropics",
+    "canvas-design": "anthropics",
+    "frontend-design": "anthropics",
+    "theme-factory": "anthropics",
+    "algorithmic-art": "anthropics",
+    "web-artifacts-builder": "anthropics",
+    "brand-guidelines": "anthropics",
+    "internal-comms": "anthropics",
+    "doc-coauthoring": "anthropics",
+    "skill-creator": "anthropics",
+    "academy-guide": "anthropics",
+    "claude-api": "anthropics",
+    "discernment-nudge": "anthropics"
+  }
+}

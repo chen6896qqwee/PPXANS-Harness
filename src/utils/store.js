@@ -68,6 +68,8 @@ export function writeJson(file, obj) {
 
 // 简单跨进程文件锁 (零依赖, 同步): 原子创建 .lock 文件, 临界区内执行 fn, finally 释放
 // 用于跨 agent 共享文件的"读-改-写"临界区 (防并发覆盖, 如共享经验库)
+// v2026-10-05 (F6): fn **必须是同步函数** —— async 回调会被当场拒绝 (抛 TypeError),
+//   因为同步锁无法跨 await 持有; 详见下方 _assertSyncFn 注释。
 // v3.0.1 (P1#5) 两处修复:
 //   ① 锁文件写 "pid:ts", 超时后先判持有者存活 —— 活进程持锁时不许抢 (原实现无脑强删锁文件,
 //      持有者还在临界区就出现双写, 互斥被破坏 → 数据交错损坏); 死进程/超长持有/自进程残留才强取。
@@ -79,7 +81,40 @@ function _syncSleep(ms) {
 function _pidAlive(pid) {
   try { process.kill(pid, 0); return true; } catch (e) { return e && e.code === "EPERM"; } // EPERM=存在但无权限
 }
+// ---- v2026-10-05 (F6): 临界区回调必须是同步函数 (硬性拒绝异步) ----
+// 本锁是**同步**锁: 锁文件在 fn() 返回的那一刻就释放 (finally)。若 fn 是 async 函数, 它返回的
+// 只是一个"刚开始执行"的 Promise —— 控制权在函数体内**第一个 await** 处就交回事件循环, 而那时
+// 临界区远未结束。于是锁在最需要它的地方静默失效: 两个进程各自"持锁"交错做同一批读-改-写,
+// 后写的那一份用基于过期状态的整文件覆盖前一份 —— 本仓库已因此真丢过用户数据
+// (见 memory/l2.js:69-106 与 test/scene-id-backfill-2026-10-04.test.js, 同为"锁外合并"竞态)。
+// 取舍: 与其假装持锁, 不如当场拒绝。AsyncFunction 在**取锁之前**就抛错 (回调一次都不会被执行);
+// 同步函数返回 thenable 的情况只能事后判定 (它的同步前半段已跑过), 同样抛错并说清互斥已失效。
+function _isThenable(v) {
+  return !!v && (typeof v === "object" || typeof v === "function") && typeof v.then === "function";
+}
+function _asyncLockError(api, file, what) {
+  return new TypeError(`${api}: ${file} 的临界区回调返回了${what} —— 这把锁只能同步持有, `
+    + `fn() 一返回锁就释放, 互斥在 await 之后形同虚设 (正是这一类 bug 造成过记忆数据被覆盖)。`
+    + " 请把读-改-写与原子落盘全部改成同步实现 (fs.readFileSync + atomicWrite/writeJson), "
+    + "需要 await 的部分 (网络/LLM/向量化) 挪到 withFileLock 之外, 锁内只做同步落盘。");
+}
+// 取锁前调用: 非函数 / async 函数直接抛错 (fn 一次都不执行, 也不留下锁文件)
+function _assertSyncFn(api, file, fn) {
+  if (typeof fn !== "function") {
+    throw new TypeError(`${api}: fn 必须是同步函数, 收到 ${fn === null ? "null" : typeof fn}: ${file}`);
+  }
+  if (Object.prototype.toString.call(fn) === "[object AsyncFunction]") {
+    throw _asyncLockError(api, file, " async 函数 (其函数体从未执行)");
+  }
+}
+// 持锁中调用: 返回值是 thenable 则抛错 (由调用方 finally 正常释放锁)
+function _callSyncFn(api, file, fn) {
+  const r = fn();
+  if (_isThenable(r)) throw _asyncLockError(api, file, "一个 Promise");
+  return r;
+}
 export function withFileLock(file, fn, { timeoutMs = 3000, pollMs = 20, staleMs = 15000 } = {}) {
+  _assertSyncFn("withFileLock", file, fn);
   const lock = file + ".lock";
   const acquire = () => {
     try {
@@ -124,10 +159,26 @@ export function withFileLock(file, fn, { timeoutMs = 3000, pollMs = 20, staleMs 
     _syncSleep(pollMs);
   }
   try {
-    return fn();
+    return _callSyncFn("withFileLock", file, fn);
   } finally {
     try { fs.rmSync(lock, { force: true }); } catch (e) { debug(`[utils/store] 已忽略异常: ${e && e.message ? e.message : e}`); }
   }
+}
+
+// 同时持有多把文件锁 (v2026-10-05, 会话按天分片的跨文件 seq 判定用)。
+// 关键: 先去重再按**路径升序**嵌套获取 —— 所有调用方共用同一全序, 因此不会互相死锁,
+// 同一路径也不会被自己锁两次 (withFileLock 的自进程残留判定会"抢"自己的锁, 提前释放)。
+// 常见情形只有一个文件 (当天分片), 此时与单次 withFileLock 开销完全一致。
+// v2026-10-05 (F6): 与 withFileLock 同一条异步禁令 —— 叶子回调同样必须在锁内全程同步;
+// 空文件列表时 fn 会在**无锁**状态下执行, 所以这里独立断言一次, 保证拒绝与文件个数无关。
+export function withFileLocks(files, fn, opts) {
+  const list = [...new Set((files || []).filter(Boolean))].sort();
+  const label = `[${list.join(", ")}]`; // 错误信息用: 一次成型, 不在每层递归里重算
+  _assertSyncFn("withFileLocks", label, fn);
+  const step = (i) => (i >= list.length
+    ? _callSyncFn("withFileLocks", label, fn)
+    : withFileLock(list[i], () => step(i + 1), opts));
+  return step(0);
 }
 
 export function readText(file, fallback = "") {
@@ -141,6 +192,14 @@ export function readText(file, fallback = "") {
 
 export function writeText(file, text) {
   atomicWrite(file, text);
+}
+
+// 追加写 (v3.2.3, P2#10): 供长期累积型文件 (如 memory-ticker 的 longterm.md) 使用。
+// 原实现 readText 全量读 + 字符串拼接 + writeText 全量重写, 文件越大每轮归档成本越高
+// (O(N) 每次滚动 → 长期累积下整体 O(N²)); 追加写把单次归档降为 O(新增字节)。
+export function appendText(file, text) {
+  ensureDir(path.dirname(file));
+  fs.appendFileSync(file, text, "utf8");
 }
 
 export function appendLine(file, line) {

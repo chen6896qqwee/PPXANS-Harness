@@ -3,24 +3,40 @@
 // 编排策略:
 //   - 有 workflow (DAG 节点数组) 时走 runDag: 按依赖拓扑分层并行, 上游结果流入下游
 //   - 无 workflow 时走 broadcast: 同一问题广播给全部 agent, 取第一个有效回复
-// 军团配置: config.agent.legion = { size, workflow } 或 config.orchestrator
+//
+// 配置 (2026-10-07 更新, 旧的 config.orchestrator 别名继续可用):
+//   config.agent.legion = { default_size, max_concurrent_agents, max_concurrent_per_call, ... }
+//   config.orchestrator = { size, workflow }   ← 兼容旧配置
+//   合并方向: 新键优先, 旧键兜底 —— 因此两者都存在时不会互相遮蔽。
 // 可注入: opts.legion (测试/复用已有军团实例, 免重复 spawn)
 import path from "node:path";
 import { Legion } from "../orchestrator/legion.js";
+import { getGovernor, governorOptsFromConfig } from "../orchestrator/governor.js";
 import { warn } from "../utils/logger.js";
 
 export async function legionExecutor(agent, userMsg, { sessionKey = "default", legion = null, workflow = null, size = null } = {}) {
-  const cfg = (agent.config && (agent.config.agent?.legion || agent.config.orchestrator)) || {};
+  // 旧别名 config.orchestrator 打底, 新键 config.agent.legion 覆盖 (两边同名键时新键胜出)
+  const legacy = (agent.config && agent.config.orchestrator) || {};
+  const modern = (agent.config && agent.config.agent && agent.config.agent.legion) || {};
+  const cfg = { ...legacy, ...modern };
+  // 军团一启动就把治理器参数同步为当前配置 (热改配置后不必重启进程)
+  getGovernor().configure(governorOptsFromConfig(agent.config, agent.dataDir || null));
 
   // 1. 拿或懒建军团 (缓存到 agent, 复用子进程, 不重复 spawn)
   let L = legion || agent._legion;
   if (!L) {
     L = new Legion();
-    const n = size || cfg.size || 2;
-    for (let i = 0; i < n; i++) {
+    const n = Math.max(1, Number(size || cfg.size || cfg.default_size || 2) || 2);
+    // 受治理的批量 spawn: 走 Legion.spawnAgents (排队等槽位), 而不是无脑 for 循环 spawn n 个
+    const specs = Array.from({ length: n }, (_, i) => ({
+      name: `agent-${i}`,
       // 每个 agent 独立数据目录, 隔离记忆/会话, 互不干扰
-      const dataDir = path.join(agent.dataDir, "legion", `agent-${i}`);
-      L.spawnAgent(`agent-${i}`, { dataDir });
+      opts: { dataDir: path.join(agent.dataDir, "legion", `agent-${i}`) },
+    }));
+    if (typeof L.spawnAgents === "function") {
+      await L.spawnAgents(specs).catch((e) => warn(`[legion] 军团启动失败: ${e.message}`));
+    } else {
+      for (const s of specs) L.spawnAgent(s.name, s.opts);
     }
     agent._legion = L;
   }
@@ -50,5 +66,5 @@ export async function legionExecutor(agent, userMsg, { sessionKey = "default", l
   } catch (e) {
     warn("[legion] broadcast 失败:", e.message);
   }
-  return "[军团] 所有 agent 均未返回有效结果 (请确认已 spawnAgent 或配置 config.agent.legion.size)";
+  return "[军团] 所有 agent 均未返回有效结果 (请确认已 spawnAgent 或配置 config.agent.legion.default_size)";
 }

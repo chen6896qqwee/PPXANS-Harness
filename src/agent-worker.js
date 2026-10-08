@@ -1,6 +1,6 @@
-﻿// src/orchestrator/agent-worker.js - 子 agent 进程 (独立 PPXAgent 实例)
+﻿// src/agent-worker.js - 子 agent 进程 (原在 src/orchestrator/ 下, 2026-10-07 因依赖环移出: 它是进程入口不是编排库) (独立 PPXAgent 实例)
 // 通过 stdin 收消息, stdout 回结果. 每个 worker 完全隔离.
-import { PPXAgent } from "../agent/index.js";
+import { PPXAgent } from "./agent/index.js";
 
 const root = process.cwd();
 // 可选: 独立数据目录 (多进程军团隔离, 避免互踩同一个 data/)
@@ -58,7 +58,7 @@ async function handleLine(line) {
     } else if (req.type === "ping") {
       process.stdout.write(JSON.stringify({ id: req.id, type: "pong", name: agent.config.agent?.name || "ppx" }) + "\n");
     } else if (req.type === "shutdown") {
-      agent.shutdown();
+      await agent.shutdown();
       process.stdout.write(JSON.stringify({ id: req.id, type: "bye" }) + "\n");
       process.exit(0);
     }

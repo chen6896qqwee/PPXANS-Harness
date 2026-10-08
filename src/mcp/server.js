@@ -308,9 +308,18 @@ export class McpServer {
     if (this._virtualTools.has(name)) {
       return this._virtualTools.get(name).execute(args, ctx, this.agent);
     }
-    // catalog 工具: 走统一策略链 (命令守卫/审计/超时)
+    // catalog 工具: 必须走 agent 的完整准入链, 而不是 catalog.call
+    // (2026-10-04 安全复审: 原实现 tools.call(name,args,{}) 传空 ctx ⇒ 权限引擎的 deny/ask、
+    //  高风险审批、config.security 黑名单、workspace 越界检查全部静默失效 —— MCP token 一旦
+    //  泄露即可经 /mcp 直接驱动 delete_file / run_command。agent._runTool 才是唯一合规入口。)
+    if (this.agent && typeof this.agent._runTool === "function") {
+      if (this.agent.tools && typeof this.agent.tools.has === "function" && !this.agent.tools.has(name)) {
+        throw new McpError(MCP_ERROR.INVALID_PARAMS, `未知工具: ${name}`);
+      }
+      return this.agent._runTool(name, args || {});
+    }
     if (this.agent && this.agent.tools && typeof this.agent.tools.call === "function") {
-      // 未知工具需在进入 catalog.call 前拦截 (catalog.call 返回错误串而非抛错)
+      // 无 agent 准入链的降级 (单测桩对象等): 仍要在进入 catalog 前拦未知工具
       if (typeof this.agent.tools.has === "function" && !this.agent.tools.has(name)) {
         throw new McpError(MCP_ERROR.INVALID_PARAMS, `未知工具: ${name}`);
       }

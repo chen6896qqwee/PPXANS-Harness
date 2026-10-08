@@ -2,10 +2,22 @@
 // 架构参考 openhanako: 每条记忆有 importance, 高斯衰减, 命中加分
 import path from "node:path";
 import crypto from "node:crypto";
-import { ensureDir, readJson, writeJson, nowISO, withFileLock } from "./store.js";
+import { ensureDir, readJson, readJsonGuarded, writeJson, nowISO, withFileLock } from "./store.js";
 import { migrateData, writeSchema } from "./schema.js";
 import { setJaccard, setOverlap } from "./similarity.js";
-import { walFileOf, appendWal, readWal, truncateWal } from "./wal.js";
+import { scrubPII } from "./pii.js";
+import { walFileOf, appendWal, readWal, truncateWal, walSizeBytes } from "./wal.js";
+// v2026-10-04 (同步 src 2026-10-04 治理批次): 独立版刻意不依赖主项目 ——
+//   src/memory/backend-migrate.js (sqlite→json 一次性导入, 需 node:sqlite) 与 utils/logger.js
+//   都不在扁平化范围内, 故此处不导入 importSqliteIntoJson, warn 降级为 console.warn。
+const warn = (...a) => console.warn(...a);
+// v2026-10-XX (同步 src 来源分级批次, 2026-10-05): 写入 tier 的判定规则集中在 provenance.js
+//   (零依赖、与 src/memory/provenance.js 逐字同源), 满足"技能副本整体可拷出"约束
+//   —— 见 test/skill-memory-drift.test.js 的副本漂移守卫。
+import {
+  resolveWriteTier, tierOfRecord, rankOf, canSupersede, normalizeTier, isQuarantined, stripTierTags,
+  matchesTierSelector,
+} from "./provenance.js";
 
 // 记忆动词前缀: 去重时剔除, 让"记住：X"与"X"视为同一条 (防 LLM 提炼版与原文冗余)
 const MEMORY_VERB_PREFIXES = [
@@ -21,6 +33,12 @@ export const LAYER_L4 = 4;
 export const FACTS_SCHEMA_VERSION = 1;
 
 export class FactStore {
+  // facts.json.wal 的字节水位 (F7, 2026-10-05, 与 src/memory/fact-store.js 同值同语义):
+  // 条数阈值数的是"条", 一条 {op:"replace"} 事件却能把整库序列化进同一行 —— "没到阈值"
+  // 不等于"有上限"。水位默认 2MiB: 正常 add 路径峰值 18KB 永远碰不到它, 批量整库替换被钉死。
+  // 0/负数 = 关闭字节水位 (退回纯条数阈值的旧行为)。
+  static WAL_MAX_BYTES = 2 * 1024 * 1024;
+
   constructor(dataDir, opts = {}) {
     this.dir = path.join(dataDir, "memory");
     ensureDir(this.dir);
@@ -45,9 +63,25 @@ export class FactStore {
     // 数据文件本身保持纯数组格式, 读取方无感; 崩溃时启动重放 WAL 恢复。
     this.wal = !!this.opts.wal;
     this.walThreshold = Math.max(1, Number(this.opts.walThreshold) || 50);
+    // 字节水位 (F7): 未配置 = 类常量默认; 显式 0/负数 = 关闭 (退回旧的纯条数阈值行为)
+    this.walMaxBytes = this.opts.walMaxBytes == null
+      ? FactStore.WAL_MAX_BYTES
+      : Math.max(0, Number(this.opts.walMaxBytes) || 0);
     this.walFile = walFileOf(this.file);
     this._walPending = 0;
-    this.facts = readJson(this.file, []);
+    // v3.0.1 (P0#1): 读入时区分「文件不存在」与「文件损坏」。
+    // 损坏时文件原地保留 (healer 启动体检会改名 .corrupt-<ts> 备份后重建),
+    // 此处必须跳过立即覆盖写回空数组, 否则损坏现场被清 → 数据不可恢复。
+    const guarded = readJsonGuarded(this.file, []);
+    this.facts = guarded.data;
+    if (guarded.parseFailed) {
+      if (this.wal) {
+        // WAL 模式: 快照损坏但追加日志可能完好, 重放后可恢复大部分状态
+        warn(`[memory/fact-store] facts.json 损坏 (文件保留), 尝试从 WAL 重放恢复 (${this.walFile})`);
+      } else {
+        warn(`[memory/fact-store] facts.json 损坏 (文件保留), 本次启动跳过立即落盘以保护现场; 等待 healer 恢复或人工处理`);
+      }
+    }
     // schema 版本迁移 (旁挂 .schema 文件; 数据文件保持纯数组, healer/外部读取者无感)
     const mig = migrateData({
       file: this.file,
@@ -66,7 +100,11 @@ export class FactStore {
     this._embedCacheMax = 1000; // LRU 上限: 超过淘汰最旧插入项, 防长跑会话内存无界增长
     for (const fact of this.facts) this._indexFact(fact);
     if (this.wal) this._replayWal(); // 重放 WAL 增量 (崩溃恢复: 快照 + 追加日志 = 完整状态)
-    this.save();
+    // v3.0.1 (P0#1): 非 WAL 模式下若快照损坏, 跳过构造期立即落盘 (保护现场, 防空数组覆盖);
+    // 后续任何显式 add/update 仍会正常落盘, 届时内存状态即事实源
+    if (!(guarded.parseFailed && !this.wal)) this.save();
+    // 独立版差异: 不做 sqlite→json 后端迁移 (src/memory/backend-migrate.js 需 node:sqlite,
+    // 且属于主项目后端选择, 与扁平化技能无关)
   }
 
   // 全量落盘。非 WAL 模式: 直接原子写 (兼容旧行为, 调用方通常在锁内)。
@@ -90,8 +128,61 @@ export class FactStore {
   _reload() {
     this.facts = readJson(this.file, []);
     if (this.wal) this.facts = this._applyWalTo(this.facts);
+    // 来源分级: 磁盘/他进程写来的行可能没 provenance 字段 (旧版本写入或外部手改),
+    //   每次重读就地补齐 —— 让 add/forget/update/_prune 的判定永远读到一个已归一化的闭集值,
+    //   而不是在若干处各写一遍回退逻辑。纯内存补齐, 不额外写盘 (落盘由调用方的变更顺带完成)。
+    this._stampProvenance();
     this.rebuildIndex();
     return this.facts;
+  }
+
+  // 给缺 provenance 字段的行按 source 登记表补上 tier (幂等, 全同步)
+  _stampProvenance() {
+    let n = 0;
+    for (const f of this.facts) {
+      const t = tierOfRecord(f);
+      if (f.provenance !== t) { f.provenance = t; n++; }
+    }
+    return n;
+  }
+
+  /**
+   * 存量库的来源分级回灌 (迁移入口, 与 src/memory/fact-store.js 同名 API 同口径)。
+   * 取舍 (为什么按 source 登记表回灌而不是统一 unknown):
+   *   ① 统一 unknown = 把"用户说过的话"也隔离掉 —— 画像/关键事实当场清空, 升级即失忆 (行为倒退,
+   *      且不可由用户恢复: 用户不会重述历史上说过的每一句)。登记表能确定地复原绝大多数行的来源,
+   *      因为 source 本来就是各调用点显式声明的字符串。
+   *   ② 代价是诚实性边界: 登记表之外的 source (自定义/手改/未来的新值) 一律 unknown → 隔离。
+   *   ③ 不猜内容: 判定只看 source/provenance 字段, 绝不做文本启发式 (见 provenance.js 约束①)。
+   * 注意: 副本版不含 sqlite 后端迁移, 语义与 src 版一致。
+   * @param {{dryRun?: boolean}} [opts]
+   * @returns {{total:number, stamped:number, byTier:Object, quarantined:number, dryRun:boolean}}
+   */
+  backfillProvenance({ dryRun = false } = {}) {
+    const tally = (arr) => {
+      const byTier = {};
+      let q = 0;
+      for (const f of arr) {
+        const t = tierOfRecord(f);
+        byTier[t] = (byTier[t] || 0) + 1;
+        if (isQuarantined(t)) q++;
+      }
+      return { byTier, q };
+    };
+    if (dryRun) {
+      const { byTier, q } = tally(this.facts);
+      return { total: this.facts.length, stamped: 0, byTier, quarantined: q, dryRun: true };
+    }
+    if (!this.facts.length) {
+      return { total: 0, stamped: 0, byTier: {}, quarantined: 0, dryRun: false };
+    }
+    return withFileLock(this.file, () => {
+      this._reload();
+      const { byTier, q } = tally(this.facts);
+      const stamped = this._stampProvenance();
+      if (stamped) this.save();
+      return { total: this.facts.length, stamped, byTier, quarantined: q, dryRun: false };
+    });
   }
 
   // 把 WAL 增量事件按序应用到磁盘快照 (幂等: upsert 按 id 覆盖, remove 删 id, replace 整体替换)
@@ -134,7 +225,11 @@ export class FactStore {
   _walAppend(evt, count = 1) {
     appendWal(this.walFile, evt);
     this._walPending += count;
-    if (this._walPending >= this.walThreshold) this._flushLocked();
+    if (this._walPending >= this.walThreshold) { this._flushLocked(); return; }
+    // 字节水位 (F7): 见 src/memory/fact-store.js 同名方法注释 —— 条数阈值封顶不了"一条巨型事件",
+    // 达到水位就地 compact 走既有"快照∪WAL∪内存 → 全量原子写 → 清 WAL"路径, 不删未 compact 事件,
+    // 重放结果与裁剪前等价; 全程在调用方已持有的文件锁内, 天然串行。
+    if (this.walMaxBytes > 0 && walSizeBytes(this.walFile) >= this.walMaxBytes) this._flushLocked();
   }
 
   _change(evt) {
@@ -193,6 +288,47 @@ export class FactStore {
     return Date.now() / 86400000;
   }
 
+  // ---- 事实有效期窗口 (v3.1, 吸收 Zep/Graphiti 思想) ----
+  // 动机: 只有衰减没有时效的事实会在"用户改主意"后继续命中 —— 检索器分不清
+  // 「曾经为真」与「现在为真」。每条事实可带 validFrom/validTo (ISO 或可解析时间),
+  // 缺省 = 永久有效 (完全向后兼容旧数据)。
+  _normTime(v) {
+    if (v == null || v === "") return null;
+    const t = v instanceof Date ? v.getTime() : new Date(v).getTime();
+    return Number.isFinite(t) ? new Date(t).toISOString() : null;
+  }
+
+  _isCurrent(f, nowMs = Date.now()) {
+    if (f.validFrom) {
+      const t = new Date(f.validFrom).getTime();
+      if (Number.isFinite(t) && nowMs < t) return false; // 尚未生效
+    }
+    if (f.validTo) {
+      const t = new Date(f.validTo).getTime();
+      if (Number.isFinite(t) && nowMs >= t) return false; // 已失效
+    }
+    return true;
+  }
+
+  // 更新事实有效期 (治理 API): 典型用法 = 新事实入库时把被取代的旧事实 validTo 收口到当前
+  setValidity(id, { validFrom = undefined, validTo = undefined } = {}) {
+    return withFileLock(this.file, () => {
+      this._reload();
+      const f = this.facts.find((x) => x.id === id);
+      if (!f) return null;
+      if (validFrom !== undefined) f.validFrom = this._normTime(validFrom);
+      if (validTo !== undefined) f.validTo = this._normTime(validTo);
+      // 时效只影响检索可见性, 不改 status (治理面仍可见, 软删/归档另有语义)
+      this._markMutated(f);
+      return { id: f.id, validFrom: f.validFrom ?? null, validTo: f.validTo ?? null };
+    });
+  }
+
+  // 列出时效窗口已过 (或未到) 的事实 (治理/体检用, 检索默认不可见)
+  listOutOfWindow(scope = null) {
+    return this._live(scope).filter((f) => !this._isCurrent(f));
+  }
+
   // 内容归一化: 去首尾空白 + 折叠连续空白, 用于去重比对
   _norm(s) {
     return String(s || "").trim().replace(/\s+/g, " ");
@@ -211,7 +347,9 @@ export class FactStore {
   // content 归一化后为空返回 null。补全对象字段 —— 缺失 lastAccess/importance 会让
   // 衰减/recency 计算出 NaN, 检索永远返回空 (v2.7.0 修复语义保持)。
   _normalizeFact(it) {
-    const norm = this._norm(it?.content);
+    // 导入路径同样脱密 (与 add 对称): 外部 JSON / 其他 backend 导出可能夹带凭证
+    // 也同样剥伪装来源标签 (与 add 对称): 导入是攻击者可控面最大的写入路径 (governance memory_import)
+    const norm = this._norm(stripTierTags(scrubPII(String(it?.content ?? ""), { keep: ["email", "phone"] }).cleaned));
     if (!norm) return null;
     const now = nowISO();
     return {
@@ -219,6 +357,9 @@ export class FactStore {
       content: norm,
       type: it.type || "general",
       source: it.source || "import",
+      // 来源分级: 迁移/导入带来的 provenance 逐字保留 (两端后端互切不得洗白或降级);
+      //   没有该字段的旧条目按 source 登记表算, 登记表外 (含 source 缺失 = "import") → unknown 隔离。
+      provenance: tierOfRecord({ provenance: it.provenance, source: it.source || "import" }),
       importance: it.importance ?? this.opts.baseImportance,
       score: it.score ?? (it.importance ?? this.opts.baseImportance),
       created: it.created || now,
@@ -226,9 +367,15 @@ export class FactStore {
       hits: it.hits || 0,
       scope: it.scope ?? null,
       layer: Number(it.layer) === LAYER_L4 ? LAYER_L4 : LAYER_L1,
-      status: it.status === "deleted" ? "deleted" : "active",
+      // v2026-10-04 (sqlite parity): archived 一并保留 (原只认 deleted, 后端切换迁移会把
+      // 版本链旧版错误复活为 active); deletedAt/deleteReason 随行携带, 保证软删可审计可回滚
+      status: it.status === "deleted" || it.status === "archived" ? it.status : "active",
+      ...(it.deletedAt ? { deletedAt: it.deletedAt } : {}),
+      ...(it.deleteReason ? { deleteReason: it.deleteReason } : {}),
       prevId: it.prevId ?? null,
       ...(it.ttlDays ? { ttlDays: Number(it.ttlDays) } : {}),
+      ...(this._normTime(it.validFrom) ? { validFrom: this._normTime(it.validFrom) } : {}),
+      ...(this._normTime(it.validTo) ? { validTo: this._normTime(it.validTo) } : {}),
       ...(it.meta ? { meta: it.meta } : {}),
     };
   }
@@ -240,8 +387,35 @@ export class FactStore {
     f.deleteReason = reason ? String(reason).slice(0, 200) : null;
   }
 
-  add(content, { importance = this.opts.baseImportance, type = "general", source = "manual", dedupe = true, scope = null, meta = null, similarThreshold = 0, layer = LAYER_L1, ttlDays = null } = {}) {
-    const norm = this._norm(content);
+  // 去重命中时的跨 tier 规则 (add 的内容去重与语义相似去重共用; 调用方必须已持锁, 全同步):
+  //   rank(写入) <  rank(存量) → 隔离带写入撞上一条可晋级记录: 只回"已存在", 不改 hits/score。
+  //     否则反复抓取同一页就能抬高某条用户事实的检索分 —— 排序被外部内容影响是另一种注入,
+  //     而且给了攻击者"这条确实写进去了"的可观测反馈。
+  //   rank(写入) >= rank(存量) → 照旧加分; 严格更高时把记录**晋级** (用户后来亲口说过同一件事,
+  //     来源就升回来了)。晋级只能向上 (canSupersede 已挡向下), 任何写入都不会把记录降级成 unknown。
+  _onDedupeHit(existing, tier, now) {
+    if (!canSupersede(tier, tierOfRecord(existing))) return existing;
+    existing.hits += 1;
+    existing.lastAccess = now;
+    existing.score += this.opts.hitBonus;
+    if (rankOf(tier) > rankOf(tierOfRecord(existing))) existing.provenance = tier;
+    this._markMutated(existing);
+    return existing;
+  }
+
+  add(content, { importance = this.opts.baseImportance, type = "general", source = "manual", dedupe = true, scope = null, meta = null, similarThreshold = 0, layer = LAYER_L1, ttlDays = null, validFrom = null, validTo = null, supersedeId = null, provenance = null } = {}) {
+    // P0 (2026-10-04) 单点脱密: add 是唯一持久化入口。记忆长期驻留、逐轮注入 system prompt、
+    //   还会发给云端 provider —— 凭证/密钥一旦进来就等于外泄。
+    //   保留 email/phone: 用户主动要求记住的联系方式是记忆的正常用途, 不是泄漏; 其余 PII 一律脱。
+    // 来源分级 (v2026-10-XX): 未声明 provenance 且 source 不在登记表 → unknown (隔离),
+    //   绝不因"没写"而继承 user-stated —— 与 src/tools/catalog.js 当年 {readOnly:true} 兜底同类的
+    //   "未声明=给最大权限"反模式在此废止 (默认拒绝)。
+    const tier = resolveWriteTier({ provenance, source });
+    // 伪装标签剥离必须在**写入侧**: 抓来的页面里若写着「(来源: 用户原话)」, 任何下游渲染路径
+    //   (本层的"关键事实", 以及 memory_search / "我记得:") 都无法分辨它 ——
+    //   在入库前剥掉, 所有渲染者一起安全 (标签文本只来自 provenance.js 的闭集常量)。
+    const safe = stripTierTags(scrubPII(String(content ?? ""), { keep: ["email", "phone"] }).cleaned);
+    const norm = this._norm(safe);
     if (!norm) return null;
     // 跨进程/多 agent 共享 dataDir 时的写保护: 锁内读-改-写, 防并发覆盖丢更新 (与 Experience 对称)
     // add 是唯一写入口, 锁内重读磁盘最新 facts (防基于过期内存操作), 操作后落盘
@@ -253,27 +427,22 @@ export class FactStore {
         // 内容去重: 归一化后相同 (含"记住："等前缀差异) 已存在则命中加分, 不新增
         // 排除软删与归档记忆 (2026-09-18 修复: 原只排除 deleted, archived 旧版本也能命中,
         //   命中加分落在不可见副本上, 活跃记忆不新增)
-        const normKey = this._normKey(content);
-        const existing = this.facts.find((f) => f.status !== "deleted" && f.status !== "archived" && this._normKey(f.content) === normKey);
-        if (existing) {
-          existing.hits += 1;
-          existing.lastAccess = now;
-          existing.score += this.opts.hitBonus;
-          this._markMutated(existing);
-          return existing;
-        }
+        // scope 参与判定 (2026-10-04 修复, 与 sqlite 后端同口径): 原先忽略 scope,
+        //   给 scope="sA" 加已有全局内容时会命中那条全局事实并"加分" —— 但检索走
+        //   _live(scope) 精确匹配作用域, 那条全局事实对 sA 根本不可见。结果既没建起
+        //   sA 的记忆, 又莫名抬高了另一作用域的分数。同语义检索去重 (findSimilar) 的口径。
+        const normKey = this._normKey(safe);
+        const existing = this.facts.find((f) =>
+          f.status !== "deleted" && f.status !== "archived"
+          && (f.scope ?? null) === (scope ?? null)
+          && this._normKey(f.content) === normKey);
+        if (existing) return this._onDedupeHit(existing, tier, now);
         // 语义相似去重: similarThreshold>0 时, 与现有事实相似度达标则命中加分
         // 双保险: 先 Jaccard (模板类变体), 未命中再 overlap (词序变化大的松散变体)
         if (similarThreshold > 0) {
           const similar = this.findSimilar(norm, { threshold: similarThreshold, scope })
             || this.findSimilar(norm, { threshold: similarThreshold, scope, method: "overlap" });
-          if (similar) {
-            similar.hits += 1;
-            similar.lastAccess = now;
-            similar.score += this.opts.hitBonus;
-            this._markMutated(similar);
-            return similar;
-          }
+          if (similar) return this._onDedupeHit(similar, tier, now);
         }
       }
       const fact = {
@@ -281,6 +450,8 @@ export class FactStore {
         content: norm,
         type,
         source,
+        // 来源分级 (闭集枚举, 落盘 = 可审计): 决定能否被提炼进静态提示区、能否取代别的记录
+        provenance: tier,
         importance,
         score: importance,
         created: now,
@@ -292,10 +463,24 @@ export class FactStore {
         status: "active",
         prevId: null,
         ...(ttlDays ? { ttlDays: Number(ttlDays) } : {}),
+        // 事实有效期窗口 (v3.1): 缺省字段 = 永久有效 (旧数据/调用方零影响)
+        ...(this._normTime(validFrom) ? { validFrom: this._normTime(validFrom) } : {}),
+        ...(this._normTime(validTo) ? { validTo: this._normTime(validTo) } : {}),
         ...(meta ? { meta } : {}),
       };
       this.facts.push(fact);
       this._indexFact(fact);
+      // v3.1 (Graphiti 思想): supersedeId 指定被本条取代的旧事实, 其 validTo 收口到当前时刻
+      // —— 旧事实不删除 (可审计"当时为真"), 只是从此不再被检索命中
+      // 跨 tier 取代规则 (v2026-10-XX): 低权限写入**不得**收口高权限记录 —— 抓一次网页就能让
+      //   "用户说过的话"从检索里静默消失, 这比注入更难发现。同权或更高才允许取代。
+      if (supersedeId) {
+        const old = this.facts.find((x) => x.id === supersedeId);
+        if (old && old.id !== fact.id && !old.validTo && canSupersede(tier, tierOfRecord(old))) {
+          old.validTo = now;
+          this._markMutated(old);
+        }
+      }
       this._statsCache.clear(); // 新增事实 -> 作用域统计失效
       // 新增先记 upsert 再裁剪 (2026-09-18 修复 WAL 事件序): 原先 _prune 先写 remove、
       //   _markMutated 后补 upsert, WAL 重放时 upsert 在 remove 之后 → 被裁剪的事实"复活"。
@@ -310,21 +495,31 @@ export class FactStore {
   // L1 总量裁剪: 超 maxFacts 时, 按「衰减后有效分 × 重要性」排序, 删除最弱事实。
   // 补齐「衰减只在查询层生效、不删数据」的缺口 -> 这里做存储层硬清理。
   // 只在 add 新增时触发; 去重命中/加分(hit) 不增条数, 无需裁剪。
+  // 只统计/裁剪活跃事实 (2026-10-04 修复, 与 sqlite 后端 status='active' 同口径):
+  //   原先把软删/归档条目一起评分, 它们与活跃事实争夺 maxFacts 名额 —— 遗忘链条越长
+  //   (sweepExpired 软删 + update 归档), 越会把真正在用的记忆当成"最弱"硬删掉。
   _prune() {
     const max = this.opts.maxFacts;
-    if (!max || max <= 0 || this.facts.length <= max) return 0;
+    if (!max || max <= 0) return 0;
+    const live = this._live();
+    if (live.length <= max) return 0;
     const nowD = this._nowDays();
-    const scored = this.facts.map((f) => {
+    const scored = live.map((f) => {
       const days = Math.max(0, nowD - new Date(f.lastAccess).getTime() / 86400000);
       const recency = Math.exp(-this._lambdaOf(f) * days * days); // 0~1 (L4 程序性记忆衰减更慢, 更抗裁剪)
       const imp = Math.min(f.importance || 0, 20) / 20; // 0~1
-      return { id: f.id, key: (f.score * (0.4 + 0.6 * recency)) * (0.5 + 0.5 * imp) };
+      // 来源分级 (v2026-10-XX): 隔离带记录先出局 —— 一次抓回上千条噪声不该把用户事实挤掉。
+      //   同一大类内部仍按原「衰减分×重要性」降序, 所以现有单来源测试的淘汰次序逐字不变。
+      const quarantineFirst = isQuarantined(tierOfRecord(f)) ? 0 : 1;
+      return { id: f.id, key: (f.score * (0.4 + 0.6 * recency)) * (0.5 + 0.5 * imp), promotable: quarantineFirst };
     });
-    scored.sort((a, b) => b.key - a.key);
+    scored.sort((a, b) => (b.promotable - a.promotable) || (b.key - a.key));
     const keep = new Set(scored.slice(0, max).map((x) => x.id));
-    const removedIds = this.facts.filter((f) => !keep.has(f.id)).map((f) => f.id);
-    this.facts = this.facts.filter((f) => keep.has(f.id));
+    const liveIds = new Set(live.map((f) => f.id));
+    const removedIds = [...liveIds].filter((id) => !keep.has(id));
+    this.facts = this.facts.filter((f) => !liveIds.has(f.id) || keep.has(f.id));
     this.rebuildIndex(); // 重建倒排索引 (内部已清 _statsCache)
+    for (const id of removedIds) this._embedCache.delete(id); // 事实已不在, 缓存向量作废
     if (removedIds.length) this._markRemoved(removedIds);
     return removedIds.length;
   }
@@ -439,12 +634,14 @@ export class FactStore {
   }
 
   // 检索: BM25 主导 (IDF 区分常见/罕见词 + 长度归一) + 子串强信号 + 高斯衰减(乘性时效) + 命中权重
-  query(q, { limit = 5, minScore = 1, scope = null } = {}) {
+  query(q, { limit = 5, minScore = 1, scope = null, includeExpired = false } = {}) {
     const nowD = this._nowDays();
     const ql = (q || "").toLowerCase();
     const qAll = this._bigramSet(ql);
     // scope 过滤基底 (检索隔离: 只查指定 scope 的事实); 软删条目一律不进检索
-    const scoped = this._live(scope);
+    // v3.1: 时效窗口过滤 —— 已失效/未生效的事实默认不命中 (includeExpired=true 供治理检视)
+    const liveAll = this._live(scope);
+    const scoped = includeExpired ? liveAll : liveAll.filter((f) => this._isCurrent(f));
     // 空查询: 按衰减分返回全部 (保持旧行为, 供 memory-ticker 取 top facts)
     if (qAll.size === 0) {
       return scoped
@@ -494,10 +691,10 @@ export class FactStore {
   }
 
   // 多查询变体检索 + RRF 融合 (供 LLM 查询扩展等场景: 每个变体各查一遍再融合)
-  queryMulti(queries, { limit = 5, scope = null, minScore = 1 } = {}) {
+  queryMulti(queries, { limit = 5, scope = null, minScore = 1, includeExpired = false } = {}) {
     const lists = [];
     for (const q of queries) {
-      const r = this.query(q, { limit: Math.max(limit * 2, 10), scope, minScore });
+      const r = this.query(q, { limit: Math.max(limit * 2, 10), scope, minScore, includeExpired });
       if (r.length) lists.push(r);
     }
     if (!lists.length) return [];
@@ -506,17 +703,51 @@ export class FactStore {
   }
 
   // ---- 可插拔 embedder (dense 语义检索, 零依赖默认关闭) ----
-  // 用户注入: ctx.consume("facts").setEmbedder(async (text) => number[])
+  // 用户注入: ctx.consume("facts").setEmbedder(async (text, role) => number[])
+  //   role = "query" | "passage" (非对称模型用; 忽略第二参数的实现照常工作)
   setEmbedder(fn) {
     this.embedder = typeof fn === "function" ? fn : null;
     this._embedCache.clear();
     return this;
   }
 
-  async _embed(text) {
+  async _embed(text, role = "query") {
     if (!this.embedder) throw new Error("未配置 embedder");
-    const v = await this.embedder(String(text));
+    // role ("query"|"passage") 透传给 embedder: 非对称模型 (e5) 的 query/passage 前缀不同,
+    //   只给一个入口参数就退化成"全按查询编码"。忽略第二参数的实现 (云端 OpenAI 兼容) 无影响。
+    const v = await this.embedder(String(text), role);
     return Array.isArray(v) && v.length ? v : null;
+  }
+
+  // 向量缓存 LRU 读 (2026-10-04): Map 迭代序 = 插入序, 旧实现只在超限时删"最早插入"那条,
+  //   于是热点事实的向量也可能被淘汰、而再没被查过的冷数据永久占位 (FIFO 冒充 LRU)。
+  //   命中时 delete+set 把它挪到队尾 = 真正的最近使用序。
+  _embedCacheGet(id) {
+    if (!this._embedCache.has(id)) return undefined;
+    const v = this._embedCache.get(id);
+    this._embedCache.delete(id);
+    this._embedCache.set(id, v);
+    return v;
+  }
+
+  _embedCacheSet(id, vec) {
+    this._embedCache.delete(id);
+    this._embedCache.set(id, vec);
+    while (this._embedCache.size > this._embedCacheMax) {
+      const oldest = this._embedCache.keys().next();
+      if (oldest.done) break;
+      this._embedCache.delete(oldest.value);
+    }
+    return vec;
+  }
+
+  // 取一条事实的向量 (缓存命中优先); 失败也缓存 null 占位, 防每次查询重投同一个坏 embedder
+  // 事实一律按 "passage" 编码 (与查询的 "query" 侧对称配对)
+  async _embedFor(fact) {
+    if (this._embedCache.has(fact.id)) return this._embedCacheGet(fact.id);
+    let ev = null;
+    try { ev = await this._embed(fact.content, "passage"); } catch { ev = null; }
+    return this._embedCacheSet(fact.id, ev || null);
   }
 
   // 余弦相似度 (零依赖)
@@ -529,25 +760,17 @@ export class FactStore {
   }
 
   // 语义检索: embedder 有则 dense cosine 排序 + 与 BM25 RRF 融合; 无则退化为 BM25
-  async querySemantic(q, { limit = 5, scope = null } = {}) {
-    if (!this.embedder) return this.query(q, { limit, scope });
-    const scoped = scope == null ? this.facts : this.facts.filter((f) => f.scope === scope);
-    const qv = await this._embed(q).catch(() => null);
+  async querySemantic(q, { limit = 5, scope = null, includeExpired = false } = {}) {
+    if (!this.embedder) return this.query(q, { limit, scope, includeExpired });
+    const liveAll = this._live(scope);
+    const scoped = includeExpired ? liveAll : liveAll.filter((f) => this._isCurrent(f)); // v3.1 时效过滤
+    const qv = await this._embed(q, "query").catch(() => null);
     if (!qv) return this.query(q, { limit, scope });
     // 懒加载每条事实的 embedding (内存缓存, 不落盘避免 facts.json 膨胀)
     const dense = [];
     for (const f of scoped) {
-      let ev = this._embedCache.get(f.id);
-      if (!ev) {
-        try { ev = await this._embed(f.content); } catch { ev = null; }
-        this._embedCache.set(f.id, ev);
-      }
+      const ev = await this._embedFor(f);
       if (ev) dense.push({ ...f, dense: this._cosine(qv, ev) });
-      // LRU 淘汰: Map 迭代序 = 插入序, 超限删最旧
-      if (this._embedCache.size > this._embedCacheMax) {
-        const oldest = this._embedCache.keys().next();
-        if (!oldest.done) this._embedCache.delete(oldest.value);
-      }
     }
     dense.sort((a, b) => b.dense - a.dense);
     // dense 与 BM25 双路 RRF 融合
@@ -617,7 +840,10 @@ export class FactStore {
   // 让遗忘变成可审计、可撤销的操作 —— 误删一条重要记忆不再无法挽回。
 
   // 软删: 标记 status='deleted' 并记录删除时间/原因, 数据保留可回滚
-  forget(idOrContent, { reason = null } = {}) {
+  // 来源分级: forget 是**治理**动作 (人/审批过的工具调用), 默认不带 provenance = 不额外设闸;
+  //   一旦调用方声明了来源 (memory_forget 在污点轮里应声明本轮 tier), 低权限声明就不得删高权限记录
+  //   —— 否则"抓来的内容唆使 agent 忘掉用户事实"就是一条现成的静默遗忘通路。
+  forget(idOrContent, { reason = null, provenance = null } = {}) {
     return withFileLock(this.file, () => {
       this._reload();
       const key = String(idOrContent || "");
@@ -626,6 +852,8 @@ export class FactStore {
         || this.facts.find((x) => this._normKey(x.content) === this._normKey(key) && x.status !== "archived");
       if (!f) return null;
       if (f.status === "deleted") return f; // 幂等: 已软删则原样返回, 不覆盖原删除原因
+      if (provenance != null && String(provenance).trim() !== ""
+        && !canSupersede(normalizeTier(provenance), tierOfRecord(f))) return null;
       f.status = "deleted";
       f.deletedAt = nowISO();
       f.deleteReason = reason ? String(reason).slice(0, 200) : null;
@@ -658,12 +886,17 @@ export class FactStore {
   }
 
   // 更新内容: 保留旧版为 prevId 版本链 (记忆演化可追溯), 新条继承 id/分数
-  update(id, content, { importance, layer, source } = {}) {
+  // 跨 tier 取代规则: 低权限写入不得改写高权限记录 (update = 覆盖内容 + 归档旧版, 是最强的
+  //   "取代"形态)。未声明 provenance 时按 source (或记录现有 source) 登记表定级; 登记不上 = unknown
+  //   → 只能改隔离带记录。返回 null = 被闸门拒绝, 调用方 (工具/治理) 会看到"没改成"。
+  update(id, content, { importance, layer, source, provenance } = {}) {
     return withFileLock(this.file, () => {
       this._reload();
       const f = this.facts.find((x) => x.id === String(id || ""));
       if (!f) return null;
-      const norm = this._norm(content);
+      const tier = resolveWriteTier({ provenance, source: source ?? f.source });
+      if (!canSupersede(tier, tierOfRecord(f))) return null;
+      const norm = this._norm(stripTierTags(scrubPII(String(content ?? ""), { keep: ["email", "phone"] }).cleaned));
       if (!norm) return null;
       // 旧版快照入链 (只保留一层历史, 防无限膨胀)
       const archived = {
@@ -676,9 +909,13 @@ export class FactStore {
       f.content = norm;
       f.prevId = archived.id;
       f.updatedAt = nowISO();
+      // 内容变了, 旧向量必须作废: 缓存以 id 为键, 不清就是"用上一条内容的相似度排这一条"
+      this._embedCache.delete(f.id);
       if (importance != null) { f.importance = importance; f.score = Math.max(f.score, importance); }
       if (layer != null) f.layer = Number(layer) === LAYER_L4 ? LAYER_L4 : LAYER_L1;
       if (source != null) f.source = source;
+      // 晋级只向上 (canSupersede 已保证 tier 不低于现值); 同权保留原声明, 避免无谓 churn
+      if (rankOf(tier) > rankOf(tierOfRecord(f))) f.provenance = tier;
       this.facts.push(archived);
       this.rebuildIndex();
       this._markMutated(archived, f);
@@ -688,12 +925,16 @@ export class FactStore {
 
   // TTL 扫描: 超过 ttlDays 未访问的条目软归档 (非硬删)
   // 与 /_prune 的分工: _prune 是容量保护的硬删, sweepExpired 是时效治理的软归档 (可回滚)
-  sweepExpired({ ttlDays = 90, layer = null, dryRun = false } = {}) {
+  // 来源分级 (v2026-10-XX) 新增可选 tier 选择器 (与 sqlite 后端同参数同口径): 只扫该档的记录,
+  //   墓碑年龄回收同样按档过滤 —— 语义闭合: sweepExpired({tier:"quarantined"}) 只动隔离带,
+  //   用户事实 (含其墓碑) 一律不碰。缺省 null = 全量, 旧调用方逐字同行为。
+  sweepExpired({ ttlDays = 90, layer = null, dryRun = false, tier = null } = {}) {
     const nowD = this._nowDays();
     const targets = [];
     for (const f of this.facts) {
       if (f.status === "deleted") continue;
       if (layer != null && Number(f.layer || LAYER_L1) !== Number(layer)) continue;
+      if (!matchesTierSelector(tierOfRecord(f), tier)) continue;
       const ttl = Number(f.ttlDays || ttlDays);
       if (!ttl || ttl <= 0) continue;
       const days = Math.max(0, nowD - new Date(f.lastAccess).getTime() / 86400000);
@@ -793,14 +1034,19 @@ export class FactStore {
     const bySource = {};
     const byType = {};
     const byLayer = {};
+    const byProvenance = {};
+    let quarantined = 0;
     let deleted = 0, archived = 0;
     for (const f of this.facts) {
       const s = f.source || "unknown";
       const t = f.type || "general";
       const l = Number(f.layer || LAYER_L1);
+      const p = tierOfRecord(f);
       bySource[s] = (bySource[s] || 0) + 1;
       byType[t] = (byType[t] || 0) + 1;
       byLayer[l] = (byLayer[l] || 0) + 1;
+      byProvenance[p] = (byProvenance[p] || 0) + 1;
+      if (isQuarantined(p)) quarantined++;
       if (f.status === "deleted") deleted++;
       if (f.status === "archived") archived++;
     }
@@ -809,10 +1055,19 @@ export class FactStore {
       live: this.facts.length - deleted - archived,
       deleted,
       archived,
+      // F4 (2026-10-04): 把"盘上行数"与"还能用的条数"分开说清楚 —— 此前工具/UI 只看到
+      // count() (行数), 遗忘链条越长越像"记忆还在涨"。rows=行数, tombstones=行数-活跃。
+      rows: this.facts.length,
+      tombstones: deleted + archived,
       max_facts: this.opts.maxFacts || 0,
+      max_tombstones: Number(this.opts.maxTombstones) || (this.opts.maxFacts ? this.opts.maxFacts * FactStore.TOMBSTONE_FACTOR : 0),
+      purge_grace_days: Number(this.opts.purgeGraceDays) || 0,
       by_source: bySource,
       by_type: byType,
       by_layer: byLayer,
+      // 来源分级可观测 (与 sqlite 后端同键名): 隔离带占比是"投毒是否在被吸收"的第一读数
+      by_provenance: byProvenance,
+      quarantined,
     };
   }
 }

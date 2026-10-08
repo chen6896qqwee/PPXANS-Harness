@@ -133,7 +133,7 @@ function shutdown(signal) {
   Promise.resolve()
     .then(() => manager?.stop?.())
     .catch(() => {})
-    .then(() => { try { agent.shutdown(); } catch {} })
+    .then(() => agent.shutdown().catch(() => {}))
     .finally(() => setTimeout(() => process.exit(0), 150));
 }
 process.on("SIGINT", () => shutdown("SIGINT"));

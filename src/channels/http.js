@@ -12,6 +12,7 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { Channel } from "./base.js";
 import { readBody, sendJson, SSE_HEADERS } from "../utils/http.js";
 import {
@@ -19,11 +20,13 @@ import {
 } from "../config/providers.js";
 import { getSettings, updateSettings } from "../config/settings.js";
 import { suggestProactive } from "../ans/proactive.js";
+import { expertCatalog } from "../orchestrator/experts.js";
 import { ensureDir, atomicWrite, readText } from "../utils/store.js";
 import { TokenBucket } from "../utils/rate-limit.js";
 import { createMcpEndpoint } from "../mcp/http.js";
 import { createAdminTools } from "../mcp/admin.js";
-import { buildTree, readWorkspaceFile } from "./workspace.js";
+import { buildTree, readWorkspaceFile, writeWorkspaceFile, searchWorkspace } from "./workspace.js";
+import { runReview } from "../review/index.js";
 import { debug } from "../utils/logger.js";
 
 const MAX_BODY = 1024 * 1024;          // 请求体上限 1MB
@@ -105,6 +108,9 @@ export class HttpChannel extends Channel {
     this._buckets = this._rateLimiter.buckets; // ip -> {tokens, last} (可观测, 与限流器同一 Map)
     // v1.0.8: webhook 路由注册表 (feishu/wechat 通道挂载), 单一 request handler 分发, 无多 listener 竞态
     this.webhookRoutes = new Map(); // path -> async (req, res) => void
+    // v3.2.3 (P2#10): 静态文件进程内缓存 (file -> {buf, mtimeMs, size}), 命中免同步读盘;
+    // mtime/size 变化自动失效, 不影响开发期热更新; 上限 64 防异常目录膨胀
+    this._staticCache = new Map();
     // CORS 来源白名单 (v1.0.7): channels.http.cors_origin 数组; 未配置默认 * (向后兼容)
     // 配置后仅放行白名单 origin, 其余跨域请求 403 (token 泄露时降低任意跨站读取风险)
     this.corsOrigins = this._corsFromConfig();
@@ -263,23 +269,53 @@ export class HttpChannel extends Channel {
     }
   }
 
-  // 可信本地请求 = 回环地址 + 可信来源 (下发 token 的唯一条件)
+  // Host 头是否指向本机回环名 (2026-10-04, DNS rebinding 防线):
+  // 仅校验 Origin 挡不住 rebinding —— 恶意域名解析到 127.0.0.1 后, 页面与请求是**同源**的,
+  // 浏览器既不发跨源 Origin 也需要 CORS 许可, /api/bootstrap 的 token 会直接被读走。
+  // 判据补一道 Host: 下发 token 的路径只认 127.0.0.1/localhost/::1。
+  // Host 缺失时不额外拒绝 (Node http 对无 Host 的 HTTP/1.1 请求本身回 400, 浏览器必发 Host)。
+  _hostTrusted(req) {
+    const raw = String(req.headers && req.headers.host || "").trim().toLowerCase();
+    if (!raw) return true;
+    let host = raw;
+    if (host.startsWith("[")) {
+      const end = host.indexOf("]");
+      host = end > 0 ? host.slice(1, end) : host;
+    } else {
+      const i = host.indexOf(":");
+      if (i !== -1) host = host.slice(0, i);
+    }
+    return host === "127.0.0.1" || host === "localhost" || host === "::1";
+  }
+
+  // 可信本地请求 = 回环地址 + 可信来源 + 回环 Host (下发 token 的唯一条件)
   _isTrustedLocal(req) {
-    return this._isLoopback(req) && this._originTrusted(req);
+    return this._isLoopback(req) && this._originTrusted(req) && this._hostTrusted(req);
   }
 
   // 版本号取自 package.json (不硬编码, 与 McpServer 同源策略)
   // 2026-09-18: 结果缓存 —— /health 与 /api/bootstrap 每次请求都重读磁盘无必要 (版本运行期不变)
+  //
+  // 2026-10-05 修复 (P1): 原实现只读 this.agent.root/package.json —— 但 agent.root 是**运行时数据根**
+  //   (默认 root/data, 或 PPX_DATA_DIR / --root 指定的任意外部目录), 里面根本没有 package.json。
+  //   实测 new PPXAgent({root:<临时目录>}) 后 /health 恒返回 version:"0.0.0", 而真正的包根
+  //   (本文件所在的 <pkg>/src/channels/../../) 明明有 package.json:3 的 3.2.2。
+  //   现改为**从模块自身位置推导包根** (import.meta.url 上溯), 这才是"包版本"的唯一正确来源
+  //   (与 McpServer 读 package.json 同源); 仍保留 agent.root 优先探测, 兼容"root 就是包根"的旧用法。
   _pkgVersion() {
     if (this._pkgVersionCache) return this._pkgVersionCache;
-    try {
-      const p = path.join(this.agent.root, "package.json");
-      if (fs.existsSync(p)) {
+    // 候选顺序: agent.root (旧用法兼容) → 模块自身所在包根 (权威来源)
+    const candidates = [];
+    if (this.agent && this.agent.root) candidates.push(path.join(this.agent.root, "package.json"));
+    candidates.push(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "package.json"));
+    for (const p of candidates) {
+      try {
+        if (!fs.existsSync(p)) continue;
         const v = JSON.parse(fs.readFileSync(p, "utf8")).version || "0.0.0";
         this._pkgVersionCache = v;
         return v;
-      }
-    } catch { /* 读不到就用占位 */ }
+      } catch { /* 读不到/坏 JSON → 试下一个候选 */ }
+    }
     return "0.0.0";
   }
 
@@ -370,6 +406,9 @@ export class HttpChannel extends Channel {
   // 2026-09-17: 桶表原本只增不减 —— 长期运行 + 多变源地址会持续吃内存; 现由 TokenBucket.sweep 摊还回收。
   // this._buckets 仍指向限流器内部 Map, 保持可观测性 (测试据此注入过期桶)。
   _rateLimit(req, res) {
+    // 每请求只计一次: _dispatch 已前置限流, MCP 端点内部还会再调本方法 —— 不加标记会让 MCP 请求扣 2 个令牌
+    if (req && req._ppxRateLimited) return true;
+    if (req) req._ppxRateLimited = true;
     const ip = req.socket?.remoteAddress || "unknown";
     if (this._rateLimiter.take(ip)) return true;
     this._json(res, 429, { error: "rate limited" }, { "Retry-After": "60" });
@@ -402,6 +441,9 @@ export class HttpChannel extends Channel {
       if (addr && typeof addr === "object" && addr.port) this.port = addr.port;
     } catch (e) { debug(`[channels/http] 已忽略异常: ${e && e.message ? e.message : e}`); }
     this.connected = true;
+    // 审批可达面 (2026-10-04): 本通道是 resolveApproval 的唯一入口 (/api/approvals/:id)。
+    // 挂上后 agent 才会真正等待人工审批; 未挂载的进程走 headless 快速拒绝, 不再死等超时。
+    this.agent?.registerApprovalSurface?.("http");
     return this;
   }
 
@@ -410,6 +452,14 @@ export class HttpChannel extends Channel {
     try {
       const reqPath = (req.url || "/").split("?")[0];
       if (!this._applyCors(req, res, reqPath)) return;
+
+      // 2026-10-04: 限流上移到各分发分支之前。
+      //   原顺序里 MCP 端点 / webhook (feishu、wechat) / SSE /events 都在限流判定【之前】就 return,
+      //   这三条路径完全不受令牌桶约束 —— 而 webhook 与 /events 会直接驱动 agent 或占长连接,
+      //   未鉴权时更是零成本放大流量。静态首页与 /health 仍不设限。
+      //   (对话请求另有一层 _acquire 并发护栏, 语义不变)
+      const isOpenGet = req.method === "GET" && (reqPath === "/" || reqPath === "/index.html" || reqPath === "/health");
+      if (!isOpenGet && !this._rateLimit(req, res)) return;
 
       // v2.6.0: MCP 标准端点优先 (Streamable HTTP, 单端点 POST)
       if (this.mcpEnabled && this.mcpHandler && req.method === "POST" && reqPath === this.mcpPath) {
@@ -420,12 +470,8 @@ export class HttpChannel extends Channel {
       if (wh) return this._runHandler(wh, req, res);
 
       // 2026-10-03: 主动提醒 SSE 端点 (GET /events)。独立于 /api/* 是因为 legacy_rest=false
-      // 时 API 全部 410, 而事件流是 Web UI 实时能力不属于退役面。长连接只建一次, 走正常限流。
+      // 时 API 全部 410, 而事件流是 Web UI 实时能力不属于退役面。
       if (req.method === "GET" && reqPath === "/events") return this._handleEvents(req, res);
-
-      // 静态页面与 /health 不设限, 其余 API 限流
-      const isOpenGet = req.method === "GET" && (reqPath === "/" || reqPath === "/index.html" || reqPath === "/health");
-      if (!isOpenGet && !this._rateLimit(req, res)) return;
 
       // v2.6.0 REST 退役开关: /message* /sessions* /reset 与 /api/* 同受 mcp.legacy_rest 控制
       // (默认关闭: 全部走标准 MCP 端点 /mcp; 旧脚本可配置 legacy_rest: true 恢复)
@@ -685,7 +731,7 @@ export class HttpChannel extends Channel {
     }
     // 通用静态文件服务 (public/ 下任意文件, 含 vendor/ 资源, 防路径穿越)
     if (!reqPath.startsWith("/api/") && !LEGACY_REST_PATHS.some((p) => reqPath === p)) {
-      return this._serveStatic(res, reqPath);
+      return this._serveStatic(req, res, reqPath);
     }
     return undefined;
   }
@@ -783,6 +829,25 @@ export class HttpChannel extends Channel {
       case "/api/settings":
         return this._apiSettings(req, res);
 
+      // 能力面板 API (2026-10-07): 技能 / 专家 / 工具 / MCP 的只读清单 (全部取内存现状)
+      case "/api/skills":
+        if (!get) return false;
+        return this._apiSkills(res);
+      case "/api/experts":
+        if (!get) return false;
+        return this._apiExperts(res);
+      case "/api/tools":
+        if (!get) return false;
+        return this._apiTools(res);
+      case "/api/mcp":
+        if (!get) return false;
+        return this._apiMcp(res);
+
+      // 任务面板 API (2026-10-07): 复用 MCP ppx.task.* 背后的 TaskBoard (src/mcp/tasks.js),
+      // 让 Web 前端有 HTTP 入口 (此前任务能力只活在 MCP 工具层, UI 无法读写)。
+      case "/api/tasks":
+        return this._apiTasks(req, res);
+
       // 工作区文件树 + 读取 (Web UI 项目文件引用)
       case "/api/workspace/tree":
         if (!get) return false;
@@ -790,6 +855,15 @@ export class HttpChannel extends Channel {
       case "/api/workspace/read":
         if (!get) return false;
         return this._apiWorkspaceRead(res, req);
+      // 写入文件 (2026-10-07): 此前工作区只读, 前端无法保存编辑
+      case "/api/workspace/write":
+        if (req.method !== "POST") return false;
+        if (!this._requireAuth(req, res)) return true;
+        return this._apiWorkspaceWrite(req, res);
+      // 搜索 (2026-10-07): 文件名/内容关键字, 支撑 @ 引用与文件面板搜索
+      case "/api/workspace/search":
+        if (!get) return false;
+        return this._apiWorkspaceSearch(res, req);
 
       default:
         return false;
@@ -797,9 +871,14 @@ export class HttpChannel extends Channel {
   }
 
   // ---- 静态文件 ----
-  _serveStatic(res, reqPath) {
+  // v3.2.3 (P2#10): ETag 协商缓存 (mtime+size 弱 ETag) + 进程内内容缓存。
+  // 原实现每次请求同步读盘 + 恒 200 全量回体; 现在:
+  //   ① 浏览器带 If-None-Match 且文件未变 → 304 零体传输 (静态资源二次加载成本趋零);
+  //   ② 未变文件直接回内存缓存, 免同步读盘 (mtime/size 变化自动失效, 开发热更新不受影响)。
+  _serveStatic(req, res, reqPath) {
     const file = path.resolve(this.publicDir, reqPath.replace(/^\//, ""));
     if (file.startsWith(this.publicDir + path.sep) && fs.existsSync(file) && fs.statSync(file).isFile()) {
+      const st = fs.statSync(file);
       const ext = path.extname(file).toLowerCase();
       const mime = {
         ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8",
@@ -807,10 +886,25 @@ export class HttpChannel extends Channel {
         ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif",
         ".svg": "image/svg+xml", ".ico": "image/x-icon", ".woff2": "font/woff2", ".map": "application/json",
       }[ext] || "application/octet-stream";
-      const headers = { "Content-Type": mime };
+      const etag = `W/"${st.size.toString(16)}-${st.mtimeMs.toString(16)}"`;
+      if (req.headers && req.headers["if-none-match"] === etag) {
+        res.writeHead(304, { ETag: etag });
+        res.end();
+        return true;
+      }
+      let cached = this._staticCache.get(file);
+      if (!cached || cached.mtimeMs !== st.mtimeMs || cached.size !== st.size) {
+        cached = { buf: fs.readFileSync(file), mtimeMs: st.mtimeMs, size: st.size };
+        this._staticCache.set(file, cached);
+        if (this._staticCache.size > 64) {
+          const oldest = this._staticCache.keys().next().value;
+          this._staticCache.delete(oldest);
+        }
+      }
+      const headers = { "Content-Type": mime, ETag: etag };
       if ([".html", ".js", ".mjs", ".css"].includes(ext)) headers["Cache-Control"] = "no-cache";
       res.writeHead(200, headers);
-      res.end(fs.readFileSync(file));
+      res.end(cached.buf);
       return true;
     }
     res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
@@ -852,12 +946,62 @@ export class HttpChannel extends Channel {
       this._json(res, 200, { goals, text: board.render ? board.render() : "" });
       return true;
     }
+    // POST /api/goalboard — 目标看板写操作 (2026-10-07): { op: "add"|"update", ... }
+    // 复用 agent.goalBoard (与 MCP 工具 goal_board 同一份台账); 非法值抛错 → 400。
+    if (req.method === "POST" && reqPath === "/api/goalboard") {
+      const board = agent.goalBoard;
+      if (!board) { this._json(res, 200, { ok: false, error: "目标看板未装配" }); return true; }
+      const body = await this._readBody(req, res);
+      if (body === null) return true;
+      try {
+        const a = JSON.parse(body || "{}");
+        const op = a.op || "add";
+        let goal;
+        if (op === "add") {
+          if (!a.title) throw new Error("add 需要 title");
+          goal = board.addGoal({ id: a.id, title: a.title, priority: a.priority, status: a.status });
+        } else if (op === "update") {
+          if (!a.id) throw new Error("update 需要 id");
+          const patch = {};
+          if (a.title != null) patch.title = a.title;
+          if (a.priority != null) patch.priority = a.priority;
+          if (a.status != null) patch.status = a.status;
+          goal = board.updateGoal(a.id, patch);
+          if (!goal) throw new Error(`未找到目标 id=${String(a.id).slice(0, 40)}`);
+        } else {
+          throw new Error(`未知目标操作: ${op}`);
+        }
+        this._json(res, 200, { ok: true, goal, goals: board.list(), text: board.render ? board.render() : "" });
+      } catch (e) { this._fail(res, e); }
+      return true;
+    }
     // GET /api/review/latest — 最近一次审查报告 (OCR 分级流水线)
     if (get && reqPath === "/api/review/latest") {
       this._json(res, 200, agent._lastReview || { issues: [], report: null });
       return true;
     }
-    // POST /api/permissions — 权限热更新 { approvalMode?, sandbox?, networkAccess? }
+    // POST /api/review/run — 触发一次分级审查 (2026-10-07): 与 MCP 工具 review_code 同一路径,
+    // 无 files/diff 时取 traces 里最近的写操作文件。结果写回 agent._lastReview 供面板读取。
+    if (req.method === "POST" && reqPath === "/api/review/run") {
+      const body = await this._readBody(req, res);
+      if (body === null) return true;
+      try {
+        const a = JSON.parse(body || "{}");
+        let files = Array.isArray(a.files) ? a.files.slice() : [];
+        const diff = a.diff || null;
+        if (!files.length && !diff) {
+          const recent = agent.traces?.read?.("write_file", 10) || [];
+          files = recent.map((t) => t.args?.path).filter(Boolean);
+        }
+        const out = runReview({ files, diff });
+        agent._lastReview = { issues: out.issues, report: out.report, ts: Date.now() };
+        this._json(res, 200, { ok: true, total: out.issues.length, issues: out.issues, report: out.report });
+      } catch (e) { this._fail(res, e); }
+      return true;
+    }
+    // POST /api/permissions — 权限热更新 { approvalMode?, sandbox?, networkAccess?, planEnabled?, sessionKey? }
+    // plan 态 (2026-10-05 /plan 修复): 带 sessionKey = 翻转该会话的计划模式 (与 /plan /do 同一条
+    // 状态轨道, Web 端免打字也能进出); 不带 = 引擎级 planEnabled 兜底开关。响应回显当前计划态。
     if (req.method === "POST" && reqPath === "/api/permissions") {
       const body = await this._readBody(req, res);
       if (body === null) return true;
@@ -867,7 +1011,32 @@ export class HttpChannel extends Channel {
       if (cfg.approvalMode) agent.permissions.approvalMode = cfg.approvalMode;
       if (cfg.sandbox) agent.permissions.sandbox = cfg.sandbox;
       if (cfg.networkAccess != null) agent.permissions.networkAccess = !!cfg.networkAccess;
-      this._json(res, 200, { ok: true, approvalMode: agent.permissions.approvalMode, sandbox: agent.permissions.sandbox });
+      if (cfg.planEnabled != null) {
+        if (cfg.sessionKey && typeof agent.setPlanMode === "function") {
+          agent.setPlanMode(String(cfg.sessionKey), !!cfg.planEnabled);
+        } else {
+          agent.permissions.planEnabled = !!cfg.planEnabled;
+        }
+      }
+      this._json(res, 200, {
+        ok: true,
+        approvalMode: agent.permissions.approvalMode,
+        sandbox: agent.permissions.sandbox,
+        planEnabled: agent.permissions.planEnabled === true,
+        planSessions: agent.planModeSessions ? agent.planModeSessions() : [],
+      });
+      return true;
+    }
+    // GET /api/permissions — 当前权限/计划态 (与会话无关的部分取引擎, 计划态按会话列出)
+    if (get && reqPath === "/api/permissions") {
+      if (!agent.permissions) { this._json(res, 200, { ok: false, reason: "权限引擎未装配" }); return true; }
+      this._json(res, 200, {
+        ok: true,
+        approvalMode: agent.permissions.approvalMode,
+        sandbox: agent.permissions.sandbox,
+        planEnabled: agent.permissions.planEnabled === true,
+        planSessions: agent.planModeSessions ? agent.planModeSessions() : [],
+      });
       return true;
     }
     return false;
@@ -982,6 +1151,110 @@ export class HttpChannel extends Channel {
     return true;
   }
 
+  // ---- 能力清单 (只读) ----
+  // 技能: agent.skills 是 SkillLoader (list/usageAll); 使用次数来自 skills/.usage.json, 用于"谁在用、谁闲置"
+  _apiSkills(res) {
+    const ag = this.agent;
+    let skills = [];
+    try { skills = ag.skills && typeof ag.skills.list === "function" ? ag.skills.list() : []; } catch (e) { debug(`[channels/http] 已忽略异常: ${e && e.message ? e.message : e}`); }
+    let usage = {};
+    try { usage = ag.skills && typeof ag.skills.usageAll === "function" ? ag.skills.usageAll() : {}; } catch (e) { usage = {}; }
+    const list = skills.map((s) => {
+      const u = usage[s.id] || {};
+      return {
+        id: s.id, name: s.name || s.id, description: s.description || "",
+        domain: s.domain || "misc", tags: s.tags || [], source: s.source || "",
+        uses: Number(u.uses || 0), lastUsed: u.lastUsed || null,
+      };
+    });
+    const domains = {};
+    for (const s of list) domains[s.domain] = (domains[s.domain] || 0) + 1;
+    this._json(res, 200, { count: list.length, skills: list, domains });
+    return true;
+  }
+
+  // 专家: 内置专家名册 (experts.js, 静态) + 已装专家包 (agent.expertPacks, 磁盘扫描)
+  _apiExperts(res) {
+    const ag = this.agent;
+    let roster = [];
+    try { roster = expertCatalog(); } catch (e) { roster = []; }
+    let packs = [];
+    let problems = [];
+    try {
+      if (ag.expertPacks) {
+        packs = typeof ag.expertPacks.list === "function" ? ag.expertPacks.list() : [];
+        problems = typeof ag.expertPacks.problems === "function" ? ag.expertPacks.problems() : [];
+      }
+    } catch (e) { debug(`[channels/http] 已忽略异常: ${e && e.message ? e.message : e}`); }
+    this._json(res, 200, { experts: roster, packs, problems });
+    return true;
+  }
+
+  // 工具: catalog 明细 (名称/启用态/分类/描述)
+  _apiTools(res) {
+    const ag = this.agent;
+    let detailed = [];
+    try { detailed = ag.tools && typeof ag.tools.listDetailed === "function" ? ag.tools.listDetailed() : []; } catch (e) { detailed = []; }
+    const tools = detailed.map((t) => ({
+      name: t.name, enabled: t.enabled !== false,
+      category: t.category || "misc", description: t.description || "",
+    }));
+    const categories = {};
+    for (const t of tools) categories[t.category] = (categories[t.category] || 0) + 1;
+    this._json(res, 200, { total: tools.length, enabled: tools.filter((t) => t.enabled).length, categories, tools });
+    return true;
+  }
+
+  // MCP: 配置里的服务器 (env 抹明文) + 当前连接态
+  _apiMcp(res) {
+    const ag = this.agent;
+    const mc = (ag.config && ag.config.mcp) || {};
+    const servers = (Array.isArray(mc.servers) ? mc.servers : []).map((s) => ({
+      name: s.name || s.command || s.url || "(未命名)",
+      command: s.command || "", args: Array.isArray(s.args) ? s.args : [], url: s.url || "",
+      prefix: s.prefix || "", timeout: s.timeout || null,
+      env_set: !!(s.env && Object.keys(s.env).length),
+    }));
+    this._json(res, 200, {
+      autoConnect: !!mc.auto_connect,
+      connected: !!(ag._mcp && ag._mcp.count),
+      tools: (ag._mcp && ag._mcp.count) || 0,
+      servers,
+    });
+    return true;
+  }
+
+  // ---- 任务面板 (读写) ----
+  // GET: 列表 + 状态计数。POST: { op: create|update|step|complete|delete, ...args }
+  // 数据源 = createAdminTools() 返回的 taskBoard (与 MCP ppx.task.* 同一实例, 同一份 tasks.json)。
+  async _apiTasks(req, res) {
+    const board = this.mcpAdmin && this.mcpAdmin.taskBoard;
+    if (!board) { this._json(res, 200, { ok: false, reason: "任务面板未装配", tasks: [], counts: {} }); return true; }
+    try {
+      if (req.method === "GET") {
+        this._json(res, 200, Object.assign({ ok: true }, board.list()));
+        return true;
+      }
+      if (req.method !== "POST") return false;
+      const body = await this._readBody(req, res);
+      if (body === null) return true;
+      const args = JSON.parse(body || "{}");
+      const op = args.op || "create";
+      let task;
+      if (op === "create") task = board.create({ title: args.title, description: args.description, steps: args.steps });
+      else if (op === "update") task = board.update(args);
+      else if (op === "step") task = board.step(args);
+      else if (op === "complete") task = board.complete(args.id, args.result || "");
+      else if (op === "delete") { board.delete(args); task = null; }
+      else throw new Error(`未知任务操作: ${op}`);
+      this._json(res, 200, Object.assign({ ok: true, task }, board.list()));
+      return true;
+    } catch (e) {
+      this._fail(res, e);
+      return true;
+    }
+  }
+
   // ---- 工作区 ----
   _apiWorkspaceTree(res, req) {
     try {
@@ -1005,6 +1278,34 @@ export class HttpChannel extends Channel {
     try {
       const u = new URL(req.url, "http://127.0.0.1");
       const out = readWorkspaceFile(path.resolve(this.agent.root), u.searchParams.get("path") || "");
+      this._json(res, 200, { ok: true, ...out });
+    } catch (e) {
+      this._fail(res, e);
+    }
+    return true;
+  }
+
+  // 写入工作区文件 (2026-10-07): { path, content }
+  async _apiWorkspaceWrite(req, res) {
+    const body = await this._readBody(req, res);
+    if (body === null) return true;
+    try {
+      const a = JSON.parse(body || "{}");
+      const out = writeWorkspaceFile(path.resolve(this.agent.root), a.path || "", a.content);
+      this._json(res, 200, { ok: true, ...out });
+    } catch (e) {
+      this._fail(res, e);
+    }
+    return true;
+  }
+
+  // 搜索工作区 (2026-10-07): ?q=<kw>&limit=<n>
+  _apiWorkspaceSearch(res, req) {
+    try {
+      const u = new URL(req.url, "http://127.0.0.1");
+      const out = searchWorkspace(path.resolve(this.agent.root), u.searchParams.get("q") || "", {
+        limit: Number(u.searchParams.get("limit")) || 50,
+      });
       this._json(res, 200, { ok: true, ...out });
     } catch (e) {
       this._fail(res, e);
@@ -1080,6 +1381,7 @@ export class HttpChannel extends Channel {
   }
 
   async disconnect() {
+    this.agent?.unregisterApprovalSurface?.("http");
     if (this._unsubBus) { try { this._unsubBus(); } catch { /* 重复退订无副作用 */ } this._unsubBus = null; }
     if (this._sseBeat) { clearInterval(this._sseBeat); this._sseBeat = null; }
     for (const r of [...this._sseClients]) { try { r.end(); } catch { /* 客户端已断 */ } }

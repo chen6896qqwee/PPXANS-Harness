@@ -1,0 +1,27 @@
+# .npmignore — npm 打包排除规则
+#
+# 动机 (2026-10-05 修复 P1): package.json 的 `files` 显式包含 `config/`, 而 .gitignore
+#   管不了 npm —— 实测 `npm pack --dry-run` 会把用户本机的 config/ppx.json (私有 provider
+#   配置, 可能含明文 api_key) 一起发到 registry。.gitignore 只影响 git, 这里必须另设闸门。
+#
+# 保留: config/ppx.json.example (配置模板) 与 config/ 下的非私有配置文件 (identity.md / ishiki.md)。
+# 排除: 用户运行时产生的真实配置。
+config/ppx.json
+config/*local*.json
+
+# 运行时数据 / 测试 / 文档 / 打包脚本 (files 白名单已挡一层, 这里做纵深防御)
+data/
+test/
+docs/
+bench/
+fixtures/
+references/
+scripts/
+.github/
+*.log
+*.tmp
+*.bak
+*.lock
+*.corrupt-*
+.DS_Store
+Thumbs.db

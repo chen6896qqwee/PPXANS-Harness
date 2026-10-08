@@ -1,6 +1,7 @@
 ---
 name: ppx-memory
 description: 皮皮虾记忆引擎（ppx-memory）的读写规程与独立 CLI 用法：五层记忆结构、什么时候记、记到哪层、怎么检索与安全遗忘。涉及长期记忆、用户偏好、跨会话召回时使用。
+domain: meta
 ---
 
 # 皮皮虾记忆引擎 (ppx-memory)

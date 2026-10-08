@@ -7,6 +7,18 @@
     "max_tool_error_retry": 2,
     "_turn_projection_note": "v3.1 Turn 生命周期投影 (chat/turn/* 事件), 设 false 可旁路",
     "turn_projection": true,
+    "_approval_note": "审批链路默认值 (与 src/agent/index.js / src/plugin/v3.js 兜底一致): headless_wait=false = 无 Web UI/serve 在听时立即拒绝, 不再死等 120s",
+    "approval_mode": "on-request",
+    "approval_timeout_ms": 120000,
+    "approval_cache": true,
+    "approval_headless_wait": false,
+    "_cache_note": "health_cache_ms=provider 健康探测 TTL (0=关); stats_cache_ms=/api/stats 聚合 TTL (0=关)",
+    "health_cache_ms": 30000,
+    "stats_cache_ms": 2000,
+    "_policy_note": "工具循环阈值: explore_break_limit=连续只读无产出 N 轮熔断; repeat_flag_limit=同工具+args 重复告警; parallel_tool_calls=false 回退串行",
+    "explore_break_limit": 3,
+    "repeat_flag_limit": 2,
+    "parallel_tool_calls": true,
     "proactive": {
       "enabled": true,
       "interval_ms": 3600000
@@ -14,8 +26,42 @@
     "evolve": {
       "enabled": true,
       "every_calls": 20,
-      "min_interval_ms": 30000
+      "min_interval_ms": 30000,
+      "upgrade_uses": 3
+    },
+    "_legion_note": "子智能体并发治理 (v3.2.3)。max_concurrent_agents 是**进程级**硬上限: 嵌套委派 (子 agent 再派子 agent) 共享同一份配额, 不随层级翻倍。运行期可用 legion_set_concurrency 工具调整, 用 legion_status 观测。",
+    "legion": {
+      "default_size": 2,
+      "max_concurrent_agents": 8,
+      "max_concurrent_per_call": 4,
+      "queue_timeout_ms": 300000,
+      "delegate_timeout_ms": 120000,
+      "kill_on_finish": true
+    },
+    "_boundary_note": "能力边界与人类监督 (v3.2.3)。六条硬边界 (幻觉/权限/隐私/法律伦理/成本/物理世界) 常驻 system; high_risk_domains 命中的任务会追加'只给分析不做决定 + 写明复核人'的动态护栏。require_human_review=false 只去掉话术, 不影响只读专家。",
+    "boundary": {
+      "enabled": true,
+      "high_risk_domains": ["medical", "legal", "finance", "security", "compliance"],
+      "require_human_review": true,
+      "extra_limits": []
     }
+  },
+  "_skills_note": "技能库 (v3.2.3)。多源装配, 顺序即优先级: builtin (随包 skills/) → user_dir → project_dir → extra_dirs。同 id 先到先得。目录即分类: skills/<domain>/<skill>/SKILL.md (max_depth=2); 扁平 skills/<skill>/ 继续可用。新技能落盘到第一个可写根。",
+  "skills": {
+    "builtin": true,
+    "user_dir": "~/.ppx/skills",
+    "project_dir": "",
+    "extra_dirs": [],
+    "max_depth": 2,
+    "prompt_hot_shown": 8,
+    "prompt_desc_cap": 120
+  },
+  "_experts_note": "专家库 (v3.2.4 吸收 TencentCloud/Octop)。专家 = experts/<id>/{manifest.json, SOUL.md} 目录包 (可选 AGENTS.md), 启动扫描建册 —— 加一个专家 = 加一个目录。顺序即优先级: builtin → user_dir → project_dir → extra_dirs。expert_pack_install 装的第三方包落 user_dir, 升级不动内置库。",
+  "experts": {
+    "builtin": true,
+    "user_dir": "~/.ppx/experts",
+    "project_dir": "",
+    "extra_dirs": []
   },
   "user": {
     "name": "用户"
@@ -73,14 +119,11 @@
     }
   ],
   "memory": {
-    "enabled": true,
-    "token_budget": 2500,
     "decay_per_day": 0.02,
     "hit_bonus": 5,
     "base_importance": 10,
-    "compile_threshold": 4.5,
     "forget_speed": 1,
-    "memory_ttl_days": 90
+    "ttl_days": 90
   },
   "audit": {
     "enabled": true,

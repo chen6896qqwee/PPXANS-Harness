@@ -82,10 +82,10 @@ for this over a thin OpenAI/Claude wrapper or a graph framework?
 • 审计哈希链：每次工具调用 append-only 写进 SHA-256 链式账本，改一行全链校验失败。
 • 治理/安全：审批四档 + 沙箱 + 命令守卫三层 + deny-wins 策略链 + 熔断。
 • 多 Agent：多进程军团 + DAG 编排 + supervisor 仲裁。
-• MCP：既是标准 MCP 服务端（POST /mcp，85 工具），也是 MCP 客户端，Claude Desktop /
+• MCP：既是标准 MCP 服务端（POST /mcp，86 工具），也是 MCP 客户端，Claude Desktop /
   Cursor 开箱即用。
 
-测试 1022 项（1018 通过 / 0 失败 / 4 skip 联网用例），Node >= 20，Apache-2.0。
+测试 1440 项（1440 通过 / 0 失败 / 4 skip 联网用例），Node >= 20，Apache-2.0。
 
 GitHub：https://github.com/chen6896qqwee/PPXANS-Harness
 

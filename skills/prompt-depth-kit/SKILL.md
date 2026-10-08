@@ -1,6 +1,7 @@
 ---
 name: prompt-depth-kit
 description: 回答表达深度提示词方案库。同一问题输出不同深度的三套方案（主动边界探索 / 情境化优先级 / 极简优雅），按场景选型。需要提升回答质量与信息密度时使用。
+domain: meta
 ---
 
 # 回答表达深度提示词方案库（Prompt Depth Kit）

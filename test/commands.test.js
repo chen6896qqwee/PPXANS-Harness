@@ -17,13 +17,13 @@ test("parse: 解析 '/name args' 结构", () => {
   assert.equal(reg.parse("/"), null, "仅有/无名称返回 null");
 });
 
-test("内置命令齐全: 13 个命令全部注册", () => {
+test("内置命令齐全: 14 个命令全部注册", () => {
   const reg = createBuiltinRegistry();
   const names = reg.list().map((c) => c.name).sort();
-  const expected = ["new", "resume", "compact", "plan", "review", "init", "model", "status",
+  const expected = ["new", "resume", "compact", "plan", "do", "review", "init", "model", "status",
     "memory", "skills", "agents", "goal", "help"].sort();
   assert.deepEqual(names, expected, "内置命令集合一致");
-  assert.equal(BUILTIN_COMMANDS.length, 13);
+  assert.equal(BUILTIN_COMMANDS.length, 14);
   // 每个命令具备 description 与 argumentHint
   for (const c of BUILTIN_COMMANDS) {
     assert.ok(c.description, `${c.name} 有描述`);
@@ -37,6 +37,9 @@ test("execute: 各内置命令返回结构化意图", () => {
   const reg = createBuiltinRegistry();
   assert.deepEqual(reg.execute("/new"), { type: "intent", action: "new_session" });
   assert.deepEqual(reg.execute("/compact"), { type: "intent", action: "compact" });
+  // /plan 与 /do 是配对开关 (2026-10-05 死命令修复): 进入/退出意图都必须存在, 缺一即 lock-in
+  assert.deepEqual(reg.execute("/plan"), { type: "intent", action: "enter_plan_mode" });
+  assert.deepEqual(reg.execute("/do"), { type: "intent", action: "exit_plan_mode" });
   assert.deepEqual(reg.execute("/resume sid123"), { type: "intent", action: "resume_session", sessionId: "sid123" });
   const r = reg.execute("/review src");
   assert.equal(r.type, "intent");

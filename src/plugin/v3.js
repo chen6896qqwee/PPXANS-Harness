@@ -43,9 +43,17 @@ export const commandsPlugin = (ctx) => {
   ctx.provide("commands", registry);
 };
 
-// 证据/看板插件: OMH prepared/observed 边界 + goal board 目标看板
+// 证据/看板插件: OMH prepared/observed 边界 + goal board 计划台账
+// 2026-10-05: 把 dataDir 接进看板 —— 旧实现 createGoalBoard() 不传任何参数, 看板是纯内存 Map,
+// 进程一退出计划就没了 (而它正是 ppx 唯一跨轮持有"多步计划"的地方)。传 dataDir 后端落到
+// <dataDir>/evidence/goals.json, 与 FactStore/L2 同一套 store.js 持久化 + 跨进程文件锁。
+// 注: dataDir 缺省时看板自动退化为旧的内存态 (测试/一次性进程), 不会到处找默认目录。
 export const evidencePlugin = (ctx) => {
-  ctx.provide("goalBoard", createGoalBoard());
+  const dataDir = ctx.consume("dataDir");
+  const board = createGoalBoard({ dataDir });
+  ctx.provide("goalBoard", board);
+  // 只报"是否持久化", 不打路径值 (控制台常开着)
+  info(`[v3] 目标看板就绪 (${board.file() ? "已持久化: evidence/goals.json" : "内存态 (未提供 dataDir)"})`);
 };
 
 // 协议总线插件: codex SQ/EQ 双队列

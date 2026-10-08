@@ -52,7 +52,8 @@ export async function runServer({ root = process.cwd(), port = Number(process.en
   console.log(`  通道: ${manager.list().filter((c) => c.enabled).map((c) => c.name).join(", ") || "(无)"}`);
   console.log(`  工具: ${agent.tools.list().join(", ")}`);
   console.log("  Ctrl+C 退出");
-  process.on("SIGINT", () => { agent.shutdown(); process.exit(0); });
+  // await 后再 exit: shutdown 的军团子进程回收是异步的 (2026-10-04)
+  process.on("SIGINT", async () => { await agent.shutdown(); process.exit(0); });
   return { agent, server, manager };
 }
 

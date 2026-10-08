@@ -1,6 +1,7 @@
 ---
 name: ppx-selfheal
 description: 皮皮虾自愈引擎的使用与判读：启动体检、损坏数据修复、崩溃恢复、残留清理。出现数据异常、启动失败、疑似崩溃退出时使用。
+domain: meta
 ---
 
 # 皮皮虾自愈引擎 (ppx-selfheal)

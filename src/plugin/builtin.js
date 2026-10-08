@@ -14,7 +14,17 @@ import {
   registerVoiceTools,
   registerSandboxTools,
   registerVadTools,
+  registerOrchestrationTools,
+  registerSkillHubTools,
+  registerExpertHubTools,
+  registerTeamRoomTools,
 } from "../tools/index.js";
+// 2026-10-07 内置技能层 v2: 多源技能库 (内置 + 用户 + 附加) + 领域分类
+import { SkillRegistry, createSkillLoader, skillRootsFromConfig } from "../skills/registry.js";
+// 2026-10-07 吸收自 TencentCloud/Octop: 专家包目录册 (启动扫描, 与技能库同款多源装配)
+import { ExpertPackCatalog, packRootsFromConfig } from "../orchestrator/expert-pack.js";
+// 2026-10-07 并发治理: 进程级子 agent 配额 (嵌套委派不乘法爆炸)
+import { getGovernor, governorOptsFromConfig } from "../orchestrator/governor.js";
 import { embedderFromConfig } from "../llm/embedder.js";
 import { LocalShellProvider } from "../seam/shell.js";
 import { registerDelegateTools } from "../tools/delegate.js";
@@ -172,12 +182,30 @@ export const toolsPlugin = (ctx) => {
   const memory = ctx.consume("memory");
   const tools = new ToolCatalog();
   registerBuiltinTools(tools, { rootDir: root, facts, memory });
+  // ---- 技能库 (2026-10-07 v2): 多源装配, 供 selfmod 读取 + skill_hub 自省 ----
+  // 在这里建而不是在 agent 里建: 装配顺序上 toolsPlugin 早于 agent, 且 agent 需要 consume 它 ——
+  // 单一实例才能让 skill_search / load_skill / 覆盖率自述共享同一份缓存与使用计数。
+  const skillRoots = skillRootsFromConfig(config, root);
+  const skillRegistry = new SkillRegistry({ roots: skillRoots, loader: createSkillLoader(config, root) });
+  ctx.provide("skillRegistry", skillRegistry);
+  // ---- 专家包目录册 (2026-10-07 吸收 Octop): 启动扫描内置 experts/ + 用户 ~/.ppx/experts + 附加 ----
+  // 与技能库同款的多源装配: "加一个专家 = 加一个目录", 不改源码、不改测试、不用发版。
+  const expertPacks = new ExpertPackCatalog({ roots: packRootsFromConfig(config, root) });
+  ctx.provide("expertPacks", expertPacks);
+  // ---- 并发治理: 把配置灌进进程级单例 (所有 Legion 实例共享同一份配额) ----
+  const governor = getGovernor();
+  // dataDir 只在开启跨进程配额时才用得上 (账本落 <dataDir>/legion-quota.json)。
+  // 三处 configure 调用点 (这里 / delegate.js / mode/legion.js) 必须传同一个 dataDir ——
+  // 否则后调的那处会用 enabled:false 把已挂上的账本摘掉, 治理静默退回单进程。
+  governor.configure(governorOptsFromConfig(config, ctx.consume("dataDir")));
+  ctx.provide("governor", governor);
   // 2026-09-18: onFire 兜底 —— 重启恢复的持久化任务无 action 闭包, 触发时按 job.name 还原行为
   const scheduler = new Scheduler(dataDir, { onFire: (job) => facts.add(`定时任务触发: ${job?.name || "?"}`, { source: "schedule" }) });
   ctx.provide("scheduler", scheduler);
   registerAdvancedTools(tools, { dataDir, scheduler, onMemoryNote: (note) => facts.add(note, { source: "schedule" }) });
   registerMethodTools(tools);
-  registerSelfmodTools(tools, { skillsDir: path.join(root, "skills") });
+  // skillsDir = 可写根 (新技能落盘); loader = 多源读取器 (内置 + 用户 + 附加)
+  registerSelfmodTools(tools, { skillsDir: skillRegistry.loader.writeDir, loader: skillRegistry.loader });
   // 用户自定义工具 (不改源码扩展能力)
   const customDir = path.join(root, (config.tools && config.tools.custom_dir) || "custom-tools");
   registerCustomTools(tools, customDir);
@@ -201,6 +229,8 @@ export const toolsPlugin = (ctx) => {
     const fromName = () => ctx.consume("agent")?.config?.agent?.name || "main";
     tools.register({
       name: "board_publish",
+      // 写军团共享板 (跨 agent 可见的持久状态) → 非只读 (F1: 未声明会被兜底成"只读"绕过只读档位)
+      capability: { riskLevel: "medium", readOnly: false, destructive: false, sideEffect: "memory" },
       description: "向军团共享记忆板发布一条知识/发现/结论, 所有 agent 实时可见。跨 agent 协作时用。",
       parameters: {
         type: "object",
@@ -220,6 +250,7 @@ export const toolsPlugin = (ctx) => {
     });
     tools.register({
       name: "board_query",
+      capability: { riskLevel: "low", readOnly: true, destructive: false, sideEffect: "none" },
       description: "查询军团共享记忆板: 看其他 agent 发布的知识/发现/结论 (实时, 跨进程)。",
       parameters: {
         type: "object",
@@ -255,6 +286,14 @@ export const toolsPlugin = (ctx) => {
   registerV3Tools(tools, { rootDir: root, agent: ctx.consume("agent") });
   // git 集成 (2026-10-01): status/diff/log/commit, 仅 add+commit, 禁 push/reset
   registerGitTools(tools, { rootDir: root });
+  // v3.2.3 (2026-10-07 全能超级 Agent): 编排自省 (军团并发/班组/专家/能力矩阵/边界自检)
+  //   + 技能库扩展 (领域覆盖率 / GitHub 技能导入)。
+  //   getAgent 用惰性取值: toolsPlugin 早于 agent 装配, 这里必须拿闭包而不是当时的值。
+  registerOrchestrationTools(tools, { getAgent: () => ctx.consume("agent") });
+  registerSkillHubTools(tools, { getAgent: () => ctx.consume("agent"), skillsRoot: skillRegistry.loader.writeDir });
+  // 专家库/人格/市场 + 团队房间 (2026-10-07 吸收 Octop)
+  registerExpertHubTools(tools, { getAgent: () => ctx.consume("agent"), getPackCatalog: () => ctx.consume("expertPacks") });
+  registerTeamRoomTools(tools, { getAgent: () => ctx.consume("agent") });
   ctx.provide("tools", tools);
   ctx.provide("toolsEnabled", config.tools?.enabled !== false);
 };

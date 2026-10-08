@@ -49,6 +49,18 @@ export class Channel {
     sendJson(res, code, obj);
   }
 
+  // P0 (2026-10-04): webhook 回调鉴权 fail-closed 判定。
+  // 原实现形如 `if (this.token) { 验签 }` —— 密钥没配就等于跳过全部校验, 端口对任何能触达的人
+  // 开放"驱动带工具 agent"的入口 (远程命令执行面)。
+  // 返回 null = 可以继续 (已配密钥, 或本地调试显式放行); 返回字符串 = 拒绝理由。
+  _webhookSecretGate(secret) {
+    if (secret) return null;
+    const sec = (this.agent && this.agent.config && this.agent.config.security) || {};
+    if (sec.allow_unauthenticated_webhooks === true || sec.allowUnauthenticatedWebhooks === true) return null;
+    return `${this.name} 回调未配置校验密钥, 已按 fail-closed 拒绝 (未鉴权的 webhook = 任何人可驱动带工具的 agent)。`
+      + `请在 config.channels.${this.name} 配置 verify_token/token, 或显式设置 security.allow_unauthenticated_webhooks=true (仅本地调试)`;
+  }
+
   // 收到消息 → 调 agent 处理 → 回发
   async handleMessage(from, text) {
     const reply = await this.agent.chat(text);

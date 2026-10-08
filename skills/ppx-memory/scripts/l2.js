@@ -2,8 +2,10 @@
 // 把相关记忆归档成场景: { name, keywords, facts[], lastUpdated }
 // 零依赖: 用关键词聚类 + 时间窗聚合
 import path from "node:path";
-import { ensureDir, readJson, writeJson, logicalDay, withFileLock } from "./store.js";
+import fs from "node:fs";
+import { ensureDir, readJson, readJsonGuarded, writeJson, logicalDay, withFileLock } from "./store.js";
 import { migrateData, writeSchema } from "./schema.js";
+import { shortId } from "./id.js";
 
 // scenes.json 当前 schema 版本 (纯数组基线 = 1); 未来数据结构变更时 +1 并注册迁移
 export const SCENES_SCHEMA_VERSION = 1;
@@ -18,12 +20,38 @@ function tokenize(text) {
   return [...new Set([...words, ...cjk.map((w) => w.toLowerCase())].filter((w) => !STOP.has(w) && w.length >= 2))];
 }
 
+// 同一场景的两个版本合并 (磁盘 vs 内存): facts 按 id/内容去重保序并保留最近 50 条,
+// keywords 取并集 (上限 30), 其余标量字段以 lastUpdated 较新的那份为准。
+function mergeOne(a, b) {
+  const facts = [];
+  const seen = new Set();
+  for (const f of [...(a.facts || []), ...(b.facts || [])]) {
+    const key = f && (f.id || f.content);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    facts.push(f);
+  }
+  const newer = String(a.lastUpdated || "") >= String(b.lastUpdated || "") ? a : b;
+  return {
+    ...newer,
+    facts: facts.slice(-50),
+    keywords: [...new Set([...(a.keywords || []), ...(b.keywords || [])])].slice(-30),
+  };
+}
+
 export class SceneStore {
   constructor(dataDir) {
     this.dir = path.join(dataDir, "memory", "l2");
     ensureDir(this.dir);
     this.file = path.join(this.dir, "scenes.json");
-    this.scenes = readJson(this.file, []);
+    // 2026-10-04: 与 FactStore 同口径改用 readJsonGuarded。旧实现用 readJson,
+    //   scenes.json 一旦损坏 (半截写/断电) 就静默退化成空数组, 而随后的任何一次写盘
+    //   会把空状态整体覆盖回文件 —— 现场消失, 旧场景永久丢失。
+    //   现在损坏时先读成空态但打 _corruptPending 标记, 第一次写盘前把损坏文件改名
+    //   .corrupt-<ts> 留档 (healer 的体检清单不含本文件, 只能自己保现场)。
+    const guarded = readJsonGuarded(this.file, []);
+    this.scenes = Array.isArray(guarded.data) ? guarded.data : [];
+    this._corruptPending = guarded.parseFailed;
     // schema 版本迁移 (旁挂 .schema 文件; 数据文件保持纯数组)
     const mig = migrateData({
       file: this.file,
@@ -31,7 +59,27 @@ export class SceneStore {
       data: this.scenes,
       currentVersion: SCENES_SCHEMA_VERSION,
     });
-    this.scenes = mig.data;
+    this.scenes = Array.isArray(mig.data) ? mig.data : [];
+  }
+
+  // 磁盘态与内存态合并 (按 id 取并集): 军团多进程共享 dataDir 时,
+  // 锁外基于过期内存做增删再整体写盘会覆盖掉别的进程已落盘的场景 (丢更新)。
+  static mergeScenes(disk, mem) {
+    const byId = new Map();
+    const put = (s) => {
+      if (!s || !s.id) return;
+      const cur = byId.get(s.id);
+      byId.set(s.id, cur ? mergeOne(cur, s) : { ...s, facts: Array.isArray(s.facts) ? [...s.facts] : [], keywords: Array.isArray(s.keywords) ? [...s.keywords] : [] });
+    };
+    for (const s of disk || []) put(s);
+    for (const s of mem || []) put(s);   // 内存后入 = 本进程变更优先
+    return [...byId.values()];
+  }
+
+  // 锁内重读: 拿磁盘最新态 + 合并内存未落盘变更
+  _reload() {
+    this.scenes = SceneStore.mergeScenes(readJson(this.file, []), this.scenes);
+    return this.scenes;
   }
 
   // 关键词命中数最高的场景。命中数 0 不会成为候选, 故返回的 scene 非空 ⟺ 至少命中 1 个关键词。
@@ -46,37 +94,42 @@ export class SceneStore {
   }
 
   // 把一条事实归入最匹配的场景 (或新建)
+  // 2026-10-04: 整个"读-改-写"移进文件锁内。旧实现先在锁外基于内存里的旧场景做归并,
+  //   锁内只写盘 —— 另一个进程刚写过的场景这边看不到, 新建重复场景 / 覆盖对方更新 (丢更新)。
   assign(fact) {
     const tokens = tokenize(fact.content);
     if (!tokens.length) return null;
 
-    let best = this._bestScene(tokens).scene;
-
-    if (best) {
-      best.facts.push({ id: fact.id, content: fact.content, ts: fact.created });
-      if (best.facts.length > 50) best.facts = best.facts.slice(-50);
-      best.lastUpdated = logicalDay();
-      // 合并新关键词
-      for (const t of tokens) if (!best.keywords.includes(t)) best.keywords.push(t);
-      if (best.keywords.length > 30) best.keywords = best.keywords.slice(-30);
-    } else {
-      best = {
-        id: "s_" + Math.random().toString(36).slice(2, 8),
-        name: tokens.slice(0, 3).join("·"),
-        keywords: tokens.slice(0, 10),
-        facts: [{ id: fact.id, content: fact.content, ts: fact.created }],
-        mode: "auto",
-        description: tokens.slice(1, 4).join("、") || "自动场景",
-        canHelp: "基于该话题的对话与记忆提供帮助",
-        created: logicalDay(),
-        lastUpdated: logicalDay(),
-      };
-      this.scenes.push(best);
-    }
-    // v1.0.9: 写盘加文件锁 (防军团多进程共享 dataDir 时写交错)
     return withFileLock(this.file, () => {
-      writeJson(this.file, this.scenes);
-      writeSchema(this.file, "scenes", SCENES_SCHEMA_VERSION);
+      this._reload();
+      let best = this._bestScene(tokens).scene;
+
+      if (best) {
+        if (!Array.isArray(best.facts)) best.facts = [];
+        if (!Array.isArray(best.keywords)) best.keywords = [];
+        if (!best.facts.some((x) => x && x.id === fact.id)) {
+          best.facts.push({ id: fact.id, content: fact.content, ts: fact.created });
+        }
+        if (best.facts.length > 50) best.facts = best.facts.slice(-50);
+        best.lastUpdated = logicalDay();
+        // 合并新关键词
+        for (const t of tokens) if (!best.keywords.includes(t)) best.keywords.push(t);
+        if (best.keywords.length > 30) best.keywords = best.keywords.slice(-30);
+      } else {
+        best = {
+          id: shortId("s_", 8),
+          name: tokens.slice(0, 3).join("·"),
+          keywords: tokens.slice(0, 10),
+          facts: [{ id: fact.id, content: fact.content, ts: fact.created }],
+          mode: "auto",
+          description: tokens.slice(1, 4).join("、") || "自动场景",
+          canHelp: "基于该话题的对话与记忆提供帮助",
+          created: logicalDay(),
+          lastUpdated: logicalDay(),
+        };
+        this.scenes.push(best);
+      }
+      this._writeLocked();
       return best;
     });
   }
@@ -84,7 +137,7 @@ export class SceneStore {
   // 手动创建场景 (用户设定人设/能力, 类似灵魂文件)
   create({ name, description, canHelp, keywords = [] }) {
     const scene = {
-      id: "s_" + Math.random().toString(36).slice(2, 8),
+      id: shortId("s_", 8),
       name: String(name || "").slice(0, 50),
       keywords: keywords.slice(0, 15),
       facts: [],
@@ -94,9 +147,12 @@ export class SceneStore {
       created: logicalDay(),
       lastUpdated: logicalDay(),
     };
-    this.scenes.push(scene);
-    this._save();
-    return scene;
+    return withFileLock(this.file, () => {
+      this._reload();
+      this.scenes.push(scene);
+      this._writeLocked();
+      return scene;
+    });
   }
 
   // 列出所有场景 (含介绍)
@@ -139,8 +195,26 @@ export class SceneStore {
   count() { return this.scenes.length; }
 
   // v1.0.9: _save 加锁 (create/scene_describe 等写盘路径)
-  _save() { withFileLock(this.file, () => {
+  // 2026-10-04: 锁内先合并磁盘最新态再整体写 (内存为本进程真相, 但不丢别人新增的场景)
+  _save() {
+    withFileLock(this.file, () => {
+      this._reload();
+      this._writeLocked();
+    });
+  }
+
+  // 纯写盘 (调用方必须已持有文件锁)
+  _writeLocked() {
+    // 损坏现场保护 (2026-10-04): healer 的体检清单不含 memory/l2/scenes.json,
+    // 若不先留档, "解析失败 -> 空数组 -> 第一次写盘" 就把旧场景永久抹掉。
+    // 这里在覆盖前把损坏文件改名 .corrupt-<ts>, 数据仍可人工恢复。
+    if (this._corruptPending) {
+      try {
+        fs.renameSync(this.file, `${this.file}.corrupt-${new Date().toISOString().replace(/[:.]/g, "")}`);
+      } catch { /* 文件已被人工处理/不存在, 照常写 */ }
+      this._corruptPending = false;
+    }
     writeJson(this.file, this.scenes);
     writeSchema(this.file, "scenes", SCENES_SCHEMA_VERSION);
-  }); }
+  }
 }
