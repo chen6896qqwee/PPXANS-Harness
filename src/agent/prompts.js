@@ -41,6 +41,7 @@ export const promptMethods = {
   // (Superpowers 吸收: 技能不自动生效, 需要触发才读取全文, 省 token)
   _skillsPrompt() {
     try {
+      if (this.toolsEnabled === false) return "";
       if (!this.skills) return "";
       const list = this.skills.list().filter((s) => s && s.description);
       if (!list.length) return "";
@@ -77,6 +78,9 @@ export const promptMethods = {
   //   一次 read_file 都没发就凭猜写了报告。本段补上绝对路径 + 三条硬纪律。
   //   root 每进程恒定 ⇒ 段落逐字稳定, 属静态前缀区 (root 在磁盘布局不变, 前缀缓存不退化)。
   _workspacePrompt() {
+    if (this.toolsEnabled === false) {
+      return "【工具状态】本轮所有工具已关闭，只能直接用文字回答。不能读取文件、执行命令、检索技能或发出工具调用。请完成能从现有输入完成的请求；需要工具的操作应如实说明无法执行，不得声称已执行。";
+    }
     let root;
     try { root = path.resolve(String(this.root || ".")); } catch { root = String(this.root || "."); }
     return [

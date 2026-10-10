@@ -20,8 +20,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-// TOOL_ERROR_PREFIX 走 seam.js (纯常量+纯函数, 无 tools/index 的重导入, 也不与 tools 成环)
-import { TOOL_ERROR_PREFIX } from "../core/errors.js";
+import { toolResultStatus } from "./tool-result.js";
 import { debug } from "../utils/logger.js";
 
 const execFileP = promisify(execFile);
@@ -206,14 +205,7 @@ const CONTENT_ARG_KEYS = ["content", "text", "body", "data", "new_string", "repl
 function isErrorResult(result) {
   const s = String(result == null ? "" : result);
   if (!s) return true;
-  if (s.startsWith(TOOL_ERROR_PREFIX) || /^\[hook\]|^\[permission\]/.test(s)) return true;
-  if (s.startsWith("{")) {
-    try {
-      const o = JSON.parse(s);
-      if (o && (o.error || o.ok === false)) return true;
-    } catch { /* 非 JSON 文本按非错误处理 */ }
-  }
-  return false;
+  return !toolResultStatus(result).ok;
 }
 
 function parseResult(result) {
@@ -320,7 +312,7 @@ export function collectTurnFiles(calls, { rootDir, capabilityOf = null } = {}) {
     const name = String(c && c.name || "");
     const cap = capabilityOf ? safeCap(capabilityOf, name) : null;
     const readOnly = isReadOnly(name, cap);
-    const failed = isErrorResult(c && c.result);
+    const failed = c?.status && typeof c.status.ok === "boolean" ? !c.status.ok : isErrorResult(c && c.result);
     const obj = parseResult(c && c.result);
     const exec = EXEC_TOOLS.has(name) || (!!cap && cap.sideEffect === "system" && !readOnly);
     if (exec) lastExecIndex = i;

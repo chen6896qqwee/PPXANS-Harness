@@ -4,7 +4,7 @@
 //   命令注册表 (src/commands) → agent 集成层消费 intent (src/agent chat/chatStream)
 //   → 按会话状态 → 准入链 ctx.planEnabled → 权限引擎 plan 分支 deny → /do 退出 → 恢复。
 // 不重新实现任何判定, 全部调用生产入口。
-import test from "node:test";
+import test, { after } from "node:test";
 import assert from "node:assert";
 import fs from "node:fs";
 import os from "node:os";
@@ -15,8 +15,24 @@ import { createBuiltinRegistry } from "../src/commands/index.js";
 import { createPermissionEngine, AskForApproval, SandboxPolicy } from "../src/permissions/index.js";
 import { HttpChannel } from "../src/channels/http.js";
 
-function tmp(tag) { return fs.mkdtempSync(path.join(os.tmpdir(), `ppx-plan-${tag}-`)); }
-function mkAgent(tag) { return new PPXAgent({ root: tmp(tag), dataDir: path.join(tmp(tag), "data") }); }
+const temporaryRoots = [];
+function tmp(tag) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), `ppx-plan-${tag}-`));
+  temporaryRoots.push(root);
+  return root;
+}
+function mkAgent(tag) {
+  const root = tmp(tag);
+  return new PPXAgent({ root, dataDir: path.join(root, "data"), globalDataDir: path.join(root, "global-data") });
+}
+after(() => {
+  for (const root of temporaryRoots) {
+    const resolved = path.resolve(root);
+    assert.equal(path.dirname(resolved), path.resolve(os.tmpdir()));
+    assert.ok(path.basename(resolved).startsWith("ppx-plan-"));
+    fs.rmSync(resolved, { recursive: true, force: true });
+  }
+});
 
 // ---- 命令层: /plan 与 /do 是配对开关, 缺一即 lock-in ----
 test("命令注册表: /plan 进入 / /do 退出, 两个 intent 都存在", () => {
@@ -56,7 +72,7 @@ test("端到端: /plan → 引擎拒 code_run (含可行动提示) → 只读工
     const noop = await agent.chat("/do", { sessionKey: "default" });
     assert.match(noop, /不在计划模式/, "重复退出 = 明确无操作, 不是失败");
   } finally {
-    agent.shutdown();
+    await agent.shutdown();
   }
 });
 
@@ -86,7 +102,7 @@ test("会话隔离: A 会话进 plan 不影响 B; 新会话默认非 plan; /rese
     agent.resetSession("alpha");
     assert.ok(!agent.isPlanMode("alpha"), "/reset 后旧计划态清零");
   } finally {
-    agent.shutdown();
+    await agent.shutdown();
   }
 });
 
@@ -100,7 +116,7 @@ test("未认领的命令不劫持链路: /nope 与 /new 不会翻计划态", asy
     assert.ok(!agent.isPlanMode("default"), "非 plan 命令不得误翻计划态");
     assert.deepEqual(agent.planModeSessions(), []);
   } finally {
-    agent.shutdown();
+    await agent.shutdown();
   }
 });
 
@@ -111,7 +127,7 @@ test("默认流: 未 /plan 时 code_run 准入不受影响 (零新增拦截/审�
     const r = await agent._admitToolCall("code_run", { code: "1+1" }, "t-0", Date.now());
     assert.equal(r.ok, true);
   } finally {
-    agent.shutdown();
+    await agent.shutdown();
   }
 });
 
@@ -146,7 +162,7 @@ test("HTTP: POST /api/permissions 带 sessionKey 翻会话计划态, 响应回�
     providers: [],
     channels: { http: { mcp: { enabled: false, legacy_rest: true } } },
   }));
-  const agent = new PPXAgent({ root, dataDir: path.join(root, "data") });
+  const agent = new PPXAgent({ root, dataDir: path.join(root, "data"), globalDataDir: path.join(root, "global-data") });
   const ch = new HttpChannel(agent, { port: 0, host: "127.0.0.1" });
   ch.authToken = "tok";
   await ch.connect();
@@ -155,7 +171,8 @@ test("HTTP: POST /api/permissions 带 sessionKey 翻会话计划态, 响应回�
     const post = async (body) => {
       const res = await fetch(`http://127.0.0.1:${port}/api/permissions`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: "Bearer tok" },
+        // No process-global fetch keep-alive sockets should survive this test.
+        headers: { "Content-Type": "application/json", Authorization: "Bearer tok", Connection: "close" },
         body: JSON.stringify(body),
       });
       return { status: res.status, json: await res.json() };
@@ -179,7 +196,7 @@ test("HTTP: POST /api/permissions 带 sessionKey 翻会话计划态, 响应回�
 
     // GET 形状可观测
     const g = await fetch(`http://127.0.0.1:${port}/api/permissions`, {
-      headers: { Authorization: "Bearer tok" },
+      headers: { Authorization: "Bearer tok", Connection: "close" },
     });
     const gj = await g.json();
     assert.ok("planEnabled" in gj && "planSessions" in gj, "GET 回显计划态");
@@ -190,6 +207,6 @@ test("HTTP: POST /api/permissions 带 sessionKey 翻会话计划态, 响应回�
     await post({ planEnabled: false });
   } finally {
     await ch.disconnect();
-    agent.shutdown();
+    await agent.shutdown();
   }
 });

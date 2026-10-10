@@ -101,9 +101,9 @@ test("catalog: 自定义策略订阅者 deny-wins 覆盖低优先级 allow", asy
   assert.equal(ok, "file-content", "其他工具不受影响");
 });
 
-test("catalog: 策略订阅者异常不拖垮工具 (fail-open)", async () => {
+test("catalog: 显式可选观测订阅者异常不拖垮工具", async () => {
   const catalog = makeCatalog();
-  catalog.addPolicySubscriber(async () => { throw new Error("boom"); }, { name: "broken" });
+  catalog.addPolicySubscriber(async () => { throw new Error("boom"); }, { name: "broken", mandatory: false });
   const r = await catalog.call("read_file", {});
   assert.equal(r, "file-content", "订阅者异常视同弃权, 工具仍执行");
 });
@@ -126,7 +126,7 @@ test("catalog: 故障订阅者连续异常达阈值后熔断, 不再被调用", 
   const catalog = makeCatalog();
   let calls = 0;
   catalog.addPolicySubscriber(async () => { calls++; throw new Error("boom"); },
-    { name: "broken", breaker: { threshold: 3, windowMs: 60000, cooldownMs: 60000 } });
+    { name: "broken", mandatory: false, breaker: { threshold: 3, windowMs: 60000, cooldownMs: 60000 } });
 
   // 前 3 次真实调用并抛错 → 触发熔断
   for (let i = 0; i < 3; i++) {

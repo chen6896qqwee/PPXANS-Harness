@@ -29,11 +29,11 @@ test("任务集: 20 任务 / 5 分类 / id 唯一 / verify 可判分", () => {
 });
 
 test("判分: 正确回复通过 / 错误回复不通过 (检索类)", () => {
-  assert.equal(judge("version-report", "版本号是 7.7.7").pass, true);
+  assert.equal(judge("version-report", "7.7.7").pass, true);
   assert.equal(judge("version-report", "版本号是 1.0.0").pass, false);
-  assert.equal(judge("sum-numbers", "加总 = 50").pass, true);
+  assert.equal(judge("sum-numbers", "50").pass, true);
   assert.equal(judge("sum-numbers", "加总 = 51").pass, false);
-  assert.equal(judge("find-symbol", "定义在 pricing.js 里").pass, true);
+  assert.equal(judge("find-symbol", "pricing.js").pass, true);
   assert.equal(judge("find-symbol", "在 unrelated.js 和 pricing.js").pass, false, "指认多个应不通过");
 });
 

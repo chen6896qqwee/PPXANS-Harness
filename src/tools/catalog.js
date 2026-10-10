@@ -7,6 +7,7 @@ import { normalizeMeta, runWithPolicy, toDescriptor, TOOL_ERROR_PREFIX } from ".
 // 熔断器 (src/bus/): 保护策略链不被故障订阅者反复拖累 —— 这正是该模块注释声明的设计意图。
 // 接线前它是"完整实现但零消费者"的预留件 (2026-09-17 接入)。
 import { CircuitBreaker } from "../bus/circuit-breaker.js";
+import { toolResultStatus } from "../core/tool-result.js";
 
 export { TOOL_ERROR_PREFIX };
 
@@ -33,13 +34,19 @@ export function consolidateDecisions(decisions) {
 
 // ---- 参数校验 (2026-10-03, "想记做学评"框架第 3 条: 参数要校验) ----
 // 工具声明了 JSON Schema 但此前运行时零校验 — 参数错误浪费一整轮 LLM 交互。
-// 轻量子集: required / type / enum (顶层), 未知键放行 (LLM 常带冗余键, 不因苛刻而误杀)。
+// 轻量子集: required / type / enum / 显式 additionalProperties:false (顶层)。
+// 未声明拒绝未知参数的自定义工具保留原有字段。
 // 返回 null = 通过; 字符串 = 可行动错误信息。
 export function validateArgs(meta, args) {
   const schema = meta?.parameters;
   if (!schema || schema.type !== "object") return null;
   const a = (args && typeof args === "object" && !Array.isArray(args)) ? args : {};
   const problems = [];
+  if (schema.additionalProperties === false) {
+    for (const key of Object.keys(a)) {
+      if (!Object.hasOwn(schema.properties || {}, key)) problems.push(`未知参数 "${key}"`);
+    }
+  }
   for (const key of schema.required || []) {
     const v = a[key];
     if (v === undefined || v === null || (typeof v === "string" && !v.trim())) {
@@ -164,15 +171,16 @@ export class ToolCatalog {
   // ---- 策略订阅者 (P0): 工具执行唯一收口上的安全策略链 ----
   // fn(name, args, ctx) -> Promise<{decision:'allow'|'deny'|'ask', reason?, priority?}> | null (null/undefined = 弃权)
   // priority: 高者优先 (合并冲突决策时取高优先级 reason); 默认 0
-  // 订阅者异常不拖垮工具执行: 记日志并视同弃权 (fail-open), 且由 per-subscriber 熔断器兜底 ——
-  //   连续异常达阈值后进入熔断期, 期间该订阅者直接跳过错开 (不再反复调用 + 不再刷日志), 冷却后半开探测。
-  addPolicySubscriber(fn, { priority = 0, name = "", breaker = null } = {}) {
+  // Security policies are mandatory by default. Only explicitly optional
+  // observation subscribers may abstain when unavailable.
+  addPolicySubscriber(fn, { priority = 0, name = "", breaker = null, mandatory = true } = {}) {
     if (typeof fn !== "function") throw new Error("策略订阅者需为函数");
     const sub = {
       fn,
       priority: Number(priority) || 0,
       name: name || `policy-${this.policySubscribers.length + 1}`,
-      // fail-closed: 熔断期 before() 返回 {allowed:false}, 由策略链跳过该订阅者 (弃权) 而非放行
+      mandatory: mandatory !== false,
+      // Mandatory subscriber unavailability becomes deny, including open circuits.
       breaker: new CircuitBreaker({
         ...DEFAULT_SUBSCRIBER_BREAKER,
         ...(breaker || {}),
@@ -191,6 +199,7 @@ export class ToolCatalog {
     return this.policySubscribers.map((s) => ({
       name: s.name,
       priority: s.priority,
+      mandatory: s.mandatory,
       ...(s.breaker && typeof s.breaker.stats === "function" ? s.breaker.stats() : {}),
     }));
   }
@@ -200,22 +209,29 @@ export class ToolCatalog {
     if (!this.policySubscribers.length) return { decision: "allow", reason: null, priority: 0 };
     const results = await Promise.all(this.policySubscribers.map(async (sub) => {
       const breaker = sub.breaker;
-      // 熔断期: 跳过故障订阅者 (视同弃权), 避免反复调用 + 日志刷屏
+      // Avoid re-invoking an open circuit, without removing required protection.
       const verdict = breaker && typeof breaker.before === "function" ? breaker.before() : { allowed: true };
       if (!verdict.allowed) {
-        info(`[policy] 订阅者 ${sub.name} 熔断中 (${verdict.reason}), 本轮弃权`);
-        return null;
+        info(`[policy] 订阅者 ${sub.name} 熔断中 (${verdict.reason})`);
+        return sub.mandatory
+          ? { decision: "deny", reason: `安全策略 ${sub.name} 不可用 (熔断), 已拒绝执行`, priority: sub.priority }
+          : null;
       }
       try {
         const d = await sub.fn(name, args, ctx);
+        if (d && !["allow", "deny", "ask"].includes(d.decision)) {
+          throw new Error("策略返回了无效决策");
+        }
         breaker?.after?.(true);
-        if (!d || !d.decision) return null;
+        if (!d) return null; // A healthy policy may legitimately have no restriction.
         return { decision: d.decision, reason: d.reason || null, priority: d.priority ?? sub.priority };
       } catch (e) {
         breaker?.after?.(false);
         const st = breaker && typeof breaker.state === "string" ? breaker.state : "closed";
-        info(`[policy] 订阅者 ${sub.name} 异常, 视同弃权: ${e?.message || e}${st === "open" ? " (已熔断)" : ""}`);
-        return null;
+        info(`[policy] 订阅者 ${sub.name} 异常${st === "open" ? " (已熔断)" : ""}`);
+        return sub.mandatory
+          ? { decision: "deny", reason: `安全策略 ${sub.name} 不可用 (异常), 已拒绝执行`, priority: sub.priority }
+          : null;
       }
     }));
     return consolidateDecisions(results.filter(Boolean));
@@ -223,9 +239,13 @@ export class ToolCatalog {
 
   // ---- Consumer: 统一策略执行 ----
   async call(name, args, ctx = {}) {
+    const refuse = (result) => {
+      if (typeof ctx.onOutcome === "function") ctx.onOutcome({ ...toolResultStatus(result), dispatched: false });
+      return result;
+    };
     const meta = this.tools.get(name);
     if (!meta) {
-      return `${TOOL_ERROR_PREFIX} 未知工具: ${name}`;
+      return refuse(`${TOOL_ERROR_PREFIX} 未知工具: ${name}`);
     }
     // args 归一 (2026-10-10 修复): 无必填参数的工具常被 LLM 以 undefined/null 调用,
     //   一路透传到 execute 里做 `args.path` 即 TypeError。在统一收口处归一为 {}，
@@ -238,7 +258,7 @@ export class ToolCatalog {
       const hint = Object.keys(meta.parameters?.properties || {}).length
         ? ` 可用参数: ${Object.keys(meta.parameters.properties).join(", ")}`
         : "";
-      return `${TOOL_ERROR_PREFIX} ${name}: 参数错误 — ${argProblem}.${hint}`;
+      return refuse(`${TOOL_ERROR_PREFIX} ${name}: 参数错误 — ${argProblem}.${hint}`);
     }
     // F5 不变量 (2026-10-05): 调用日志只打参数名清单, 不打任何参数值 ——
     // 旧实现 JSON.stringify(args) 会把 200KB 正文/密钥/token 原样写进 stdout。
@@ -250,18 +270,22 @@ export class ToolCatalog {
       // 2026-10-10 修复 (P1-2): 被拦调用原先直接 return, 账本里查无此条 ——
       // "可审计"的核心恰恰是"拦了什么"。补记 ok=false + 原因 (审计写入失败不阻断)。
       try { this.audit?.append({ tool: name, args, ok: false, error: reason, ms: 0 }); } catch { /* 审计降级不阻塞 */ }
-      return `${TOOL_ERROR_PREFIX} ${name}: ${reason}`;
+      return refuse(`${TOOL_ERROR_PREFIX} ${name}: ${reason}`);
     }
     if (policy.decision === "ask") {
       const reason = `需要人工审批: ${policy.reason || "敏感操作"}`;
       try { this.audit?.append({ tool: name, args, ok: false, error: reason, ms: 0 }); } catch { /* 审计降级不阻塞 */ }
-      return `${TOOL_ERROR_PREFIX} ${name}: ${reason}`;
+      return refuse(`${TOOL_ERROR_PREFIX} ${name}: ${reason}`);
     }
     if (!this.audit) return runWithPolicy(meta, args, ctx);
     const t0 = Date.now();
     try {
-      const r = await runWithPolicy(meta, args, ctx);
-      const failed = typeof r === "string" && r.startsWith(TOOL_ERROR_PREFIX);
+      let outcome = null;
+      const r = await runWithPolicy(meta, args, { ...ctx, onOutcome: (status) => {
+        outcome = status;
+        if (typeof ctx.onOutcome === "function") ctx.onOutcome(status);
+      } });
+      const failed = !(outcome || toolResultStatus(r)).ok;
       this.audit.append({ tool: name, args, ok: !failed, error: failed ? String(r).slice(0, 200) : null, ms: Date.now() - t0 });
       return r;
     } catch (e) {

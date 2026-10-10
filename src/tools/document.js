@@ -7,6 +7,7 @@ import path from "node:path";
 import zlib from "node:zlib";
 import { ocrImage } from "./ocr.js";
 import { safePath } from "./builtin.js";
+import { toolOutcome } from "../core/tool-result.js";
 
 const MAX_CHARS = 20000; // 单文档返回上限
 
@@ -179,7 +180,7 @@ export function registerDocumentTools(catalog, { rootDir }) {
         const text = await readDocumentText(p, ocrOptsFromConfig(cfg));
         const max = Math.min(args.maxChars || MAX_CHARS, 40000);
         const truncated = text.length > max ? text.slice(0, max) + `\n...[已截断, 共 ${text.length} 字符]` : text;
-        return truncated || "(文档无文本内容, 且未识别出扫描件文字)";
+        return toolOutcome(truncated || "(文档无文本内容, 且未识别出扫描件文字)");
       } catch (e) {
         return JSON.stringify({ error: "read_document 失败: " + e.message });
       }

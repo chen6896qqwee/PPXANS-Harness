@@ -4,7 +4,7 @@
 // 设计:
 //   - 内置常用模型价格表 (USD / 1M tokens, prompt + completion), 前缀匹配取最长者
 //   - 云厂商价格随时变动: 内置表只是"开箱即用的估算快照", 精确控费用 config.budget.model_prices 覆盖
-//   - 未知模型 → 返回 null (cost 记 0), **不编数字**; 想纳入预算控制就显式配置价格
+//   - 未知模型 / 缺失 usage → 返回 null, 不把未知伪装为免费; 精确预算需显式配置价格
 //   - 只有 total_tokens 无拆分时, 全部按 completion 价计 (预算取保守侧, 宁高估不高估)
 // 零依赖, 纯函数, 可独立测试。
 
@@ -75,19 +75,28 @@ export function resolvePrice(model, overrides) {
 }
 
 // 折算一笔 usage 的成本 (USD)。usage: { prompt_tokens, completion_tokens } 或仅 { total_tokens }。
-// 无价格 → 0 (调用方无从区分"免费"与"未知", 需要区分时自行调 resolvePrice)。
+// 缺失/非法 usage 或价格 → null; 已知免费模型且有合法 usage → 0。
+export function usageTokens(usage) {
+  const valid = (v) => typeof v === "number" && Number.isFinite(v) && v >= 0;
+  if (!usage || typeof usage !== "object") return null;
+  if (valid(usage.total_tokens)) return usage.total_tokens;
+  if (valid(usage.prompt_tokens) && valid(usage.completion_tokens)) return usage.prompt_tokens + usage.completion_tokens;
+  return null;
+}
+
 export function estimateCost(model, usage, overrides) {
   const p = resolvePrice(model, overrides);
-  if (!p) return 0;
+  if (!p || usageTokens(usage) === null) return null;
   const pt = usage?.prompt_tokens, ct = usage?.completion_tokens;
   let prompt, completion;
-  if (pt == null && ct == null) {
+  if (pt == null || ct == null) {
     // 只有总量 (部分本地推理后端不拆分): 全按 completion 价计 —— 预算保守侧
     prompt = 0;
-    completion = Number(usage?.total_tokens) || 0;
+    completion = usageTokens(usage);
   } else {
-    prompt = Number(pt) || 0;
-    completion = Number(ct) || 0;
+    if (typeof pt !== "number" || typeof ct !== "number" || !Number.isFinite(pt) || !Number.isFinite(ct) || pt < 0 || ct < 0) return null;
+    prompt = pt;
+    completion = ct;
   }
   return (prompt * p.prompt + completion * p.completion) / 1e6;
 }

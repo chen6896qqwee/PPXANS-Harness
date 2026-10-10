@@ -3,7 +3,9 @@
 //   Service Definition(声明/元数据) / Service Provider(execute 实现) / Consumer(runWithPolicy 统一策略入口)
 // 零依赖, 纯 Node 原生。保留皮皮虾原有错误语义, 追加超时门禁/禁用门禁/追踪回调。
 
-export const TOOL_ERROR_PREFIX = "[工具错误]";
+import { TOOL_ERROR_PREFIX } from "../core/errors.js";
+import { toolResultStatus, toolResultContent } from "../core/tool-result.js";
+export { TOOL_ERROR_PREFIX };
 
 // ---- B1: 工具结果标准化 (吸收 codex format_exec_output_for_model) ----
 // 命令类工具返回统一元数据头, 模型不靠猜判断成败:
@@ -72,30 +74,37 @@ export function normalizeMeta(def = {}) {
 // ---- Consumer 层: 统一策略执行 ----
 // 统一处理: 禁用门禁 / 实现缺失 / 超时门禁 / 标准错误语义 / 追踪回调
 export async function runWithPolicy(meta, args, ctx = {}) {
+  let dispatched = false;
+  const finish = (result) => {
+    const status = { ...toolResultStatus(result), dispatched };
+    if (typeof ctx.onOutcome === "function") ctx.onOutcome(status);
+    const content = toolResultContent(result);
+    return typeof content === "string" ? content : JSON.stringify(content);
+  };
   if (meta.enabled === false) {
-    return `${TOOL_ERROR_PREFIX} ${meta.name}: 能力已禁用`;
+    return finish(`${TOOL_ERROR_PREFIX} ${meta.name}: 能力已禁用`);
   }
   // power 权限门禁: 仅当 ctx.power 明确提供时生效(向后兼容, 无 ctx.power 默认放行)
   if (ctx && ctx.power) {
     const need = POWER_LEVEL[meta.power] ?? 0;
     const have = POWER_LEVEL[ctx.power] ?? 0;
     if (have < need) {
-      return `${TOOL_ERROR_PREFIX} ${meta.name}: 权限不足(需要 ${meta.power}, 当前 ${ctx.power})`;
+      return finish(`${TOOL_ERROR_PREFIX} ${meta.name}: 权限不足(需要 ${meta.power}, 当前 ${ctx.power})`);
     }
   }
   const fn = meta.execute;
   if (typeof fn !== "function") {
-    return `${TOOL_ERROR_PREFIX} ${meta.name}: 无实现(Provider 缺失)`;
+    return finish(`${TOOL_ERROR_PREFIX} ${meta.name}: 无实现(Provider 缺失)`);
   }
   // before 钩子: 返回非 undefined 则短路(不执行), throw 则拒绝
   if (meta.before) {
     try {
       const shortCircuit = await meta.before(args, ctx);
       if (shortCircuit !== undefined && shortCircuit !== null) {
-        return typeof shortCircuit === "string" ? shortCircuit : JSON.stringify(shortCircuit);
+        return finish(shortCircuit);
       }
     } catch (e) {
-      return `${TOOL_ERROR_PREFIX} ${meta.name}: before 钩子拒绝: ${e.message}`;
+      return finish(`${TOOL_ERROR_PREFIX} ${meta.name}: before 钩子拒绝: ${e.message}`);
     }
   }
   let timer = null;
@@ -112,7 +121,10 @@ export async function runWithPolicy(meta, args, ctx = {}) {
     //   1) signal 传给 execute: 配合的工具提前终止释放资源 (资源超时)
     //   2) Promise.race 强制超时返回: 不响应 signal 的工具也不至于永远挂住对话 (语义超时兜底)
     // 这是文档指出的灰色地带: 光靠 abort 信号, 不配合的工具会无限期挂着。
-    const run = () => (fn.length >= 2 ? fn(args, { ...ctx, signal: ctrl.signal }) : fn(args));
+    const run = () => {
+      dispatched = true;
+      return fn.length >= 2 ? fn(args, { ...ctx, signal: ctrl.signal }) : fn(args);
+    };
     let result;
     if (effectiveTimeout > 0) {
       let raceTimer = null;
@@ -133,15 +145,18 @@ export async function runWithPolicy(meta, args, ctx = {}) {
     } else {
       result = await run();
     }
-    if (timedOut) return `${TOOL_ERROR_PREFIX} ${meta.name}: 超时`;
+    if (timedOut) return finish(`${TOOL_ERROR_PREFIX} ${meta.name}: 超时`);
     if (meta.after) {
-      try { await meta.after(args, result, ctx); } catch { /* after 钩子错误不阻塞 */ }
+      try { await meta.after(args, toolResultContent(result), ctx); } catch { /* after 钩子错误不阻塞 */ }
     }
-    if (typeof ctx.onResult === "function") ctx.onResult(meta.name, "ok", null);
-    return typeof result === "string" ? result : JSON.stringify(result);
+    if (typeof ctx.onResult === "function") {
+      const status = toolResultStatus(result);
+      ctx.onResult(meta.name, status.ok ? "ok" : "error", status.error);
+    }
+    return finish(result);
   } catch (e) {
     if (typeof ctx.onResult === "function") ctx.onResult(meta.name, "error", e.message);
-    return `${TOOL_ERROR_PREFIX} ${meta.name}: ${timedOut ? "超时" : e.message}`;
+    return finish(`${TOOL_ERROR_PREFIX} ${meta.name}: ${timedOut ? "超时" : e.message}`);
   } finally {
     if (timer) clearTimeout(timer);
   }

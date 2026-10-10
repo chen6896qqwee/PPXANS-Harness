@@ -27,6 +27,7 @@ import { createAdminTools } from "../mcp/admin.js";
 import { buildTree, readWorkspaceFile, writeWorkspaceFile, searchWorkspace } from "./workspace.js";
 import { runReview } from "../review/index.js";
 import { createTaskBoard } from "../mcp/tasks.js";
+import { maskPIIOutput } from "../utils/pii-output.js";
 
 const MAX_BODY = 1024 * 1024;          // 请求体上限 1MB
 const RATE_PER_MIN = 60;               // 每 IP 每分钟最大请求数 (令牌桶)
@@ -589,21 +590,22 @@ export class HttpChannel extends Channel {
       if (!this._acquire(res)) return true;
       res.writeHead(200, SSE_HEADERS);
       if (typeof res.flushHeaders === "function") res.flushHeaders();
+      const maskPII = this.agent?.config?.security?.pii_reply_mask === true;
+      const send = (obj) => {
+        if (!res.writableEnded) res.write("data: " + JSON.stringify(maskPII ? maskPIIOutput(obj) : obj) + "\n\n");
+      };
       try {
-        const send = (obj) => { if (!res.writableEnded) res.write("data: " + JSON.stringify(obj) + "\n\n"); };
-        let full = "";
         const reply = await this.agent.chatStream(String(text), {
           sessionKey,
-          onDelta: (d) => { full += d; try { send({ type: "delta", content: d }); } catch {} },
+          onDelta: (d) => { try { send({ type: "delta", content: d }); } catch {} },
           onTool: (ev) => { try { send({ type: "tool", tool: ev.tool, id: ev.id, status: ev.type, args: ev.args, ok: ev.ok, durationMs: ev.durationMs }); } catch {} }, // 工具调用可视化
           onStep: (ev) => { try { send({ type: "step", round: ev.round, maxRounds: ev.maxRounds }); } catch {} }, // turn/step 推理轮次进度
         });
-        const finalContent = full || reply;
-        send({ type: "done", content: finalContent, sessionId: sessionKey });
+        send({ type: "done", content: reply, sessionId: sessionKey });
         if (!res.writableEnded) res.end();
       } catch (e) {
         // 不外泄内部实现细节 (如 ERR_HTTP_HEADERS_SENT 之类)
-        try { res.write("data: " + JSON.stringify({ type: "error", error: publicErrorMessage(e) }) + "\n\n"); } catch {}
+        try { send({ type: "error", error: publicErrorMessage(e) }); } catch {}
         try { res.end(); } catch {}
       } finally { this._release(); }
       return true;

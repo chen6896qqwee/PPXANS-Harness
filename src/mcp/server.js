@@ -7,6 +7,7 @@
 // 传输无关: 仅做 JSON-RPC 分发, stdio/HTTP 传输由上层 (src/mcp/http.js 等) 接入。
 import { TOOL_ERROR_PREFIX } from "../tools/catalog.js";
 import { warn } from "../utils/logger.js";
+import { maskPIIOutput } from "../utils/pii-output.js";
 import { sanitizeMcpName } from "./index.js";
 
 // 版本号统一读 package.json, 避免与发布版本漂移 (外部体检: 硬编码 2.5.0 导致 serverInfo 落后真实版本)
@@ -110,16 +111,21 @@ export class McpServer {
         description: "发送消息给皮皮虾 agent, 流式返回回复 (SSE 进度通知)。内部会执行完整工具调用循环。sessionId 用于区分会话上下文, 默认 default。",
         inputSchema: chatInputSchema(),
         execute: async (args, ctx, agent) => {
-          let full = "";
-          const reply = await agent.chatStream(String(args.message || ""), {
-            sessionKey: args.sessionId || "default",
-            onDelta: (d) => { full += d; ctx?.stream?.onDelta?.(d); },
-            // v2.6.0: 结构化工具/推理事件透传 (web 前端渲染工具卡片 + 轮次进度)
-            onTool: (ev) => { ctx?.stream?.onTool?.(ev); },
-            onStep: (ev) => { ctx?.stream?.onStep?.(ev); },
-          });
-          const text = full || String(reply);
-          return { content: [{ type: "text", text }] };
+          try {
+            const reply = await agent.chatStream(String(args.message || ""), {
+              sessionKey: args.sessionId || "default",
+              onDelta: (d) => { ctx?.stream?.onDelta?.(d); },
+              // v2.6.0: 结构化工具/推理事件透传 (web 前端渲染工具卡片 + 轮次进度)
+              onTool: (ev) => { ctx?.stream?.onTool?.(ev); },
+              onStep: (ev) => { ctx?.stream?.onStep?.(ev); },
+            });
+            return { content: [{ type: "text", text: String(reply) }] };
+          } catch (e) {
+            if (agent.config?.security?.pii_reply_mask !== true) throw e;
+            throw new McpError(e instanceof McpError ? e.code : MCP_ERROR.INTERNAL_ERROR,
+              maskPIIOutput(String(e?.message || "internal error")),
+              e?.data == null ? null : maskPIIOutput(e.data));
+          }
         },
       },
     ];
