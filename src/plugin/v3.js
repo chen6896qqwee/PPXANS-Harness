@@ -39,36 +39,29 @@ export const permissionsPlugin = (ctx) => {
 // 斜杠命令插件: claude-code 统一命令模型 + 用户命令目录 .ppx/commands/*.md
 export const commandsPlugin = (ctx) => {
   const root = ctx.consume("root");
-  const registry = createRegistryWithUserCommands(path.join(root, ".ppx", "commands"));
+  // 2026-10-10 修复: createRegistryWithUserCommands(dir) 内部自行拼 `.ppx/commands`,
+  //   原调用传的已是 root/.ppx/commands → 实际拼成 root/.ppx/commands/.ppx/commands,
+  //   用户命令目录永远读不到 (注册表里永远只有内置命令)。这里传 root 即可。
+  const registry = createRegistryWithUserCommands(root);
   ctx.provide("commands", registry);
 };
 
-// 证据/看板插件: OMH prepared/observed 边界 + goal board 计划台账
-// 2026-10-05: 把 dataDir 接进看板 —— 旧实现 createGoalBoard() 不传任何参数, 看板是纯内存 Map,
-// 进程一退出计划就没了 (而它正是 ppx 唯一跨轮持有"多步计划"的地方)。传 dataDir 后端落到
-// <dataDir>/evidence/goals.json, 与 FactStore/L2 同一套 store.js 持久化 + 跨进程文件锁。
-// 注: dataDir 缺省时看板自动退化为旧的内存态 (测试/一次性进程), 不会到处找默认目录。
+// 证据/看板插件: OMH prepared/observed 边界 + goal board 目标看板
+// 2026-10-05: 看板从"进程内 Map"改为**文件后端** —— 军团/CLI+Web 是多个进程共用一个 dataDir 的
+// 真实形态, 旧形态下计划随进程退出蒸发 (goal_board 工具因此长期"每次调用都抛错")。
 export const evidencePlugin = (ctx) => {
-  const dataDir = ctx.consume("dataDir");
-  const board = createGoalBoard({ dataDir });
-  ctx.provide("goalBoard", board);
-  // 只报"是否持久化", 不打路径值 (控制台常开着)
-  info(`[v3] 目标看板就绪 (${board.file() ? "已持久化: evidence/goals.json" : "内存态 (未提供 dataDir)"})`);
+  ctx.provide("goalBoard", createGoalBoard({ dataDir: ctx.consume("dataDir") }));
 };
 
-// 协议总线插件: codex SQ/EQ 双队列
-// 2026-10-03 接线 (P2): WAL 原硬编码 null (注释宣称"默认 data/protocol/eq.jsonl" 但从未开启) →
-// 默认落盘 data/protocol/eq.wal.jsonl (config.protocol.wal_enabled=false 可关), 支持崩溃后 replay()。
-// EQ 事件另有真实消费方: channels/http.js 订阅后经 SSE /events 广播给 Web UI 时间线。
+// 协议总线插件: codex SQ/EQ 双队列 (WAL 默认落盘 data/protocol/eq.wal.jsonl)
 export const protocolPlugin = (ctx) => {
-  const dataDir = ctx.consume("dataDir");
-  const config = ctx.consume("config") || {};
-  const walEnabled = config?.protocol?.wal_enabled !== false;
-  const bus = createProtocolBus({
-    walPath: walEnabled && dataDir ? path.join(dataDir, "protocol", "eq.wal.jsonl") : null,
-  });
+  // 2026-10-10 修复: 原 walPath 硬编码 null → EQ 事件从不落盘, replay() 恒空 (WAL 名存实亡)。
+  //   改为落到 data/protocol/eq.wal.jsonl, 与 src/protocol/index.js 的 JSONL 语义一致, 可 replay。
+  const dataDir = ctx.consume("dataDir") || path.join(ctx.consume("root"), "data");
+  const walPath = path.join(dataDir, "protocol", "eq.wal.jsonl");
+  const bus = createProtocolBus({ walPath });
   ctx.provide("protocolBus", bus);
-  info(`[v3] 协议总线就绪 (SQ/EQ${walEnabled ? " + WAL" : ""})`);
+  info("[v3] 协议总线就绪 (SQ/EQ)");
 };
 
 // v3 全量插件组 (builtinPlugins 之后追加装配)

@@ -2,29 +2,16 @@
 // 借鉴 deepseek-harness 的 "everything is a plugin": 每个模块是一个插件, 通过 ctx.provide 注册服务。
 // 装配顺序即依赖顺序 (依赖在前), 任何插件都可被用户插件替换或扩展。
 import path from "node:path";
-import { info, warn } from "../utils/logger.js";
+import { info } from "../utils/logger.js";
 import { Healer } from "../selfheal/healer.js";
 import { Persona } from "../persona/index.js";
-import { FactStore, SqliteFactStore, MemoryTicker, Experience, L0Recorder, SceneStore, PersonaStore, LegionBoard } from "../memory/index.js";
+import { FactStore, MemoryTicker, Experience, L0Recorder, SceneStore, PersonaStore, LegionBoard } from "../memory/index.js";
 import { SessionStore } from "../memory/session.js";
 import {
   ToolCatalog, registerBuiltinTools, registerAdvancedTools, Scheduler,
   registerMethodTools, registerSelfmodTools, registerCustomTools, registerDocumentTools,
   registerGovernanceTools,
-  registerVoiceTools,
-  registerSandboxTools,
-  registerVadTools,
-  registerOrchestrationTools,
-  registerSkillHubTools,
-  registerExpertHubTools,
-  registerTeamRoomTools,
 } from "../tools/index.js";
-// 2026-10-07 内置技能层 v2: 多源技能库 (内置 + 用户 + 附加) + 领域分类
-import { SkillRegistry, createSkillLoader, skillRootsFromConfig } from "../skills/registry.js";
-// 2026-10-07 吸收自 TencentCloud/Octop: 专家包目录册 (启动扫描, 与技能库同款多源装配)
-import { ExpertPackCatalog, packRootsFromConfig } from "../orchestrator/expert-pack.js";
-// 2026-10-07 并发治理: 进程级子 agent 配额 (嵌套委派不乘法爆炸)
-import { getGovernor, governorOptsFromConfig } from "../orchestrator/governor.js";
 import { embedderFromConfig } from "../llm/embedder.js";
 import { LocalShellProvider } from "../seam/shell.js";
 import { registerDelegateTools } from "../tools/delegate.js";
@@ -34,6 +21,7 @@ import { RuntimeBus } from "../bus/runtime-bus.js";
 import { PlaybookStore } from "../evolve/playbook.js";
 import { MemoryHealthMonitor } from "../services/memory-health.js";
 import { FailureEpisodeStore } from "../memory/failure-episode.js";
+import { registerVoiceTools } from "../tools/voice.js";
 import { CanvasStore } from "../memory/canvas.js";
 import { AssetHub } from "../memory/asset-hub.js";
 import { exportMemorySnapshot, mergeSnapshotBack, hasSnapshot } from "../memory/fork.js";
@@ -41,6 +29,15 @@ import { exportMemorySnapshot, mergeSnapshotBack, hasSnapshot } from "../memory/
 import { registerV3Tools } from "../tools/v3.js";
 // v3.0.1 (GitHub 主流 Agent 对标): git 集成工具 (aider/Claude Code/OpenHands 标配, 带硬护栏)
 import { registerGitTools } from "../tools/git.js";
+// 2026-10-09 接线: 以下 6 个工具模块此前【只定义、从未装配】——
+//   文件在 src/tools/ 里, 但没被任何插件注册进工具目录, 运行时一律报「未知工具」,
+//   对应测试 (team-orchestration / orchestration-tools / expert-pack / plugin-dx 等) 长期失败。
+import { registerTeamRoomTools } from "../tools/team-room.js";
+import { registerOrchestrationTools } from "../tools/orchestration.js";
+import { registerSkillHubTools } from "../tools/skill-hub.js";
+import { registerExpertHubTools } from "../tools/expert-hub.js";
+import { registerSandboxTools } from "../tools/sandbox.js";
+import { registerVadTools } from "../tools/vad.js";
 
 // fork 工具 (供 ctx.consume("fork") 取用)
 const forkTools = { exportMemorySnapshot, mergeSnapshotBack, hasSnapshot };
@@ -87,30 +84,7 @@ export const personaPlugin = (ctx) => {
 
 export const factsPlugin = (ctx) => {
   const config = ctx.consume("config");
-  const dataDir = ctx.consume("dataDir");
-  // 记忆后端选择 (2026-10-03): "json" (默认, 向后兼容) | "sqlite" (内嵌库, FTS5+WAL) | "auto" (优先 sqlite)
-  // 选 sqlite 的收益: 增量写 (实测 800 条 18.7x 更快, JSON 版每次 add 都全量重写)、
-  //   事务级并发安全 (无文件锁忙等)、崩溃可恢复 (WAL)、数据量增大时检索不退化 (JSON 版全量重扫)。
-  // 代价: 文件体积更大 (FTS 索引+WAL), 依赖 Node >= 22.5 的 node:sqlite (不可用会自动回落 JSON)。
-  const backend = String(config.memory?.backend || "json").toLowerCase();
-  let facts = null;
-  if (backend === "sqlite" || backend === "auto") {
-    try {
-      facts = new SqliteFactStore(dataDir, config.memory || {});
-      info(`[memory] 记忆后端: SQLite 内嵌库 (FTS5=${facts.ftsReady}, WAL)`);
-    } catch (e) {
-      warn(`[memory] SQLite 后端不可用, 回落 JSON: ${e.message}`);
-    }
-  }
-  if (!facts) {
-    // 2026-10-03 深度优化 (P2 写放大): 主链路默认开启 FactStore WAL 增量落盘 ——
-    // 原默认每次变更全量原子重写 facts.json (高频对话下写放大显著, SQLite 注释自认 18.7x 差距)。
-    // WAL 模式: 变更走追加日志, 达阈值才 compact 全量写。仅主链路开启 (轻量构造/测试保持旧行为);
-    // config.memory.wal 可显式关。agent.shutdown 时 flush 兜底。
-    facts = new FactStore(dataDir, { wal: true, walThreshold: 50, ...(config.memory || {}) });
-    if (backend === "sqlite") warn("[memory] 显式指定了 sqlite 后端但不可用, 已回落 JSON");
-  }
-  ctx.provide("facts", facts);
+  ctx.provide("facts", new FactStore(ctx.consume("dataDir"), config.memory || {}));
 };
 
 export const experiencePlugin = (ctx) => {
@@ -140,6 +114,30 @@ export const memoryPlugin = (ctx) => {
   const sessions = ctx.consume("sessions");
   ctx.provide("memory", new MemoryTicker(ctx.consume("dataDir"), facts, null, sessions));
 };
+
+// 记忆后端插槽 (2026-10-09 补 —— 轻内核缺口 2 第一步)
+// 默认实现是 MemoryTicker (本地 JSON)。想让记忆落到外部后端 (Qdrant/Redis/…) 时,
+// 插件按约定注册工厂: ctx.provide("memoryBackend:<name>", (services) => instance),
+// 然后把 config.memory.backend 设为 <name> 即可切换 —— 内核不需要知道任何具体后端。
+// fail-safe 三条 (缺工厂 / 工厂抛错 / 显式默认) 一律保留 MemoryTicker, 绝不因为插槽问题让记忆不可用。
+export function applyMemoryBackend(ctx, config = {}) {
+  const backend = config?.memory?.backend;
+  // json/sqlite/auto 是 FactStore 自己的存储层语义, 与"记忆实现插槽"无关, 不触发切换
+  if (!backend || backend === "default" || backend === "json" || backend === "sqlite" || backend === "auto") return;
+  const factory = ctx.consume(`memoryBackend:${backend}`);
+  if (typeof factory !== "function") return;   // 工厂缺失 → 保留默认
+  try {
+    const instance = factory({
+      dataDir: ctx.consume("dataDir"),
+      facts: ctx.consume("facts"),
+      sessions: ctx.consume("sessions"),
+      userName: ctx.consume("userName"),
+    });
+    if (instance) ctx.provide("memory", instance);
+  } catch {
+    // 工厂抛错 → 保留默认实现, 不向上传播 (插槽坏了不该让整个 agent 起不来)
+  }
+}
 
 export const llmPlugin = (ctx) => {
   const config = ctx.consume("config");
@@ -182,41 +180,17 @@ export const toolsPlugin = (ctx) => {
   const memory = ctx.consume("memory");
   const tools = new ToolCatalog();
   registerBuiltinTools(tools, { rootDir: root, facts, memory });
-  // ---- 技能库 (2026-10-07 v2): 多源装配, 供 selfmod 读取 + skill_hub 自省 ----
-  // 在这里建而不是在 agent 里建: 装配顺序上 toolsPlugin 早于 agent, 且 agent 需要 consume 它 ——
-  // 单一实例才能让 skill_search / load_skill / 覆盖率自述共享同一份缓存与使用计数。
-  const skillRoots = skillRootsFromConfig(config, root);
-  const skillRegistry = new SkillRegistry({ roots: skillRoots, loader: createSkillLoader(config, root) });
-  ctx.provide("skillRegistry", skillRegistry);
-  // ---- 专家包目录册 (2026-10-07 吸收 Octop): 启动扫描内置 experts/ + 用户 ~/.ppx/experts + 附加 ----
-  // 与技能库同款的多源装配: "加一个专家 = 加一个目录", 不改源码、不改测试、不用发版。
-  const expertPacks = new ExpertPackCatalog({ roots: packRootsFromConfig(config, root) });
-  ctx.provide("expertPacks", expertPacks);
-  // ---- 并发治理: 把配置灌进进程级单例 (所有 Legion 实例共享同一份配额) ----
-  const governor = getGovernor();
-  // dataDir 只在开启跨进程配额时才用得上 (账本落 <dataDir>/legion-quota.json)。
-  // 三处 configure 调用点 (这里 / delegate.js / mode/legion.js) 必须传同一个 dataDir ——
-  // 否则后调的那处会用 enabled:false 把已挂上的账本摘掉, 治理静默退回单进程。
-  governor.configure(governorOptsFromConfig(config, ctx.consume("dataDir")));
-  ctx.provide("governor", governor);
   // 2026-09-18: onFire 兜底 —— 重启恢复的持久化任务无 action 闭包, 触发时按 job.name 还原行为
   const scheduler = new Scheduler(dataDir, { onFire: (job) => facts.add(`定时任务触发: ${job?.name || "?"}`, { source: "schedule" }) });
   ctx.provide("scheduler", scheduler);
   registerAdvancedTools(tools, { dataDir, scheduler, onMemoryNote: (note) => facts.add(note, { source: "schedule" }) });
   registerMethodTools(tools);
-  // skillsDir = 可写根 (新技能落盘); loader = 多源读取器 (内置 + 用户 + 附加)
-  registerSelfmodTools(tools, { skillsDir: skillRegistry.loader.writeDir, loader: skillRegistry.loader });
+  registerSelfmodTools(tools, { skillsDir: path.join(root, "skills") });
   // 用户自定义工具 (不改源码扩展能力)
   const customDir = path.join(root, (config.tools && config.tools.custom_dir) || "custom-tools");
   registerCustomTools(tools, customDir);
   // 文档加载器 (RAG: read_document / ingest_document)
   registerDocumentTools(tools, { rootDir: root });
-  // 语音能力 (ASR voice_transcribe / TTS voice_speak): 走 OpenAI 兼容端点, 零依赖
-  // v3.1: voice.asr 支持 backend:"local" (nodejs-whisper 可选依赖, 离线转写)
-  registerVoiceTools(tools, { config, rootDir: root });
-  // v3.1 新能力: 内置 JS 沙箱执行器 (CodeAct, 零依赖) + 语音活动检测 (VAD)
-  registerSandboxTools(tools, { rootDir: root });
-  registerVadTools(tools, { rootDir: root });
   // 向量化: 配了 config.embedding 则自动注入 embedder, 检索切 dense+BM25 RRF; 否则纯 BM25 兜底
   const embedder = embedderFromConfig(config);
   if (embedder) facts.setEmbedder(embedder);
@@ -225,12 +199,13 @@ export const toolsPlugin = (ctx) => {
   // 多 agent 自主协作: spawn_agent 工具 (agent 自主派生子 agent 分工)
   // 传入军团记忆板: share_board 自动发布子任务结论 + 仲裁前自动读板
   registerDelegateTools(tools, { board });
+  // 语音 TTS (2026-10-03 开箱即用): Windows SAPI / macOS say / Linux espeak
+  registerVoiceTools(tools);
   if (board) {
     const fromName = () => ctx.consume("agent")?.config?.agent?.name || "main";
     tools.register({
       name: "board_publish",
-      // 写军团共享板 (跨 agent 可见的持久状态) → 非只读 (F1: 未声明会被兜底成"只读"绕过只读档位)
-      capability: { riskLevel: "medium", readOnly: false, destructive: false, sideEffect: "memory" },
+      capability: { readOnly: false, riskLevel: "medium", sideEffect: "workspace" },
       description: "向军团共享记忆板发布一条知识/发现/结论, 所有 agent 实时可见。跨 agent 协作时用。",
       parameters: {
         type: "object",
@@ -250,7 +225,7 @@ export const toolsPlugin = (ctx) => {
     });
     tools.register({
       name: "board_query",
-      capability: { riskLevel: "low", readOnly: true, destructive: false, sideEffect: "none" },
+      capability: { readOnly: true, riskLevel: "low", sideEffect: "none" },
       description: "查询军团共享记忆板: 看其他 agent 发布的知识/发现/结论 (实时, 跨进程)。",
       parameters: {
         type: "object",
@@ -286,14 +261,16 @@ export const toolsPlugin = (ctx) => {
   registerV3Tools(tools, { rootDir: root, agent: ctx.consume("agent") });
   // git 集成 (2026-10-01): status/diff/log/commit, 仅 add+commit, 禁 push/reset
   registerGitTools(tools, { rootDir: root });
-  // v3.2.3 (2026-10-07 全能超级 Agent): 编排自省 (军团并发/班组/专家/能力矩阵/边界自检)
-  //   + 技能库扩展 (领域覆盖率 / GitHub 技能导入)。
-  //   getAgent 用惰性取值: toolsPlugin 早于 agent 装配, 这里必须拿闭包而不是当时的值。
-  registerOrchestrationTools(tools, { getAgent: () => ctx.consume("agent") });
-  registerSkillHubTools(tools, { getAgent: () => ctx.consume("agent"), skillsRoot: skillRegistry.loader.writeDir });
-  // 专家库/人格/市场 + 团队房间 (2026-10-07 吸收 Octop)
-  registerExpertHubTools(tools, { getAgent: () => ctx.consume("agent"), getPackCatalog: () => ctx.consume("expertPacks") });
-  registerTeamRoomTools(tools, { getAgent: () => ctx.consume("agent") });
+  // ---- 2026-10-09 补齐装配: 团队房间 / 编排观测 / 技能中枢 / 专家中枢 / 沙箱 / VAD ----
+  // 全部用惰性 getAgent —— ctx.consume("agent") 在装配期可能尚未 provide (返回 undefined 不抛),
+  // 用闭包延迟到工具真正被调用时再取, 规避插件装配顺序依赖。
+  const getAgentLazy = () => ctx.consume("agent");
+  registerTeamRoomTools(tools, { getAgent: getAgentLazy });
+  registerOrchestrationTools(tools, { getAgent: getAgentLazy });
+  registerSkillHubTools(tools, { getAgent: getAgentLazy, skillsRoot: path.join(root, "skills") });
+  registerExpertHubTools(tools, { getAgent: getAgentLazy });
+  registerSandboxTools(tools, { rootDir: root });
+  registerVadTools(tools, { rootDir: root });
   ctx.provide("tools", tools);
   ctx.provide("toolsEnabled", config.tools?.enabled !== false);
 };

@@ -28,10 +28,6 @@ export const PROVIDER_PRESETS = [
     base_url: "https://api.moonshot.cn/v1", api_key_env: "MOONSHOT_API_KEY",
     models: ["kimi-k2-0711-preview", "moonshot-v1-128k"], context_window: 131072,
     key_url: "https://platform.moonshot.cn/console/api-keys" },
-  { id: "volcengine", label: "火山方舟 豆包", cloud: true, region: "cn",
-    base_url: "https://ark.cn-beijing.volces.com/api/v3", api_key_env: "VOLCENGINE_API_KEY",
-    models: [], model_hint: "填接入点 ID (ep-xxx) 或模型名", context_window: 131072,
-    key_url: "https://console.volcengine.com/ark" },
   // ---- 云端: 海外 ----
   { id: "openai", label: "OpenAI", cloud: true, region: "global",
     base_url: "https://api.openai.com/v1", api_key_env: "OPENAI_API_KEY",
@@ -78,6 +74,10 @@ export function getPreset(id) {
 
 // 由预设生成 provider 配置对象 (与 config/ppx.json providers[] 字段完全一致)
 // apiKey 缺失时落到环境变量名 (LLMClient 运行时兜底读取)
+// 2026-10-10 修复 (P1): 本地提供商 (lmstudio/ollama) 的 api_key_env 为 null, 于是这里
+//   既不写 api_key 也不写 api_key_env → LLMClient 校验时判定"无凭据"必抛。
+//   本地服务实际上不需要密钥, 但 HTTP 客户端仍要求一个非空 api_key 字段,
+//   故对无 key_env 的本地预设注入占位值 (不覆盖调用方显式传入的 key)。
 export function buildProvider(id, { apiKey = "", model = "" } = {}) {
   const preset = getPreset(id);
   if (!preset) return null;
@@ -93,10 +93,8 @@ export function buildProvider(id, { apiKey = "", model = "" } = {}) {
     provider.api_key_env = preset.api_key_env;
     if (apiKey) provider.api_key = apiKey;
   } else {
-    // 2026-10-03 修复 (P1): 本地预设 (api_key_env: null) 原先不写任何 key 字段,
-    // 而 LLMClient._request 对空 apiKey 直接 throw → 向导配出来的 provider 必挂。
-    // 注入占位 key (LM Studio / Ollama 不校验), 与 ppx.json.example 手工模板行为对齐。
-    provider.api_key = apiKey || "local";
+    // 本地/免 Key 提供商: 注入占位密钥, 让 HTTP 客户端能构造请求 (服务端忽略之)
+    provider.api_key = apiKey || "local-no-key";
   }
   return provider;
 }

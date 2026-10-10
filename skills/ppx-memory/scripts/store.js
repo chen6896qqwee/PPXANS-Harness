@@ -179,6 +179,63 @@ export function withFileLocks(files, fn, opts) {
   return step(0);
 }
 
+// ---- 带锁的 JSON 集合存储 (2026-10-10, 同步 src) ----
+// 供 failure-episode.js / asset-hub.js 等"多进程共写"的 JSON 数组文件使用:
+//   取锁 → 锁内重读磁盘 → 与内存态按 id 并集 → 原子全量写。锁内不得 await (mutate 必须同步)。
+export function mutateJsonCollection(file, fallback, mutate, { warnTag = "store", memory = null, idKey = "id" } = {}) {
+  let corrupted = null;
+  let data = [];
+  const run = () => {
+    const g = readJsonGuarded(file, null);
+    let disk;
+    if (g.parseFailed && g.existedBefore) {
+      corrupted = archiveCorrupt(file);
+      disk = fallback();
+    } else {
+      disk = Array.isArray(g.data) ? g.data : fallback();
+    }
+    data = memory ? unionById(disk, memory, idKey) : disk;
+    const next = mutate(data);
+    if (Array.isArray(next)) data = next;
+    writeJson(file, data);
+  };
+  try {
+    withFileLock(file, run);
+    return { ok: true, data, corrupted };
+  } catch (e) {
+    console.log(`[warn] [${warnTag}] 落盘失败 (内存态保留, 下次写入补齐): ${file} (${e && e.message ? e.message : e})`);
+    return { ok: false, data, error: e, corrupted };
+  }
+}
+
+// 按 id 做并集: primary 顺序优先, secondary 中未出现过的追加到尾部。
+export function unionById(primary, secondary, idKey = "id") {
+  const out = Array.isArray(primary) ? [...primary] : [];
+  const seen = new Set(out.map((x) => (x ? x[idKey] : undefined)));
+  for (const x of (Array.isArray(secondary) ? secondary : [])) {
+    if (!x) continue;
+    const k = x[idKey];
+    if (k != null && seen.has(k)) continue;
+    if (k != null) seen.add(k);
+    out.push(x);
+  }
+  return out;
+}
+
+// 把损坏文件改名留档 .corrupt-<ts>; 已有存档时不覆盖 (两次损坏各留一份)。
+export function archiveCorrupt(file) {
+  try {
+    if (!fs.existsSync(file)) return null;
+    let dest = `${file}.corrupt-${Date.now()}`;
+    let n = 0;
+    while (fs.existsSync(dest)) dest = `${file}.corrupt-${Date.now()}-${++n}`;
+    fs.renameSync(file, dest);
+    return dest;
+  } catch {
+    return null;
+  }
+}
+
 export function readText(file, fallback = "") {
   try {
     if (!fs.existsSync(file)) return fallback;

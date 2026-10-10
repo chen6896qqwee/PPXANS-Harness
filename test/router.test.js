@@ -5,7 +5,7 @@ import { isUsableProvider, resolveLLM, resolveAllLLMs, orderByHealth, resolvePre
 const base = { id: "openai", base_url: "https://api.x.com/v1", api_key: "sk-real-123" };
 const local = { id: "lmstudio", base_url: "http://127.0.0.1:1234/v1", api_key: "lm-studio", model: "local-q8" };
 const baseCfg = { id: "dash", base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1", api_key: "sk-real", model: "qwen-turbo" };
-const placeholder = { id: "volc", base_url: "https://ark.cn-beijing.volces.com/api/v3", api_key: "sk-real", model: "REPLACE_WITH_YOUR_ENDPOINT" };
+const placeholder = { id: "example-vendor", base_url: "https://llm.example.com/v1", api_key: "sk-real", model: "REPLACE_WITH_YOUR_ENDPOINT" };
 const envkey = { id: "deepseek", base_url: "https://api.deepseek.com/v1", api_key_env: "DEEPSEEK_API_KEY", model: "deepseek-chat" };
 
 test("router: 占位死配置判不可用", () => {
@@ -41,7 +41,7 @@ test("router: 只有本地时回落本地(零配置默认可跑)", () => {
 test("router: 占位死配置从候选剔除, 不会误选", () => {
   const cfg = { providers: [placeholder, local] };
   const all = resolveAllLLMs(cfg);
-  assert.ok(all.every((c) => c.providerId !== "volc"), "占位 provider 不进候选");
+  assert.ok(all.every((c) => c.providerId !== "example-vendor"), "占位 provider 不进候选");
   assert.equal(all.length, 1);
   assert.equal(all[0].providerId, "lmstudio");
 });

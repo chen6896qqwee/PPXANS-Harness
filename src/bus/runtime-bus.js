@@ -1,4 +1,3 @@
-import { debug } from "../utils/logger.js";
 // src/bus/runtime-bus.js - ②循环系: 全局 Runtime 总线 (RC1 §2 动态行为层地基)
 // 在 session.js 会话事件日志之上新增一层"全局总线", 打通模块间函数直连的接缝:
 //   - Event:   事实广播 (发生了什么), 只读, 谁都能订阅
@@ -24,12 +23,12 @@ export class RuntimeBus {
     this._history.push(ev);
     if (this._history.length > this._historyLimit) this._history.shift();
     const set = this._events.get(type);
-    if (set) for (const fn of set) { try { fn(ev); } catch (e) { debug(`[bus/runtime-bus] 已忽略异常: ${e && e.message ? e.message : e}`); } }
+    if (set) for (const fn of set) { try { fn(ev); } catch {} }
     // 2026-09-18 修复 (P1): on("*") 通配订阅此前从不分发 (emit 只查精确 type),
     //   trace() 与一切 "*" 观察者永久空转。现补齐通配分发 (精确 set 之后)。
     if (type !== "*") {
       const wild = this._events.get("*");
-      if (wild) for (const fn of wild) { try { fn(ev); } catch (e) { debug(`[bus/runtime-bus] 已忽略异常: ${e && e.message ? e.message : e}`); } }
+      if (wild) for (const fn of wild) { try { fn(ev); } catch {} }
     }
     return ev;
   }

@@ -91,8 +91,8 @@ test("providers: validate timeout_ms 边界", () => {
 });
 
 test("providers: validate 拦截 REPLACE_WITH_ 占位符", () => {
-  // model 占位符 (如 volcengine 模板残留)
-  const m = validateProvider({ id: "volcengine", base_url: "https://ark.cn-beijing.volces.com/api/v3", model: "REPLACE_WITH_YOUR_ENDPOINT", api_key_env: "VOLCENGINE_API_KEY" });
+  // model 占位符 (厂商模板里的未替换残留)
+  const m = validateProvider({ id: "example-vendor", base_url: "https://llm.example.com/v1", model: "REPLACE_WITH_YOUR_ENDPOINT", api_key_env: "EXAMPLE_VENDOR_KEY" });
   assert.ok(m && /占位符/.test(m), `model 占位符被拦: ${m}`);
   // base_url / api_key 占位符
   assert.ok(/占位符/.test(validateProvider({ id: "x", base_url: "https://REPLACE_WITH_HOST/v1" })));

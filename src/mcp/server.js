@@ -6,7 +6,7 @@
 //   - legacy 2025-06-18 及更早: initialize 握手 + capabilities 协商 (兼容存量 MCP 客户端)。
 // 传输无关: 仅做 JSON-RPC 分发, stdio/HTTP 传输由上层 (src/mcp/http.js 等) 接入。
 import { TOOL_ERROR_PREFIX } from "../tools/catalog.js";
-import { warn, debug } from "../utils/logger.js";
+import { warn } from "../utils/logger.js";
 import { sanitizeMcpName } from "./index.js";
 
 // 版本号统一读 package.json, 避免与发布版本漂移 (外部体检: 硬编码 2.5.0 导致 serverInfo 落后真实版本)
@@ -16,7 +16,7 @@ import path from "node:path";
 let PKG_VERSION = "0.0.0";
 try {
   PKG_VERSION = JSON.parse(readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "package.json"), "utf8")).version || "0.0.0";
-} catch (e) { debug(`[mcp/server] 已忽略异常: ${e && e.message ? e.message : e}`); } // 非标准安装位置时降级, 不影响启动
+} catch {} // 非标准安装位置时降级, 不影响启动
 
 // 协议版本常量 (与官方 schema/2026-07-28 对齐)
 export const MODERN_PROTOCOL_VERSION = "2026-07-28";  // 现代 era (每请求 _meta)
@@ -308,22 +308,21 @@ export class McpServer {
     if (this._virtualTools.has(name)) {
       return this._virtualTools.get(name).execute(args, ctx, this.agent);
     }
-    // catalog 工具: 必须走 agent 的完整准入链, 而不是 catalog.call
-    // (2026-10-04 安全复审: 原实现 tools.call(name,args,{}) 传空 ctx ⇒ 权限引擎的 deny/ask、
-    //  高风险审批、config.security 黑名单、workspace 越界检查全部静默失效 —— MCP token 一旦
-    //  泄露即可经 /mcp 直接驱动 delete_file / run_command。agent._runTool 才是唯一合规入口。)
-    if (this.agent && typeof this.agent._runTool === "function") {
-      if (this.agent.tools && typeof this.agent.tools.has === "function" && !this.agent.tools.has(name)) {
-        throw new McpError(MCP_ERROR.INVALID_PARAMS, `未知工具: ${name}`);
-      }
-      return this.agent._runTool(name, args || {});
+    // catalog 工具: 必须经 agent 准入链 (_runTool: PreToolUse 钩子 + 权限引擎 + 审批 + 审计),
+    //   不得直连 catalog.call —— 后者会静默绕过 _admitToolCall, 把 MCP 端点变成权限旁路
+    //   (2026-10-04 S3 加固: MCP 端点此前权限引擎/审批/黑名单全静默)。
+    const agent = this.agent;
+    const hasCatalog = !!(agent && agent.tools && typeof agent.tools.has === "function");
+    const known = !hasCatalog || agent.tools.has(name);
+    if (agent && typeof agent._runTool === "function") {
+      // 未知工具须在进入执行前拦截 (否则会落 catalog 并抛"未知工具"以外的行为)
+      if (!known) throw new McpError(MCP_ERROR.INVALID_PARAMS, `未知工具: ${name}`);
+      return agent._runTool(name, args || {});
     }
-    if (this.agent && this.agent.tools && typeof this.agent.tools.call === "function") {
-      // 无 agent 准入链的降级 (单测桩对象等): 仍要在进入 catalog 前拦未知工具
-      if (typeof this.agent.tools.has === "function" && !this.agent.tools.has(name)) {
-        throw new McpError(MCP_ERROR.INVALID_PARAMS, `未知工具: ${name}`);
-      }
-      return this.agent.tools.call(name, args || {}, {});
+    // 兼容: 仅当 agent 未提供 _runTool (精简 mock/无准入链) 才回落 catalog.call
+    if (agent && agent.tools && typeof agent.tools.call === "function") {
+      if (!known) throw new McpError(MCP_ERROR.INVALID_PARAMS, `未知工具: ${name}`);
+      return agent.tools.call(name, args || {}, {});
     }
     throw new McpError(MCP_ERROR.INVALID_PARAMS, `未知工具: ${name}`);
   }

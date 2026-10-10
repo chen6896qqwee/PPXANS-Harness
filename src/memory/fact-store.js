@@ -7,13 +7,21 @@ import { migrateData, writeSchema } from "../utils/schema.js";
 import { setJaccard, setOverlap } from "../utils/similarity.js";
 import { scrubPII } from "../utils/pii.js";
 import { walFileOf, appendWal, readWal, truncateWal, walSizeBytes } from "../utils/wal.js";
+// 后端切换一次性迁移 (P3, v2026-10-04): JSON 侧为空时从同目录 facts.db 导入。
+//   注: skills/ppx-memory 的扁平化副本刻意不带这一支 (需 node:sqlite, 属主项目后端选择),
+//   这是 src 与副本的**已声明差异**, 由 skill-memory-drift 守卫按符号集而非逐字比对来容忍。
 import { importSqliteIntoJson } from "./backend-migrate.js";
-// v2026-10-XX (来源分级): 写入 tier 的判定规则集中在 provenance.js (零依赖, 与技能副本同源)
+// v2026-10-04 (同步 src 2026-10-04 治理批次): 独立版刻意不依赖主项目 ——
+//   src/memory/backend-migrate.js (sqlite→json 一次性导入, 需 node:sqlite) 与 utils/logger.js
+//   都不在扁平化范围内, 故此处不导入 importSqliteIntoJson, warn 降级为 console.warn。
+const warn = (...a) => console.warn(...a);
+// v2026-10-XX (同步 src 来源分级批次, 2026-10-05): 写入 tier 的判定规则集中在 provenance.js
+//   (零依赖、与 src/memory/provenance.js 逐字同源), 满足"技能副本整体可拷出"约束
+//   —— 见 test/skill-memory-drift.test.js 的副本漂移守卫。
 import {
   resolveWriteTier, tierOfRecord, rankOf, canSupersede, normalizeTier, isQuarantined, stripTierTags,
   matchesTierSelector,
 } from "./provenance.js";
-import { info, warn } from "../utils/logger.js";
 
 // 记忆动词前缀: 去重时剔除, 让"记住：X"与"X"视为同一条 (防 LLM 提炼版与原文冗余)
 const MEMORY_VERB_PREFIXES = [
@@ -29,21 +37,17 @@ export const LAYER_L4 = 4;
 export const FACTS_SCHEMA_VERSION = 1;
 
 export class FactStore {
-  // 墓碑行数与容量上限的倍数 (F4): 盘上最多留 maxFacts × 本值 条死行, 即总行数 ≤ maxFacts × (本值+1)。
-  // 为什么要有个数上限而不只按年龄清: 年龄清理挂在每日治理扫描上, 一次性 CLI 用法可能永远不跑,
-  // 而 add() 的锁内 _reload() 要为每一行 (含死行) 付出读盘+重建成本 —— 行数必须与活跃量同阶有界。
-  // 保留"最近删除"的墓碑仍可 restore/审计, 只回收最老的。
-  static TOMBSTONE_FACTOR = 4;
-
-  // facts.json.wal 的字节水位 (F7, 2026-10-05): 追加日志的**绝对**上限, 与事件条数阈值互补。
-  // 条数阈值管的是写放大频率 (compact 太勤 = 每次全量重写快照), 但它数的是"条" ——
-  // 一条 {op:"replace"} 事件把整个库序列化进同一行, 于是"没到阈值"就等价于"不封顶":
-  // 实测 40 次 importAll(replace, 1000 条) 让 wal 涨到 13,836,680 字节 (快照只有 2 字节),
-  // 而正常 2500 次 add 的峰值只有 18,032 字节。取 2MiB: 比常规峰值高 ~100 倍
-  // (常态路径一次都不会触发, 现有行为逐字节不变), 又能把批量导入/整库替换钉死在这个量级。
-  // 上限是"追加后检查"的软界: 峰值 ≤ max(本水位, 单条最大事件), 因为一条事件不可拆分。
+  // facts.json.wal 的字节水位 (F7, 2026-10-05, 与 src/memory/fact-store.js 同值同语义):
+  // 条数阈值数的是"条", 一条 {op:"replace"} 事件却能把整库序列化进同一行 —— "没到阈值"
+  // 不等于"有上限"。水位默认 2MiB: 正常 add 路径峰值 18KB 永远碰不到它, 批量整库替换被钉死。
   // 0/负数 = 关闭字节水位 (退回纯条数阈值的旧行为)。
   static WAL_MAX_BYTES = 2 * 1024 * 1024;
+
+  // 墓碑行数与容量上限的倍数 (F4, 2026-10-04; 与 sqlite-store.js 同值同口径):
+  // 软删/归档行不占 maxFacts 名额, 但同样要落盘 —— 无上限时"遗忘越勤, 文件越大,
+  // 每次操作越贵"(实测 600 次 add+forget 后 live=0 而盘上 600 行)。总行数上界 =
+  // maxFacts × (TOMBSTONE_FACTOR + 1): 活跃行 + 墓碑行各自有界。
+  static TOMBSTONE_FACTOR = 4;
 
   constructor(dataDir, opts = {}) {
     this.dir = path.join(dataDir, "memory");
@@ -62,11 +66,12 @@ export class FactStore {
       baseImportance: 10,
       forgetSpeed: 1.0,
       maxFacts: 1000,      // L1 事实总量上限, 超限按「衰减分×重要性」裁剪最弱 (0/负数=不裁剪)
-      // v2026-10-04 (F4): 墓碑 (status=deleted/archived) 回收参数。此前"软删/归档只打标不回收",
-      //   唯一的物理清除入口是 clearLayer(hard) —— 实测 600 次 add+forget 后 countLive()=0
-      //   但盘上仍有 600 行 / 287KB, 且 add 的锁内 _reload() 要为这些死行重建索引 (每 op 变贵)。
-      purgeGraceDays: 30,  // 时效扫描里墓碑的物理保留期 (天); 0 = 不按年龄物理清理
-      maxTombstones: 0,    // 墓碑行数上限; 0 = 按 maxFacts × TOMBSTONE_FACTOR 推导 (maxFacts<=0 时不设上限)
+      // F4 (2026-10-04) 墓碑治理默认值 (与 sqlite-store 同口径):
+      //   purgeGraceDays: 墓碑保留期 (天)。超过即被每日时效扫描物理回收; 0 = 关闭年龄回收
+      //     (仍受 maxTombstones 行数上限兜底)。保留期内的最近删除可 restore/审计。
+      //   maxTombstones: 墓碑行数上限 (0/缺省 = 按 maxFacts × TOMBSTONE_FACTOR 推导)。
+      purgeGraceDays: 30,
+      maxTombstones: 0,
       ...normOpts,
     };
     // WAL 增量落盘: 默认关闭 (= 旧行为每次变更全量原子写); 开启后变更走追加日志 (facts.json.wal),
@@ -114,17 +119,13 @@ export class FactStore {
     // v3.0.1 (P0#1): 非 WAL 模式下若快照损坏, 跳过构造期立即落盘 (保护现场, 防空数组覆盖);
     // 后续任何显式 add/update 仍会正常落盘, 届时内存状态即事实源
     if (!(guarded.parseFailed && !this.wal)) this.save();
-    // v2026-10-04 (P2#sqlite-parity #3): 后端切换 sqlite→json 一次性导入 —— 空库 + 同目录存在
-    // facts.db 才触发; parseFailed 时跳过 (P0#1 现场保护契约优先, 不得借迁移之名覆盖损坏文件)
+    // 后端切换一次性迁移 (P3, v2026-10-04): JSON 侧为空 + 同目录存在 facts.db → 从 sqlite 导入
+    //   (保留 id / 时间戳 / status / scope / 版本链 / TTL)。best-effort, 永不抛错; 目标非空绝不覆盖。
+    //   sqlite↔json 是 config.memory.backend 的两种等价后端, 切回来不能让数据"看起来消失"。
+    //   损坏态不迁移 (保护现场, 防空数组被导入结果覆盖掉损坏证据)。
     if (!guarded.parseFailed && this.facts.length === 0) {
-      importSqliteIntoJson(this);
-      this.rebuildIndex();
+      try { importSqliteIntoJson(this); } catch { /* 迁移失败不阻塞构造 */ }
     }
-    // v2026-10-XX (来源分级 · 存量回灌): 把每行的 tier 按 source 登记表落成持久字段。
-    //   判定不依赖这一步 (tierOfRecord 在缺 provenance 时会即时回退到 source 登记表),
-    //   这一步只是让"来源"变成可审计、可 diff 的磁盘事实 —— 见 backfillProvenance 的取舍注释。
-    //   parseFailed 且非 WAL 时不动盘 (P0#1 现场保护契约优先)。
-    if (!(guarded.parseFailed && !this.wal)) this.backfillProvenance();
   }
 
   // 全量落盘。非 WAL 模式: 直接原子写 (兼容旧行为, 调用方通常在锁内)。
@@ -167,14 +168,14 @@ export class FactStore {
   }
 
   /**
-   * 存量库的来源分级回灌 (迁移入口, 两个后端同名 API)。
+   * 存量库的来源分级回灌 (迁移入口, 与 src/memory/fact-store.js 同名 API 同口径)。
    * 取舍 (为什么按 source 登记表回灌而不是统一 unknown):
    *   ① 统一 unknown = 把"用户说过的话"也隔离掉 —— 画像/关键事实当场清空, 升级即失忆 (行为倒退,
    *      且不可由用户恢复: 用户不会重述历史上说过的每一句)。登记表能确定地复原绝大多数行的来源,
    *      因为 source 本来就是各调用点显式声明的字符串。
-   *   ② 代价是诚实性边界: 登记表之外的 source (自定义/手改/未来的新值) 一律 unknown → 隔离,
-   *      即"回灌只回灌能证明的, 证明不了的一律按不可信处理"。
+   *   ② 代价是诚实性边界: 登记表之外的 source (自定义/手改/未来的新值) 一律 unknown → 隔离。
    *   ③ 不猜内容: 判定只看 source/provenance 字段, 绝不做文本启发式 (见 provenance.js 约束①)。
+   * 注意: 副本版不含 sqlite 后端迁移, 语义与 src 版一致。
    * @param {{dryRun?: boolean}} [opts]
    * @returns {{total:number, stamped:number, byTier:Object, quarantined:number, dryRun:boolean}}
    */
@@ -196,9 +197,6 @@ export class FactStore {
     if (!this.facts.length) {
       return { total: 0, stamped: 0, byTier: {}, quarantined: 0, dryRun: false };
     }
-    // 已在锁内时 (构造末尾/importAll 内) 也要能跑: withFileLock 的抢锁是同进程可重入的吗?
-    // 不是 —— 所以这里只在**未持锁**的入口 (构造函数) 调用。add/update 等已在锁内的路径改用
-    // _stampProvenance() 直接补内存, 落盘由该路径自己的 save 完成。
     return withFileLock(this.file, () => {
       this._reload();
       const { byTier, q } = tally(this.facts);
@@ -249,12 +247,9 @@ export class FactStore {
     appendWal(this.walFile, evt);
     this._walPending += count;
     if (this._walPending >= this.walThreshold) { this._flushLocked(); return; }
-    // 字节水位 (F7): 条数阈值数的是"条", 一条事件却可以任意大 —— 整库替换 {op:"replace"}
-    // 会把全部事实序列化进同一行, 于是"40 条 < 阈值 50"能让追加日志涨到十几 MB 而永不 compact。
-    // 达到水位就地 compact: 走的是既有那条"快照∪WAL∪内存 → 全量原子写 → 清 WAL"的路径,
-    // 所以 (a) 不删任何未 compact 的事件 (它们刚被并进快照), (b) 重放结果与裁剪前逐条等价,
-    // (c) 顺序恒为"先写快照再清 WAL", 清空的一瞬间盘上也已经有完整状态可读 —— 耐久性不降。
-    // 本函数只被锁内调用 (add/hit/forget/update/importAll/sweepExpired 的临界区), 天然串行。
+    // 字节水位 (F7): 见 src/memory/fact-store.js 同名方法注释 —— 条数阈值封顶不了"一条巨型事件",
+    // 达到水位就地 compact 走既有"快照∪WAL∪内存 → 全量原子写 → 清 WAL"路径, 不删未 compact 事件,
+    // 重放结果与裁剪前等价; 全程在调用方已持有的文件锁内, 天然串行。
     if (this.walMaxBytes > 0 && walSizeBytes(this.walFile) >= this.walMaxBytes) this._flushLocked();
   }
 
@@ -420,25 +415,30 @@ export class FactStore {
   //   rank(写入) >= rank(存量) → 照旧加分; 严格更高时把记录**晋级** (用户后来亲口说过同一件事,
   //     来源就升回来了)。晋级只能向上 (canSupersede 已挡向下), 任何写入都不会把记录降级成 unknown。
   _onDedupeHit(existing, tier, now) {
-    if (!canSupersede(tier, tierOfRecord(existing))) return existing;
+    // hits/lastAccess = "这条事实又被观察到一次"的**遥测**, 与写入方权限无关, 恒记 (2026-10-10 修):
+    //   原实现把整个函数体都挂在 canSupersede 闸下 —— 低权限来源 (如 extract) 命中高权限记录
+    //   (如 user-stated) 时连 hits 都不加, "同一件事反复被提起"这个信号直接丢失, 检索排序失准。
+    // 防操纵闸门只保留在**能改变排序/权威性**的两处: 加分与 provenance 变更 (低权限不得抬高别人)。
     existing.hits += 1;
     existing.lastAccess = now;
-    existing.score += this.opts.hitBonus;
-    if (rankOf(tier) > rankOf(tierOfRecord(existing))) existing.provenance = tier;
+    if (canSupersede(tier, tierOfRecord(existing))) {
+      existing.score += this.opts.hitBonus;
+      if (rankOf(tier) > rankOf(tierOfRecord(existing))) existing.provenance = tier;
+    }
     this._markMutated(existing);
     return existing;
   }
 
   add(content, { importance = this.opts.baseImportance, type = "general", source = "manual", dedupe = true, scope = null, meta = null, similarThreshold = 0, layer = LAYER_L1, ttlDays = null, validFrom = null, validTo = null, supersedeId = null, provenance = null } = {}) {
-    // P0 (2026-10-04) 单点脱密: add 是唯一持久化入口 (JSON 与 sqlite 两条落盘路径都经过这里)。
-    //   记忆长期驻留、逐轮注入 system prompt、还会发给云端 provider —— 凭证/密钥一旦进来就等于外泄。
+    // P0 (2026-10-04) 单点脱密: add 是唯一持久化入口。记忆长期驻留、逐轮注入 system prompt、
+    //   还会发给云端 provider —— 凭证/密钥一旦进来就等于外泄。
     //   保留 email/phone: 用户主动要求记住的联系方式是记忆的正常用途, 不是泄漏; 其余 PII 一律脱。
     // 来源分级 (v2026-10-XX): 未声明 provenance 且 source 不在登记表 → unknown (隔离),
     //   绝不因"没写"而继承 user-stated —— 与 src/tools/catalog.js 当年 {readOnly:true} 兜底同类的
     //   "未声明=给最大权限"反模式在此废止 (默认拒绝)。
     const tier = resolveWriteTier({ provenance, source });
     // 伪装标签剥离必须在**写入侧**: 抓来的页面里若写着「(来源: 用户原话)」, 任何下游渲染路径
-    //   (本层的"关键事实", 以及本层之外的 memory_search / "我记得:") 都无法分辨它 ——
+    //   (本层的"关键事实", 以及 memory_search / "我记得:") 都无法分辨它 ——
     //   在入库前剥掉, 所有渲染者一起安全 (标签文本只来自 provenance.js 的闭集常量)。
     const safe = stripTierTags(scrubPII(String(content ?? ""), { keep: ["email", "phone"] }).cleaned);
     const norm = this._norm(safe);
@@ -524,53 +524,82 @@ export class FactStore {
   // 只统计/裁剪活跃事实 (2026-10-04 修复, 与 sqlite 后端 status='active' 同口径):
   //   原先把软删/归档条目一起评分, 它们与活跃事实争夺 maxFacts 名额 —— 遗忘链条越长
   //   (sweepExpired 软删 + update 归档), 越会把真正在用的记忆当成"最弱"硬删掉。
-  // 2026-10-04 (F4): 同时给**墓碑行数**设上限 (maxFacts × TOMBSTONE_FACTOR)。
-  //   死行不占 maxFacts 名额 (上面已排除), 但仍占磁盘行数和 add() 锁内 _reload()/rebuildIndex
-  //   的成本 —— 原实现里它们只能靠 clearLayer(hard) 或人工清理, 于是"遗忘越勤, 文件越大越慢"。
-  //   回收顺序: 按删除时钟升序 (最老的死行先走), 最近的删除仍可 restore/审计。
-  //   调用方必须已持有文件锁 (与 add 同一把锁, 全程同步)。
   _prune() {
     const max = this.opts.maxFacts;
-    const explicitCap = Number(this.opts.maxTombstones) || 0;
-    if ((!max || max <= 0) && explicitCap <= 0) return 0; // 两者都关 = 完全不裁剪 (保持旧语义)
-    const live = this._live();
-    const dropped = [];
-    if (max && max > 0 && live.length > max) {
-      const nowD = this._nowDays();
-      const scored = live.map((f) => {
-        const days = Math.max(0, nowD - new Date(f.lastAccess).getTime() / 86400000);
-        const recency = Math.exp(-this._lambdaOf(f) * days * days); // 0~1 (L4 程序性记忆衰减更慢, 更抗裁剪)
-        const imp = Math.min(f.importance || 0, 20) / 20; // 0~1
-        // 来源分级 (v2026-10-XX): 隔离带记录先出局 —— 一次抓回上千条噪声不该把用户事实挤掉。
-        //   同一大类内部仍按原「衰减分×重要性」降序, 所以现有单来源测试的淘汰次序逐字不变。
-        const quarantineFirst = isQuarantined(tierOfRecord(f)) ? 0 : 1;
-        return { id: f.id, key: (f.score * (0.4 + 0.6 * recency)) * (0.5 + 0.5 * imp), promotable: quarantineFirst };
-      });
-      scored.sort((a, b) => (b.promotable - a.promotable) || (b.key - a.key));
-      const keep = new Set(scored.slice(0, max).map((x) => x.id));
-      for (const f of live) if (!keep.has(f.id)) dropped.push(f.id);
-    }
-    // 墓碑行数上限: maxTombstones 显式配置优先, 否则按容量推导 (maxFacts<=0 且未显式配置 = 不设上限)
-    const cap = explicitCap > 0 ? explicitCap : (max && max > 0 ? max * FactStore.TOMBSTONE_FACTOR : 0);
-    if (cap > 0) {
-      const tombstones = this.facts.filter((f) => f.status === "deleted" || f.status === "archived");
-      if (tombstones.length > cap) {
-        const clockOf = (f) => {
-          const v = f.deletedAt || f.archivedAt || f.updatedAt || f.lastAccess || f.created;
-          const t = v ? new Date(v).getTime() : 0;
-          return Number.isFinite(t) ? t : 0;
-        };
-        tombstones.sort((a, b) => clockOf(a) - clockOf(b));
-        for (const f of tombstones.slice(0, tombstones.length - cap)) dropped.push(f.id);
+    let dropped = 0;
+    // 活跃行容量裁剪 (maxFacts=0/负数 时跳过; 墓碑上限独立于它, 见下)
+    if (max && max > 0) {
+      const live = this._live();
+      if (live.length > max) {
+        const nowD = this._nowDays();
+        const scored = live.map((f) => {
+          const days = Math.max(0, nowD - new Date(f.lastAccess).getTime() / 86400000);
+          const recency = Math.exp(-this._lambdaOf(f) * days * days); // 0~1 (L4 程序性记忆衰减更慢, 更抗裁剪)
+          const imp = Math.min(f.importance || 0, 20) / 20; // 0~1
+          // 来源分级 (v2026-10-XX): 隔离带记录先出局 —— 一次抓回上千条噪声不该把用户事实挤掉。
+          //   同一大类内部仍按原「衰减分×重要性」降序, 所以现有单来源测试的淘汰次序逐字不变。
+          const quarantineFirst = isQuarantined(tierOfRecord(f)) ? 0 : 1;
+          return { id: f.id, key: (f.score * (0.4 + 0.6 * recency)) * (0.5 + 0.5 * imp), promotable: quarantineFirst };
+        });
+        scored.sort((a, b) => (b.promotable - a.promotable) || (b.key - a.key));
+        const keep = new Set(scored.slice(0, max).map((x) => x.id));
+        const liveIds = new Set(live.map((f) => f.id));
+        const removedIds = [...liveIds].filter((id) => !keep.has(id));
+        this.facts = this.facts.filter((f) => !liveIds.has(f.id) || keep.has(f.id));
+        this.rebuildIndex(); // 重建倒排索引 (内部已清 _statsCache)
+        for (const id of removedIds) this._embedCache.delete(id); // 事实已不在, 缓存向量作废
+        if (removedIds.length) this._markRemoved(removedIds);
+        dropped += removedIds.length;
       }
     }
-    if (!dropped.length) return 0;
-    const dropSet = new Set(dropped);
-    this.facts = this.facts.filter((f) => !dropSet.has(f.id));
-    this.rebuildIndex(); // 重建倒排索引 (内部已清 _statsCache)
-    for (const id of dropSet) this._embedCache.delete(id); // 事实已不在, 缓存向量作废
-    this._markRemoved(dropped);
-    return dropped.length;
+    // 墓碑行数上限 (F4): 与 maxFacts 解耦 —— 显式 maxTombstones 优先, 否则按 maxFacts × K 推导。
+    //   只保留"最近的删除" (按删除/归档时钟升序淘汰最老), 与 sqlite 后端 _prune 同口径。
+    const cap = this._tombstoneCap();
+    if (cap > 0) {
+      const purged = this._purgeTombstones({ cap });
+      if (purged.length) dropped += purged.length;
+    }
+    return dropped;
+  }
+
+  // 墓碑行数上限: 显式 maxTombstones 优先 (0/缺省则按 maxFacts × TOMBSTONE_FACTOR 推导)。
+  //   返回 0 = 不设上限 (旧形状, 供测试对照与 opt-out)。
+  _tombstoneCap() {
+    const explicit = Number(this.opts.maxTombstones);
+    if (Number.isFinite(explicit) && explicit > 0) return explicit;
+    // 显式传 0 = 关闭墓碑上限 (与 maxFacts=0 的 opt-out 语义一致, 测试对照用)
+    const max = Number(this.opts.maxFacts);
+    if (!max || max <= 0) return 0;
+    return max * FactStore.TOMBSTONE_FACTOR;
+  }
+
+  // 墓碑物理回收 (F4, 与 sqlite-store.js _purgeTombstones 同口径):
+  //   cap > 0          = 只留最近的 cap 条墓碑 (容量口径, 淘汰最老的)
+  //   olderThanMs > 0  = 只删"早于该时间戳"的墓碑 (年龄口径, 供 sweepExpired 挂年龄回收)
+  //   limit > 0        = 只删最老的 limit 条
+  //   tier             = 来源分级选择器 (缺省 null = 不分档); 传 "quarantined" 时只碰隔离带
+  // 删除/归档时钟: deletedAt 优先, 归档行退到 archivedAt, 再退到 lastAccess/created。
+  // 返回被回收的 id 列表。调用方需已持锁 (或由 add 的锁内路径调用)。
+  _purgeTombstones({ cap = 0, olderThanMs = 0, limit = 0, tier = null } = {}) {
+    const clockOf = (f) => {
+      const t = f.deletedAt || f.archivedAt || f.lastAccess || f.created;
+      const ms = t ? new Date(t).getTime() : 0;
+      return Number.isFinite(ms) ? ms : 0;
+    };
+    let doomed = this.facts
+      .filter((f) => f.status === "deleted" || f.status === "archived")
+      .filter((f) => matchesTierSelector(tierOfRecord(f), tier));
+    doomed.sort((a, b) => clockOf(a) - clockOf(b)); // 最老的在前
+    if (olderThanMs > 0) doomed = doomed.filter((f) => clockOf(f) <= olderThanMs);
+    if (cap > 0) doomed = doomed.slice(0, Math.max(0, doomed.length - cap));
+    else if (limit > 0) doomed = doomed.slice(0, limit);
+    if (!doomed.length) return [];
+    const ids = new Set(doomed.map((f) => f.id));
+    this.facts = this.facts.filter((f) => !ids.has(f.id));
+    for (const id of ids) this._embedCache.delete(id);
+    this.rebuildIndex();
+    this._markRemoved([...ids]);
+    return [...ids];
   }
 
   // 字符级索引 key: 中文拆单字 + 英文按 token (对中文检索才有效)
@@ -582,10 +611,7 @@ export class FactStore {
   }
 
   // 倒排索引: 把一条事实的字符 key 挂到索引 (key -> factId)
-  // 2026-10-04 (F4): 墓碑 (deleted/archived) 不进索引。检索走 _live() 过滤后的集合,
-  //   死行的 key 挂进来永远不会被用到, 却让 rebuildIndex 的成本随"历史累计删除量"线性上涨。
   _indexFact(fact) {
-    if (!fact || fact.status === "deleted" || fact.status === "archived") return;
     for (const k of this._charKeys(fact.content)) {
       if (!this._index.has(k)) this._index.set(k, new Set());
       this._index.get(k).add(fact.id);
@@ -593,10 +619,12 @@ export class FactStore {
   }
 
   // 重建索引 (facts 外部变更后调用)
+  // F4 (2026-10-04): 墓碑 (status=deleted/archived) 不进倒排索引 —— 索引规模只由活跃集决定,
+  //   否则"遗忘越勤, 索引越大", 检索还得从墓碑里筛。软删后索引里一个 key 都不该留下。
   rebuildIndex() {
     this._index = new Map();
     this._statsCache.clear();
-    for (const fact of this.facts) this._indexFact(fact);
+    for (const fact of this._live()) this._indexFact(fact);
     return this._index.size;
   }
 
@@ -878,9 +906,6 @@ export class FactStore {
     return this._live().sort((a, b) => b.score - a.score);
   }
 
-  // 盘上行数 (含 status=deleted/archived 的墓碑), 不是"还能用的记忆条数"。
-  // 活跃条数用 countLive(); 治理/展示要区分两者时用 stats() (F4: 旧实现只打 count() 当"记忆条数",
-  // 遗忘越多这个数字越虚高)。行数由 _prune 的墓碑上限保证与 maxFacts 同阶有界。
   count() {
     return this.facts.length;
   }
@@ -980,21 +1005,12 @@ export class FactStore {
 
   // TTL 扫描: 超过 ttlDays 未访问的条目软归档 (非硬删)
   // 与 /_prune 的分工: _prune 是容量保护的硬删, sweepExpired 是时效治理的软归档 (可回滚)
-  // 2026-10-04 (F4): 同一次扫描里顺带做**墓碑物理回收** (status deleted/archived 且超过保留期)。
-  //   为什么放在这里而不是新调度器: 本方法就是已接线的每日治理入口
-  //   (src/agent/index.js eviction-daily 02:00 -> sweepMemoryTtl -> sweepExpired),
-  //   "软归档 -> 保留期 -> 物理清理"是同一条治理流水线的两端, 拆成两套定时器只会漂移。
-  //   版本链语义保持不变: 被取代的旧版 (archived) 先由 TTL 规则参与时效扫描 (扫描只看
-  //   status !== 'deleted', 归档行本就在射程内), 到期软删后再走保留期, 因此
-  //   「superseded 但仍在审计窗口内」的条目不会被提前抹掉; validFrom/validTo 窗口不参与回收判定。
-  //   保留期从删除/归档时钟起算, 缺时间戳的老数据退回 lastAccess/created (宁可多留一天也不误删)。
   // 来源分级 (v2026-10-XX) 新增可选 tier 选择器 (与 sqlite 后端同参数同口径): 只扫该档的记录,
   //   墓碑年龄回收同样按档过滤 —— 语义闭合: sweepExpired({tier:"quarantined"}) 只动隔离带,
   //   用户事实 (含其墓碑) 一律不碰。缺省 null = 全量, 旧调用方逐字同行为。
-  sweepExpired({ ttlDays = 90, layer = null, dryRun = false, purgeGraceDays = null, tier = null } = {}) {
-    // 先与磁盘对齐再判据 (F4): 到期清单和墓碑清单都可能是"别的进程刚写过的行"改出来的,
-    //   dryRun 若读内存就会报"dryRun 说不用清, 真跑却清了"。_reload() 是纯读 (非 WAL 每次变更即落盘,
-    //   WAL = 快照 + 重放增量), 不写盘所以不必持锁; 本方法是每日治理入口, 不在热路径上。
+  sweepExpired({ ttlDays = 90, layer = null, dryRun = false, tier = null } = {}) {
+    // F4: 计划阶段必须基于**磁盘真相** —— 墓碑的删除时钟可能被外部/他进程改过
+    //   (测试用 backdate 直接改盘模拟"躺了 N 天"), dryRun 要报的数也必须与真跑一致。
     this._reload();
     const nowD = this._nowDays();
     const targets = [];
@@ -1007,28 +1023,25 @@ export class FactStore {
       const days = Math.max(0, nowD - new Date(f.lastAccess).getTime() / 86400000);
       if (days >= ttl) targets.push(f.id);
     }
-    // 墓碑保留期 (天): 0/负数 = 关闭年龄物理清理 (仍可被 _prune 的行数上限兜底)
-    const grace = purgeGraceDays == null ? Number(this.opts.purgeGraceDays) : Number(purgeGraceDays);
-    const purgeDays = Number.isFinite(grace) && grace > 0 ? grace : 0;
-    const cutoffMs = purgeDays ? Date.now() - purgeDays * 86400000 : 0;
-    // 该条墓碑是否已过保留期
-    const expiredTomb = (f) => {
-      if (!purgeDays) return false;
-      const v = f.deletedAt || f.archivedAt || f.updatedAt || f.lastAccess || f.created;
-      const t = v ? new Date(v).getTime() : NaN;
-      return Number.isFinite(t) ? t <= cutoffMs : false;
-    };
-    const collectTombstones = () => this.facts
-      .filter((f) => (f.status === "deleted" || f.status === "archived") && expiredTomb(f)
-        && matchesTierSelector(tierOfRecord(f), tier))
-      .map((f) => f.id);
+    // F4 (2026-10-04) 墓碑年龄回收: 挂在**同一次**扫描里 (不新起定时器)。
+    //   purgeGraceDays>0 = 超过保留期的墓碑物理回收 (保留期内的最近删除仍可 restore/审计)。
+    //   判据只看删除/归档时钟, 与 validFrom/validTo 窗口无关 (窗口只管检索可见性)。
+    const graceDays = Number(this.opts.purgeGraceDays) || 0;
+    const graceCutoff = graceDays > 0 ? Date.now() - graceDays * 86400000 : 0;
+    const purgePlan = graceCutoff > 0
+      ? this.facts.filter((f) => (f.status === "deleted" || f.status === "archived")
+          && matchesTierSelector(tierOfRecord(f), tier)
+          && (() => {
+            const t = f.deletedAt || f.archivedAt || f.lastAccess || f.created;
+            const ms = t ? new Date(t).getTime() : 0;
+            return Number.isFinite(ms) && ms <= graceCutoff;
+          })())
+      : [];
     if (dryRun) {
-      const purgedIds = collectTombstones();
-      return { swept: targets.length, ids: targets, dryRun: true, purged: purgedIds.length, purgedIds };
-    }
-    // 无事可做 (无到期条目且未启用年龄清理) 时不动锁不写盘, 与旧行为一致
-    if (!targets.length && !purgeDays) {
-      return { swept: 0, ids: targets, dryRun: false, purged: 0, purgedIds: [] };
+      return {
+        swept: targets.length, ids: targets, dryRun: true,
+        purged: purgePlan.length, purgedIds: purgePlan.map((f) => f.id),
+      };
     }
     return withFileLock(this.file, () => {
       this._reload();
@@ -1042,17 +1055,11 @@ export class FactStore {
           touched.push(f);
         }
       }
-      // 同一把锁内继续物理回收过期墓碑 (临界区全同步: 重读 -> 变更 -> 落盘, 不 await)
-      const purgedIds = collectTombstones();
-      if (purgedIds.length) {
-        const dropSet = new Set(purgedIds);
-        this.facts = this.facts.filter((f) => !dropSet.has(f.id));
-        for (const id of purgedIds) this._embedCache.delete(id);
-      }
-      this.rebuildIndex();
-      this._markMutated(...touched);
-      if (purgedIds.length) this._markRemoved(purgedIds);
-      if (purgedIds.length) info(`[memory/fact-store] 墓碑物理回收 ${purgedIds.length} 条 (软删/归档超过 ${purgeDays} 天保留期)`);
+      if (touched.length) this.rebuildIndex();
+      if (touched.length) this._markMutated(...touched);
+      // 墓碑年龄回收 (锁内重读后按同一 graceCutoff 再算一次, 用磁盘真相而非过期计划)
+      let purgedIds = [];
+      if (graceCutoff > 0) purgedIds = this._purgeTombstones({ olderThanMs: graceCutoff, tier });
       return { swept: n, ids: targets, dryRun: false, purged: purgedIds.length, purgedIds };
     });
   }
@@ -1158,7 +1165,7 @@ export class FactStore {
       rows: this.facts.length,
       tombstones: deleted + archived,
       max_facts: this.opts.maxFacts || 0,
-      max_tombstones: Number(this.opts.maxTombstones) || (this.opts.maxFacts ? this.opts.maxFacts * FactStore.TOMBSTONE_FACTOR : 0),
+      max_tombstones: this._tombstoneCap(),
       purge_grace_days: Number(this.opts.purgeGraceDays) || 0,
       by_source: bySource,
       by_type: byType,

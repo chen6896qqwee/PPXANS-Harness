@@ -133,7 +133,8 @@ function shutdown(signal) {
   Promise.resolve()
     .then(() => manager?.stop?.())
     .catch(() => {})
-    .then(() => agent.shutdown().catch(() => {}))
+    // 2026-10-10 (L2): shutdown 已异步化, 返回并等待 (确保军团子进程回收完成再退出)
+    .then(() => Promise.resolve(agent.shutdown()).catch(() => {}))
     .finally(() => setTimeout(() => process.exit(0), 150));
 }
 process.on("SIGINT", () => shutdown("SIGINT"));

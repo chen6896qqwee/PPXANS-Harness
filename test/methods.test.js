@@ -23,9 +23,6 @@ test("方法型Skill: 无LLM时返回标准错误前缀 (降级不崩)", async (
   const a = new PPXAgent({ root: tmpRoot("methods2") });
   // 强制无 LLM
   a.llm = null;
-  // 2026-10-05: clarify 在无人应答进程改走"指引"分支 (不再出题), 这里登记人类通道,
-  // 测的仍是"有人在场但 LLM 缺失 → 标准错误前缀"的旧口径。
-  a.markHumanChannel(true);
   const r1 = await a.tools.call("humanize", { text: "很高兴为您服务" }, { agent: a });
   assert.ok(r1.startsWith(TOOL_ERROR_PREFIX), "humanize 无LLM应报错: " + r1);
   const r2 = await a.tools.call("write_article", { topic: "测试" }, { agent: a });

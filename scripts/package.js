@@ -73,39 +73,16 @@ function stageApp(zipPath) {
   const stage = path.join(DIST, ".stage");
   fs.rmSync(stage, { recursive: true, force: true });
   fs.mkdirSync(stage, { recursive: true });
-  for (const d of APP_DIRS) {
-    // 2026-10-03 修复 (P1): config 目录原样递归复制会把 config/ppx.json (可能含明文
-    // api_key / channels auth_token, 由 ppx-setup 向导落盘) 一起打进发布物发给最终用户。
-    // 打包时排除 ppx.json, 只带 example 模板。
-    const filter = d === "config"
-      ? (src) => path.basename(src) !== "ppx.json"
-      : undefined;
-    fs.cpSync(path.join(ROOT, d), path.join(stage, d), { recursive: true, filter });
-  }
+  for (const d of APP_DIRS) fs.cpSync(path.join(ROOT, d), path.join(stage, d), { recursive: true });
   for (const f of APP_FILES) {
     if (fs.existsSync(path.join(ROOT, f))) fs.copyFileSync(path.join(ROOT, f), path.join(stage, f));
     else log(`      警告: 清单文件不存在, 跳过 ${f}`);
   }
-  // 内置运行时: 从 node zip 抽出 node.exe → runtime/node.exe
-  // 2026-10-03 修复 (P2): 原 execFileSync("python3") 在裸 Windows 上必挂 (无 python3,
-  // 且易撞微软商店假别名), 与零依赖叙事不符。改用系统自带 PowerShell Expand-Archive。
+  // 内置运行时: 从 node zip 抽出 node.exe → runtime/node.exe (python3 解压, 构建机通用)
   fs.mkdirSync(path.join(stage, "runtime"), { recursive: true });
-  const tmpUnzip = path.join(DIST, ".unzip-tmp");
-  fs.rmSync(tmpUnzip, { recursive: true, force: true });
-  fs.mkdirSync(tmpUnzip, { recursive: true });
-  run("powershell", ["-NoProfile", "-Command",
-    `Expand-Archive -Path '${zipPath.replace(/'/g, "''")}' -DestinationPath '${tmpUnzip.replace(/'/g, "''")}' -Force`]);
-  const found = (function findNode(dir) {
-    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-      const p = path.join(dir, e.name);
-      if (e.isDirectory()) { const r = findNode(p); if (r) return r; }
-      else if (e.name === "node.exe") return p;
-    }
-    return null;
-  })(tmpUnzip);
-  if (!found) die("node zip 中找不到 node.exe");
-  fs.copyFileSync(found, path.join(stage, "runtime", "node.exe"));
-  fs.rmSync(tmpUnzip, { recursive: true, force: true });
+  execFileSync("python3", ["-c",
+    `import zipfile,sys; z=zipfile.ZipFile(sys.argv[1]); [open(sys.argv[2],'wb').write(z.read(n)) for n in z.namelist() if n.endswith('/node.exe')]`,
+    zipPath, path.join(stage, "runtime", "node.exe")]);
   // 打包专属启动器: 运行时优先的 Web 启动入口 (快捷方式指向它)
   fs.writeFileSync(path.join(stage, "ppx-web.cmd"), [
     "@echo off",
@@ -118,25 +95,24 @@ function stageApp(zipPath) {
   return stage;
 }
 
-// ---- 3. zip 打包 (PowerShell Compress-Archive; withTopDir=便携版带顶层目录, 安装器 payload 平铺) ----
-// 2026-10-03 修复 (P2): 原依赖外部 Info-ZIP `zip` 命令, 裸 Windows 不存在 → 打包必挂。
-// 改用系统自带 PowerShell (目标机解压侧本就依赖 Expand-Archive, 同源无兼容问题)。
+// ---- 3. zip 打包 (系统 zip; withTopDir=便携版带顶层目录, 安装器 payload 平铺) ----
 function makeZip(stage, outPath, withTopDir) {
-  fs.rmSync(outPath, { force: true });
-  const psQuote = (s) => "'" + s.replace(/'/g, "''") + "'";
+  const args = ["-r", "-q", "-X", outPath];
   if (withTopDir) {
     // 便携版: 顶层目录 PPXANS-Harness/
+    fs.rmSync(path.join(path.dirname(outPath), "PPXANS-Harness"), { recursive: true, force: true });
     const tmpTop = path.join(path.dirname(outPath), "PPXANS-Harness");
-    fs.rmSync(tmpTop, { recursive: true, force: true });
     fs.cpSync(stage, tmpTop, { recursive: true });
-    run("powershell", ["-NoProfile", "-Command",
-      `Compress-Archive -Path ${psQuote(tmpTop)} -DestinationPath ${psQuote(outPath)} -Force`]);
-    fs.rmSync(tmpTop, { recursive: true, force: true });
+    args.push("PPXANS-Harness");
   } else {
     // 安装器 payload: 平铺 (解压目标目录即安装根)
-    run("powershell", ["-NoProfile", "-Command",
-      `Compress-Archive -Path ${psQuote(path.join(stage, "*"))} -DestinationPath ${psQuote(outPath)} -Force`]);
+    for (const e of fs.readdirSync(stage, { withFileTypes: true })) {
+      if (e.isDirectory()) args.push(e.name + "/");
+      else args.push(e.name);
+    }
   }
+  fs.rmSync(outPath, { force: true });
+  run("zip", args, { cwd: withTopDir ? path.dirname(outPath) : stage });
 }
 
 // ---- 4. 安装器: payload base64 内嵌进自解压 .cmd ----

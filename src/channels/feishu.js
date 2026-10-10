@@ -15,6 +15,11 @@ export class FeishuChannel extends Channel {
     this.lastUser = null; // 最近收到消息的 open_id, 供主动提醒(广播)回发
   }
 
+  // 2026-10-10 (S6): 未配 verify_token 时是否允许放行 —— 仅当显式 opt-in
+  _allowUnauthenticated() {
+    return this.agent?.config?.security?.allow_unauthenticated_webhooks === true;
+  }
+
   // 主动提醒广播 (to="*") 时回最近联系人; 无记录则报缺接收人
   _resolveTarget(to) {
     const target = !to || to === "*" ? this.lastUser : to;
@@ -64,15 +69,20 @@ export class FeishuChannel extends Channel {
   mount(server, httpChannel = null) {
     const register = this._registrar(server, httpChannel);
     register(this.webhookPath, async (req, res) => {
-      // 鉴权先于读体: 未鉴权请求不应消耗/接收整个 body (也防大 body DoS)
-      const denied = this._webhookSecretGate(this.verifyToken);
-      if (denied) return this._sendJson(res, 403, { error: denied });
-      // 飞书事件订阅用请求头 X-Lark-Request-Token 携带 verify_token (body 内 token 极少存在, 仅作纵深)
-      // 到这里 verifyToken 必非空, 除非操作者显式开了 allow_unauthenticated_webhooks (本地调试) —— 那时跳过比对
-      if (this.verifyToken && req.headers["x-lark-request-token"] !== this.verifyToken) {
-        return this._sendJson(res, 403, { error: "invalid token" });
-      }
       const body = await this._readBody(req);
+      // 2026-10-10 安全修复 (S6): 未配置 verify_token = 无法鉴权 = fail closed (原为完全放行)。
+      //   本地调试需显式设 security.allow_unauthenticated_webhooks=true。
+      if (!this.verifyToken) {
+        if (this._allowUnauthenticated()) {
+          try { return this._sendJson(res, 200, await this.handleWebhook(body)); }
+          catch (e) { return this._sendJson(res, 500, { error: e.message }); }
+        }
+        return this._sendJson(res, 403, { error: "未配置 verify_token, 拒绝处理 webhook。本地调试请设 security.allow_unauthenticated_webhooks=true" });
+      }
+      // 飞书事件订阅用请求头 X-Lark-Request-Token 携带 verify_token (body 内 token 极少存在, 仅作纵深)
+      if (req.headers["x-lark-request-token"] !== this.verifyToken) {
+        return this._sendJson(res, 403, { error: "令牌无效" });
+      }
       try {
         return this._sendJson(res, 200, await this.handleWebhook(body));
       } catch (e) {
@@ -84,11 +94,9 @@ export class FeishuChannel extends Channel {
   // 处理飞书 webhook 事件 (事件订阅回调)
   async handleWebhook(body) {
     // 校验 verify_token (纵深防御; 主校验在 mount 的 X-Lark-Request-Token 头)
-    const denied = this._webhookSecretGate(this.verifyToken);
-    if (denied) return { code: 1, msg: denied };
     const data = typeof body === "string" ? JSON.parse(body) : body;
     if (data.token && data.token !== this.verifyToken) {
-      return { code: 1, msg: "invalid token" };
+      return { code: 1, msg: "令牌无效" };
     }
     // URL 验证 (飞书首次配置时)
     if (data.type === "url_verification") {

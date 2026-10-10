@@ -31,14 +31,13 @@ function registerMemoryGovernanceTools(catalog, { rootDir, facts, dataDir } = {}
   // 1. 遗忘 (软删, 可回滚) —— ppx-agent 原版只有不可逆硬删, 这是最大的治理缺口
   catalog.register({
     name: "memory_forget",
-    // 软删 (可 memory_restore 回滚) —— 变更持久记忆状态故非只读, 但可逆所以不定 high
-    capability: { riskLevel: "medium", readOnly: false, destructive: false, sideEffect: "memory" },
+    capability: { readOnly: false, riskLevel: "medium", sideEffect: "workspace" },
     description: "遗忘一条记忆 (软删, 数据保留可用 memory_restore 回滚)。传 id 或内容关键字定位。",
     parameters: {
       type: "object",
       properties: {
         id_or_content: { type: "string", description: "记忆 id 或内容 (按内容精确匹配, 去记忆动词前缀后比对)" },
-        id: { type: "string", description: "记忆 id (与 id_or_content 二选一, 与 memory_restore 参数名对齐)" },
+        id: { type: "string", description: "记忆 id (与 id_or_content 等价, 双向兼容)" },
         reason: { type: "string", description: "遗忘原因 (记入审计, 便于后续复核)" },
       },
       required: [],
@@ -48,9 +47,9 @@ function registerMemoryGovernanceTools(catalog, { rootDir, facts, dataDir } = {}
     idempotent: true,
     execute: async (args) => {
       if (!facts) return noFacts();
-      // 2026-10-03 统一: 兼容接受 id (与 memory_restore 同名), 消除两个工具参数命名不一致
-      const target = args.id_or_content || args.id;
-      if (!target) return JSON.stringify({ error: "缺少必填参数 id 或 id_or_content" });
+      // 2026-10-10: 命名统一 —— 双向兼容 id 与 id_or_content (两键任意一个有值即用)
+      const target = args.id_or_content ?? args.id;
+      if (!target) return JSON.stringify({ error: "缺少 id 或 id_or_content (两者任一即可)" });
       const f = facts.forget(target, { reason: args.reason || null });
       if (!f) return JSON.stringify({ error: "未找到匹配记忆", target });
       return JSON.stringify({ ok: true, id: f.id, content: f.content, status: f.status, note: "已软删, 可用 memory_restore 回滚" });
@@ -60,23 +59,24 @@ function registerMemoryGovernanceTools(catalog, { rootDir, facts, dataDir } = {}
   // 2. 回滚遗忘
   catalog.register({
     name: "memory_restore",
-    capability: { riskLevel: "medium", readOnly: false, destructive: false, sideEffect: "memory" },
+    capability: { readOnly: false, riskLevel: "medium", sideEffect: "workspace" },
     description: "恢复一条被遗忘 (软删) 的记忆。",
     parameters: {
       type: "object",
-    properties: {
-      id: { type: "string", description: "记忆 id" },
-      id_or_content: { type: "string", description: "记忆 id 或内容 (与 id 二选一, 兼容 memory_forget 参数名)" },
-    },
-    required: [],
+      properties: {
+        id: { type: "string", description: "记忆 id" },
+        id_or_content: { type: "string", description: "记忆 id 或内容 (与 id 等价, 双向兼容)" },
+      },
+      required: [],
     },
     category: "memory",
     power: "user",
     idempotent: true,
     execute: async (args) => {
       if (!facts) return noFacts();
-      // 2026-10-03 统一: 兼容接受 id_or_content (与 memory_forget 同名)
-      const target = args.id || args.id_or_content;
+      // 2026-10-10: 命名统一 —— 双向兼容 id 与 id_or_content
+      const target = args.id ?? args.id_or_content;
+      if (!target) return JSON.stringify({ error: "缺少 id 或 id_or_content (两者任一即可)" });
       const f = facts.restore(target);
       if (!f) return JSON.stringify({ error: "未找到该记忆", id: target });
       return JSON.stringify({ ok: true, id: f.id, content: f.content, status: f.status });
@@ -86,7 +86,7 @@ function registerMemoryGovernanceTools(catalog, { rootDir, facts, dataDir } = {}
   // 3. 查看已遗忘的记忆 (复核入口)
   catalog.register({
     name: "memory_list_deleted",
-    capability: { riskLevel: "low", readOnly: true, destructive: false, sideEffect: "none" },
+    capability: { readOnly: true, riskLevel: "low", sideEffect: "none" },
     description: "列出已遗忘 (软删) 的记忆, 供人工/审计复核, 避免误删无法发现。",
     parameters: {
       type: "object",
@@ -107,9 +107,7 @@ function registerMemoryGovernanceTools(catalog, { rootDir, facts, dataDir } = {}
   // 4. 导出记忆 (备份/迁移)
   catalog.register({
     name: "memory_export",
-    // 落一个备份文件 (含全量记忆) → 非只读; 只增不改原库, 故 medium。
-    // 注: 导出文件本身就是记忆明文, 位置由 safePath 关在工作区内。
-    capability: { riskLevel: "medium", readOnly: false, destructive: false, sideEffect: "workspace" },
+    capability: { readOnly: false, riskLevel: "medium", sideEffect: "workspace" },
     description: "导出全量记忆到 JSON 文件 (含软删/归档条目), 用于备份与跨机迁移。",
     parameters: {
       type: "object",
@@ -141,10 +139,7 @@ function registerMemoryGovernanceTools(catalog, { rootDir, facts, dataDir } = {}
   // 5. 导入记忆 (merge 去重 / replace 整体替换)
   catalog.register({
     name: "memory_import",
-    // F1 (高危): mode=replace 走 facts.importAll 的整体替换 —— 一次调用可清掉全部长期记忆,
-    // 且是"外部 JSON 灌进自己的记忆库" (提示注入/数据投毒的入口)。capability 是静态声明,
-    // 按最坏动作定档 → high + destructive:true: 默认模式也要人工确认 (旧兜底 readOnly:true 静默放行)。
-    capability: { riskLevel: "high", readOnly: false, destructive: true, sideEffect: "memory" },
+    capability: { readOnly: false, riskLevel: "high", sideEffect: "system", destructive: true },
     description: "从 JSON 文件导入记忆。mode=merge 按内容去重跳过重复 (默认), mode=replace 整体替换。",
     parameters: {
       type: "object",
@@ -171,8 +166,7 @@ function registerMemoryGovernanceTools(catalog, { rootDir, facts, dataDir } = {}
   // 6. 按层清空 (L1 事实 / L4 程序性记忆)
   catalog.register({
     name: "memory_clear_layer",
-    // 高危: 按层批量清空, hard=true 是物理删除不可回滚 (plan/只读档位之外, 默认模式也要人工确认)
-    capability: { riskLevel: "high", readOnly: false, destructive: true, sideEffect: "memory" },
+    capability: { readOnly: false, riskLevel: "high", sideEffect: "workspace", destructive: true },
     description: "按记忆层级批量清空。layer=1 是事实/用户记忆, layer=4 是程序性记忆(技能/流程)。默认软删可回滚, hard=true 才物理删除。",
     parameters: {
       type: "object",
@@ -197,9 +191,7 @@ function registerMemoryGovernanceTools(catalog, { rootDir, facts, dataDir } = {}
 function registerAuditTools(catalog, { audit } = {}) {
   catalog.register({
     name: "audit_verify",
-    // 校验本身只读, 但 quarantine=true 会把损坏段隔离并重建空链 (动审计账本) ——
-    // 按最坏动作声明 high/destructive, 与旧 category:"system" 兜底口径一致 (行为不变, 只是显式化)。
-    capability: { riskLevel: "high", readOnly: false, destructive: true, sideEffect: "system" },
+    capability: { readOnly: false, riskLevel: "high", sideEffect: "system" },
     description: "校验工具调用审计日志的 SHA-256 哈希链完整性, 定位首个被篡改/截断的位置。quarantine=true 时隔离损坏段并重建空链。",
     parameters: {
       type: "object",
@@ -236,8 +228,7 @@ function registerOpsTools(catalog, { personaStore, healer, experience, facts } =
   // 7. 画像重建 (ppx-v2 ppx-memory 的 persona_build, 这里薄包装 l3 PersonaStore)
   catalog.register({
     name: "persona_build",
-    // 重建并写 L3 画像层 (覆盖既有画像) → 非只读
-    capability: { riskLevel: "medium", readOnly: false, destructive: false, sideEffect: "memory" },
+    capability: { readOnly: false, riskLevel: "medium", sideEffect: "workspace" },
     description: "从当前记忆与经验重新提炼用户画像 / agent 人格, 写入 L3 层。",
     parameters: {
       type: "object",
@@ -267,7 +258,7 @@ function registerOpsTools(catalog, { personaStore, healer, experience, facts } =
   // 8. 画像读取
   catalog.register({
     name: "persona_read",
-    capability: { riskLevel: "low", readOnly: true, destructive: false, sideEffect: "none" },
+    capability: { readOnly: true, riskLevel: "low", sideEffect: "none" },
     description: "读取 L3 层沉淀的用户画像 / agent 人格全文。",
     parameters: {
       type: "object",
@@ -288,9 +279,7 @@ function registerOpsTools(catalog, { personaStore, healer, experience, facts } =
   // 9. 自愈体检 (ppx-v2 selfheal_run, 薄包装 Healer)
   catalog.register({
     name: "selfheal_run",
-    // 补目录/重写损坏 JSON/清理备份 = 文件系统写操作 (category:"system" 旧兜底已是 high+destructive,
-    // 这里显式化并保持同一档位, 行为零变化)
-    capability: { riskLevel: "high", readOnly: false, destructive: true, sideEffect: "system" },
+    capability: { readOnly: false, riskLevel: "high", sideEffect: "system", destructive: true },
     description: "手动跑一次自愈体检: 补建缺失目录、修复损坏 JSON、清理崩溃残留与过期备份。",
     parameters: {
       type: "object",

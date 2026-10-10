@@ -3,7 +3,11 @@
 // 纯 Node、零运行时依赖、ESM、简体中文注释。
 
 import path from "node:path";
-import { parseEditBlocks, codexPatchPaths, MISSING_TARGET_HELP, patchTargetPreview } from "../edit/editblock.js";
+import {
+  parseEditBlocks, parseCodexPatch,
+  PATCH_FORMAT_HELP, MISSING_TARGET_HELP, patchTargetPreview,
+  looksLikePath, resolvePatchTargets,
+} from "../edit/editblock.js";
 
 // ---- codex: 审批模式四档 ----
 export const AskForApproval = {
@@ -38,21 +42,9 @@ const HTTP_TOOLS = new Set([
 ]);
 
 // ON_REQUEST 模式下默认需要审批的工具 (其余按 args.requires_approval 决定)
-// 破坏性/可执行类留在这里: 命令能做任何事、删除不可逆, 必须问人。
-// apply_patch 于 2026-10-05 移出 (见 WORKSPACE_AUTO_TOOLS): 它被披露进核心 schema,
-// 却与 run_command 同列审批名单, headless 下 agent/index.js 直接快速拒绝 ——
-// 等于把模型一个永远用不了的工具塞给它 (真跑基准 json-edit 就是这么失败的)。
 const REQUIRES_APPROVAL_TOOLS = new Set([
-  "run_command", "shell", "exec", "bash", "delete_file", "rm",
+  "run_command", "shell", "exec", "bash", "apply_patch", "delete_file", "rm",
 ]);
-
-// 路径受限的补丁/编辑类工具: 免审批的前提是"能证明每个落点都在工作区根内"。
-// 依据: write_file (整体覆盖, 落点更宽) 本来就不审批, 却单独卡住比它更窄、且落点已被
-// safePath 关在工作区内的 apply_patch, 口径不自洽。这里补上自洽的那半边 ——
-// 越界/落点不明的补丁仍然照旧升级审批, 不是无条件放行。
-// (edit_file 不在此列: 它从来没进过 REQUIRES_APPROVAL_TOOLS, 也就从来没被审批门卡过,
-//  而且当前没有任何工具以该名注册 —— 只在 WRITE_EXEC_TOOLS 里作为只读沙箱的别名存在。)
-const WORKSPACE_AUTO_TOOLS = new Set(["apply_patch"]);
 
 // ---- 通配符匹配 (opencode 语义) ----
 //  '*'         -> 匹配任意
@@ -81,8 +73,8 @@ function ruleMatches(rule, toolName, args) {
 function toCompare(p) {
   return path.resolve(String(p)).toLowerCase().replace(/\\/g, "/");
 }
-// 唯一的路径包含判定真相源 (safePath 同款口径)。导出给 src/permissions/intersection.js 复用 ——
-// 权限交集绝不许再写第二份包含逻辑 (2026-10-05 safePath 双实现教训: 两层都以为对方查过)。
+// 2026-10-09: 补 export —— permission-intersection.test.js 与 tools/v3.js 的 apply_patch
+//   都在等待这个判定函数, 但实现一直没导出, 导致它看起来"不存在"。
 export function isWithinRoot(p, root) {
   const a = toCompare(p);
   const b = toCompare(root);
@@ -92,102 +84,75 @@ export function isWithinRoot(p, root) {
 }
 
 // 从 args 收集需要校验的候选路径
+// 2026-10-10 修复 (P1-1): URL 不是本地路径 —— 原先裸正则会把 `https://github.com/a/b.git`
+//   切成 `s://github.com/a/b.git`, path.resolve 把 `s:` 当盘符 → 误判"路径越界"。
+//   后果: git clone / curl / npm --registry 全部被拦, 且给出误导性的"越界"理由。
+//   修法: 先剔除 URL 字面量, 再扫路径。真实越界 (/etc/passwd、../../evil) 不受影响。
+const URL_RE = /[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s"']+/g;
+function stripUrls(command) {
+  return String(command).replace(URL_RE, " ");
+}
 function collectPaths(args) {
   const out = [];
   for (const key of ["path", "file_path", "filePath", "cwd", "dir", "destination", "dest"]) {
     if (typeof args?.[key] === "string" && args[key]) out.push(args[key]);
   }
   if (typeof args?.command === "string") {
-    // 先剔除 URL (scheme://...): 否则 "curl http://x" 里的 "p:/" 会被盘符正则误判为
-    // Windows 绝对路径 "p://x", 进而触发"路径越界"误拒 (任何带 URL 的命令都跑不了)。
-    const cmd = args.command.replace(/[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s"']*/g, " ");
-    const m = cmd.match(/(?:[A-Za-z]:[\\/][^\s"']+|\/[^\s"']+)/g);
+    const m = stripUrls(args.command).match(/(?:[A-Za-z]:[\\/][^\s"']+|\/[^\s"']+)/g);
     if (m) out.push(...m);
   }
   return out;
 }
 function findEscape(args, root) {
   for (const p of collectPaths(args)) {
-    // 相对路径也要判 (2026-10-05): 旧实现只看 path.isAbsolute, 于是 ../../evil.txt
-    // 这类相对穿越被完全忽略 —— "在工作区内"的正确定义是先按 root 解析再做包含检查,
-    // 绝对路径同样走这条路 (resolve 对绝对路径是幂等的), 判定口径只留一个。
-    if (!isWithinRoot(path.resolve(root, p), root)) return p;
+    if (!p) continue;
+    // 2026-10-09 修复: 原先只判 isAbsolute —— 相对穿越 (../evil.js) 完全漏判,
+    // 于是"越界补丁"与"根内补丁"拿到同样的判定, fail-closed 出现缺口。
+    // 现统一解析为绝对路径再判 isWithinRoot: 相对/绝对一视同仁。
+    let abs;
+    try { abs = path.resolve(root, p); } catch { return p; }
+    if (!isWithinRoot(abs, root)) return p;
   }
   return null;
 }
 
-// apply_patch 的落点优先在 content 的 SEARCH/REPLACE 块头行里, collectPaths/findEscape
-// 看不见它。这里复用工具自己的解析器 (src/edit/editblock.js), 保证"权限看到的落点清单"
-// 与"工具真正写盘的路径"同源, 不会各说各话。
-// 2026-10-05: 块无路径 → 与 tools/v3 execute 同口径兜底到 args.path (args.path 本身
-// 已在下方键值收集里); 块与 args.path 都没有 → unprovable, 整份补丁升级审批 (fail closed)。
-// 2026-10-05 (rename-symbol 复盘): 第三种常见写法是 codex 风格补丁, 落点写在
-// `*** Update File:` / `*** Add File:` / `*** Delete File:` 表头里, SR 解析器给出 0 块
-// → 落点清单为空 → 一律升级审批 → headless 即拒。现同口径抽取这些表头路径, 让工作区内
-// 的 codex 补丁能自证落点。注意方向: 抽取只会让清单更长 (paths.every(在根内) 更难成立),
-// 不可能把越界补丁证明成合规 —— 证明不了仍然 ask, 失败关闭不变。
-function collectPatchPaths(args) {
-  const paths = [];
-  let argsPath = "";
-  for (const key of ["path", "file_path", "filePath"]) {
-    if (typeof args?.[key] === "string" && args[key]) {
-      if (!argsPath) argsPath = args[key];
-      paths.push(args[key]);
-    }
+// ---- apply_patch 落点证明三态 (2026-10-09 补) ----
+// apply_patch 的目标路径藏在 content 字符串里, 通用 collectPaths 看不见 → 旧实现一律按
+// REQUIRES_APPROVAL_TOOLS 升级 ask。问题在于它把两种完全不同的情况压成同一个 ask:
+//   · 补丁确实越界 (该升级审批, 一分不放宽)
+//   · 补丁没写目标 (这是【用法错误】, 模型改一下就能过; 给通用审批文案它只会僵住)
+// 三态: allow (落点全在根内) / escapes (有越界, 照旧审批, 不给 modelHint) / unprovable (落点不可确定)。
+function provePatchTargets(args, root) {
+  const content = String(args?.content || "");
+  const srBlocks = parseEditBlocks(content);
+  const cx = parseCodexPatch(content);
+  const argPath = looksLikePath(args?.path) ? String(args.path).trim() : null;
+
+  // 同时收集两类落点 —— 一份补丁里可能既有 SR 块又有 codex 表头 (模型混写很常见),
+  // 只认其中一种会让"表头越界 + 块在根内"这种混合补丁被误判为可证明。
+  const targets = [];
+  if (srBlocks.length) targets.push(...resolvePatchTargets(content, srBlocks));
+  if (cx.detected) {
+    const cxp = cx.paths.filter(looksLikePath);
+    if (cxp.length) targets.push(...cxp);
+    else targets.push(...cx.blocks.map((b) => b.path));
   }
-  let unprovable = false;
-  if (typeof args?.content === "string" && args.content) {
-    try {
-      for (const b of parseEditBlocks(args.content)) {
-        if (b.path) paths.push(b.path);
-        else if (!argsPath) unprovable = true;
-      }
-      for (const p of codexPatchPaths(args.content)) paths.push(p);
-    } catch { unprovable = true; /* 解析失败 → 落点清单不可信 */ }
+
+  if (!targets.length) {
+    return { state: "unprovable", reason: `补丁落点无法证明。实际收到: ${patchTargetPreview(content)}\n${MISSING_TARGET_HELP}`, modelHint: MISSING_TARGET_HELP };
   }
-  return { paths, unprovable };
-}
+  // args.path 只在块自身拿不到落点时兜底 (显式给了路径就算可证明)
+  const list = argPath ? targets.map((t) => t || argPath) : targets;
 
-// 补丁工具落点三态 (2026-10-05 "已修复"幻觉复盘): 旧布尔把两种性质完全不同的失败压成
-// 同一个 ask → headless 通用审批文案, 模型无从自纠。现拆开:
-//   allow     — 每个落点都可证明在 root 内 (免审批)
-//   escapes   — 补丁被证明触碰 root 之外的文件 (照旧升级审批, 不放宽)
-//   unprovable— 根本确定不了落点 (缺目标 = 请求格式错误, 文案改为点名三种合法写法)
-// 失败关闭不变: 权限引擎对 unprovable 的决策仍是 ask/deny, 只有文案变得可行动。
-function patchWorkspaceStatus(args, root) {
-  const { paths, unprovable } = collectPatchPaths(args);
-  if (unprovable || !paths.length) return { status: "unprovable" };
-  const escape = paths.find((p) => !isWithinRoot(path.resolve(root, p), root));
-  return escape ? { status: "escapes", escape } : { status: "allow" };
-}
-
-// unprovable 的可行动文案: 三种约定 + 实际收到的前两行 content (与 tools/v3 同源)。
-// 同时作为 decision.modelHint 透传给 agent 的 headless 拒绝消息 (agent/index.js)。
-function unprovablePatchReason(args) {
-  return MISSING_TARGET_HELP + " 收到的内容前两行: " + patchTargetPreview(args?.content);
-}
-
-// ON_REQUEST 模式下"这个调用需不需要审批"的唯一判定 (原先在 needAsk 与最终映射里各写一遍)。
-function requiresApproval(toolName, args, root) {
-  if (args?.requires_approval === true) return true;
-  if (REQUIRES_APPROVAL_TOOLS.has(toolName)) return true;
-  if (WORKSPACE_AUTO_TOOLS.has(toolName)) return patchWorkspaceStatus(args, root).status !== "allow";
-  return false;
-}
-
-// 补丁类工具的 ask 文案按三态分路: unprovable → 教模型怎么补目标; escapes → 维持原审批口径。
-function workspaceToolAskReason(toolName, args, root) {
-  if (WORKSPACE_AUTO_TOOLS.has(toolName) && patchWorkspaceStatus(args, root).status === "unprovable") {
-    return unprovablePatchReason(args);
+  const outside = list.filter((t) => t && !isWithinRoot(path.resolve(root, t), root));
+  if (outside.length) {
+    return { state: "escapes", reason: `工作区写沙箱: 补丁落点越界 ${outside[0]}` };
   }
-  return "on-request: 补丁落点无法证明都在工作区内, 需审批";
+  if (list.some((t) => !t)) {
+    return { state: "unprovable", reason: `补丁落点无法证明。实际收到: ${patchTargetPreview(content)}\n${MISSING_TARGET_HELP}`, modelHint: MISSING_TARGET_HELP };
+  }
+  return { state: "allow" };
 }
-
-// plan 模式拒绝的可行动文案 (走既有 modelHint 通道, 由 agent/index.js 的拒绝消息原样带给模型):
-// 拒绝必须给出下一步 (本项目 standing rule: 模型无从自纠的拒绝只会诱发重试)。
-export const PLAN_MODE_MODEL_HINT =
-  "[plan 模式] 当前会话为只读: 请输出执行计划 (步骤 / 落点文件 / 验证方式) 交用户审阅;"
-  + " 用户同意执行时由用户发送 /do 退出计划模式后再来。不要重复发起该写/执行调用。";
 
 // ---- 兼容 CASDK canUseTool 回调的返回 ----
 // 允许 { behavior:'allow'|'deny' } 或字符串 'allow'/'deny'
@@ -252,7 +217,7 @@ export function createPermissionEngine({
   // ZCode 工具能力门 (2026-10-02 吸收): getCapability 工具→能力元数据; capabilityGate 总开关
   getCapability = null,
   capabilityGate = false,
-  planEnabled = false, // plan 模式 (引擎级): 只允许只读非破坏工具; 按会话开关走 check 的 ctx.planEnabled
+  planEnabled = false, // plan 模式: 只读非破坏工具直通, 其余拒绝
   autoApproveHighRisk = false, // high 风险免确认 (critical 永不免)
 } = {}) {
   const _rules = Array.isArray(rules) ? rules.map((r) => ({ pattern: r.pattern, action: r.action })) : [];
@@ -322,23 +287,17 @@ export function createPermissionEngine({
     const cap = capGate && typeof capGetter === "function"
       ? capGetter(toolName, args)
       : null;
-    // plan 模式有两个来源: 引擎级 planEnabled (进程级兜底/测试注入) 与按会话 ctx.planEnabled
-    // (集成层 /plan 命令翻转后经 agent 准入链传入)。二者等价, ctx 只增不减。
-    const planActive = planOn || ctx?.planEnabled === true;
-    if (planActive) {
-      // 失败关闭 (2026-10-05 /plan 死命令复盘): 旧实现只在拿到能力声明时才判只读 ——
-      // capGate 关闭 / 能力未声明时 cap=null, plan 模式下写/执行/派生全部静默直通,
-      // "计划模式"只是文案。现在: 拿不出"只读且非破坏"的正向证明就拒绝 (deny 不新增审批,
-      // 默认 plan 关闭时本节完全不动, 常规工作区流程零变化)。
-      const readOnlySafe = !!(cap && cap.readOnly === true && cap.destructive !== true);
-      if (!readOnlySafe) {
-        return {
-          decision: "deny",
-          rule: matched,
-          reason: "plan 模式: 只允许只读非破坏工具",
-          modelHint: PLAN_MODE_MODEL_HINT,
-        };
-      }
+    // plan 模式 (引擎级 planEnabled OR 调用注入的 ctx.planEnabled, 按会话):
+    //   只读非破坏工具直通; 其余 (含能力声明不可证 = getter 返回 null) 一律拒绝 (fail closed)。
+    //   旧实现在这里静默直通 —— 死命令的另一半 (文档说计划模式, 出厂代码拦不住任何工具)。
+    const planActive = planOn || ctx.planEnabled === true;
+    if (planActive && !(cap && cap.readOnly && !cap.destructive)) {
+      return {
+        decision: "deny",
+        rule: matched,
+        reason: "plan 模式: 只允许只读非破坏工具",
+        modelHint: "当前处于计划模式 (plan mode), 仅允许只读工具。请先产出计划交用户审阅; 审阅通过后输入 /do 退出计划模式再执行。",
+      };
     }
     if (cap) {
       const askByCap = cap.alwaysAsk ||
@@ -362,28 +321,35 @@ export function createPermissionEngine({
     let sandboxAsk = false;
     let sandboxDeny = false;
     let reason = "";
+    let patchProven = false;   // apply_patch 落点已证明全在根内 → 免审批直通
+    let patchHint = null;      // unprovable 时给模型的可自纠提示 (随 ask/deny 一起交给调用方)
 
     if (effectiveSandbox === SandboxPolicy.READ_ONLY) {
-      if (WRITE_EXEC_TOOLS.has(toolName) && !allowRuleHit) {
+      // 只读档位拦截有两路: ①硬编码写/执行名单 (历史语义) ②能力声明的 readOnly=false (ZCode 能力门)
+      // 后者覆盖"名单外但确实有副作用"的工具 (如 code_run/append_file 等), 避免披着只读标签静默直通。
+      if ((WRITE_EXEC_TOOLS.has(toolName) || (cap && cap.readOnly === false)) && !allowRuleHit) {
         sandboxAsk = true;
         reason = "只读沙箱: 写/执行类工具需审批" + (escalated ? " [本次已提权]" : "");
-      } else if (cap && !cap.readOnly && !allowRuleHit) {
-        // F1 (2026-10-05): 只读档位此前**只**按工具名硬名单 (WRITE_EXEC_TOOLS) 判,
-        // 名单外的 code_act / spawn_agent / git_commit / memory_import / create_skill /
-        // enable_capability / http_request 在「只读巡检」下全部静默放行 (实测)。
-        // 现按声明式能力裁定: 任何自认"非只读"的工具在只读沙箱一律升级审批 ——
-        // 这是同一条不变量的声明式版本, 新增工具默认落入其中, 不需要再维护名字名单。
-        // 不放宽任何既有分支: allow 规则命中仍然放行 (与旧 WRITE_EXEC 口径一致);
-        // capabilityGate=false (引擎默认) 时 cap 为 null, 行为与今天完全相同。
-        sandboxAsk = true;
-        reason = `只读沙箱: 能力声明非只读 (sideEffect=${cap.sideEffect || "unknown"}) 需审批`
-          + (escalated ? " [本次已提权]" : "");
       }
     } else if (effectiveSandbox === SandboxPolicy.WORKSPACE_WRITE) {
       const escape = findEscape(args, workspaceRoot);
       if (escape) {
+        // args 级越界 (args.path 等) 口径不变: 直接 deny
         sandboxDeny = true;
         reason = `工作区写沙箱: 路径越界 ${escape}`;
+      } else if (toolName === "apply_patch") {
+        // 补丁落点证明: allow 直通 / escapes 升级审批 / unprovable 给可自纠提示
+        const proof = provePatchTargets(args, workspaceRoot);
+        if (proof.state === "escapes") {
+          sandboxAsk = true;
+          reason = proof.reason;
+        } else if (proof.state === "unprovable") {
+          sandboxAsk = true;
+          reason = proof.reason;
+          patchHint = proof.modelHint || null;
+        } else {
+          patchProven = true;
+        }
       }
     }
 
@@ -403,14 +369,13 @@ export function createPermissionEngine({
     const needAsk = approvalMode !== AskForApproval.NEVER && (
       sandboxAsk || (matched && matched.action === "ask") ||
       (approvalMode === AskForApproval.UNLESS_TRUSTED && !TRUSTED_TOOLS.includes(toolName)) ||
-      (approvalMode === AskForApproval.ON_REQUEST && requiresApproval(toolName, args, workspaceRoot)));
+      (approvalMode === AskForApproval.ON_REQUEST &&
+        (args.requires_approval === true || (REQUIRES_APPROVAL_TOOLS.has(toolName) && !patchProven))));
     if (needAsk && typeof onAsk === "function") {
       const askReason = sandboxAsk ? reason
         : matched ? `命中 ask 规则: ${matched.pattern}`
         : approvalMode === AskForApproval.UNLESS_TRUSTED ? "unless-trusted: 非白名单工具需审批"
-        : WORKSPACE_AUTO_TOOLS.has(toolName)
-          ? workspaceToolAskReason(toolName, args, workspaceRoot)
-          : "on-request: 工具需审批";
+        : "on-request: 工具需审批";
       try {
         const verdict = await onAsk(toolName, args, askReason);
         const decision = typeof verdict === "string" ? verdict : verdict?.decision;
@@ -423,10 +388,10 @@ export function createPermissionEngine({
 
     // (e) never 模式: ask 降级为 deny
     if (sandboxAsk && approvalMode === AskForApproval.NEVER) {
-      return { decision: "deny", rule: matched, reason: `${reason} (never 模式降级拒绝)` };
+      return { decision: "deny", rule: matched, reason: `${reason} (never 模式降级拒绝)`, ...(patchHint ? { modelHint: patchHint } : {}) };
     }
     if (sandboxAsk) {
-      return { decision: "ask", rule: matched, reason };
+      return { decision: "ask", rule: matched, reason, ...(patchHint ? { modelHint: patchHint } : {}) };
     }
 
     // (f) 规则命中后的最终映射
@@ -447,15 +412,11 @@ export function createPermissionEngine({
         : { decision: "ask", reason: "unless-trusted: 非白名单工具需审批" };
     }
     if (approvalMode === AskForApproval.ON_REQUEST) {
-      const need = requiresApproval(toolName, args, workspaceRoot);
-      if (!need) return { decision: "allow", reason: "on-request: 无需审批" };
-      // unprovable 补丁: reason 已是可行动文案, 另挂 modelHint 供 agent 的 headless 拒绝
-      // 消息原样带给模型 (其他工具的 ask 不带此字段 → run_command/delete_file/rm 文案不变)。
-      const unprovable = WORKSPACE_AUTO_TOOLS.has(toolName)
-        && patchWorkspaceStatus(args, workspaceRoot).status === "unprovable";
-      return unprovable
-        ? { decision: "ask", reason: unprovablePatchReason(args), modelHint: unprovablePatchReason(args) }
-        : { decision: "ask", reason: workspaceToolAskReason(toolName, args, workspaceRoot) };
+      // 与上面 needAsk 同源: apply_patch 落点已证明在根内时免审批 (patchProven)
+      const need = args.requires_approval === true || (REQUIRES_APPROVAL_TOOLS.has(toolName) && !patchProven);
+      return need
+        ? { decision: "ask", reason: "on-request: 工具需审批" }
+        : { decision: "allow", reason: "on-request: 无需审批" };
     }
     // ON_FAILURE / NEVER 默认放行
     return { decision: "allow", reason: "默认放行 (on-failure/never)" };

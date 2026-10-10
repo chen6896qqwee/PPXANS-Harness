@@ -16,21 +16,18 @@ const ok = (m) => console.log("  ✓ " + m);
 
 // 1) 图标: defs 里定义 vs 被引用
 const defined = new Set([...html.matchAll(/<g id="(i-[a-z-]+)"/g)].map((m) => m[1]));
-const hrefRefs = new Set([...(html + js).matchAll(/href="#(i-[a-z-]+)"/g)].map((m) => m[1]));
-const used = new Set(hrefRefs);
-// 2026-10-07: app.js 里经 ico("name") 动态拼的图标也要算引用 —— 否则静态扫描会把
-// 大量在 ico() 里使用的图标误报成"未使用" (假阳性), 反过来诱导误删。
-// 取每个 ico( ... ) 调用括号内的所有字符串字面量 (含三元/dir 变量以外的字面量), 避免"引号紧贴 ico(" 的窄匹配漏掉 ico(cond ? "a" : "b") 这类写法。
-for (const m of js.matchAll(/\bico\(([^)]*)\)/g)) {
-  for (const s of m[1].matchAll(/"([a-z-]+)"/g)) used.add("i-" + s[1]);
-}
-// 未定义检查只看 href 字面引用 (ico() 参数里的比较字符串如 "dark" 不是图标名, 会误报)
-const missIcon = [...hrefRefs].filter((u) => !defined.has(u));
+const used = new Set([...(html + js).matchAll(/href="#(i-[a-z-]+)"/g)].map((m) => m[1]));
+// app.js 里大量图标是 ico("name") 运行时拼出来的, 扫不到 href → 单独识别调用名,
+// 否则这类图标会被误报成"未使用"(自检输出失去信噪比)
+for (const m of js.matchAll(/\bico\(\s*["']([a-z-]+)["']/g)) used.add("i-" + m[1]);
+const missIcon = [...used].filter((u) => !defined.has(u));
 if (missIcon.length) fail("引用了未定义的图标: " + missIcon.join(", "));
 else ok(`图标定义 ${defined.size} 个, 引用 ${used.size} 个, 全部命中`);
 
 const unusedIcon = [...defined].filter((d) => !used.has(d));
-if (unusedIcon.length) console.log("  · 未被使用的图标: " + unusedIcon.join(", "));
+// 未被使用的图标是【备用的图标集】(stop/bot/sun/monitor/term 等通用 UI 元素), 留着供后续功能取用 ——
+//   不是遗留问题, 故用 · (提示) 而非 ✗ (失败)。真正的门禁在上面: "引用了未定义的图标" 才是错误。
+if (unusedIcon.length) console.log(`  · 备用图标 ${unusedIcon.length} 个 (已定义未引用, 供后续取用): ` + unusedIcon.join(", "));
 
 // 2) id: HTML 里声明的 + JS 模板里生成的
 const htmlIds = new Set([...html.matchAll(/\bid="([A-Za-z][\w-]*)"/g)].map((m) => m[1]));

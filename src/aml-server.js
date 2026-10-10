@@ -10,52 +10,41 @@
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import crypto from "node:crypto";
 import { FactStore } from "./memory/fact-store.js";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
-const PORT = Number(process.env.PPX_AML_PORT || 8900);
-// P0 (2026-10-04): 默认只绑回环。原 server.listen(PORT) 不传 host = 0.0.0.0,
-//   叠加鉴权默认 none, 等于把可读写记忆的服务开放给整个局域网/公网。
-const HOST = process.env.PPX_AML_HOST || "127.0.0.1";
-const AUTH_SCHEME = (process.env.PPX_AML_AUTH || "none").toLowerCase();
-const AUTH_VALUE = process.env.PPX_AML_AUTH_VALUE || "";
 const MAX_BODY = 1024 * 1024; // 1MB 请求体上限, 防滥用
 const RATE_PER_MIN = 60;      // 每 IP 每分钟最大请求数 (令牌桶, 对齐 http.js)
 const RATE_WINDOW_MS = 60_000;
 
-// 数据目录: 每次调用现读环境变量 (不在模块加载期固化)
+// ---- 惰性初始化 (2026-10-09) ----
+// 原先这几个值在【模块顶层】读取 env 并即刻 new FactStore —— 而 ESM 的静态 import 早于
+// 调用方任何代码执行, 于是测试里"先设 process.env.PPX_AML_DATA=tmp, 再 import"完全无效,
+// 实例仍指向 <项目>/data/aml, 每跑一次测试就往生产数据目录写一条夹具事实。
+// 改为惰性: import 保持零副作用, 首次真正用到时才读 env 建实例。
+// 同时支持 env 在运行期变化 (测试逐个用例切换目录) —— 目录变了就重建。
+let _store = null;
+let _storeDir = null;
 function amlDataDir() {
   return process.env.PPX_AML_DATA || path.join(ROOT, "data", "aml");
 }
-
-// 记忆库懒初始化 (2026-10-03 修复)
-// 原先写的是模块顶层 `const store = new FactStore(DATA, {})` —— ESM 静态 import 会在任何
-// 调用方代码之前执行, 于是测试里"先设 process.env.PPX_AML_DATA 再 createAmlServer()"完全无效:
-// store 早已指向真实 <root>/data/aml。后果是**每跑一轮测试就往生产数据目录写记录**
-// (实测 data/aml/memory/facts.json 每轮 +2 条, 内容与测试用例一致)。
-// 改为懒加载: 首次真正用到时才读环境变量建库, import 本身零副作用。
-let _store = null;
 function getStore() {
-  if (!_store) _store = new FactStore(amlDataDir(), {});
+  const dir = amlDataDir();
+  if (!_store || _storeDir !== dir) {
+    _store = new FactStore(dir, {});
+    _storeDir = dir;
+  }
   return _store;
 }
-const _buckets = new Map(); // ip -> {tokens, last}
+function authScheme() { return String(process.env.PPX_AML_AUTH || "none").toLowerCase(); }
+function authValue() { return process.env.PPX_AML_AUTH_VALUE || ""; }
 
-// 桶回收 (2026-10-03 修复): 变源 IP 长期运行时 _buckets 无界增长 → 超过阈值时
-// 摊还回收 "2 倍窗口未活跃" 的过期桶 (对齐 utils/rate-limit.js 的 sweep 策略)
-function sweepBuckets(now) {
-  if (_buckets.size < 512) return;
-  for (const [k, b] of _buckets) {
-    if (now - b.last > RATE_WINDOW_MS * 2) _buckets.delete(k);
-  }
-}
+const _buckets = new Map(); // ip -> {tokens, last}
 
 // 简单令牌桶限流: 每 IP 60 req/min (对齐 channels/http.js) [P1#10]
 function rateLimit(req, res) {
   const ip = req.socket?.remoteAddress || "unknown";
   const now = Date.now();
-  sweepBuckets(now);
   let b = _buckets.get(ip);
   if (!b) {
     b = { tokens: RATE_PER_MIN, last: now };
@@ -68,53 +57,51 @@ function rateLimit(req, res) {
   }
   if (b.tokens <= 0) {
     res.writeHead(429, { "Content-Type": "application/json", "Retry-After": "60" });
-    res.end(JSON.stringify({ error: "rate limited" }));
+    res.end(JSON.stringify({ error: "请求过于频繁, 请稍后重试" }));
     return false;
   }
   b.tokens -= 1;
   return true;
 }
 
-// 恒定时间比较 (2026-10-03 修复): 原 === 直接比较存在计时侧信道;
-// 先 sha256 摘要拉平长度再 timingSafeEqual (对齐 channels/http.js 的 safeEqual)
-function safeEqual(a, b) {
-  const sha = (s) => crypto.createHash("sha256").update(String(s)).digest();
-  try { return crypto.timingSafeEqual(sha(a), sha(b)); } catch { return false; }
-}
-
 function authOk(req) {
-  if (AUTH_SCHEME === "none") return true;
-  // fail-closed: 声明了鉴权方式却没给密钥, 一律拒绝 (原实现会拿空串比对, "Token " 头即可通过)
-  if (!AUTH_VALUE) return false;
-  if (AUTH_SCHEME === "token") return safeEqual(req.headers.authorization, "Token " + AUTH_VALUE);
-  if (AUTH_SCHEME === "bearer") return safeEqual(req.headers.authorization, "Bearer " + AUTH_VALUE);
-  if (AUTH_SCHEME === "x-api-key") return safeEqual(req.headers["x-api-key"], AUTH_VALUE);
+  const scheme = authScheme(), value = authValue();
+  if (scheme === "none") return true;
+  if (scheme === "token") return req.headers.authorization === "Token " + value;
+  if (scheme === "bearer") return req.headers.authorization === "Bearer " + value;
+  if (scheme === "x-api-key") return req.headers["x-api-key"] === value;
   return false;
 }
 
 // 读取请求体, 带大小上限。
-// 2026-10-03 修复: 原实现用字符串累加 `d += c`, 多字节 UTF-8 字符跨 TCP 分块边界
-// 会被切成 U+FFFD, 中文消息静默损坏 (utils/http.js 修过一模一样的 bug)。
-// 改为先 Buffer.concat 再整体 toString("utf8")。
-// 返回: { ok: true, body } | { ok: false, tooBig } (tooBig → 413, 非法 JSON → 400)
+// 2026-10-10 修复 (P1): 原实现对"超限"与"JSON 非法"一律返回 null, handler 只能笼统回 413 ——
+//   客户端拿到 413 会以为"体太大"而截断重试, 但真正的问题是 JSON 写错 (应回 400 提示修正)。
+//   现返回结构化结果区分三种情形, 由 handler 映射到 413 / 400 / 500。
+// @returns {Promise<{ok:true, data:any} | {ok:false, reason:"too-large"|"bad-json"|"io"}>}
 function readBody(req, maxBytes = MAX_BODY) {
   return new Promise((resolve) => {
-    const chunks = [];
-    let size = 0;
+    let d = "";
     let tooBig = false;
     req.on("data", (c) => {
-      if (tooBig) return; // 已超限, 丢弃后续数据但不断连 (让 handler 回 413)
-      size += c.length;
-      if (size > maxBytes) { tooBig = true; chunks.length = 0; return; }
-      chunks.push(c);
+      if (tooBig) return; // 已超限, 丢弃后续数据但不断连
+      d += c;
+      if (Buffer.byteLength(d) > maxBytes) { tooBig = true; d = ""; }
     });
     req.on("end", () => {
-      if (tooBig) return resolve({ ok: false, tooBig: true });
-      try { resolve({ ok: true, body: JSON.parse(Buffer.concat(chunks).toString("utf8")) }); }
-      catch { resolve({ ok: false, tooBig: false }); }
+      if (tooBig) return resolve({ ok: false, reason: "too-large" });
+      if (!d.trim()) return resolve({ ok: false, reason: "bad-json" }); // 空体视为非法
+      try { resolve({ ok: true, data: JSON.parse(d) }); }
+      catch { resolve({ ok: false, reason: "bad-json" }); }
     });
-    req.on("error", () => resolve({ ok: false, tooBig: false }));
+    req.on("error", () => resolve({ ok: false, reason: "io" }));
   });
+}
+
+// 把 readBody 的失败原因映射到 HTTP 状态码 + 可判读文案
+function bodyErrorResponse(res, reason) {
+  if (reason === "too-large") return send(res, 413, { error: "请求体过大" });
+  if (reason === "bad-json") return send(res, 400, { error: "请求体不是合法 JSON" });
+  return send(res, 500, { error: "读取请求体失败" });
 }
 
 function send(res, code, obj) {
@@ -127,12 +114,11 @@ function send(res, code, obj) {
 // 保留 role/顺序/时间, 支撑 AML 多跳/时间/关系维度
 // 同步语义 = 全部落盘且可检索后才返回
 async function handleAdd(req, res) {
-  const parsed = await readBody(req);
-  if (!parsed.ok) return send(res, parsed.tooBig ? 413 : 400, { error: parsed.tooBig ? "request body too large" : "invalid JSON body" });
-  const body = parsed.body;
-  if (!body || !Array.isArray(body.messages)) return send(res, 422, { error: "messages[] required" });
-  const { request_id, messages, scope, conversation_id, async_mode } = body;
-  if (scope == null) return send(res, 422, { error: "scope required" });
+  const body = await readBody(req);
+  if (!body.ok) return bodyErrorResponse(res, body.reason);
+  const { request_id, messages, scope, conversation_id, async_mode } = body.data || {};
+  if (!Array.isArray(messages)) return send(res, 422, { error: "缺少 messages[] 字段" });
+  if (scope == null) return send(res, 422, { error: "缺少 scope 字段" });
   let stored = 0;
   messages.forEach((m, i) => {
     const content = String(m?.content || "").trim();
@@ -158,13 +144,13 @@ async function handleAdd(req, res) {
 }
 
 async function handleSearch(req, res) {
-  const parsed = await readBody(req);
-  if (!parsed.ok) return send(res, parsed.tooBig ? 413 : 400, { error: parsed.tooBig ? "request body too large" : "invalid JSON body" });
-  const body = parsed.body;
-  const query = String(body?.query || "").trim();
-  const scope = body?.scope ?? null;
-  const top_k = Math.min(Number(body?.top_k || 10), 100);
-  if (!query) return send(res, 422, { error: "query required" });
+  const body = await readBody(req);
+  if (!body.ok) return bodyErrorResponse(res, body.reason);
+  const data = body.data || {};
+  const query = String(data.query || "").trim();
+  const scope = data.scope ?? null;
+  const top_k = Math.min(Number(data.top_k || 10), 100);
+  if (!query) return send(res, 422, { error: "缺少 query 字段" });
   const hits = getStore().query(query, { limit: top_k || 10, scope: scope == null ? null : String(scope) });
   return send(res, 200, {
     query,
@@ -177,33 +163,31 @@ async function handleSearch(req, res) {
 export function createAmlServer() {
   return http.createServer(async (req, res) => {
     const url = new URL(req.url, "http://x");
+    if (!authOk(req)) return send(res, 401, { error: "未授权: 请提供有效的访问令牌" });
     if (!rateLimit(req, res)) return;
-    // /health 免鉴权 (2026-10-03 修复): 监控系统探活惯例不带业务 token。
-    // 注意仍受限流约束 (在 rateLimit 之后), 与测试 "限流 429 (60/min 令牌桶)" 的口径一致。
-    if (req.method === "GET" && url.pathname === "/health") return send(res, 200, { status: "ok" });
-    if (!authOk(req)) return send(res, 401, { error: "unauthorized" });
     const pathname = url.pathname;
     if (req.method === "POST" && pathname === "/v1/memories/add") return handleAdd(req, res);
     if (req.method === "POST" && pathname === "/v1/memories/search") return handleSearch(req, res);
-    return send(res, 404, { error: "not found" });
+    if (req.method === "GET" && pathname === "/health") return send(res, 200, { status: "ok" });
+    return send(res, 404, { error: "未找到该端点" });
   });
 }
 
 // CLI 入口: 直接运行本文件时启动服务器
-// 2026-10-03 修复 (P0): 原判断 `import.meta.url === \`file:///${argv1.replace(/\\\\/g, "/")}\``
-// 正则写成了 /\\\\/g (匹配两个连续反斜杠), Windows argv1 是单反斜杠 → 替换不生效 →
-// 条件恒 false → `node src/aml-server.js` 静默退出。改用 pathToFileURL 规范比较。
-if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  const loopback = HOST === "127.0.0.1" || HOST === "localhost" || HOST === "::1";
-  if (!loopback && AUTH_SCHEME === "none") {
-    console.error(`[aml-server] 拒绝启动: 绑定非回环地址 ${HOST} 却未配鉴权 (PPX_AML_AUTH=none)。`
-      + ` 请设 PPX_AML_AUTH=token + PPX_AML_AUTH_VALUE, 或用默认 PPX_AML_HOST=127.0.0.1`);
-    process.exitCode = 1;
-  } else {
-    const server = createAmlServer();
-    server.listen(PORT, HOST, () => {
-      console.log(`[aml-server] listening on ${HOST}:${PORT} | auth=${AUTH_SCHEME} | data=${amlDataDir()}`);
-      console.log(`  POST /v1/memories/add    POST /v1/memories/search    GET /health`);
-    });
-  }
+// 2026-10-10 修复 (P0): 原判定 `import.meta.url === file:///${argv[1].replace(/\\\\/g,"/")}`
+//   恒为 false —— ① 该正则实为匹配单个反斜杠, ② import.meta.url 是 file:///C:/... (正斜杠 + 三斜杠),
+//   而手工拼出的串在 Windows 上形态对不上, 于是 `node src/aml-server.js` 静默不监听 (P0-1 复现)。
+//   改用 pathToFileURL 规范化两侧: 跨平台一致, 且能正确处理盘符/空格/非 ASCII 路径。
+const _isMain = (() => {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try { return import.meta.url === pathToFileURL(entry).href; } catch { return false; }
+})();
+if (_isMain) {
+  const server = createAmlServer();
+  const port = Number(process.env.PPX_AML_PORT || 8900);
+  server.listen(port, () => {
+    console.log(`[aml-server] listening on :${port} | auth=${authScheme()} | data=${amlDataDir()}`);
+    console.log(`  POST /v1/memories/add    POST /v1/memories/search    GET /health`);
+  });
 }

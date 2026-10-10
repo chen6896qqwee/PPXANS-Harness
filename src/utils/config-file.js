@@ -9,7 +9,6 @@ import fs from "node:fs";
 import path from "node:path";
 import { atomicWrite } from "./store.js";
 import { warn } from "./logger.js";
-import { debug } from "../utils/logger.js";
 
 // 备份文件最多保留个数
 const MAX_BACKUPS = 3;
@@ -44,9 +43,9 @@ export function writeConfigAtomic(root, cfg) {
         .map((f) => ({ f, t: fs.statSync(path.join(dir, f)).mtimeMs }));
       baks.sort((a, b) => b.t - a.t);
       for (const old of baks.slice(MAX_BACKUPS)) {
-        try { fs.unlinkSync(path.join(dir, old.f)); } catch (e) { debug(`[utils/config-file] 已忽略异常: ${e && e.message ? e.message : e}`); }
+        try { fs.unlinkSync(path.join(dir, old.f)); } catch {}
       }
-    } catch (e) { debug(`[utils/config-file] 已忽略异常: ${e && e.message ? e.message : e}`); }
+    } catch {}
   }
   // 原子写: store.atomicWrite 带随机 .tmp 后缀 + Windows rename 重试 (EPERM/EEXIST 兜底)
   atomicWrite(p, JSON.stringify(cfg, null, 2));

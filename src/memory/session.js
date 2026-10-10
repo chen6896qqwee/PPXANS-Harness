@@ -23,7 +23,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import { ensureDir, logicalDay, withFileLock, withFileLocks } from "../utils/store.js";
-import { debug } from "../utils/logger.js";
 
 // 事件类型集 (对齐 dsh 事件域: user/assistant/tool/system)
 export const EVENTS = {
@@ -86,7 +85,7 @@ export class SessionStore {
     try {
       files = fs.readdirSync(this.dir)
         .filter((f) => f.endsWith(".jsonl") && (f === "default.jsonl" || this._isShard(f)));
-    } catch (e) { debug(`[memory/session] 已忽略异常: ${e && e.message ? e.message : e}`); }
+    } catch {}
     return files.map((f) => path.join(this.dir, f));
   }
   _removeDefaultFiles() {
@@ -95,7 +94,7 @@ export class SessionStore {
     // 删掉了 (Windows 上还会因写入方占用句柄直接 EPERM 让删除静默失败)。
     withFileLocks(this._defaultFiles(), () => {
       for (const f of this._defaultFiles()) {
-        try { fs.rmSync(f, { force: true }); } catch (e) { debug(`[memory/session] 已忽略异常: ${e && e.message ? e.message : e}`); }
+        try { fs.rmSync(f, { force: true }); } catch {}
       }
     });
   }
@@ -105,9 +104,9 @@ export class SessionStore {
     const events = [];
     try {
       for (const l of fs.readFileSync(file, "utf8").split("\n").filter(Boolean)) {
-        try { const e = JSON.parse(l); if (e && e.seq && e.type && e.data) events.push(e); } catch (e) { debug(`[memory/session] 已忽略异常: ${e && e.message ? e.message : e}`); }
+        try { const e = JSON.parse(l); if (e && e.seq && e.type && e.data) events.push(e); } catch {}
       }
-    } catch (e) { debug(`[memory/session] 已忽略异常: ${e && e.message ? e.message : e}`); }
+    } catch {}
     return events;
   }
 
@@ -173,7 +172,7 @@ export class SessionStore {
   // 单个文件的锁内删除 (W1: 所有 unlink 都走这里, 不再裸 rmSync)
   _removePathLocked(file) {
     withFileLock(file, () => {
-      try { fs.rmSync(file, { force: true }); } catch (e) { debug(`[memory/session] 已忽略异常: ${e && e.message ? e.message : e}`); }
+      try { fs.rmSync(file, { force: true }); } catch {}
     });
   }
 
@@ -416,7 +415,7 @@ export class SessionStore {
       } else {
         this._removeFile(k);
       }
-    } catch (e) { debug(`[memory/session] 已忽略异常: ${e && e.message ? e.message : e}`); }
+    } catch {}
     this._bump();
   }
 
@@ -463,7 +462,7 @@ export class SessionStore {
       this._bump(); // 锁内可能改过 seq / compaction 游标, 派生缓存必须作废
     } catch (e) {
       // v1.0.9: 落盘失败不再静默 (磁盘满/权限丢失消息不可见), 至少留日志
-      try { console.warn(`[session] 会话 ${k} 落盘失败: ${e.message}`); } catch (e) { debug(`[memory/session] 已忽略异常: ${e && e.message ? e.message : e}`); }
+      try { console.warn(`[session] 会话 ${k} 落盘失败: ${e.message}`); } catch {}
     }
   }
 
@@ -487,7 +486,7 @@ export class SessionStore {
 
   // 已持锁时的静默删除
   _rmSyncQuiet(file) {
-    try { fs.rmSync(file, { force: true }); } catch (e) { debug(`[memory/session] 已忽略异常: ${e && e.message ? e.message : e}`); }
+    try { fs.rmSync(file, { force: true }); } catch {}
   }
 
   // v2026-10-05 (跨进程 seq 竞态兜底): append 分配的 seq 是无锁乐观值, 两进程同时读到同一

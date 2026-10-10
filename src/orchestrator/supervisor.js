@@ -4,8 +4,8 @@
 //   S 综合/评审 → 决定: 接受最终答案 / 发现分歧 → 重新派发修正 / 升级人工。
 // 皮皮虾自研实现, 构建在现有 Legion (多进程) + delegate 仲裁之上。
 // 与 delegate.js 的 arbitrate (一次性聚合) 互补: supervisor 是完整编排循环 (可多轮修正)。
-// ✅ 接线状态 (2026-10-07 复核): 已由 tools/delegate.js 的 spawn_agent(supervisor=true) 调用 ——
-//   同一任务 → 多专家**并行**派发 → 分歧检测 → 监督者评审 → 打回带反馈重派 → 定稿整合。
+// ⚠ 接线状态 (2026-09-17 核对): runSupervisor **无内置调用点** —— 尚无 mode/工具把它接成可用入口;
+//   spawn_agent 当前走 tools/delegate.js 自带的 review 循环。属"编排器就绪、未接线", 需显式调用才生效。
 
 // 带超时等待 (防子 agent 卡死) — 实现收敛到 utils/async.js (原先本文件与 tools/delegate.js 各写一份)
 // 本文件内部继续使用, 同时保留同名导出, 对外接口不变。
@@ -75,52 +75,30 @@ export function buildRevisionPrompt(task, feedback) {
 }
 
 // ---- 监督者循环 ----
-// opts: { legion, agents: [name...], task, judge, maxRounds, timeoutMs, minConsensus, onRound, concurrency }
+// opts: { legion, agents: [name...], task, judge, maxRounds, timeoutMs, minConsensus, onRound }
 // 返回 { answer, rounds, consensus, divergent, history: [{round, results, feedback}] }
-//
-// 2026-10-07: 派发从**串行 for-await** 改为**有界并行**。
-//   旧实现逐个 await legion.send(...) —— 4 个专家一轮就要 4×单专家耗时, 而 supervisor 的
-//   全部价值就是"同一任务多专家并跑再收敛", 串行等于把并行度退化成 1 (实测争议收敛一轮
-//   从期望 ~15s 变成 ~60s)。现在走治理器 mapBounded, 宽度 = min(agents.length, 治理器单次上限)。
-export async function runSupervisor({ legion, agents = [], task = "", judge = "", maxRounds = SUPERVISOR_DEFAULTS.maxRounds, timeoutMs = SUPERVISOR_DEFAULTS.timeoutMs, minConsensus = SUPERVISOR_DEFAULTS.minConsensus, onRound = null, llm = null, finalize = null, concurrency = null } = {}) {
+export async function runSupervisor({ legion, agents = [], task = "", judge = "", maxRounds = SUPERVISOR_DEFAULTS.maxRounds, timeoutMs = SUPERVISOR_DEFAULTS.timeoutMs, minConsensus = SUPERVISOR_DEFAULTS.minConsensus, onRound = null, llm = null, finalize = null } = {}) {
   const history = [];
   let currentTask = task;
   let answer = "";
   let rounds = 0;
-  const list = Array.isArray(agents) ? agents.filter(Boolean) : [];
-  const width = (() => {
-    const n = Number(concurrency);
-    if (Number.isFinite(n) && n > 0) return Math.floor(n);
-    // legion 是军团实例时跟随其单次派发宽度; 桩对象/未接线时退化为"全并行"(专家数天然很小, 2~4)
-    if (legion && Number.isFinite(legion.maxConcurrent) && legion.maxConcurrent > 0) return legion.maxConcurrent;
-    if (legion && legion.governor && typeof legion.governor.effPerCall === "function") return legion.governor.effPerCall(list.length || 1);
-    return Math.max(1, list.length || 1);
-  })();
 
   for (let r = 0; r < maxRounds; r++) {
     rounds = r + 1;
-    // 派发给所有专家 (有界并行)
-    const tasks = list.map((name) => async () => {
+    // 派发给所有专家
+    const results = [];
+    for (const name of agents) {
       try {
         const resp = await withTimeout(
           legion.send(name, { type: "chat", message: currentTask }, { timeout: timeoutMs + 5000 }),
           timeoutMs,
           `监督者派发→${name}`
         );
-        return { agent: name, reply: String(resp?.reply || "").trim() || "(无回复)" };
+        results.push({ agent: name, reply: String(resp?.reply || "").trim() || "(无回复)" });
       } catch (e) {
-        return { agent: name, reply: `[失败] ${e.message}` };
+        results.push({ agent: name, reply: `[失败] ${e.message}` });
       }
-    });
-    const results = [];
-    let idx = 0;
-    const workers = Array.from({ length: Math.max(1, Math.min(width, tasks.length || 1)) });
-    await Promise.all(workers.map(async () => {
-      while (idx < tasks.length) {
-        const i = idx++;
-        results[i] = await tasks[i]();
-      }
-    }));
+    }
 
     // 分歧检测
     const { consensus, divergent, clusters } = findDisagreement(results, { minConsensus });

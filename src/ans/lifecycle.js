@@ -66,20 +66,10 @@ export class Lifecycle {
   }
 
   // 进化计数 (refine/分享经验), 内部落盘
-  // 2026-10-03 深度优化: evolving 从"纯计数器"升为真阶段 —— 首次进化且已 mature 时推进 stage,
-  // 修复审计指出的 "阶段名存在但永远不可达" (计数器≠阶段, 状态机撒谎)。
-  evolve(n = 1) {
-    this.evolved += n;
-    if (this.stage === "mature") this.to("evolving", `首次进化 (累计 ${this.evolved} 次)`);
-    else this._save();
-  }
+  evolve(n = 1) { this.evolved += n; this._save(); }
 
-  // 繁衍计数 (spawn_agent), 内部落盘; 首次繁衍推进到 reproducing 阶段
-  reproduce(n = 1) {
-    this.reproduced += n;
-    if (this.stage === "mature" || this.stage === "evolving") this.to("reproducing", `首次繁衍 (累计 ${this.reproduced} 次)`);
-    else this._save();
-  }
+  // 繁衍计数 (spawn_agent), 内部落盘
+  reproduce(n = 1) { this.reproduced += n; this._save(); }
 
   // 人类可读摘要 (可观测)
   status() {

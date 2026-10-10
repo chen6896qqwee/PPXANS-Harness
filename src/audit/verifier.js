@@ -8,7 +8,6 @@
 //   2. heldOutSplit   — 按时间切 train/held-out 子集, 供回归闸门用 (Self-Harness held-out 规则)
 //   3. Auditor.gate   — 唯一"已验证写回"通道, 持久化 verified.json 账本, 可统计/审计
 import path from "node:path";
-import crypto from "node:crypto";
 import { ensureDir, readJson, writeJson } from "../utils/store.js";
 
 // ---- 1. 经验闸门: LLM 提议的经验 → 确定性验收 ----
@@ -90,46 +89,10 @@ export class Auditor {
     return String(s).slice(0, 80);
   }
 
-  // 2026-10-03 深度优化: 账本从明文升级为 SHA-256 链式哈希 (对齐 audit-chain.js 风格)。
-  // 原先 verified.json 可被静默篡改 (改条目/删行无痕迹), 与"审计哈希链"叙事不符。
-  // 兼容性: 旧账本无 hash 字段的条目作为 legacy 前缀, 链从第一个带 hash 条目重新起算。
-  static GENESIS = "0".repeat(64);
-
-  _hash(entry) {
-    return crypto.createHash("sha256")
-      .update(`${entry.seq}|${entry.ts}|${entry.kind}|${entry.summary}|${JSON.stringify(entry.verdict)}|${entry.prevHash}`)
-      .digest("hex");
-  }
-
   _record(kind, payload, verdict) {
-    const prevHash = this.ledger.length ? (this.ledger[this.ledger.length - 1].hash || null) : Auditor.GENESIS;
-    const entry = {
-      seq: this.ledger.length + 1,
-      ts: new Date().toISOString(),
-      kind,
-      summary: this._summarize(payload),
-      verdict,
-      prevHash,
-    };
-    entry.hash = this._hash(entry);
-    this.ledger.push(entry);
+    this.ledger.push({ ts: new Date().toISOString(), kind, summary: this._summarize(payload), verdict });
     if (this.ledger.length > this.maxLedger) this.ledger = this.ledger.slice(-this.maxLedger);
     if (this.path) writeJson(this.path, this.ledger);
-  }
-
-  // 链完整性校验: 返回 { ok, brokenAt?, legacy } 。
-  // legacy = 链首之前无 hash 的旧格式条目数 (不算篡改, 只作迁移提示)。
-  verify() {
-    let legacy = 0;
-    let prev = null;
-    for (let i = 0; i < this.ledger.length; i++) {
-      const e = this.ledger[i];
-      if (!e.hash) { legacy++; continue; }
-      if (prev && e.prevHash !== prev) return { ok: false, brokenAt: e.seq, legacy };
-      if (this._hash(e) !== e.hash) return { ok: false, brokenAt: e.seq, legacy };
-      prev = e.hash;
-    }
-    return { ok: true, legacy };
   }
 
   // 仅在验证通过时才写回; 返回 { committed, reason?, verdict?, done? }

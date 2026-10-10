@@ -62,8 +62,8 @@ const client0 = null; // 占位: 候选链探活后确定 client
     console.error(`\n✗ 诊断: 当前模型 (${prov.model}) 不支持图像输入或端点拒绝了图片。`);
     console.error(`  修复: 在 config/ppx.json 前置一个视觉模型 provider, 例如:`);
     console.error(`  - 智谱 glm-4v-flash (免费额度, base_url=https://open.bigmodel.cn/api/paas/v4)`);
-    console.error(`  - 方舟普通端点 + doubao-seed-1-6-vision / 阿里 qwen-vl-max`);
-    console.error(`  (注: 方舟 Coding Plan Key 仅限编程特化模型, 不含视觉, 见 docs/MODEL-SETUP.md)`);
+    console.error(`  - 阿里 qwen-vl-max (base_url=https://dashscope.aliyuncs.com/compatible-mode/v1)`);
+    console.error(`  (注: 编程特化模型的 Key 往往不含视觉能力, 视觉需单独配 vision provider, 见 docs/MODEL-SETUP.md)`);
     client.close?.();
     process.exit(2);
   }

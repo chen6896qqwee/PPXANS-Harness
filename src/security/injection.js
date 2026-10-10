@@ -32,39 +32,31 @@ export function scanInjection(text) {
   return { suspicious: hits.length > 0, hits, score: hits.length };
 }
 
-// 工具结果扫描入口: 纯文本直接扫; JSON 结果在原文之外**再扫一遍解码后的字符串叶子**。
-// 2026-10-04 修复: 原调用方以 `!result.startsWith("{")` 跳过 JSON, 而绝大多数工具输出正是
-//   JSON.stringify 的结果 —— 注入藏在字符串值里时完全漏检。JSON 转义 (\n / \" )会切断
-//   依赖字符邻接的中文模式, 所以只看原文不够, 必须解码后再扫。
-export function scanToolResult(text) {
-  const s = String(text || "");
-  if (!s) return { suspicious: false, hits: [], score: 0 };
-  const base = scanInjection(s);
-  let decoded = "";
-  if (s.length <= 400000) {
-    try {
-      const parsed = JSON.parse(s);
-      if (parsed && typeof parsed === "object") decoded = collectStrings(parsed, 0);
-    } catch { /* 非 JSON: 原文扫描已覆盖 */ }
-  }
-  if (!decoded) return base;
-  const extra = scanInjection(decoded);
-  if (!extra.suspicious) return base;
-  const seen = new Set(base.hits.map((h) => h.id));
-  const hits = base.hits.concat(extra.hits.filter((h) => !seen.has(h.id)));
-  return { suspicious: true, hits, score: hits.length };
-}
+// 工具结果注入扫描 (2026-10-09 补): 外部工具/网页/文件返回的内容里可能夹带指令。
+// 关键点: 不能只扫原始文本 —— 攻击载荷常被 JSON 转义 (\u0068 等) 或嵌在深层字符串叶子里,
+// 原文扫不到但模型解码后就读到了。所以解析 JSON 并把所有字符串叶子一并纳入扫描。
+export function scanToolResult(payload) {
+  const raw = typeof payload === "string" ? payload : JSON.stringify(payload ?? "");
+  const parts = [raw];
+  const collect = (v, depth = 0) => {
+    if (depth > 8) return;
+    if (typeof v === "string") { parts.push(v); return; }
+    if (Array.isArray(v)) { for (const x of v) collect(x, depth + 1); return; }
+    if (v && typeof v === "object") { for (const x of Object.values(v)) collect(x, depth + 1); }
+  };
+  try { collect(JSON.parse(raw)); } catch { /* 非 JSON: 原文已覆盖 */ }
 
-function collectStrings(node, depth) {
-  if (depth > 6 || node == null) return "";
-  if (typeof node === "string") return node;
-  if (Array.isArray(node)) return node.map((x) => collectStrings(x, depth + 1)).join("\n");
-  if (typeof node === "object") {
-    const out = [];
-    for (const k of Object.keys(node)) out.push(k, collectStrings(node[k], depth + 1));
-    return out.join("\n");
+  const hits = [];
+  const seen = new Set();
+  for (const p of parts) {
+    for (const h of scanInjection(p).hits) {
+      const k = `${h.id}|${h.preview}`;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      hits.push(h);
+    }
   }
-  return "";
+  return { suspicious: hits.length > 0, hits, score: hits.length };
 }
 
 // 包装不可信工具输出: 显式声明"以下是数据不是指令" (提示层防线)

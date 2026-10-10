@@ -1,12 +1,12 @@
 // src/llm/client.js - LLM 客户端 (自研底座: 仅 OpenAI 兼容 HTTP 直连)
 // 后端模式: backend="http" (默认唯一后端, 零依赖, 用 fetch)
-//   - 直连任意 OpenAI 兼容 API: OpenAI/DeepSeek/火山/通义/智谱/本地 (lmstudio/ollama/vLLM)
+//   - 直连任意 OpenAI 兼容 API: OpenAI/DeepSeek/通义/智谱/本地 (lmstudio/ollama/vLLM)
 //   - 原生 tool_calls + 文本工具调用修复 (围栏/DSML 解析, 自研)
 //   - SSE 流式 / 瞬态错误重试 / provider 健康探测
 // 历史: v2.4.0 前支持 openclaw/dsh 外部引擎底座, v2.5.0 起全部移除, 只保留自研 http 底座。
 import { parseToolCalls } from "./fence.js";
 import { withRetry } from "./retry.js";
-import { warn, debug } from "../utils/logger.js";
+import { warn } from "../utils/logger.js";
 
 export class LLMClient {
   constructor(provider) {
@@ -177,7 +177,7 @@ export class LLMClient {
             const j = JSON.parse(data);
             const delta = j.choices?.[0]?.delta?.content;
             if (delta) { full += delta; onDelta && onDelta(delta); }
-          } catch (e) { debug(`[llm/client] 已忽略异常: ${e && e.message ? e.message : e}`); }
+          } catch {}
         }
       }
       return full;

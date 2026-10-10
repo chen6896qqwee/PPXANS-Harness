@@ -1,6 +1,5 @@
 ﻿// src/memory/index.js - 记忆系统统一出口 (v0.3 五层架构)
 export { FactStore } from "./fact-store.js";
-export { SqliteFactStore } from "./sqlite-store.js";
 export { MemoryTicker } from "./memory-ticker.js";
 export { Experience } from "./experience.js";
 export { LegionBoard } from "./legion-board.js";

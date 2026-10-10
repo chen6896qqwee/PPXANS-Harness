@@ -173,5 +173,37 @@ let bad = 0;
 if (cycles.length) { console.error("\n  ✗ 存在依赖环 —— 模块边界事实上不成立"); bad++; }
 if (CHECK && fresh.length) { console.error(`\n  ✗ 新增 ${fresh.length} 条越层依赖 (存量已冻结在基线, 新增一律不放过)`); bad++; }
 
+// ---- 内核行数预算 (2026-10-08, 轻内核路线图缺口 1) ----
+// 愿景: "内核代码尽量少, 每一行都需要有充分理由"。行数不设闸 = 每次往内核塞东西都
+// 无人报警, 轻内核会静默退化成胖内核。规则: 四个内核目录 (core/plugin/utils/config)
+// 各有预算上限, 超限只告警不拦 (记录漂移趋势), 超限 20% 以上才失败 —— 给合理的演进
+// 留出缓冲, 但让"塞东西进内核"这个动作必须先改这里的预算数字 (显式决策 > 静默膨胀)。
+// 预算基线 = 2026-10-08 实测值取整上浮 (core 1205 / plugin 575 / utils 957 / config 856)。
+const KERNEL_BUDGET = {
+  "src/core": 1300,
+  "src/plugin": 650,
+  "src/utils": 1100,
+  "src/config": 950,
+};
+function dirLines(dir) {
+  let n = 0;
+  (function walk(d) {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (p.endsWith(".js")) n += fs.readFileSync(p, "utf8").split("\n").length;
+    }
+  })(dir);
+  return n;
+}
+console.log("\n  --- 内核行数预算 (轻内核缺口 1) ---");
+for (const [dir, budget] of Object.entries(KERNEL_BUDGET)) {
+  const n = dirLines(path.join(ROOT, dir));
+  const pct = Math.round((n / budget) * 100);
+  const mark = pct <= 100 ? "✓" : pct <= 120 ? "△" : "✗";
+  console.log(`  ${mark} ${dir}: ${n} 行 / 预算 ${budget} (${pct}%)`);
+  if (pct > 120) { console.error(`    超预算 20% —— 塞进内核的功能必须重新评估 (拆到插件/技能层, 或显式上调预算)`); bad++; }
+}
+
 console.log(bad ? "" : "\n  ✓ 架构守卫通过");
 process.exit(bad ? 1 : 0);

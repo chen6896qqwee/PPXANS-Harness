@@ -24,7 +24,7 @@
 ## 三、脚本数据隔离统一 (第九轮建议 #3，P1) — 已落地
 
 - 新增 `scripts/lib/tmp-agent.js`：`makeTmpRoot`/`makeTmpAgent`/`makeAgentOnRoot`/`cleanupTmp`。**dataDir 强制落在临时根内**（覆盖 `PPX_DATA_DIR`），**清理必经安全护栏**（路径须在 `os.tmpdir()` 内，否则抛错绝不删）。
-- 改造 bench/eval/acceptance/e2e-response-smoke/memory-benchmark/e2e-volcengine-smoke **6 个脚本**，消除各自手写 mkdtemp/dataDir/rmSync——从根上杜绝将来新脚本重蹈"压测误删生产数据"（第九轮 P0）的覆辙。
+- 改造 bench/eval/acceptance/e2e-response-smoke/memory-benchmark **等 6 个脚本**，消除各自手写 mkdtemp/dataDir/rmSync——从根上杜绝将来新脚本重蹈"压测误删生产数据"（第九轮 P0）的覆辙。
 
 ## 四、Web token 失效自动引导 (第九轮建议 #4，P2) — 后端持久化落地
 

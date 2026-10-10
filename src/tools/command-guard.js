@@ -1,11 +1,8 @@
 // src/tools/command-guard.js - 命令守卫 (吸收 Hermes Agent approval 机制)
-// 四层防线:
+// 三层防线:
 //   1. 用户 deny 规则 (config.security.deny, glob 风格) — 最高优先级, 即使 allow_all 也拦
-//   2. 硬黑名单 HARD_BLOCK (rm -rf /、fork bomb、写裸设备、管道到 shell、重定向写敏感位置) — allow_all 也拦
-//   3. 常规高危黑名单 DEFAULT_DENY (继承皮皮虾 P0)
-//   3.5 内联执行规则 INLINE_EXEC_RULES (解释器/包执行器/git 钩子带内联参数) — allow_all 也拦,
-//       需 security.allow_inline_exec 显式放开 (2026-10-04 复审: 原白名单只看首词,
-//       node/python/git/find/tar/npx 自身即执行器 ⇒ "白名单前缀"等于任意代码执行)
+//   2. 硬黑名单 HARD_BLOCK (rm -rf /、fork bomb、写裸设备、管道到 shell 等) — allow_all 也拦
+//   3. 常规高危黑名单 DEFAULT_DENY (继承皮皮虾 P0) — allow_all 放行
 //   4. 白名单前缀 (allow_all=false 时) — 只放行已知安全命令前缀
 // 反混淆: normalizeCommand 先去引号再规范化空白, 防 `rm ""-rf` / `bash <(curl)` 引号技巧绕过
 
@@ -27,9 +24,6 @@ export const HARD_BLOCK = [
   { pattern: /dd\s+[^\n;]*of=\/dev\/(sd[a-z]|nvme[0-9])/i, reason: "dd 写裸磁盘设备" },
   { pattern: /(curl|wget)\s+[^\s|;&]+\s*\|[\s]*(ba|z|k)?sh/i, reason: "管道下载内容到 shell 执行 (不可信代码)" },
   { pattern: /(ba|z|k)?sh\s*<\s*\(\s*(curl|wget)/i, reason: "进程替换执行远程内容" },
-  // 2026-10-04 复审补口: 白名单里的 cat/echo/type 可被用作"任意位置写入"入口
-  //   (`cat /etc/passwd > ~/.ssh/authorized_keys`, `echo vbs > 启动目录\skip.lnk`)
-  { pattern: />>?\s*\S*(~\/|\$home|%userprofile%|\/etc\/|\/root\/|\.ssh|start\s?menu|startup|\.bashrc|\.bash_profile|\.zshrc|\.profile|launchagents|\\appdata\\roaming\\microsoft\\windows\\start menu)/i, reason: "重定向写入敏感位置 (授权密钥/启动项/shell rc/系统配置)" },
 ];
 
 // ---- 常规高危黑名单 (继承皮皮虾 P0: 删除/格式化/关机/强杀/强制推送等) ----
@@ -50,74 +44,6 @@ export const DEFAULT_ALLOW_PREFIX = [
   "cd", "help", "ipconfig", "netstat", "tasklist", "whoami", "date", "time", "tsc",
 ];
 
-// ---- 内联执行规则 (2026-10-04 安全复审新增, 第 4 层之前的硬规则) ----
-// 白名单只看首词 (原 step 4 取 split(/[\s|&;>]+/)[0]) ⇒ node/python/git/find/tar/npm 这些
-// "本身就是执行器"的命令带内联参数时等于任意代码执行:
-//   `python -c __import__("os").system("id")` / `node -e ...` / `git -c core.fsmonitor=/tmp/x status`
-//   `find . -exec sh ;` / `tar --checkpoint-action=exec=...` / `npx evil-pkg`
-// 这类形态一律不进白名单 —— **且 security.allow_all 也不能放行** (allow_all 的语义是
-// "放开常规高危黑名单", 不是 "任意代码执行免检")。想放开: security.allow_inline_exec=true。
-// 更安全的等价写法是把脚本落盘再执行 (write_file + `node file.js`), 规则对此不加严。
-export const INLINE_EXEC_RULES = [
-  { cmds: ["node", "deno", "bun"], flag: /^(-e|--eval|-p|--print|-c|--input-type=\S+)$/i, reason: "内联 JS 代码" },
-  // -c/-e 与组合短选项 (python -ic) 直接执行内联源码; 裸 `-` = 从 stdin/heredoc 读脚本。
-  // 不含 -m: `python -m pip install` / `-m venv` 是常规用法, 执行的是环境里已有的模块而非内联源码
-  { cmds: ["python", "python3", "python2", "pypy", "pypy3", "perl", "perl5", "ruby"], flag: /^(-c|--command|-e|--eval|-|-[a-z]*c[a-z]*)$/i, reason: "内联脚本代码 (-c/-e 或 stdin heredoc)" },
-  { cmds: ["php"], flag: /^(-r|--run|-a|--interactive)$/i, reason: "php -r 内联脚本代码" },
-  { cmds: ["sh", "bash", "zsh", "dash", "ksh"], flag: /^(-c|--command|-s|--stdin)$/i, reason: "内联 shell 命令" },
-  { cmds: ["cmd"], flag: /^\/[ck]$/i, reason: "cmd /c 内联 shell 命令" },
-  { cmds: ["powershell", "pwsh"], flag: /^(-c|--command|-e|-enc|-encodedcommand|-encodewithprotectedstring|-inputformat|-file|-commandfile)$/i, reason: "PowerShell 内联/编码命令" },
-  { cmds: ["git"], flag: /^-c$|^--exec-path$|^--git-dir$|^--work-tree$/i, reason: "git -c/--exec-path 配置注入可执行外部命令 (core.fsmonitor/alias/pager)" },
-  { cmds: ["find", "fd"], flag: /^(-exec|-execdir|-ok|-okdir|--exec)$/i, reason: "find -exec 派生任意进程" },
-  { cmds: ["tar"], flag: /^--(checkpoint-action|to-command|use-compress-program|rsh-command|index-file)$/i, reason: "tar 钩子执行外部命令" },
-  // 只拦"以执行任意包代码为目的"的动词; install/add 属常规依赖安装 (跑 postinstall 但语义中立),
-  // 不在本层拦截, 由 run_command 的高危审批与用户 deny 规则管
-  { cmds: ["npm", "pnpm", "yarn"], flag: /^(exec|dlx|create|global|unsafe)$/i, reason: "包执行器拉起任意第三方包代码" },
-  // npx 的语义本身就是"按包名拉起并执行第三方代码": 任何非 flag 位置参数都算 (npx tsc / npx create-x)
-  { cmds: ["npx"], flag: /^(?!-)\S+$/i, reason: "npx 按包名拉起任意第三方包代码" },
-];
-
-// 前导包装器: `env python -c` / `sudo node -e` / `nohup bash -c` 不改变实际执行的程序
-const EXEC_WRAPPERS = new Set(["env", "sudo", "nohup", "time", "nice", "stdbuf", "command", "exec", "doas"]);
-
-// 把一条命令拆成管道段并解析出真实执行程序 + 参数 token
-export function parseCommandSegments(normalized) {
-  const out = [];
-  for (const raw of String(normalized || "").split(/[|&;]+/)) {
-    const tokens = raw.trim().split(/\s+/).filter(Boolean);
-    let i = 0;
-    while (i < tokens.length) {
-      const base = pathBasename(tokens[i]);
-      if (EXEC_WRAPPERS.has(base)) { i++; continue; } // 跳过 env/sudo 等包装器
-      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i])) { i++; continue; } // 跳过 FOO=bar 前置赋值
-      break;
-    }
-    if (i >= tokens.length) continue;
-    out.push({ exe: pathBasename(tokens[i]).replace(/\.exe$/i, "").toLowerCase(), args: tokens.slice(i + 1) });
-  }
-  return out;
-}
-
-function pathBasename(t) {
-  return String(t || "").replace(/\\/g, "/").split("/").filter(Boolean).pop() || "";
-}
-
-// 命中内联执行规则 → 返回原因; 未命中返回 null
-export function findInlineExec(normalized) {
-  for (const { exe, args } of parseCommandSegments(normalized)) {
-    if (!exe) continue;
-    for (const rule of INLINE_EXEC_RULES) {
-      if (!rule.cmds.includes(exe)) continue;
-      for (const a of args) {
-        // 去引号后的 token 里可能带粘连值 (`--input-type=module` / `git -c key=val` 的 key 段)
-        const tok = a.replace(/^["']+|["']+$/g, "");
-        if (tok && rule.flag.test(tok)) return `${exe} ${tok} (${rule.reason})`;
-      }
-    }
-  }
-  return null;
-}
-
 // 命中拦截后附加的指引: 明确告知不要重试/改写绕过 (Hermes approval 同款约束)
 export const DENY_HINT = " 命中后不要重试或改写命令绕过 — 确需执行请让用户调整 security 配置。";
 
@@ -129,8 +55,62 @@ export function globToRegExp(glob) {
   try { return new RegExp("^" + s + "$", "i"); } catch { return null; }
 }
 
+// ---- 解释器内联执行检测 (2026-10-09 补) ----
+// 缺陷: 首词合法的命令可以携带任意内联源码逃过前缀白名单 ——
+//   `node -e "..."` / `python -c "..."` / `bash -c "..."` / `powershell -enc ...` 全是"node/python/bash"开头,
+//   `npx <pkg>` 等于即取即执行远程包, `find . -exec cat {} ;` 借用 find 执行任意程序,
+//   `git -c pager=... log` 借 git 注入配置。这些一律按【硬拦截】处理 (allow_all 也拦),
+//   需显式 allow_inline_exec 才放开。
+// 刻意不误伤: `python -m venv`(模块) / `node app.js` / `bash build.sh` / `find . -name` 均不在拦截范围。
+const INLINE_INTERPRETERS = [
+  { names: ["node", "nodejs"], flags: ["-e", "-p", "--eval", "--print"] },
+  { names: ["python", "python2", "python3", "py"], flags: ["-c"] },
+  { names: ["perl", "ruby"], flags: ["-e"] },
+  { names: ["php"], flags: ["-r"] },
+  { names: ["bash", "sh", "zsh", "ksh", "dash"], flags: ["-c"] },
+  { names: ["powershell", "pwsh"], flags: ["-c", "-command", "-enc", "-encodedcommand", "-e"] },
+];
+export const INLINE_EXEC_OPT_IN = "security.allow_inline_exec";
+
+/**
+ * 检测命令是否在不走脚本文件的前提下内联执行代码。
+ * @returns {string|null} 命中说明, 未命中返回 null
+ */
+export function findInlineExec(cmd) {
+  const s = normalizeCommand(cmd);
+  if (!s) return null;
+  // 逐"命令段"判定 (&& || ; | 分段): env/sudo/time/nohup 等包装器不构成绕过,
+  // 因为下面按段内任意位置找解释器 token。
+  const segments = s.split(/\s*(?:&&|\|\||;|\|)\s*/);
+  for (const seg of segments) {
+    const toks = seg.split(/\s+/).filter(Boolean);
+    if (!toks.length) continue;
+    for (let i = 0; i < toks.length; i++) {
+      const raw = toks[i].toLowerCase().replace(/^.*[\\/]/, "").replace(/\.(exe|cmd|bat)$/, "");
+      const interp = INLINE_INTERPRETERS.find((x) => x.names.includes(raw));
+      if (interp) {
+        for (let j = i + 1; j < toks.length; j++) {
+          const t = toks[j].toLowerCase();
+          if (t.startsWith("-") && interp.flags.includes(t)) return `${raw} ${t} 内联执行`;
+          if (!t.startsWith("-")) break; // 遇到第一个非选项 token (脚本文件/模块名) 即停, 避免误伤 node app.js / python -m venv
+        }
+      }
+    }
+    if (/^(npx|pnpx)$/.test(toks[0]) || (/^(pnpm|yarn)$/.test(toks[0]) && toks[1] === "dlx")) {
+      return "npx/dlx 即取即执行远程包";
+    }
+    if (/^(find|fd)$/.test(toks[0]) && toks.some((t) => /^-(exec|execdir|ok)$/i.test(t))) {
+      return "find -exec 内联执行外部程序";
+    }
+    if (toks[0].toLowerCase().replace(/\.exe$/, "") === "git" && toks[1] === "-c") {
+      return "git -c 注入配置 (可挂 pager/sshCommand 等执行点)";
+    }
+  }
+  return null;
+}
+
 // 统一检查入口:
-//   opts = { allowAll|allow_all, allowPrefix, denyList, deny, hardBlock }
+//   opts = { allowAll|allow_all, allowPrefix, denyList, deny, hardBlock, allow_inline_exec }
 //   v1.0.9: 兼容 snake 配置键 allow_all (config.security.allow_all 是 snake, 原只认 camel 导致 allow_all=true 永不生效)
 //   返回 { ok: true, normalized } | { ok: false, reason, hard }
 export function checkCommand(cmd, opts = {}) {
@@ -152,27 +132,20 @@ export function checkCommand(cmd, opts = {}) {
     if (pattern.test(normalized)) return { ok: false, hard: true, reason: "硬黑名单拦截: " + reason };
   }
 
+  // 2.5 解释器内联执行 (硬拦截, allow_all 不可放开; 需显式 allow_inline_exec opt-in)
+  //     放在白名单之前, 否则 `node -e ...` 会因首词是 node 而被前缀白名单放行。
+  const inlineOptIn = !!(opts && (opts.allow_inline_exec || opts.allowInlineExec));
+  if (!inlineOptIn) {
+    const inlineHit = findInlineExec(normalized);
+    if (inlineHit) {
+      return { ok: false, hard: true, reason: `内联执行拦截: ${inlineHit} (需 ${INLINE_EXEC_OPT_IN}=true 才放开)` };
+    }
+  }
+
   // 3. 常规高危黑名单 (allow_all 放行)
   const deny = (opts && opts.denyList) || DEFAULT_DENY;
   for (const re of deny) {
     if (re.test(normalized)) return { ok: false, hard: false, reason: "命令被拒绝: 命中高危黑名单 (delete/format/shutdown/curl等)" };
-  }
-
-  // 3.5 内联执行硬规则 (allow_all 也不放开; security.allow_inline_exec=true 才放开)
-  //   放在白名单之前是因为白名单只看首词, 对"首词是执行器"的命令无语义 (见 INLINE_EXEC_RULES)
-  //   skipInlineExec: code_act 的执行形态本就是"脚本落盘再执行", 扫脚本内容属类别错误
-  if (opts && (opts.skipInlineExec || opts.allowInlineExec || opts.allow_inline_exec)) {
-    // 显式放开 (配置或调用方声明) 时跳过本层
-  } else {
-    const inline = findInlineExec(normalized);
-    if (inline) {
-      return {
-        ok: false,
-        hard: true,
-        needsApproval: true,
-        reason: `内联执行不进白名单且不随 allow_all 放开: ${inline}. 建议把脚本写入文件后执行 (如 write_file + node file.js), 或设置 security.allow_inline_exec=true`,
-      };
-    }
   }
 
   // 4. 白名单前缀 (allow_all=false 时)

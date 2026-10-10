@@ -15,7 +15,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { ensureDir, withFileLock } from "../utils/store.js";
-import { warn, debug } from "../utils/logger.js";
+import { warn } from "../utils/logger.js";
 
 export const AUDIT_SEQ_FILE = "audit.seq";
 export const AUDIT_FILE = "audit.ndjson";
@@ -52,12 +52,6 @@ export class AuditLog {
     this._seqFile = path.join(path.dirname(this.file), AUDIT_SEQ_FILE);
     ensureDir(path.dirname(this.file));
     this._seq = this._loadSeq();
-    // 链头缓存 (2026-10-03 性能优化): append 每次都要拿链头, 而 lastHash() 原先每次全量读日志文件
-    // → 整体 O(N^2)。实测 574KB 日志追加 2000 条耗时 23.5s。
-    // 现改为"缓存 + 文件字节数校验": 单进程热路径只做一次 statSync; 若文件被其他进程写过
-    // (size 变化) 则回退到读盘, 保证多进程语义不变。
-    this._head = undefined; // undefined=未加载, null=空链
-    this._headSize = -1; // 缓存对应的文件大小
   }
 
   _loadSeq() {
@@ -66,44 +60,11 @@ export class AuditLog {
       return Number.isFinite(n) ? n : 0;
     } catch {
       // 无 seq 文件 → 从日志尾部推断 (防并行进程计数漂移)
-      const tail = this._tailEntry();
-      if (tail) return Number.isFinite(tail.seq) ? tail.seq : 0;
-      if (tail === undefined) {
-        // 尾部窗口里没有完整行 (单行超 16KB 等), 退回全量读一次拿真实计数
-        try {
-          const lines = fs.readFileSync(this.file, "utf8").trim().split("\n").filter(Boolean);
-          if (lines.length) return Number(JSON.parse(lines[lines.length - 1]).seq) || 0;
-        } catch (e) { debug(`[audit/audit-chain] 已忽略异常: ${e && e.message ? e.message : e}`); }
-      }
+      try {
+        const lines = fs.readFileSync(this.file, "utf8").trim().split("\n").filter(Boolean);
+        if (lines.length) return Number(JSON.parse(lines[lines.length - 1]).seq) || 0;
+      } catch {}
       return 0;
-    }
-  }
-
-  // 只读日志末尾 16KB 拿最后一条完整记录 (审计日志单调增长, 全量读盘是 O(N))
-  // 末行可能正被别的进程写到一半 → 逐行回退到第一条能解析的; 都解析不了返回 null 让调用方回退全量读
-  _tailEntry() {
-    let fd;
-    try {
-      const size = fs.statSync(this.file).size;
-      if (!size) return null;
-      fd = fs.openSync(this.file, "r");
-      const len = Math.min(size, 16384);
-      const buf = Buffer.alloc(len);
-      fs.readSync(fd, buf, 0, len, size - len);
-      const lines = buf.toString("utf8").split("\n");
-      for (let i = lines.length - 1; i >= 0; i--) {
-        const s = lines[i].trim();
-        if (!s) continue;
-        try {
-          const e = JSON.parse(s);
-          if (e && (Number.isFinite(e.seq) || typeof e.hash === "string")) return e;
-        } catch { /* 半截行, 继续往前 */ }
-      }
-      return undefined; // 尾部窗口内没有完整行 (超长行/异常), 调用方回退全量读
-    } catch {
-      return null; // 文件不存在: 空链
-    } finally {
-      if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* 忽略 */ } }
     }
   }
 
@@ -113,17 +74,13 @@ export class AuditLog {
       .digest("hex");
   }
 
-  // 追加一条审计记录
-  // 2026-10-04: "取链头 → 递增 seq → 追加"整体放进跨进程文件锁, 并在锁内以磁盘尾行为权威重读 seq。
-  //   原先是裸 appendFileSync + 内存 _seq (只在构造时播种过一次): 军团多进程共用 dataDir 时
-  //   两个进程各自 +1 写出**重复 seq**, prevHash 又各指自己的头 —— 哈希链当场断裂;
-  //   audit_verify 只会报"第 N 行 hash 不匹配", 把一个并发问题伪装成篡改事故。
-  //   交错写还会留下半截 JSON 行, 同样只表现为"疑似篡改"。
+  // 追加一条审计记录 (单进程内同步追加)
+  // 2026-10-10 (G9 修复): 两进程交替追加时 seq 会重复 —— 各自构造时 _seq=0, 谁都不知道对方写到哪。
+  //   现改为在**文件锁内**分配: seq 取 max(进程内档, 磁盘档)+1 (磁盘 seq 文件是跨进程真相),
+  //   prevHash 也在锁内重读 (链头始终指向盘上真最后一条)。锁只护"读尾→算 hash→追加"临界区。
   append({ tool, args = {}, ok = true, error = null, ms = 0 }) {
     return withFileLock(this.file, () => {
-      const tail = this._tailEntry();
-      if (tail && Number.isFinite(tail.seq) && tail.seq > this._seq) this._seq = tail.seq;
-      const seq = this._seq + 1;
+      const seq = Math.max(this._seq, this._loadSeq()) + 1;
       const prevHash = this.lastHash();
       const entry = {
         seq,
@@ -138,18 +95,9 @@ export class AuditLog {
       entry.hash = this._hash(entry);
       this.totalWrites = (this.totalWrites || 0) + 1;
       try {
-        const line = JSON.stringify(entry) + "\n";
-        fs.appendFileSync(this.file, line, "utf8");
+        fs.appendFileSync(this.file, JSON.stringify(entry) + "\n", "utf8");
         this._seq = seq;
-        // seq 文件只是"上次写到哪"的提示 (读不到会回退日志尾行), 单独 try: 它失败不该算审计写入失败
-        try { fs.writeFileSync(this._seqFile, String(seq), "utf8"); } catch (e) { debug(`[audit/audit-chain] seq 文件写入失败: ${e?.message || e}`); }
-        // 同步链头缓存: 下一次 lastHash() 命中快路径, 不再全量读日志
-        this._head = entry.hash;
-        try {
-          this._headSize = fs.statSync(this.file).size;
-        } catch {
-          this._headSize = -1;
-        }
+        fs.writeFileSync(this._seqFile, String(seq), "utf8");
       } catch (e) {
         // 审计写入失败不阻断主流程 (可观测性降级不阻塞 agent, 与 core/trace.js 同策略),
         // 但不静默吞: 计数 + warn, 供 audit.health() 暴露写入健康度 (审计承诺不能被悄悄破坏)。
@@ -171,32 +119,12 @@ export class AuditLog {
   }
 
   // 读最后一条 hash (链头)
-  // 快路径: 文件字节数与缓存一致 → 直接返回内存链头 (O(1), 只花一次 statSync)
-  // 慢路径: 文件被外部改动过 (多进程追加/被截断/不存在) → 只读末尾窗口重建缓存
-  //   (2026-10-04: 旧慢路径全量读盘, 别的进程每写一条本进程就要重读整个日志 → 又回到 O(N^2);
-  //    尾行解析不出 (超长行) 时才退回一次全量读兜底)
   lastHash() {
     try {
-      const st = fs.statSync(this.file);
-      if (this._headSize === st.size) return this._head;
-      const tail = this._tailEntry();
-      if (tail) {
-        this._head = tail.hash || null;
-        this._headSize = st.size;
-        return this._head;
-      }
-      if (tail === null) { // 空文件 = 空链
-        this._head = null;
-        this._headSize = st.size;
-        return null;
-      }
       const lines = fs.readFileSync(this.file, "utf8").trim().split("\n").filter(Boolean);
-      this._head = lines.length ? (JSON.parse(lines[lines.length - 1]).hash || null) : null;
-      this._headSize = st.size;
-      return this._head;
+      if (!lines.length) return null;
+      return JSON.parse(lines[lines.length - 1]).hash || null;
     } catch {
-      this._head = null;
-      this._headSize = -1;
       return null;
     }
   }
@@ -248,7 +176,7 @@ export function quarantineBroken(dataDir) {
   try {
     const bak = log.file + ".quarantine-" + Date.now();
     fs.renameSync(log.file, bak);
-    try { fs.rmSync(log._seqFile, { force: true }); } catch (e) { debug(`[audit/audit-chain] 已忽略异常: ${e && e.message ? e.message : e}`); }
+    try { fs.rmSync(log._seqFile, { force: true }); } catch {}
     // 重建空日志 + 记录隔离事件 (新的链起点)
     const fresh = new AuditLog(dataDir);
     fresh.append({ tool: "audit_quarantine", args: { reason: v.detail, source: path.basename(bak) }, ok: false, error: v.detail });

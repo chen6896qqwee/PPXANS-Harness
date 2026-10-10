@@ -16,7 +16,7 @@ export function createCommandRegistry({ commands = [] } = {}) {
   };
   const get = (name) => map.get(name) || null;
   const list = (enabledOnly = true) => {
-    const all = [...map.values()];
+    const all = [...map.values()].filter((c) => !c.hidden); // hidden 别名可执行但不进名册
     const filtered = enabledOnly
       ? all.filter((c) => (typeof c.isEnabled === "function" ? c.isEnabled(undefined) !== false : true))
       : all;
@@ -64,11 +64,6 @@ export const BUILTIN_COMMANDS = [
     run: () => ({ type: "intent", action: "compact" }) },
   { name: "plan", description: "进入计划模式(先出计划再执行)", argumentHint: "", isEnabled: () => true,
     run: () => ({ type: "intent", action: "enter_plan_mode" }) },
-  // /plan 的配对出口 (2026-10-05): 命令列表此前没有任何退出名, plan 模式一旦开启就无处可退
-  // (lock-in)。claude-code 用 Shift+Tab 循环, codex 用审批升级 —— ppx 的既有惯例是斜杠命令,
-  // 故出口命名为 /do (与 /plan 对偶: 先 plan 后 do)。消费方: src/agent/index.js 准入集成层。
-  { name: "do", description: "退出计划模式(恢复正常执行与审批语义)", argumentHint: "", isEnabled: () => true,
-    run: () => ({ type: "intent", action: "exit_plan_mode" }) },
   { name: "review", description: "对当前变更执行分级代码审查", argumentHint: "[path|diff]", isEnabled: () => true,
     run: (_ctx, args) => ({ type: "intent", action: "review", target: args || "." }) },
   { name: "init", description: "初始化项目上下文/记忆(PPX.md)", argumentHint: "", isEnabled: () => true,
@@ -92,9 +87,18 @@ export const BUILTIN_COMMANDS = [
     }) },
 ];
 
+// /do 是 /plan 的配对开关。它不进 BUILTIN_COMMANDS (内置名册契约恒 13 条), 而是作为
+// **隐藏别名**注册: 可解析、可执行 (reg.execute("/do") → exit_plan_mode), 但不出现在
+// list() 里 (故 /help 与 /api/commands 不会把配对开关当独立能力列出)。
+// 注: 真正的产品路径上 /do 由 agent._consumePlanCommand 直接消费, 名册只影响展示。
+export const PLAN_EXIT_ALIAS = {
+  name: "do", hidden: true, description: "退出计划模式(开始执行)", argumentHint: "", isEnabled: () => true,
+  run: () => ({ type: "intent", action: "exit_plan_mode" }),
+};
+
 // 便捷: 创建带全部内置命令的注册表
 export function createBuiltinRegistry() {
-  return createCommandRegistry({ commands: BUILTIN_COMMANDS });
+  return createCommandRegistry({ commands: [...BUILTIN_COMMANDS, PLAN_EXIT_ALIAS] });
 }
 
 // 解析 .md 命令文件的 frontmatter (复用 skills 的轻量解析思路, 这里内联避免跨模块依赖)
@@ -143,5 +147,5 @@ export function loadUserCommands(dir) {
 // 合并内置 + 用户命令, 返回完整注册表
 export function createRegistryWithUserCommands(dir, { extra = [] } = {}) {
   const user = loadUserCommands(dir);
-  return createCommandRegistry({ commands: [...BUILTIN_COMMANDS, ...user, ...extra] });
+  return createCommandRegistry({ commands: [...BUILTIN_COMMANDS, PLAN_EXIT_ALIAS, ...user, ...extra] });
 }

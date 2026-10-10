@@ -7,7 +7,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import { scanRepo, extractSymbols, DEFAULT_IGNORE } from "../repomap/index.js";
-import { debug } from "../utils/logger.js";
 
 // 敏感文件名模式 (ZCode Wiki 同款语义): 命中即从 wiki 中排除, 不读不引
 export const SENSITIVE_PATTERNS = [
@@ -160,7 +159,7 @@ export function checkStaleness(wikiOutPath, root) {
       try {
         const m = fs.statSync(path.join(root, f.rel)).mtimeMs;
         if (m > newest) newest = m;
-      } catch (e) { debug(`[wiki/index] 已忽略异常: ${e && e.message ? e.message : e}`); }
+      } catch {}
     }
     if (newest > wikiMtime) return { stale: true, reason: "源码在 wiki 生成后有变更" };
     return { stale: false, reason: "wiki 与源码同步" };

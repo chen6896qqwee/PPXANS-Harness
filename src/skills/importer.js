@@ -114,11 +114,35 @@ function timeoutSignal(ms) {
   try { return AbortSignal.timeout(ms); } catch { return undefined; }
 }
 
+// GitHub 限流专用错误 (2026-10-09 补): 通用 "GitHub API 403 Forbidden" 对模型毫无可操作性 ——
+// 它既不知道这是限流, 也不知道还能走哪条路, 只会原样重试再撞一次。
+// 这里把三条出路写进消息: 等重置 / 配 token / 改走 tarball 直链。
+export function ratelimitError(status, resetEpochSec = null, url = "") {
+  const reset = Number(resetEpochSec);
+  let wait = "";
+  if (Number.isFinite(reset) && reset > 0) {
+    const mins = Math.max(1, Math.ceil((reset * 1000 - Date.now()) / 60000));
+    wait = `, 约 ${mins} 分钟后重置`;
+  }
+  const where = String(url || "").replace(/^https?:\/\/[^/]+/, "") || "(未知地址)";
+  return new Error(
+    `GitHub API ${status} 限流: ${where}${wait}。三条出路: `
+    + "1) 等到窗口重置后重试; "
+    + "2) 配置 token (环境变量 GITHUB_TOKEN) 后重试 —— 认证请求配额更高; "
+    + "3) 改用 tarball 直链下载 (不走 API, 不受此限流影响)。"
+  );
+}
+
 async function ghJson(url, token) {
   const headers = { "User-Agent": "ppxans-harness-skill-importer", Accept: "application/vnd.github+json" };
   if (token) headers.Authorization = `Bearer ${token}`;
   const res = await fetch(url, { headers, signal: timeoutSignal(IMPORT_LIMITS.timeoutMs) });
-  if (!res.ok) throw new Error(`GitHub API ${res.status} ${res.statusText} (${url})`);
+  if (!res.ok) {
+    if (res.status === 403 || res.status === 429) {
+      throw ratelimitError(res.status, res.headers.get("x-ratelimit-reset"), url);
+    }
+    throw new Error(`GitHub API ${res.status} ${res.statusText} (${url})`);
+  }
   return res.json();
 }
 

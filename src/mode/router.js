@@ -3,7 +3,6 @@
 // 适合: 多领域任务, 快速定位专门能力; 按需加载技能, 省 token。
 import path from "node:path";
 import { SkillLoader } from "../skills/loader.js";
-import { debug } from "../utils/logger.js";
 
 // 技能匹配移至 src/skills/search.js (2026-10-01): name 加权 + 高置信阈值 + 歧义不押注,
 // 并供 skill_search 工具复用同一打分器。此处保持转出口兼容既有 import。
@@ -18,7 +17,7 @@ export async function routerExecutor(agent, userMsg, { sessionKey = "default" } 
   // 命中即 trackUse — 路由路径此前绕过了使用统计, 自进化飞轮 (auto_skill/升级闸门) 因此少计数。
   const loader = agent.skills || new SkillLoader(path.join(agent.root, "skills"));
   const skill = matchSkill(loader, userMsg);
-  if (skill && typeof loader.trackUse === "function") { try { loader.trackUse(skill.id); } catch (e) { debug(`[mode/router] 已忽略异常: ${e && e.message ? e.message : e}`); } }
+  if (skill && typeof loader.trackUse === "function") { try { loader.trackUse(skill.id); } catch {} }
   // 2. 注入技能内容到 system prompt, 再执行 (场景上下文已由 agent._context 注入)
   const system = agent._context(userMsg)
     + (skill ? `\n\n[已激活技能: ${skill.name}]\n${loader.read(skill.id)}` : "");

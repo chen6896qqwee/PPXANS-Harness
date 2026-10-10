@@ -16,23 +16,7 @@ import { shortId } from "../utils/id.js";
 import { scrubPII } from "../utils/pii.js";
 
 const als = new AsyncLocalStorage();
-const MAX_PAYLOAD = 2000; // 单个字符串字段上限, 防爆文件
-const MAX_LINE = MAX_PAYLOAD * 4; // 整行硬上限 (字段都裁过后仍超限才走"骨架行"兜底)
-
-// 载荷裁剪 (2026-10-04 修复): 原实现裁的是"序列化后的整行"再补 "…", 等于把 JSON 从中间剪断 ——
-//   这行永远无法 JSON.parse, 大 payload 事件 (工具输出/审批摘要/playbook) 在持久事件流里静默消失,
-//   replay/verifyReplay 还会把它们记成 parse 错误。现在只裁"值", 落盘行始终是合法 JSON。
-function shrinkPayload(node, cap, depth = 0) {
-  if (depth > 6) return "(嵌套过深, 已省略)";
-  if (typeof node === "string") return node.length > cap ? node.slice(0, cap) + "…" : node;
-  if (Array.isArray(node)) return node.slice(0, 100).map((v) => shrinkPayload(v, cap, depth + 1));
-  if (node && typeof node === "object") {
-    const out = {};
-    for (const [k, v] of Object.entries(node)) out[k] = shrinkPayload(v, cap, depth + 1);
-    return out;
-  }
-  return node;
-}
+const MAX_PAYLOAD = 2000; // 单条事件载荷上限, 防爆文件
 
 export function genTraceId() {
   return shortId("t_", 8);
@@ -79,22 +63,14 @@ export class EventTracer {
       seq: this.count,
       // ...safe 在 type 之前 (2026-09-18 修复): payload 自带 type 键时不得覆盖埋点事件类型,
       //   否则 events-*.jsonl 中 type 与实际语义不符, 基于 type 的检索/统计失真
-      ...shrinkPayload(safe, MAX_PAYLOAD),
+      ...safe,
       type,
     };
     if (opts.durationMs != null) entry.durationMs = Math.round(opts.durationMs);
     if (opts.error != null) entry.error = String(opts.error).slice(0, 500);
-    let line;
+    const line = JSON.stringify(entry);
     try {
-      line = JSON.stringify(entry);
-      // 极端情况 (海量小字段堆出来的对象) 兜底: 换成只留事件骨架的一行, 而不是把 JSON 剪断
-      if (line.length > MAX_LINE) {
-        line = JSON.stringify({
-          ts: entry.ts, sessionId: entry.sessionId, traceId: entry.traceId, seq: entry.seq,
-          type, _payloadDropped: line.length,
-        });
-      }
-      fs.appendFileSync(this._file(), line + "\n", "utf8");
+      fs.appendFileSync(this._file(), (line.length > MAX_PAYLOAD * 4 ? line.slice(0, MAX_PAYLOAD * 4) + "…" : line) + "\n", "utf8");
     } catch (e) { /* 事件写入失败不影响主流程 (可观测性降级不阻塞 agent) */ }
     return entry;
   }

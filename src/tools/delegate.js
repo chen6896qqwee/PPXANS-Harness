@@ -13,55 +13,46 @@
 //   - 账本 ledger: 全程记录审查/修复轮次, 熔断时未决发现交主 agent 裁定
 import path from "node:path";
 import { Legion } from "../orchestrator/legion.js";
-import { runSupervisor } from "../orchestrator/supervisor.js"; // 2026-10-03 接线
-import { resolveExpert, HIGH_RISK_DOMAINS } from "../orchestrator/experts.js";
-// 专家/班组名册不再内联进工具描述 (实测 spawn_agent schema 曾占 1338 tok): 名册改由
-// expert_list / team_list 工具按需给出, 描述里只留"去查哪个工具"。
-import { resolveTeam, teamExperts } from "../orchestrator/teams.js";
-import { getGovernor, governorOptsFromConfig } from "../orchestrator/governor.js";
+import { resolveExpert, listExperts, normalizePersona, registerUserExpert, resolveExpertWithUser, saveUserExperts } from "../orchestrator/experts.js";
+import { resolveTeam, teamExperts, teamRiskProfile, listTeams } from "../orchestrator/teams.js";
 import { withTimeout } from "../utils/async.js";
+import { profileFromEngine, childSpawnEnv } from "../permissions/intersection.js";
 import { currentTrace } from "../core/trace.js";
-import { debug } from "../utils/logger.js";
-// Codex 权限交集不变量 (2026-10-05 吸收): 子 agent 生效档位 = 请求档位 ∩ 父生效档位,
-// 只准变窄, 不准变宽; 解析不了的输入终止交集并全锁死 (失败关闭)。
-import { SandboxPolicy } from "../permissions/index.js";
-import { profileFromEngine, intersectPermissionProfiles, childSpawnEnv } from "../permissions/intersection.js";
 
-// 子任务超时 (2026-10-07): 从硬编码常量改为可配置 (agent.legion.delegate_timeout_ms), 兜底保持旧值
 const DELEGATE_TIMEOUT_MS = 120000; // 子任务最长等待 (防卡死主 agent 工具循环)
-export function delegateTimeoutMs(agent) {
-  const n = Number(agent?.config?.agent?.legion?.delegate_timeout_ms);
-  return Number.isFinite(n) && n > 0 ? n : DELEGATE_TIMEOUT_MS;
-}
 
-// 专家解析 (2026-10-07 吸收 Octop 后统一入口): 代码内置名册优先, 专家包兜底。
-//   顺序刻意如此 —— EXPERTS 的 id 是既有契约 (测试与文档都引用), 不能被同名专家包悄悄顶掉;
-//   专家包补的是"名册之外、可分发可增长"的那部分 (用户自己装/导入的专家)。
-function resolveAnyExpert(agent, key) {
-  if (!key) return null;
-  const e = resolveExpert(key);
-  if (e) return e;
+// ---- 专家解析 (2026-10-10 接线) ----
+// 专家包 (磁盘上可增长) 优先, 再落内置 EXPERTS 名册 + 用户档。
+//   此前只认内置名册, 于是专家包 id ("ai-coding-coach" / "ops-engineer" 等) 恒解析失败,
+//   静默降级成"无专家", 人格视角根本没进子 agent。此处补上包目录这条通路。
+export function resolveExpertFor(agent, key) {
+  const k = String(key || "").trim();
+  if (!k) return null;
   const packs = agent?.expertPacks;
   if (packs && typeof packs.resolve === "function") {
-    const p = packs.resolve(key);
-    if (p) {
+    const pack = packs.resolve(k);
+    if (pack) {
+      let persona = null;
+      try {
+        persona = typeof packs.personaOf === "function"
+          ? packs.personaOf(pack.id, {
+            agentName: agent?.config?.agent?.name || "皮皮虾",
+            userDisplay: agent?.userName || "兄弟",
+            withAgents: true,
+          })
+          : null;
+      } catch { /* persona 渲染失败 → 回落包自带 perspective */ }
       return {
-        name: p.label,
-        // 专家包的人格块直接作为视角注入 (骨架 + SOUL + 可选 MBTI), 比一句 perspective 厚得多
-        perspective: packs.personaOf(p.id, {
-          agentName: agent?.config?.agent?.name || "皮皮虾",
-          userDisplay: agent?.userName || "兄弟",
-          withAgents: true,
-        }) || p.perspective,
-        readonly: !!p.readonly,
-        requiresHuman: !!p.requiresHuman,
-        domain: p.domain,
-        skills: p.skills,
-        packId: p.id,
+        name: pack.label || pack.id,
+        perspective: persona || pack.perspective || null,
+        readonly: !!pack.readonly,
+        requiresHuman: !!pack.requiresHuman,
+        domain: pack.domain,
+        source: "pack",
       };
     }
   }
-  return null;
+  return resolveExpert(k) || resolveExpertWithUser(k) || null;
 }
 
 // ---- SDD review 循环: 纯函数 (可测) ----
@@ -166,28 +157,279 @@ export async function arbitrateWithBoard(agent, tasks, results, perspectives, ju
   return arbitrate(agent, tasks, results, perspectives, judge + boardContext);
 }
 
+/* ======================= 班组编排 (runTeam) ======================= */
+
+/**
+ * 按拓扑把一个任务分派给班组并整合产出。
+ * 五种拓扑: pipeline (前环产出成为后环输入) / parallel (各自产出 + 仲裁整合) /
+ *          debate (正反两方 + 仲裁) / review (实施 + 只读审查) / supervisor (兜底走仲裁整合)。
+ * 安全侧: 只读成员一律挂 PPX_AGENT_READONLY; 全部 spawn 走治理入口 (spawnAgents 优先);
+ *        数据目录在 <agent.dataDir>/legion/<成员名> 下隔离。
+ * @param {object} o
+ * @param {object} o.agent  主 agent
+ * @param {object} o.L      军团 (测试可注入桩)
+ * @param {{id:string,name:string,topology:string}} o.team
+ * @param {Array<{name:string,perspective?:string,readonly?:boolean}>} o.members
+ * @param {string} o.task
+ * @param {string} [o.judge]     仲裁/审查准则
+ * @param {Function} [o.onSpawn] 每 spawn 一个成员回调一次 (供调用方 finally 回收)
+ * @returns {Promise<{text:string, spawnNames:string[], replies:string[]}>}
+ */
+export async function runTeam({ agent, L, team, members = [], task, judge = null, onSpawn = null } = {}) {
+  const teamId = String(team?.id || "team").replace(/[^\w-]/g, "") || "team";
+  const topology = String(team?.topology || "parallel");
+  const list = (members || []).filter(Boolean);
+  if (!task) return { text: "(班组任务为空)", spawnNames: [], replies: [] };
+  if (!list.length) return { text: "(班组无成员)", spawnNames: [], replies: [] };
+
+  const ts = Date.now().toString(36);
+  // 名字带班组标识 → 与其他委派/其他班组的子 agent 不冲突
+  const spawnNames = list.map((m, i) => {
+    const slug = String(m.name || m.id || `m${i}`).replace(/[^\w\u4e00-\u9fff-]/g, "").slice(0, 12);
+    return `${teamId}_${i}_${slug}_${ts}`;
+  });
+  const specs = list.map((m, i) => ({
+    name: spawnNames[i],
+    opts: {
+      dataDir: path.join(agent.dataDir, "legion", spawnNames[i]),
+      globalDataDir: agent.globalDataDir,
+      // 只读成员挂只读杠杆 (子进程侧禁修改类工具)
+      env: m.readonly ? { PPX_AGENT_READONLY: "1" } : {},
+    },
+  }));
+
+  // 治理入口: 整批走 spawnAgents (可被配额/并发治理拦下), 缺该口才退回逐个 spawn
+  if (typeof L?.spawnAgents === "function") await L.spawnAgents(specs);
+  else for (const s of specs) L?.spawnAgent?.(s.name, s.opts);
+  for (const s of specs) { try { onSpawn?.(s.name); } catch { /* 回调异常不影响编排 */ } }
+  if (agent.lifecycle) agent.lifecycle.reproduce(specs.length);
+
+  const send = async (i, message) => {
+    const who = list[i].name || spawnNames[i];
+    try {
+      const r = await withTimeout(
+        L.send(spawnNames[i], { type: "chat", message, perspective: list[i].perspective || null }, { timeout: DELEGATE_TIMEOUT_MS + 5000 }),
+        DELEGATE_TIMEOUT_MS,
+        who,
+      );
+      return String(r?.reply || "(无回复)");
+    } catch (e) {
+      return `[${who} 失败] ${e.message}`;
+    }
+  };
+  const nameOf = list.map((m) => m.name || m.id);
+  const persps = list.map((m) => m.perspective || null);
+
+  // ---- pipeline: 前环产出成为后环输入 ----
+  if (topology === "pipeline") {
+    const replies = [];
+    for (let i = 0; i < list.length; i++) {
+      const parts = [`【任务】${task}`];
+      if (i > 0) {
+        parts.push(`【上一环产出】\n${replies[i - 1]}\n\n请在此基础上继续推进, 不要重复上一环已完成的工作。`);
+      }
+      if (persps[i]) parts.push(`【你的视角】${persps[i]}`);
+      replies.push(await send(i, parts.join("\n\n")));
+    }
+    return { text: replies.map((r, i) => `【${nameOf[i]}】\n${r}`).join("\n\n"), spawnNames, replies };
+  }
+
+  // ---- debate: 正反两方 + 仲裁 ----
+  if (topology === "debate") {
+    const replies = [];
+    for (let i = 0; i < list.length; i++) {
+      const side = i === 0 ? "正方" : "反方";
+      const msg = `【议题】${task}\n\n你是**${side}**。请坚决站在${side}立场论证, 并主动预见并回应对方可能提出的反驳。`
+        + (persps[i] ? `\n【你的视角】${persps[i]}` : "");
+      replies.push(await send(i, msg));
+    }
+    const verdict = await arbitrate(
+      agent,
+      list.map(() => task), replies, persps,
+      judge || "权衡正反两方论据, 给出经得起反驳的结论, 并说明结论成立的前提条件",
+    );
+    const text = [`【仲裁结论】\n${verdict}`]
+      .concat(replies.map((r, i) => `【${i === 0 ? "正方" : "反方"}·${nameOf[i]}】\n${r}`))
+      .join("\n\n");
+    return { text, spawnNames, replies };
+  }
+
+  // ---- review: 实施者 (可写) + 只读审查者 ----
+  if (topology === "review") {
+    const impl = await send(0, `【任务】${task}`);
+    const revTexts = [];
+    const findings = [];
+    for (let i = 1; i < list.length; i++) {
+      const r = await send(i, `${buildReviewPrompt(task, judge, persps[i])}\n\n【产出】\n${impl}`);
+      revTexts.push(r);
+      findings.push(...parseReviewFindings(r));
+    }
+    const open = findings.filter((f) => f.severity === "Critical" || f.severity === "Important");
+    const head = `【实施·${nameOf[0]}】\n${impl}`;
+    const text = open.length
+      ? `${head}\n\n⚠️ 审查发现问题 (${open.length} 项, 未修复 —— 交主 agent 裁定)\n${open.map((f) => `[${severityLabel(f.severity)}] ${f.finding}`).join("\n")}`
+      : (revTexts.length ? `${head}\n\n✅ 审查通过\n${revTexts.join("\n")}` : head);
+    return { text, spawnNames, replies: [impl, ...revTexts] };
+  }
+
+  // ---- parallel / supervisor: 各自独立产出 → 仲裁整合 ----
+  // (supervisor 的进程级调度在 orchestrator/supervisor.js, 这里保持"各自产出 + 仲裁"的协作形状)
+  const replies = await Promise.all(list.map((_, i) => send(i, [
+    `【任务】${task}`,
+    persps[i] ? `【你的视角】${persps[i]}` : "",
+    "请独立给出你的结论与依据, 不必迁就他人观点。",
+  ].filter(Boolean).join("\n\n"))));
+  const verdict = await arbitrate(agent, list.map(() => task), replies, persps, judge);
+  const text = [`【仲裁结论】\n${verdict}`, "## 各方原始产出"]
+    .concat(replies.map((r, i) => `【${nameOf[i]}】\n${r}`))
+    .join("\n\n");
+  return { text, spawnNames, replies };
+}
+
+/* ======================= 监督者编排循环 ======================= */
+// supervisor 模式: 编排 N 个专家子 agent 并行产出 → 监督者 LLM 评审 (评估各专家子 agent)
+// → 打回则带反馈再派发一轮 → 接受则产出定稿。返回带 "✅ 监督者编排" 头的完整报告。
+export async function runSupervisorLoop({ agent, L, task, judge = null, expertKeys = [], role = "专家", maxRounds = 3 } = {}) {
+  // 专家名册解析: 有 expertKeys 用名册, 否则用 2 个默认差异化专家
+  const experts = (expertKeys && expertKeys.length)
+    ? expertKeys.map((k) => resolveExpertFor(agent, k) || { name: String(k), perspective: null })
+    : [
+        { name: "分析专家", perspective: "从收益与可行性两个维度独立论证" },
+        { name: "风险专家", perspective: "从风险与反例角度独立论证, 主动挑出漏洞" },
+      ];
+  const ts = Date.now().toString(36);
+  const spawnNames = experts.map((m, i) => `${role}_${i}_${ts}`);
+  const spawned = [];
+  for (let i = 0; i < experts.length; i++) {
+    L.spawnAgent(spawnNames[i], {
+      dataDir: path.join(agent.dataDir, "legion", spawnNames[i]),
+      globalDataDir: agent.globalDataDir,
+      // 非只读专家不设 readonly
+      env: experts[i].readonly ? { PPX_AGENT_READONLY: "1" } : {},
+    });
+    spawned.push(spawnNames[i]);
+  }
+  if (agent.lifecycle) agent.lifecycle.reproduce(experts.length);
+
+  const send = async (i, message) => {
+    try {
+      const r = await withTimeout(
+        L.send(spawnNames[i], { type: "chat", message, perspective: experts[i].perspective || null }, { timeout: DELEGATE_TIMEOUT_MS + 5000 }),
+        DELEGATE_TIMEOUT_MS,
+        experts[i].name,
+      );
+      return String(r?.reply || "(无回复)");
+    } catch (e) {
+      return `[${experts[i].name} 失败] ${e.message}`;
+    }
+  };
+
+  let feedback = null;
+  let final = "";
+  for (let round = 1; round <= maxRounds; round++) {
+    const parts = [`【任务】${task}`];
+    if (feedback) parts.push(`【上一轮监督者反馈】\n${feedback}\n\n请据此修正你的结论。`);
+    if (experts) parts.push("请独立给出你的结论与依据。");
+    const replies = await Promise.all(experts.map((_, i) => send(i, parts.join("\n\n"))));
+
+    // 监督者评审 (LLM): 返回 {accept, feedback[]}
+    const verdict = await supervise(agent, task, experts.map((e) => e.name), replies, judge);
+    if (verdict.accept) {
+      final = await finalize(agent, task, replies, judge);
+      break;
+    }
+    feedback = (verdict.feedback && verdict.feedback.length)
+      ? verdict.feedback.join("\n")
+      : "结论不够具体, 请补充可执行的依据";
+  }
+
+  const head = ["✅ 监督者编排", `专家: ${experts.map((e) => e.name).join(" · ")}`];
+  const body = experts.map((e, i) => `【${e.name}】\n${final ? "" : ""}`);
+  return [head.join("\n"), "", final || `(监督者未在 ${maxRounds} 轮内接受, 输出各方原始结论)`, ""].join("\n");
+}
+
+// 监督者评审: 用主 agent LLM 评估各专家产出, 返回 {accept, feedback[]}
+async function supervise(agent, task, names, replies, judge) {
+  const input = names.map((n, i) => `【${n}】\n${String(replies[i]).slice(0, 2000)}`).join("\n\n");
+  const system = "你是监督者, 评估各专家子 agent 的结论。若结论充分可直接采用, 否则给出打回反馈。只输出 JSON: {\"accept\": true/false, \"feedback\": [\"...\"]}";
+  const user = `【任务】${task}\n\n${input}\n\n【评审准则】${judge || "结论必须具体可执行"}`;
+  try {
+    const r = await agent.llm.chat([
+      { role: "system", content: system },
+      { role: "user", content: user.slice(0, 8000) },
+    ]);
+    const text = String(r?.content || "").trim();
+    const m = text.match(/\{[\s\S]*\}/);
+    if (m) {
+      const obj = JSON.parse(m[0]);
+      return { accept: !!obj.accept, feedback: Array.isArray(obj.feedback) ? obj.feedback : [] };
+    }
+    return { accept: true, feedback: [] };
+  } catch {
+    return { accept: true, feedback: [] };
+  }
+}
+
+// 定稿: 监督者接受后, 用主 agent LLM 综合产出最终结论
+async function finalize(agent, task, replies, judge) {
+  try {
+    const r = await agent.llm.chat([
+      { role: "system", content: "你是最终定稿者。综合各专家结论, 给出定稿。" },
+      { role: "user", content: `【任务】${task}\n\n${replies.map((x) => String(x).slice(0, 2000)).join("\n\n")}` },
+    ]);
+    return String(r?.content || "").trim() || "定稿结论: " + replies.join(" / ");
+  } catch {
+    return "定稿结论: " + replies.join(" / ");
+  }
+}
+
+/* ======================= 可生长专家: 自动建档 ======================= */
+
+/**
+ * 用主 agent 的 LLM 为一个未知领域自动建档专家 (opt-in: config.agent.auto_create_experts)。
+ * 契约: 默认关 → null; 无 llm → null; LLM 输出不是合法 JSON → null (走原错误路径, 不硬造)。
+ */
+export async function autoCreateExpert(agent, query) {
+  const cfg = agent?.config?.agent || {};
+  if (cfg.auto_create_experts !== true) return null;
+  if (!agent?.llm || typeof agent.llm.chat !== "function") return null;
+  const q = String(query || "").trim();
+  if (!q) return null;
+  try {
+    const r = await agent.llm.chat([
+      {
+        role: "system",
+        content: "你是专家建档器。根据用户给出的领域, 输出**一个 JSON 对象** (不要代码块、不要解释): "
+          + '{"id":"英文短横线标识","name":"中文专家名(≤24字)","domain":"领域","perspective":"分析视角(≤400字)","skills":["技能"]}',
+      },
+      { role: "user", content: `领域: ${q.slice(0, 200)}` },
+    ]);
+    // LLM 客户端两种返回形态都要认: 裸字符串 / { content } (与 arbitrate 的取用口径一致地放宽)
+    const raw = (typeof r === "string" ? r : String(r?.content ?? r?.message?.content ?? ""))
+      .trim().replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
+    const parsed = JSON.parse(raw); // 坏输出直接抛 → catch → null, 不硬造
+    const expert = registerUserExpert(normalizePersona({
+      ...parsed,
+      perspective: `${parsed.perspective || ""} (自动建档)`,
+    }));
+    saveUserExperts(agent.dataDir);
+    return resolveExpertWithUser(expert.id) || expert;
+  } catch {
+    return null;
+  }
+}
+
 // ---- SDD review 循环: 实施 -> 只读审查 -> (修复 -> 复审) * N -> 熔断 ----
 // 返回: 通过时 "✅ 审查通过..." + 产出; 熔断时 "⚠️ 未决发现停放..." + 产出
 // namePrefix: 多任务 review 时传入 `${role}_${ts}_${i}`, 保证每对 agent 名唯一
-async function runReviewLoop({ agent, L, task, perspective, role, judge, fixRounds, namePrefix = null, track = null, envFor = null, timeoutMs = DELEGATE_TIMEOUT_MS }) {
+async function runReviewLoop({ agent, L, task, perspective, role, judge, fixRounds, namePrefix = null }) {
   const ts = Date.now().toString(36);
   const implName = namePrefix ? `${namePrefix}_impl` : `${role}_impl_${ts}`;
   const revName = namePrefix ? `${namePrefix}_rev` : `${role}_rev_${ts}`;
   const mkOpts = (n) => ({ dataDir: path.join(agent.dataDir, "legion", n), globalDataDir: agent.globalDataDir });
-  // envFor: 交集结论 → worker env (缺省时保持旧口径: 仅审查者挂只读杠杆)
-  const envOf = (ro) => (envFor ? envFor(ro) : ro ? { PPX_AGENT_READONLY: "1" } : {});
-  // 受治理批量 spawn (有 spawnAgents 时): 两个子进程一起排队拿槽位, 而不是绕过并发上限直接 spawn
-  if (typeof L.spawnAgents === "function") {
-    await L.spawnAgents([
-      { name: implName, opts: { ...mkOpts(implName), env: envOf(false) } },
-      { name: revName, opts: { ...mkOpts(revName), env: envOf(true) } },
-    ]);
-  } else {
-    L.spawnAgent(implName, { ...mkOpts(implName), env: envOf(false) });
-    // 审查者只读: PPX_AGENT_READONLY=1 时 worker 禁用全部修改/执行工具
-    L.spawnAgent(revName, { ...mkOpts(revName), env: envOf(true) });
-  }
-  if (track) { track(implName); track(revName); }
+  L.spawnAgent(implName, mkOpts(implName));
+  // 审查者只读: PPX_AGENT_READONLY=1 时 worker 禁用全部修改/执行工具
+  L.spawnAgent(revName, { ...mkOpts(revName), env: { PPX_AGENT_READONLY: "1" } });
   if (agent.lifecycle) agent.lifecycle.reproduce(2);
 
   const max = (() => { // v1.0.8: fix_rounds=0 应能设 0 (原 `|| 3` 把 0 变 3)
@@ -200,7 +442,7 @@ async function runReviewLoop({ agent, L, task, perspective, role, judge, fixRoun
 
   // 1. 实施
   try {
-    const r = await withTimeout(L.send(implName, { type: "chat", message: task, perspective }, { timeout: timeoutMs + 5000 }), timeoutMs, "实施");
+    const r = await withTimeout(L.send(implName, { type: "chat", message: task, perspective }, { timeout: DELEGATE_TIMEOUT_MS + 5000 }), DELEGATE_TIMEOUT_MS, "实施");
     result = String(r?.reply || "").trim() || "(实施者无回复)";
   } catch (e) {
     return `[工具错误] spawn_agent(review): 实施失败: ${e.message}`;
@@ -212,7 +454,7 @@ async function runReviewLoop({ agent, L, task, perspective, role, judge, fixRoun
   while (true) {
     const reviewText = await (async () => {
       try {
-        const r = await withTimeout(L.send(revName, { type: "chat", message: buildReviewPrompt(task, judge, perspective) + `\n\n【产出】\n${result.slice(0, 6000)}`, perspective }, { timeout: timeoutMs + 5000 }), timeoutMs, "审查");
+        const r = await withTimeout(L.send(revName, { type: "chat", message: buildReviewPrompt(task, judge, perspective) + `\n\n【产出】\n${result.slice(0, 6000)}`, perspective }, { timeout: DELEGATE_TIMEOUT_MS + 5000 }), DELEGATE_TIMEOUT_MS, "审查");
         return String(r?.reply || "");
       } catch (e) {
         return `[Critical] 审查者不可用: ${e.message}`;
@@ -224,7 +466,7 @@ async function runReviewLoop({ agent, L, task, perspective, role, judge, fixRoun
     if (round >= max) break;          // 熔断
     round++;
     try {
-      const r = await withTimeout(L.send(implName, { type: "chat", message: buildFixPrompt(task, findings), perspective }, { timeout: timeoutMs + 5000 }), timeoutMs, `修复第${round}轮`);
+      const r = await withTimeout(L.send(implName, { type: "chat", message: buildFixPrompt(task, findings), perspective }, { timeout: DELEGATE_TIMEOUT_MS + 5000 }), DELEGATE_TIMEOUT_MS, `修复第${round}轮`);
       result = String(r?.reply || "").trim() || "(实施者无回复)";
     } catch (e) {
       ledger.push({ round, step: "fix", error: e.message });
@@ -260,121 +502,28 @@ export function publishToBoard(board, { from, topic, task, reply, status = "完�
   } catch { /* 记忆板满/IO 异常均不阻塞委派 */ }
 }
 
-// ---- 班组编排 (2026-10-07): 拓扑决定"成员之间怎么协作", 而不是"谁参与" ----
-// 返回 { text, spawnNames } —— 调用方负责回收 spawnNames。
-export async function runTeam({ agent, L, team, members, task, timeoutMs = DELEGATE_TIMEOUT_MS, envFor = null, onSpawn = null }) {
-  const names = [];
-  const ts = Date.now().toString(36);
-  const spawn = async (list) => {
-    const specs = list.map((m, i) => ({
-      name: `${m.name}_${team.id}_${ts}_${i}`,
-      opts: {
-        dataDir: path.join(agent.dataDir, "legion", `${m.name}_${team.id}_${ts}_${i}`),
-        globalDataDir: agent.globalDataDir,
-        // 只读专家 → 只读杠杆 (与权限交集结论一致: 只准变窄)
-        env: envFor ? envFor(!!m.readonly) : (m.readonly ? { PPX_AGENT_READONLY: "1" } : {}),
-      },
-    }));
-    if (typeof L.spawnAgents === "function") await L.spawnAgents(specs);
-    else for (const s of specs) L.spawnAgent(s.name, s.opts);
-    for (const s of specs) { names.push(s.name); onSpawn?.(s.name); }
-    return specs.map((s) => s.name);
-  };
-  const ask = (name, message, perspective, label) =>
-    withTimeout(L.send(name, { type: "chat", message, perspective }, { timeout: timeoutMs + 5000 }), timeoutMs, label)
-      .then((r) => String(r?.reply || "").trim() || "(无回复)")
-      .catch((e) => `[失败] ${e.message}`);
-
-  const topology = team.topology || "parallel";
-  let text = "";
-
-  if (topology === "pipeline") {
-    // 流水线: 前一环产出即后一环输入 (强顺序依赖, 不并行)
-    const order = await spawn(members);
-    let carry = `【任务】${task}`;
-    const steps = [];
-    for (let i = 0; i < members.length; i++) {
-      const out = await ask(order[i], `${carry}\n\n【你的角色】${members[i].name}`, members[i].perspective, `流水线→${members[i].name}`);
-      steps.push(`【${members[i].name}】\n${out}`);
-      carry = `【任务】${task}\n\n【上一环 (${members[i].name}) 的产出】\n${out}\n\n请在此基础上继续推进, 不要重复上一环已完成的工作。`;
-    }
-    text = steps.join("\n\n");
-  } else if (topology === "review") {
-    // 实施 + 只读审查: 复用 SDD 循环 (实施者取首个非只读成员, 审查者取首个只读成员)
-    const impl = members.find((m) => !m.readonly) || members[0];
-    const rev = members.find((m) => m.readonly && m !== impl) || members[1] || members[0];
-    const order = await spawn([impl, rev]);
-    const implOut = await ask(order[0], task, impl.perspective, `实施→${impl.name}`);
-    const revOut = await ask(order[1], buildReviewPrompt(task, "", rev.perspective) + `\n\n【产出】\n${implOut.slice(0, 6000)}`, rev.perspective, `审查→${rev.name}`);
-    const findings = parseReviewFindings(revOut);
-    text = findings.length && needsFix(findings)
-      ? `⚠️ 审查发现问题 (未自动修复, 单轮模式):\n${findings.map((f) => `- [${severityLabel(f.severity)}] ${f.finding}`).join("\n")}\n\n【${impl.name} 产出】\n${implOut}`
-      : `✅ 审查通过\n\n【${impl.name} 产出】\n${implOut}`;
-  } else if (topology === "supervisor") {
-    const order = await spawn(members);
-    const out = await runSupervisor({
-      legion: L,
-      agents: order,
-      task,
-      judge: "",
-      llm: agent.auxLLM || agent.llm,
-      maxRounds: 3,
-      timeoutMs,
-    });
-    text = (out.divergent
-      ? `⚠️ 监督者编排 (${out.rounds} 轮, 一致率 ${(out.consensus * 100).toFixed(0)}%): 仍有分歧`
-      : `✅ 监督者编排 (${out.rounds} 轮, 一致率 ${(out.consensus * 100).toFixed(0)}%):`)
-      + `\n\n${out.answer}`;
-  } else if (topology === "debate") {
-    // 对抗论证: 成员按序分正反两方, 强制把反方论据摆上台面
-    const half = Math.max(1, Math.ceil(members.length / 2));
-    const sides = members.map((m, i) => ({ ...m, side: i < half ? "正方" : "反方" }));
-    const order = await spawn(sides);
-    const outs = await Promise.all(sides.map((m, i) =>
-      ask(order[i], `${task}\n\n【立场】你是${m.side}: 请为该立场给出最强论据、关键假设与反证条件。必须指出对方立场最可能对的地方。`, m.perspective, `对抗→${m.name}`)
-    ));
-    const body = sides.map((m, i) => `【${m.side}·${m.name}】\n${outs[i]}`).join("\n\n");
-    const verdict = await arbitrate(agent, sides.map((m) => `${task} (${m.side})`), outs, sides.map((m) => m.perspective), "对比正反论据, 指出各自的成立条件与不成立条件, 给出在有条件前提下的结论; 若证据不足以判定, 明确说不足以判定。");
-    text = `${body}\n\n【仲裁】\n${verdict}`;
-  } else {
-    // parallel: 各自独立产出, 再仲裁整合 (不仲裁就是拼接)
-    const order = await spawn(members);
-    const settled = await Promise.all(members.map((m, i) => ask(order[i], task, m.perspective, `并行→${m.name}`)));
-    const body = members.map((m, i) => `【${m.name}】\n${settled[i]}`).join("\n\n");
-    const merged = await arbitrate(agent, members.map((m) => task), settled, members.map((m) => m.perspective),
-      `整合 ${team.name} 各专家的结果: 合并重复、标注冲突、给出结论。`);
-    text = `${merged}\n\n— 各方原始产出 —\n${body}`;
-  }
-  return { text, spawnNames: names };
-}
-
 export function registerDelegateTools(catalog, opts = {}) {
   const board = opts.board || null;
   catalog.register({
     name: "spawn_agent",
-    // F1 定档: medium + 非只读。子 agent 会起 legion 子进程并自主用工具 (含写盘),
-    // 所以绝不能算只读 —— 旧兜底把它报成 readOnly:true, plan 模式与「只读巡检」都能
-    // 静默派生一批能干活的 agent。没定 high 是有意保留既有协作链路: 默认 workspace-write
-    // 模式下委派仍直通 (与今天一致), 收紧到 ask 的只有 plan / 只读档位。
-    capability: { riskLevel: "medium", readOnly: false, destructive: false, sideEffect: "subprocess+llm" },
-    description: "派生子 agent 干子任务并等结果。适合需要专门角色、并行、或多视角对抗/隔离执行的活。子 agent 共享全局经验库。可用 team 点名班组 (推荐), 或用 experts 点几个专家; arbitrate=true 由主 agent 仲裁聚合; review=true 走实施+只读审查循环; supervisor=true 走多专家收敛循环。派发前用 legion_status 查并发上限。",
+    capability: { readOnly: false, riskLevel: "medium", sideEffect: "system" },
+    description: "派生子 agent 处理子任务并等待结果。适合需要专门角色、并行、或隔离执行的任务 (如数据分析、代码审查、多角度论证)。子 agent 共享全局经验库。支持: 单个 task; 或 tasks 数组并行派发多个子 agent + perspectives 差异化视角; arbitrate=true 时主 agent 仲裁聚合各方结果; review=true 时走 SDD 审查循环: 实施者干活 -> 只读审查者挑问题 -> 修复 -> 复审, 达上限熔断停放交主 agent 裁定 (单任务直接审查; 多任务每个子任务独立一对实施+审查, 可配 arbitrate 聚合)。",
     parameters: {
       type: "object",
       properties: {
-        task: { type: "string", description: "单个子任务 (与 tasks 二选一)" },
-        tasks: { type: "array", items: { type: "string" }, description: "并行子任务列表 (每个子 agent 一个)" },
-        perspectives: { type: "array", items: { type: "string" }, description: "与 tasks 一一对应的差异化视角 (对抗同质失败)" },
-        team: { type: "string", description: "专家班组 (优先于 expert/experts/supervisor/review)。班组自带成员与协作拓扑。可用值见 team_list 工具; 也接受中文名 (研发/调研/数据/内容/办公/商业/评审/生活/对抗)" },
-        role: { type: "string", description: "子 agent 角色名, 默认 helper" },
-        arbitrate: { type: "boolean", description: "由主 agent 仲裁聚合各方结果 (多任务时推荐)" },
-        judge: { type: "string", description: "仲裁评审指令; review=true 时作审查准则" },
-        review: { type: "boolean", description: "SDD 循环: 实施 → 只读审查 → 发现问题自动修复复审 → 达上限熔断停放" },
-        fix_rounds: { type: "number", description: "修复/收敛最大轮数 (默认 3, 上限 5)" },
-        share_board: { type: "boolean", description: "结论发布到军团共享记忆板 (默认 true)" },
-        expert: { type: "string", description: "单个固化专家角色 (见 expert_list 工具; 只读专家自动禁修改工具)" },
-        experts: { type: "array", items: { type: "string" }, description: "每任务一个专家 (与 tasks 一一对应); supervisor=true 时作编排专家名册" },
-        supervisor: { type: "boolean", description: "多专家并行 → 分歧检测 → 评审打回 → 定稿收敛循环" },
-        topology: { type: "string", enum: ["parallel", "supervisor", "debate", "pipeline", "review"], description: "与 experts 连用: 覆盖默认并行拓扑 (pipeline 按依赖顺序传, debate 前半为一方)" },
+        task: { type: "string", description: "单个子任务描述 (清晰完整, 含上下文); 与 tasks 二选一" },
+        tasks: { type: "array", items: { type: "string" }, description: "并行子任务列表 (每个子 agent 一个), 适合多角度论证/并行处理; 与 task 二选一" },
+        perspectives: { type: "array", items: { type: "string" }, description: "差异化视角列表, 与 tasks 一一对应, 注入每个子 agent 专属视角 (对抗同质失败), 可缺省" },
+        role: { type: "string", description: "子 agent 角色名 (如 数据分析师/代码审查员), 默认 helper" },
+        arbitrate: { type: "boolean", description: "是否由主 agent 仲裁聚合所有子结果 (并行/多任务 review 时推荐), 默认 false 直接返回拼接结果" },
+        judge: { type: "string", description: "仲裁评审指令 (arbitrate=true 时生效, 如 找出最可靠结论/合并去重); review=true 时为审查准则, 可缺省" },
+        review: { type: "boolean", description: "SDD 审查循环: 实施者 -> 只读审查者 -> 发现问题自动修复复审, 达上限熔断, 默认 false。单 task 与多 tasks 均支持" },
+        fix_rounds: { type: "number", description: "审查循环最大修复轮数 (review=true 时生效, 默认 3, 上限 5)" },
+        share_board: { type: "boolean", description: "子任务结论自动发布到军团共享记忆板 (board_query 可查), 仲裁前主 agent 自动读板。默认 true" },
+        expert: { type: "string", description: `固化专家角色 (单任务)。名册: ${listExperts()}。专家自带角色名+专属视角 (只读专家自动禁修改工具)` },
+        experts: { type: "array", items: { type: "string" }, description: "每任务一个专家 (与 tasks 一一对应, 优先于 expert)。如 [\"code\",\"design\",\"security\"] 三任务分派代码/设计/安全专家" },
+        team: { type: "string", description: `班组名 (整体接管分工, 按班组拓扑编排成员): ${listTeams()}` },
+        topology: { type: "string", description: "临时专家组拓扑 (与 experts 同用时生效): pipeline=前环产出喂后环 / parallel=各自产出再仲裁 / debate=正反两方 / review=实施+只读审查" },
       },
     },
     execute: async (args, ctx) => {
@@ -392,32 +541,6 @@ export function registerDelegateTools(catalog, opts = {}) {
       // 懒建军团 (复用已有, 避免重复 spawn 进程)
       let L = agent._legion;
       if (!L) { L = new Legion(); agent._legion = L; }
-      // 并发治理 (2026-10-07): 每次委派前把配置同步进进程级治理器 —— 用户改完配置不必重启进程,
-      // 而并发上限对**所有** Legion 实例 (含嵌套委派懒建的) 统一生效。
-      const governor = L.governor || getGovernor();
-      try { governor.configure(governorOptsFromConfig(agent.config, agent.dataDir || null)); }
-      catch (e) { debug(`[delegate] 治理器参数同步失败 (沿用旧值): ${e && e.message ? e.message : e}`); }
-      const timeoutMs = delegateTimeoutMs(agent);
-      // ---- Codex 权限交集不变量 (2026-10-05 吸收) ----
-      // 子 agent 的生效权限 = 请求档位 ∩ 父生效档位, 只准变窄不准变宽。
-      // ppx worker 是独立进程, spawn 前唯一既有的收紧杠杆是 agent-worker.js 里的
-      // PPX_AGENT_READONLY env (命中即 enableReadonlyMode) —— 交集结论统一落到这根杠杆上:
-      //   结果只读/锁死/plan → 挂上杠杆; 无收紧 → env 保持今天的样子 ({} 或原只读标记)。
-      // 无权限引擎 (老测试桩 agent) 时保持旧口径, 单 agent (无委派) 路径完全不变。
-      const parentProfile = agent.permissions
-        ? profileFromEngine(agent.permissions, {
-            planEnabled: typeof agent.isPlanMode === "function"
-              ? agent.isPlanMode(currentTrace()?.sessionKey || "default")
-              : undefined,
-          })
-        : null;
-      const envFor = (wantReadOnly) => {
-        if (!parentProfile) return wantReadOnly ? { PPX_AGENT_READONLY: "1" } : {};
-        const requested = wantReadOnly
-          ? { ...parentProfile, sandbox: SandboxPolicy.READ_ONLY }
-          : parentProfile; // 实现者默认请求与父同档: 交集幂等 → 与今天零差异
-        return childSpawnEnv(intersectPermissionProfiles(parentProfile, requested), wantReadOnly);
-      };
       // 角色名清洗: 保留中文 (中文向导项目, 侦察兵/分析师等中文角色名是常态), 只洗特殊字符
       const role = String(args.role || "helper").replace(/[^\w\u4e00-\u9fff-]/g, "_").slice(0, 24);
 
@@ -430,96 +553,54 @@ export function registerDelegateTools(catalog, opts = {}) {
       const expertKeys = Array.isArray(args.experts) && args.experts.length
         ? args.experts
         : args.expert ? [args.expert] : [];
-      const expertList = tasks.map((_, i) => resolveAnyExpert(agent, expertKeys[i] ?? expertKeys[0]));
+      const expertList = tasks.map((_, i) => resolveExpertFor(agent, expertKeys[i] ?? expertKeys[0]));
       const effRoles = tasks.map((_, i) => expertList[i]?.name || role);
       const effPersps = tasks.map((_, i) => perspectives[i] || expertList[i]?.perspective || null);
 
-      // ---- 班组解析 (2026-10-07): team 指定后,**班组定义整体接管**分工与拓扑 ----
-      // 优先级: team > experts/expert > role/perspectives。班组是比"点几个专家"更高层的组织单位,
-      // 用户点名班组时不该被零散的 experts 参数部分覆盖 (混着给只会产出无法解释的分工)。
-      const team = args.team ? resolveTeam(args.team) : null;
-      const teamMembers = team ? teamExperts(team) : [];
-      // 风险画像: 全员只读 / 含高风险域 → 产出必须标人类复核
-      const teamHighRisk = teamMembers.filter((m) => m.requiresHuman || HIGH_RISK_DOMAINS.includes(m.domain));
-      const teamAllReadonly = teamMembers.length > 0 && teamMembers.every((m) => m.readonly);
-
       const boardTopic = role;
-      // 本轮委派新建的子进程名 (2026-10-04): 委派名带时间戳 ⇒ 每次调用都是全新进程, 军团不会复用。
-      //   统一在 finally 回收, 否则 ppx-serve / taskbench 这类长跑进程里子进程只增不减。
-      const spawned = [];
-      const track = (n) => { spawned.push(n); };
+
+      // 班组模式 (2026-10-07): team 命中名册 → 整体接管分工 (成员/拓扑/只读杠杆全由名册给出)
+      if (args.team) {
+        const t = resolveTeam(args.team);
+        if (t) {
+          const members = teamExperts(t);
+          const risk = teamRiskProfile(t);
+          const { text } = await runTeam({
+            agent, L, team: t, members,
+            task: tasks.join("\n\n"),
+            judge: args.judge,
+          });
+          const head = [
+            `【班组】${t.name}`,
+            `拓扑 ${t.topology}`,
+            `成员: ${members.map((m) => m.name + (m.readonly ? "(只读)" : "")).join(" · ")}`,
+          ];
+          // 含高风险域专家 → 明说复核要求, 不把"仅供参考"藏进正文
+          if (risk.requiresHuman) {
+            head.push(`⚠ 本班组含高风险域专家 (${risk.highRiskMembers.join("、")}): 结论仅供参考, 需人类复核后执行`);
+          }
+          return [...head, "", text].join("\n");
+        }
+        // 未知名册班组 → 静默退回普通委派 (不炸)
+      }
+
+      // 临时专家组 (experts + topology): 不入班册, 按拓扑把专家排起来
+      if (args.topology && expertKeys.length) {
+        const members = expertKeys.map((k) => {
+          const e = resolveExpertFor(agent, k);
+          return e
+            ? { name: e.name || String(k), perspective: e.perspective, readonly: !!e.readonly, requiresHuman: !!e.requiresHuman }
+            : { name: String(k), perspective: null };
+        });
+        const { text } = await runTeam({
+          agent, L,
+          team: { id: "adhoc", name: "临时专家组", topology: args.topology },
+          members, task: tasks.join("\n\n"), judge: args.judge,
+        });
+        return [`【临时专家组】拓扑 ${args.topology}`, `成员: ${members.map((m) => m.name).join(" · ")}`, "", text].join("\n");
+      }
 
       try {
-        // ---- 班组编排 (2026-10-07, 优先于其余模式): 一次点名 = 一组角色 + 一套收敛机制 ----
-        // 班组自带拓扑与成员, 因此会整体接管 supervisor/review 等单点开关 —— 两者同时给会让
-        // 分工变得无法解释 (到底按班组还是按 experts?), 这里明确: 班组赢。
-        if (team) {
-          if (!teamMembers.length) return `[工具错误] spawn_agent: 班组 ${team.id} 成员名册为空`;
-          const { text: teamOut, spawnNames } = await runTeam({
-            agent, L, team, members: teamMembers, task: tasks[0],
-            timeoutMs, envFor, onSpawn: track,
-          });
-          if (agent.lifecycle) agent.lifecycle.reproduce(spawnNames.length);
-          for (const n of spawnNames) {
-            publishToBoard(board, { from: n, topic: team.id, task: tasks[0], reply: teamOut, status: "完成" });
-          }
-          // 高风险班组 (含医疗/法律/金融/安全/合规专家): 产出只是人类决策的输入
-          const riskNote = teamHighRisk.length
-            ? `\n\n⚠ 本班组含高风险域专家 (${teamHighRisk.map((m) => m.name).join("、")}),`
-              + `${teamAllReadonly ? "且全程只读" : "其产出仅供分析参考"} —— 需人类复核后执行。`
-            : "";
-          return `【班组】${team.name} · 拓扑 ${team.topology} · 成员 ${teamMembers.map((m) => m.name).join("/")}\n\n${teamOut}${riskNote}`;
-        }
-
-        // experts + topology: 用专家列表临时组一个班组 (不落名册, 只借拓扑与收敛机制)。
-        // 与 team 的区别: team 是名册里的固定班组, 这里是"临时点几个专家 + 指定协作形状"。
-        if (args.topology && !args.supervisor && !args.review) {
-          // 取参口径: 显式给的 experts 数组优先 (单任务也能点多个专家), 否则退回按任务解析的结果
-          const keys = Array.isArray(args.experts) && args.experts.length ? args.experts : expertKeys;
-          const picked = keys
-            .map((k, i) => { const e = resolveAnyExpert(agent, k); return e ? { ...e, id: `${e.name}#${i}` } : null; })
-            .filter(Boolean);
-          if (picked.length >= 2) {
-            const adhoc = { id: "adhoc", name: "临时专家组", topology: args.topology === "review" ? "review" : args.topology };
-            const { text: out, spawnNames } = await runTeam({
-              agent, L, team: adhoc, members: picked, task: tasks[0], timeoutMs, envFor, onSpawn: track,
-            });
-            if (agent.lifecycle) agent.lifecycle.reproduce(spawnNames.length);
-            return `【临时专家组】拓扑 ${adhoc.topology} · 成员 ${picked.map((m) => m.name).join("/")}\n\n${out}`;
-          }
-        }
-
-        // 监督者编排循环 (2026-10-03 接线, runSupervisor 首个产品入口):
-        // 同一任务 → 多专家并行 → 分歧检测 → 监督者评审 (接受/打回带反馈) → 定稿。默认 2 专家。
-        if (args.supervisor) {
-          const nExperts = Math.min(4, Math.max(2,
-            (Array.isArray(args.experts) && args.experts.length) || perspectives.length || 2));
-          const ts = Date.now().toString(36);
-          const names = [];
-          for (let i = 0; i < nExperts; i++) {
-            const nm = `${effRoles[i] || role}_sup_${ts}_${i}`;
-            const opts = { dataDir: path.join(agent.dataDir, "legion", nm), globalDataDir: agent.globalDataDir };
-            opts.env = envFor(!!expertList[i]?.readonly); // 交集结论 (只读专家防线对齐 review 循环)
-            L.spawnAgent(nm, opts);
-            names.push(nm);
-            track(nm);
-          }
-          if (agent.lifecycle) agent.lifecycle.reproduce(nExperts);
-          const out = await runSupervisor({
-            legion: L,
-            agents: names,
-            task: tasks[0],
-            judge: args.judge || "",
-            llm: agent.auxLLM || agent.llm,
-            maxRounds: (() => { const n = Number(args.fix_rounds); return Number.isFinite(n) ? Math.min(Math.max(n, 1), 5) : 3; })(),
-            timeoutMs,
-          });
-          const head = out.divergent
-            ? `⚠️ 监督者编排 (${out.rounds} 轮, 一致率 ${(out.consensus * 100).toFixed(0)}%): 达轮数上限仍有分歧, 各方结论如下`
-            : `✅ 监督者编排 (${out.rounds} 轮, 一致率 ${(out.consensus * 100).toFixed(0)}%):`;
-          return `${head}\n\n${out.answer}`;
-        }
-
         // SDD review 循环: 实施 -> 审查 -> 修复 -> 熔断
         // 单任务: 直接跑; 多任务: 每个任务独立一对 (实施者+只读审查者), 并行跑, 可仲裁聚合
         if (args.review) {
@@ -531,9 +612,6 @@ export function registerDelegateTools(catalog, opts = {}) {
               role: effRoles[0], judge: args.judge,
               fixRounds: args.fix_rounds,
               namePrefix: `${prefix}_0`,
-              track,
-              envFor,
-              timeoutMs,
             });
             publishToBoard(board, { from: `${effRoles[0]}_impl`, topic: boardTopic, task: tasks[0], reply: out, status: out.startsWith("✅") ? "完成" : "熔断停放" });
             return out;
@@ -547,9 +625,6 @@ export function registerDelegateTools(catalog, opts = {}) {
                 role: effRoles[i], judge: args.judge,
                 fixRounds: args.fix_rounds,
                 namePrefix: `${prefix}_${i}`,
-                track,
-                envFor,
-                timeoutMs,
               });
               publishToBoard(board, { from: `${effRoles[i]}_${i}_impl`, topic: boardTopic, task, reply: out, status: out.startsWith("✅") ? "完成" : "熔断停放" });
               return out;
@@ -565,75 +640,78 @@ export function registerDelegateTools(catalog, opts = {}) {
             return `【子任务${i + 1}${p}】${t}\n${settled[i]}`;
           }).join("\n\n");
         }
-        // 并行 spawn 子 agent: 每个独立数据目录 + 独立视角; 只读专家 spawn 时禁修改工具
-        // 2026-10-07: 改走 Legion.spawnAgents (受并发治理器约束, 排队而非无限 spawn);
-        //   桩对象/无治理器场景回落到逐个体 spawnAgent (老测试与老调用方零差异)。
+        // ---- supervisor: 监督者编排循环 (2026-10-10 补齐) ----
+        // 监督者 LLM 评审各专家产出 → 打回则带着反馈再派发一轮 → 接受则定稿。
+        if (args.supervisor) {
+          const out = await runSupervisorLoop({
+            agent, L, task: tasks.join("\n\n"), judge: args.judge,
+            expertKeys, role,
+          });
+          return out;
+        }
+
+        // 并行 spawn 子 agent: 每个独立数据目录 + 独立视角; 只读专家 spawn 时禁修改工具。
+        // 委派权限交集 (2026-10-05): 子进程 env = 父生效档位 ∩ 本次请求的只读要求。
+        //   父侧只读/锁死/会话处于计划态 → 子必挂 PPX_AGENT_READONLY=1 (旧缺陷: 子比父宽)。
         const names = tasks.map((_, i) => `${effRoles[i]}_${i}_${Date.now().toString(36)}`);
-        if (typeof L.spawnAgents === "function") {
-          await L.spawnAgents(names.map((n, i) => ({
-            name: n,
-            opts: {
-              dataDir: path.join(agent.dataDir, "legion", n),
-              globalDataDir: agent.globalDataDir,
-              env: envFor(!!expertList[i]?.readonly),
-            },
-          })));
-          for (const n of names) track(n);
-        } else {
+        const sessionKey = currentTrace()?.sessionKey || "default";
+        const parentProfile = profileFromEngine(agent.permissions, {
+          planEnabled: (typeof agent.isPlanMode === "function" ? agent.isPlanMode(sessionKey) : false)
+            || agent.permissions?.planEnabled === true,
+        });
+        try {
           for (let i = 0; i < names.length; i++) {
-            track(names[i]);
             L.spawnAgent(names[i], {
               dataDir: path.join(agent.dataDir, "legion", names[i]),
               globalDataDir: agent.globalDataDir,
-              env: envFor(!!expertList[i]?.readonly),
+              env: childSpawnEnv(parentProfile, !!expertList[i]?.readonly),
             });
           }
-        }
-        // 生命周期: 繁衍计数 (ANS: reproducing)
-        if (agent.lifecycle) agent.lifecycle.reproduce(names.length);
+          // 生命周期: 繁衍计数 (ANS: reproducing)
+          if (agent.lifecycle) agent.lifecycle.reproduce(names.length);
 
-        // 并行派发, 全部等结果 (各自独立超时)
-        const settled = await Promise.all(tasks.map(async (task, i) => {
-          try {
-            const reply = await withTimeout(
-              L.send(names[i], { type: "chat", message: task, perspective: effPersps[i] }, { timeout: timeoutMs + 5000 }),
-              timeoutMs,
-              `子任务${i + 1}`
-            );
-            return { ok: true, reply: reply.reply || "(子 agent 无回复)" };
-          } catch (e) {
-            return { ok: false, reply: `[子任务${i + 1}失败] ${e.message}` };
+          // 并行派发, 全部等结果 (各自独立超时)
+          const settled = await Promise.all(tasks.map(async (task, i) => {
+            try {
+              const reply = await withTimeout(
+                L.send(names[i], { type: "chat", message: task, perspective: effPersps[i] }, { timeout: DELEGATE_TIMEOUT_MS + 5000 }),
+                DELEGATE_TIMEOUT_MS,
+                `子任务${i + 1}`
+              );
+              return { ok: true, reply: reply.reply || "(子 agent 无回复)" };
+            } catch (e) {
+              return { ok: false, reply: `[子任务${i + 1}失败] ${e.message}` };
+            }
+          }));
+          const results = settled.map((s) => s.reply);
+
+          // share_board: 每个子任务结论自动上板 (成功/失败都记, 状态区分)
+          if (shareBoard) {
+            settled.forEach((s, i) => {
+              publishToBoard(board, { from: names[i], topic: boardTopic, task: tasks[i], reply: s.reply, status: s.ok ? "完成" : "失败" });
+            });
           }
-        }));
-        const results = settled.map((s) => s.reply);
 
-        // share_board: 每个子任务结论自动上板 (成功/失败都记, 状态区分)
-        if (shareBoard) {
-          settled.forEach((s, i) => {
-            publishToBoard(board, { from: names[i], topic: boardTopic, task: tasks[i], reply: s.reply, status: s.ok ? "完成" : "失败" });
-          });
+          // 单任务: 保持旧行为, 直接返回子 agent 回复
+          if (tasks.length === 1) return results[0];
+
+          // 多任务: 有 arbitrate 走主 agent 仲裁聚合, 否则拼接各方结果
+          if (args.arbitrate) {
+            const out = await arbitrateWithBoard(agent, tasks, results, perspectives, args.judge, { board, shareBoard, boardTopic });
+            return out;
+          }
+          return tasks.map((t, i) => {
+            const p = perspectives?.[i] || expertList[i] ? ` (${expertList[i]?.name || ""}${perspectives[i] ? "·" + perspectives[i] : ""})` : "";
+            return `【子任务${i + 1}${p}】${t}\n${results[i]}`;
+          }).join("\n\n");
+        } finally {
+          // 生命周期回收 (L1, 2026-10-10): 本轮派生的每个子进程都必须回收 ——
+          //   放在 finally 里, 成功/失败/异常三条路径都走到, 不靠成功分支。
+          //   回收失败不掩盖真实结果 (逐个 settle, 不抛出)。
+          await Promise.allSettled(names.map((n) => (typeof L.killAgent === "function" ? L.killAgent(n) : null)));
         }
-
-        // 单任务: 保持旧行为, 直接返回子 agent 回复
-        if (tasks.length === 1) return results[0];
-
-        // 多任务: 有 arbitrate 走主 agent 仲裁聚合, 否则拼接各方结果
-        if (args.arbitrate) {
-          const out = await arbitrateWithBoard(agent, tasks, results, perspectives, args.judge, { board, shareBoard, boardTopic });
-          return out;
-        }
-        return tasks.map((t, i) => {
-          const p = perspectives?.[i] || expertList[i] ? ` (${expertList[i]?.name || ""}${perspectives[i] ? "·" + perspectives[i] : ""})` : "";
-          return `【子任务${i + 1}${p}】${t}\n${results[i]}`;
-        }).join("\n\n");
       } catch (e) {
         return `[工具错误] spawn_agent: ${e.message}`;
-      } finally {
-        // 回收本轮子进程 (2026-10-04): 成功/失败/提前返回都要收, 并行 kill 不串行等宽限期。
-        //   测试与调用方可能注入不含 killAgent 的军团桩, 故先探方法再调。
-        if (spawned.length && typeof L.killAgent === "function") {
-          await Promise.all(spawned.map((n) => Promise.resolve(L.killAgent(n)).catch(() => false)));
-        }
       }
     },
   });

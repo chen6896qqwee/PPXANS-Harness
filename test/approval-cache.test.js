@@ -10,13 +10,15 @@ import { PPXAgent } from "../src/agent/index.js";
 function tmp(n) { return fs.mkdtempSync(path.join(os.tmpdir(), `ppx-b2-${n}-`)); }
 
 // 构造 agent + 注入返回 ask 的权限引擎 + 拦截 _requestApproval 计数
+// 注: 2026-10-09 起 ask 在 headless (无审批面) 进程里直接快拒 (见 hardening S8),
+//   不再挂起等 _requestApproval。本文件测的是"审批缓存"这条链, 故须先注册一个审批面
+//   才能走到审批分支 —— 否则测的是 headless 快拒, 与缓存语义无关。
 function makeAgent(mode = "approve", cfgExtra = {}) {
   const agent = new PPXAgent({ root: tmp("agent") });
-  // 登记审批可达面: 否则 headless 快速拒绝会抢在 _requestApproval 之前生效 (见 hardening 测试)
-  agent.registerApprovalSurface("test");
   let asks = 0;
   agent._requestApproval = async () => { asks += 1; return mode === "approve" ? {} : null; };
   agent.permissions = { check: async () => ({ decision: "ask", reason: "测试 ask" }) };
+  agent.registerApprovalSurface("http"); // 挂一个可达审批面: 让 ask 走审批分支而非 headless 快拒
   // 允许注入 approval_cache 开关等配置
   agent.config = agent.config || {};
   agent.config.agent = Object.assign({}, agent.config.agent, cfgExtra);

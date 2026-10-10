@@ -4,8 +4,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import { auditFile } from "../audit/audit-chain.js";
-import { summarizeCauses } from "./triage.js";
-import { debug } from "../utils/logger.js";
 
 function readJson(p, fallback) {
   try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return fallback; }
@@ -19,7 +17,7 @@ function readAuditSignals(dataDir, maxLines = 5000) {
   lines = lines.slice(-maxLines);
   const calls = [];
   for (const line of lines) {
-    try { calls.push(JSON.parse(line)); } catch (e) { debug(`[services/diagnose] 已忽略异常: ${e && e.message ? e.message : e}`); }
+    try { calls.push(JSON.parse(line)); } catch {}
   }
   if (!calls.length) return null;
   const byTool = new Map(); // tool -> {calls, fails, errors:{}}
@@ -39,7 +37,7 @@ function readAuditSignals(dataDir, maxLines = 5000) {
   return { file, total: calls.length, byTool, paramErrors, policyBlocks, timeouts };
 }
 
-export function diagnoseAgent({ dataDir, rootDir = null, usageStats = null, health = null, topPerFinding = 3 } = {}) {
+export function diagnoseAgent({ dataDir, rootDir = null, usageStats = null, topPerFinding = 3 } = {}) {
   const findings = [];
   const signals = {};
 
@@ -99,28 +97,6 @@ export function diagnoseAgent({ dataDir, rootDir = null, usageStats = null, heal
     });
   }
 
-  // 2b. 记忆管线健康度 (2026-10-03 接线: MemoryHealthMonitor 曾被装配却零消费)
-  if (health) {
-    signals.memoryHealth = {
-      overall: health.overall,
-      worstRecentFails: health.worstRecentFails,
-      totalFail: health.totalFail,
-    };
-    if (health.overall && health.overall !== "healthy") {
-      const badSteps = (health.steps || [])
-        .filter((s) => s.recentFails > 0)
-        .map((s) => `${s.name}(${s.recentFails}次: ${String(s.lastError || "?").slice(0, 60)})`);
-      findings.push({
-        severity: health.overall === "unhealthy" ? "high" : "medium",
-        symptom: `记忆管线 ${health.overall} — 窗口内最差单步失败 ${health.worstRecentFails} 次, 累计 ${health.totalFail} 次`,
-        rootCause: badSteps.length ? badSteps.join("; ") : "上游模型或存储不稳",
-        action: health.overall === "unhealthy"
-          ? "已强制降级为「只写不压」(跳过 compact/extract); 先排查 LLM provider 可用性与磁盘写入权限"
-          : "观察是否持续恶化; 可用 model_routing.aux 把辅助任务切到更稳/更便宜的模型",
-      });
-    }
-  }
-
   // 3. 使用统计 (成本症状)
   const usage = usageStats || readJson(path.join(dataDir, "usage-stats.json"), null);
   signals.usage = usage;
@@ -143,18 +119,11 @@ export function diagnoseAgent({ dataDir, rootDir = null, usageStats = null, heal
     const fails = baseline.results.filter((r) => !r.pass);
     signals.baseline = { coverage: `${baseline.results.length} 任务`, failures: fails.length };
     if (fails.length) {
-      // 失败归因 (2026-10-03 接线): 基线里若带 triage 记录, 直接给确定性根因与处方;
-      // 没有才回落到"需人工判定" —— 这正是框架第 1 条要消灭的那句话。
-      const triages = fails.map((f) => f.triage).filter(Boolean);
-      const causes = triages.length ? summarizeCauses(triages) : null;
       findings.push({
         severity: "high",
         symptom: `任务基线有 ${fails.length} 项未通过: ${fails.slice(0, topPerFinding).map((f) => f.id).join(", ")}`,
-        rootCause: causes
-          ? `失败归因: ${Object.entries(causes.byCause).sort((a, b) => b[1] - a[1]).map(([c, n]) => `${c}×${n}`).join(", ")}`
-          : "未归因 (重跑 taskbench 可自动归因)",
-        action: causes?.dominantAction || "任务分解 + 验证器 + 重规划; 先人工复跑确认是真实失败还是环境误伤",
-        evidence: triages.flatMap((t) => t.evidence || []).slice(0, 4),
+        rootCause: "规划差 / 验证缺失 / 环境限制 (需人工判定)",
+        action: "任务分解 + 验证器 + 重规划; 先人工复跑确认是真实失败还是环境误伤",
       });
     }
   }
@@ -167,7 +136,6 @@ export function diagnoseAgent({ dataDir, rootDir = null, usageStats = null, heal
   const L = ["═══ 皮皮虾自诊断报告 ═══", ""];
   L.push(`审计信号: ${signals.audit ? `${signals.audit.total} 次工具调用 (参数错 ${signals.audit.paramErrors} / 策略拦 ${signals.audit.policyBlocks} / 超时 ${signals.audit.timeouts})` : "(无审计数据)"}`);
   L.push(`失败案例: ${signals.failureEpisodes} 条 | 使用: ${signals.usage ? `${signals.usage.calls} 次 / ${signals.usage.tokens} tok` : "(无数据)"}`);
-  L.push(`记忆管线: ${signals.memoryHealth ? `${signals.memoryHealth.overall} (最差步失败 ${signals.memoryHealth.worstRecentFails} 次 / 累计 ${signals.memoryHealth.totalFail})` : "(未接入)"}`);
   L.push(`任务基线: ${signals.baseline ? `${signals.baseline.coverage}, ${signals.baseline.failures} 项未通过` : "(未建立)"}`);
   L.push("");
   for (const f of findings) {

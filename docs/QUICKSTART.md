@@ -52,13 +52,12 @@ docker run -p 8899:8899 -p 3000:3000 ppx-agent
 # 任选其一（按你用的模型）
 export OPENAI_API_KEY="sk-..."
 export DEEPSEEK_API_KEY="sk-..."
-export VOLCENGINE_API_KEY="..."
 export DASHSCOPE_API_KEY="..."
 ```
 
 不配 key 也能以「离线记忆模式」启动，只是不会真的调用模型。
 
-内置 provider 模板：`openai` / `deepseek` / `volcengine` / `dashscope`（文本）+ `qwen-vl`（多模态）+ `lmstudio`（本地）。
+内置 provider 模板见 `docs/MODEL-SETUP.md`（文本：`openai` / `deepseek` / `zhipu` / `dashscope` / `moonshot` / `openrouter` / `groq` / `siliconflow` 等；多模态：`qwen-vl`；本地：`lmstudio` / `ollama`）。
 
 ## 4. 三种使用方式
 
@@ -114,7 +113,7 @@ ppx-channels remove <name>            # 移除配置（恢复默认）
 
 ## 6. 引擎底座（v2.5.0 起仅自研 http 底座）
 
-皮皮虾**不再内置/依赖任何外部引擎**（DeepSeek Harness / OpenClaw 已全部移除）。模型接入 = 在 `config/ppx.json` 的 `providers` 配多个 **http provider**（OpenAI / DeepSeek / 火山 / 通义 / 智谱 / 本地 lmstudio / ollama / vLLM），router 按配置顺序回退：
+皮皮虾**不再内置/依赖任何外部引擎**（DeepSeek Harness / OpenClaw 已全部移除）。模型接入 = 在 `config/ppx.json` 的 `providers` 配多个 **http provider**（OpenAI / DeepSeek / 通义 / 智谱 / 本地 lmstudio / ollama / vLLM），router 按配置顺序回退：
 
 ```json
 { "id": "deepseek", "base_url": "https://api.deepseek.com/v1", "api_key_env": "DEEPSEEK_API_KEY", "model": "deepseek-chat" }

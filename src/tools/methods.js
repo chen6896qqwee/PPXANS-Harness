@@ -22,8 +22,7 @@ export function registerMethodTools(catalog) {
   // ---------- 1. humanize: 去 AI 味 (Humanizer-zh) ----------
   catalog.register({
     name: "humanize",
-    // 纯文本进出: 不改任何状态 (LLM 出口与主对话同一档位) → 只读
-    capability: { riskLevel: "low", readOnly: true, destructive: false, sideEffect: "none" },
+    capability: { readOnly: true, riskLevel: "low", sideEffect: "none" },
     description: "去除文本的 AI 模板腔。检查宣传腔、过度排比、模糊归因、连接词过多、句式重复、空话套话, 返回改写的自然版本。适合公众号稿、汇报、产品介绍。",
     parameters: {
       type: "object",
@@ -53,7 +52,7 @@ export function registerMethodTools(catalog) {
   // ---------- 2. write_article: 分阶段写作 (writing-agent) ----------
   catalog.register({
     name: "write_article",
-    capability: { riskLevel: "low", readOnly: true, destructive: false, sideEffect: "none" },
+    capability: { readOnly: true, riskLevel: "low", sideEffect: "none" },
     description: "分阶段写长文: 选题→结构→初稿→审稿→修改→导出。适合公众号文章、产品介绍、课程内容、需要反复修改的长文。",
     parameters: {
       type: "object",
@@ -85,9 +84,8 @@ export function registerMethodTools(catalog) {
   // ---------- 3. clarify: 需求澄清 (Superpowers) ----------
   catalog.register({
     name: "clarify",
-    // 只出不改 (无人应答时连 LLM 都不调) → 只读; plan 模式本就该用它出题/收敛方案
-    capability: { riskLevel: "low", readOnly: true, destructive: false, sideEffect: "none" },
-    description: "需求澄清: 面对模糊任务先问清需求再动手, 避免返工。传入任务描述, 返回需要澄清的问题清单; 若信息足够则直接给出执行方案。仅当进程有人可答 (Web/CLI) 时才出题; 无人应答进程会返回\"按工作区自行推进\"的指引而非问题。适合改代码/做项目前使用。",
+    capability: { readOnly: true, riskLevel: "low", sideEffect: "none" },
+    description: "需求澄清: 面对模糊任务先问清需求再动手, 避免返工。传入任务描述, 返回需要澄清的问题清单; 若信息足够则直接给出执行方案。适合改代码/做项目前使用。",
     parameters: {
       type: "object",
       properties: {
@@ -99,19 +97,23 @@ export function registerMethodTools(catalog) {
     execute: async (args, ctx) => {
       const task = textOf(args.task, "");
       if (!task) return "[工具错误] clarify: 缺少 task";
-      // 2026-10-05 (基准 fix-syntax / write-function 复盘): 本工具产出的"问题清单"会被模型
-      // 原样转述给用户, 随后不再发工具调用 —— runToolLoop (core/policy.js) 见到无 tool_calls
-      // 的 assistant 消息即返回, 轮次就此终结; headless 进程里根本没人回答, 任务直接死在反问上。
-      // 修的是机制而非文案: 无人应答时不再走 LLM 生成问题 (不消费轮次/不产生可转述的问题),
-      // 改返回继续推进的指引; 有人在场 (Web 审批面 / CLI 终端) 时行为与今天完全一致。
-      const agent = ctx && ctx.agent;
-      if (agent && typeof agent.hasHumanChannel === "function" && !agent.hasHumanChannel()) {
-        return "[clarify·无人可答] 当前进程没有人能回答反问 (非 Web/CLI 交互会话)。"
-          + "不要把问题转述给用户后结束本轮: 先 read_file / search_files / list_dir 查看工作目录"
-          + "实际有什么 (任务点名的文件通常就在里面), 在回答里明确写出你的假设, 然后直接完成任务; "
-          + "只有真正找遍了才能说\"找不到\"。";
-      }
       const context = textOf(args.context, "无额外背景");
+      const agent = ctx?.agent;
+      // 无 LLM 先于"无人可答"分支判: 没有模型时既问不了人也给不出方案 —— 必须明说工具不可用,
+      //   而不是退回一句"请自行推进"的指引 (那会让调用方以为工具正常, 实际它什么都做不了)。
+      if (!agent || !agent.llm) return "[工具错误] clarify: 未配置 LLM provider, 无法澄清需求";
+      // 2026-10-05: 无人应答的进程里不反问 —— 反问会终结轮次 (runToolLoop 见"无 tool_calls
+      //   的 assistant 消息"即 return), 模型把问题转述给不存在的人后就不动了, 连工作区里
+      //   点名的文件都没读。改为返回【可继续推进的指引】, 让模型带着假设往下干。
+      //   判定走 agent.hasHumanChannel() (审批面 || CLI 人类标记); 谓词缺席的老调用方
+      //   (拿不准是否有人) 保持今天行为 = 照常出题, 见下方 fallback。
+      if (agent && typeof agent.hasHumanChannel === "function" && !agent.hasHumanChannel()) {
+        return [
+          `无人可答: 当前进程没有可应答的人类通道 (无审批面/无 CLI 终端), 不要反问。`,
+          `请自行推进: 用 read_file / search_files / list_dir 在当前工作目录里定位 "${task}" 涉及的文件;`,
+          `找不到时按最合理假设继续 (并在结论里写明假设), 不要向用户反问路径, 不要空转。`,
+        ].join(" ");
+      }
       const system = "你是需求澄清专家。面对模糊任务, 先判断信息是否足够执行。若不足, 列出必须澄清的关键问题(≤5个, 只问真正影响执行的问题, 不啰嗦); 若已足够, 给出简明执行方案(步骤+风险+受影响的文件/模块)。不编造, 不确定就列问题。";
       const user = `任务: ${task}\n已知背景: ${context}\n\n请判断信息是否足够, 不足则问关键问题, 足够则给执行方案。`;
       try {
@@ -126,8 +128,7 @@ export function registerMethodTools(catalog) {
   // ---------- 场景系统: 类似灵魂文件的场景设定 ----------
   catalog.register({
     name: "scene_create",
-    // 写场景库 (持久状态变更) → 非只读
-    capability: { riskLevel: "medium", readOnly: false, destructive: false, sideEffect: "memory" },
+    capability: { readOnly: false, riskLevel: "medium", sideEffect: "workspace" },
     description: "创建/更新一个场景(人设)。每个场景定义智能体在这个情境下能帮用户干什么, 类似灵魂文件。可手动设定名称/介绍/能力。",
     parameters: {
       type: "object",
@@ -150,7 +151,7 @@ export function registerMethodTools(catalog) {
 
   catalog.register({
     name: "scene_list",
-    capability: { riskLevel: "low", readOnly: true, destructive: false, sideEffect: "none" },
+    capability: { readOnly: true, riskLevel: "low", sideEffect: "none" },
     description: "列出所有场景及其介绍/能力。",
     parameters: { type: "object", properties: {} },
     execute: async (args, ctx) => {
@@ -162,8 +163,7 @@ export function registerMethodTools(catalog) {
 
   catalog.register({
     name: "scene_describe",
-    // 提炼完会回写 scene.description/canHelp 并 scenes._save() → 持久状态变更, 非只读
-    capability: { riskLevel: "medium", readOnly: false, destructive: false, sideEffect: "memory" },
+    capability: { readOnly: false, riskLevel: "medium", sideEffect: "workspace" },
     description: "用 LLM 从历史对话提炼场景介绍和能力。给定场景名, 自动总结该场景的用途和能帮用户干什么。",
     parameters: {
       type: "object",

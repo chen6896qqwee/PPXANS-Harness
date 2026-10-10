@@ -2,15 +2,16 @@
 // 解析 LLM 输出的编辑块, 应用 (精确/去首尾空行/模糊匹配), 生成回灌提示。
 // 纯 Node、零依赖、ESM。
 
-// 2026-10-05: assert 全文件零使用, 删除死导入
+import { strict as assert } from "node:assert";
+
 // ---- 解析: 容错处理围栏/冒号/反引号/多块 ----
-// 路径约定三选一, 均合法 (多文件时每块各带各的):
-//   a) aider: 文件名在 <<<<<<< SEARCH 的**上一行** (可带 @@@/[]/反引号/冒号装饰)
-//   b) 行内: 文件名在 <<<<<<< SEARCH 的**下一行** —— 仅当该行是无空白的"路径形"
-//      单行, 且再下一行仍是 SEARCH 内容时才认定; 否则该行按代码处理。
-//      旧实现无条件吃掉紧跟标记的行, 普通无路径块的首行代码被当成路径,
-//      search 恒空 → apply_patch 全块报 empty, 工具实际不可用 (见 tools/v3.js)。
-//   c) 无路径: path=null, 由调用方兜底 (apply_patch 的 args.path)。
+// 块格式:
+//   <<<<<<< SEARCH
+//   [path/to/file.js]
+//   旧代码
+//   =======
+//   新代码
+//   >>>>>>> REPLACE
 export function parseEditBlocks(text) {
   const blocks = [];
   const lines = String(text || "").split(/\r?\n/);
@@ -18,8 +19,6 @@ export function parseEditBlocks(text) {
   let cur = null;
 
   const trimFence = (s) => s.replace(/^`+|`+$/g, "").trim();
-  const isDivider = (s) => /^={5,}/.test(s);
-  const isEndMarker = (s) => /^>{5,}/.test(s);
 
   for (let i = 0; i < lines.length; i++) {
     const raw = lines[i];
@@ -28,36 +27,32 @@ export function parseEditBlocks(text) {
     if (state === "seek") {
       if (/^<{5,}\s*SEARCH/i.test(line)) {
         cur = { path: null, search: "", replace: "" };
-        // 约定 a: 前一行整行是裸文件名才算路径 (含空白/标记行/散文一律不算, 不吃内容)
-        const prev = i > 0 ? cleanPathCandidate(trimFence(lines[i - 1])) : "";
-        if (prev && !isMarkerLine(prev) && looksLikePath(prev)) cur.path = prev;
         state = "path";
       }
       continue;
     }
 
     if (state === "path") {
-      // 约定 b: 已有前置路径时不再猜行内路径; 标记行本身不是候选
-      if (!cur.path && !isDivider(line) && !isEndMarker(line)) {
-        const p = cleanPathCandidate(line);
-        const next = lines[i + 1] === undefined ? "" : trimFence(lines[i + 1]);
-        // 确定性判据: 消费后 SEARCH 必须还有内容 (next 非分隔/结束行) ——
-        // 这保证"普通无路径形式首行代码永远留在 search 里, 良构块 search 非空"。
-        if (looksLikePath(p) && next && !isDivider(next) && !isEndMarker(next)) {
-          cur.path = p;
-          state = "search";
-          continue;
-        }
+      // SEARCH 之后那一行「可能是」路径, 也可能直接就是 search 正文的第一行。
+      // 2026-10-10 修复: 原实现无条件把它当路径吃掉 —— 而工具描述教的正是
+      //   「无路径的普通 SEARCH/REPLACE 形式」, 于是首行代码被吞、search 恒空、
+      //   apply_patch 实际不可用 (且权限层据此判"无落点"升级 ask, headless 直接拒)。
+      // 现与 resolvePatchTargets / 权限层共用同一判据 looksLikePath: 像路径才消费,
+      //   不像路径则本行回落为 search 正文首行 (不 continue, 继续走下面的 search 分支)。
+      state = "search";
+      if (looksLikePath(line)) {
+        cur.path = line.replace(/[\[\]`]/g, "").replace(/^[\s:]+|[\s:]+$/g, "").trim() || null;
+        continue;
       }
-      state = "search"; // 本行不是路径行, 原样落入 SEARCH 内容
+      cur.path = null; // 显式归零, 交由调用方用 args.path / codex 表头补落点
     }
 
     if (state === "search") {
-      if (isDivider(line)) {
+      if (/^={5,}/.test(line)) {
         state = "replace";
         continue;
       }
-      if (isEndMarker(line)) {
+      if (/^>{5,}/.test(line)) {
         // 异常: 缺少 divider, 放弃当前块
         cur = null;
         state = "seek";
@@ -68,7 +63,7 @@ export function parseEditBlocks(text) {
     }
 
     if (state === "replace") {
-      if (isEndMarker(line)) {
+      if (/^>{5,}/.test(line)) {
         blocks.push(finalize(cur));
         cur = null;
         state = "seek";
@@ -79,27 +74,6 @@ export function parseEditBlocks(text) {
     }
   }
   return blocks;
-}
-
-// 去装饰: @@@ 前缀 (SWE-agent/OpenHands 风格)、[] 包裹、反引号、首尾冒号/空白
-function cleanPathCandidate(s) {
-  return String(s)
-    .replace(/^@{2,}\s*/, "")
-    .replace(/[\[\]`]/g, "")
-    .replace(/^[:\s]+|[:\s]+$/g, "")
-    .trim();
-}
-
-// 确定性"像路径"判据: 整行无空白, 且含路径分隔符或以 .扩展名 结尾。
-// 代码行几乎必带空白/括号/运算符, 散文句子同理 —— 误吃只能发生在"整行恰是裸文件名"
-// 的固有歧义上, 该形式本来就该走约定 a 或 args.path, 行内约定只是兼容旧格式。
-function looksLikePath(p) {
-  if (!p || /\s/.test(p)) return false;
-  return /[\/\\]/.test(p) || /\.[A-Za-z0-9]{1,8}$/.test(p);
-}
-
-function isMarkerLine(s) {
-  return /^<{5,}|^={5,}|^>{5,}/i.test(s);
 }
 
 function finalize(block) {
@@ -295,114 +269,159 @@ export function formatRetryFeedback(results, fileContent = "") {
   return out.join("\n");
 }
 
-// ---- codex/OpenAI 补丁风格 (*** Begin Patch / *** Update File: p / @@ / -旧 +新 / *** End Patch) ----
-// 2026-10-05 (真跑基准 rename-symbol 失败复盘): 模型除本文档的两种 SEARCH/REPLACE 写法外,
-// 还会吐第三种 —— codex 的统一 diff 风格。旧行为是 parseEditBlocks 解析出 0 块, 于是
-//   · 工具报 "未找到任何 SEARCH/REPLACE 块" (模型无法据此改写),
-//   · 权限层 collectPatchPaths 证明不了任何落点 → 升级 ask → headless 即拒 ("权限/策略拦截")。
-// 本模块内核仍是 SEARCH/REPLACE; 这里只做两件低风险的事, 完全不进 SR 解析路径:
-//   (a) 表头路径抽取 (给权限层当落点清单, 含 Delete/Move 段 —— 路径越多只可能更严, 不会更松);
-//   (b) 把 Update/Add 段的 @@ 块还原成等价的 SEARCH/REPLACE 块 (前缀行 ' ' 同时进两侧,
-//       '-' 只进 SEARCH, '+' 只进 REPLACE), 交回既有 applyAll/快照回滚/回灌提示, 不新写应用逻辑。
-// 认不出的段 (Move/Delete/裸正文行) 一律记进 unsupported 并整份拒绝, 不"猜着应用"半个补丁。
-const CODEX_HEADER_RE = /^\s*\*{3,}\s*(Begin\s+Patch|End\s+Patch|Update\s+File|Add\s+File|Delete\s+File|Move\s+File|Move\s+to|End\s+of\s+File)\b\s*:?\s*(.*)$/i;
+// 供测试断言一致性 (非公开 API 也导出以便内部复用验证)
+export const __internal = { stripEdgeBlanks, countOccurrences, fuzzyPlan };
 
-function codexKeyword(head) {
-  return String(head || "").toLowerCase().replace(/\s+/g, " ").trim();
+// ================= codex 风格统一 diff 解析 (2026-10-09 补) =================
+// 背景: 工具描述只教 SEARCH/REPLACE 两种写法, 但模型实测还会吐 codex 风格:
+//   *** Begin Patch / *** Update File: 路径 / @@ / -旧行 +新行 / *** End Patch
+// 旧行为是"解出 0 块 → 权限层证明不了落点 → 升级 ask → headless 直接拒",
+// 而工具那侧只会回一句"未找到任何 SEARCH/REPLACE 块", 模型拿到也无从改写。
+// 本函数只做一件事: 把 codex 段还原成【等价 SEARCH/REPLACE 块】, 应用/回滚完全复用既有 SR 主路径。
+//
+// 刻意不猜的两件事:
+//   · Delete File — apply_patch 不承担删除, 交给 delete_file 工具 (避免误删);
+//   · Move to     — 移动语义无法用 SR 表达, 猜了就可能改错文件, 整段标为不可应用。
+
+export const PATCH_FORMAT_HELP = [
+  "apply_patch 支持两种写法:",
+  "A) SEARCH/REPLACE: 首行写文件名, 然后 <<<<<<< SEARCH / ======= / >>>>>>> REPLACE",
+  "B) codex: *** Begin Patch / *** Update File: 路径 / @@ / -旧行 +新行 / *** End Patch",
+  "删除文件请用 delete_file 工具 (apply_patch 不执行 Delete File)。",
+].join("\n");
+
+export const MISSING_TARGET_HELP = [
+  "补丁落点无法确定, 因此不能免审批。三种合法写法任选其一:",
+  "1) 用 path 参数指定目标文件;",
+  "2) 在 <<<<<<< SEARCH 块的【上一行】写明文件名;",
+  "3) 用 codex 表头 *** Update File: 文件路径。",
+].join("\n");
+
+// 复述"实际收到了什么" —— 空内容与有内容都要说清, 否则模型无从自纠
+export function patchTargetPreview(content, maxLines = 2) {
+  const s = String(content == null ? "" : content);
+  if (!s.trim()) return "(未收到任何 content 文本)";
+  return s.split(/\r?\n/).slice(0, maxLines).map((l) => l.trim()).filter(Boolean).join(" / ").slice(0, 160);
 }
 
+const CODEX_BEGIN_RE = /^\s*\*{3}\s*Begin Patch\s*$/i;
+const CODEX_END_RE = /^\s*\*{3}\s*End Patch\s*$/i;
+const CODEX_FILE_RE = /^\s*\*{3}\s*(Update|Add|Delete)\s+File:\s*(.+?)\s*$/i;
+const CODEX_MOVE_RE = /^\s*\*{3}\s*Move to:\s*(.+?)\s*$/i;
+
+/**
+ * 解析 codex 风格补丁。
+ * @returns {{detected:boolean, paths:string[], blocks:Array<{path:string,search:string,replace:string}>, unsupported:Array<{kind:string,path?:string}>}}
+ */
 export function parseCodexPatch(text) {
+  const out = { detected: false, paths: [], blocks: [], unsupported: [] };
   const raw = String(text || "");
-  const out = { detected: false, blocks: [], paths: [], unsupported: [] };
-  if (!/\*{3,}\s*(Begin\s+Patch|Update\s+File|Add\s+File|Delete\s+File|Move\s+File)/i.test(raw)) return out;
+  if (!/\*{3}\s*Begin Patch/i.test(raw)) return out;
   out.detected = true;
+
   const lines = raw.split(/\r?\n/);
-  let cur = null; // { path, kind, search: [], replace: [], touched: bool }
+  let begin = lines.findIndex((l) => CODEX_BEGIN_RE.test(l));
+  if (begin === -1) begin = -1;
+  let end = lines.findIndex((l, k) => k > begin && CODEX_END_RE.test(l));
+  if (end === -1) end = lines.length;
+  const body = lines.slice(begin + 1, end);
 
-  const pushBlock = (c) => {
-    if (!c || !c.path) return;
-    if (!c.search.length && !c.replace.length) return; // 空 hunk: 没有可应用的落点, 不产垃圾块
-    out.blocks.push({ path: c.path, search: c.search.join("\n"), replace: c.replace.join("\n") });
-  };
-  const flush = () => { if (cur) pushBlock(cur); cur = null; };
+  let cur = null;      // { kind, path }
+  let hunks = [];      // [[{type,text}]]  当前文件的 hunk
+  let curHunk = null;
 
-  for (const line of lines) {
-    const hm = line.match(CODEX_HEADER_RE);
-    if (hm) {
-      const kw = codexKeyword(hm[1]);
-      const rest = cleanPathCandidate(hm[2] || "");
-      if (kw === "begin patch") continue;
-      if (kw === "end patch" || kw === "end of file") { flush(); continue; }
-      if (kw === "update file" || kw === "add file") {
-        flush();
-        if (!rest) { out.unsupported.push({ kind: "路径缺失", detail: line.trim() }); cur = null; continue; }
-        cur = { path: rest, kind: kw === "add file" ? "add" : "update", search: [], replace: [], touched: false };
-        out.paths.push(rest);
-        continue;
+  const flushHunk = () => { if (curHunk && curHunk.length) hunks.push(curHunk); curHunk = null; };
+  const flushFile = () => {
+    flushHunk();
+    if (cur && cur.kind === "Update") {
+      for (const h of hunks) {
+        const search = [], replace = [];
+        for (const { type, text } of h) {
+          if (type === "-") search.push(text);
+          else if (type === "+") replace.push(text);
+          else { search.push(text); replace.push(text); }   // 上下文行两侧都在
+        }
+        out.blocks.push({ path: cur.path, search: search.join("\n"), replace: replace.join("\n") });
       }
-      // Delete / Move: 语义超出本文 (删文件/改文件名), 只登记落点供权限层证明, 不应用
-      flush();
-      if (rest) out.paths.push(rest);
-      out.unsupported.push({ kind: kw === "delete file" ? "Delete File" : "Move", detail: rest || line.trim() });
-      cur = null;
+    } else if (cur && cur.kind === "Add") {
+      const added = [];
+      for (const h of hunks) for (const { type, text } of h) if (type === "+") added.push(text);
+      out.blocks.push({ path: cur.path, search: "", replace: added.join("\n") });
+    }
+    // Delete / __skip__ (含 Move): 不产出块
+    hunks = [];
+    curHunk = null;
+  };
+
+  for (const line of body) {
+    const fm = line.match(CODEX_FILE_RE);
+    if (fm) {
+      flushFile();
+      const kind = fm[1][0].toUpperCase() + fm[1].slice(1).toLowerCase(); // Update / Add / Delete
+      cur = { kind, path: fm[2].trim() };
+      if (cur.path) out.paths.push(cur.path);
+      if (kind === "Delete") out.unsupported.push({ kind: "Delete File", path: cur.path });
       continue;
     }
-    if (!cur) continue;
-    if (/^\s*(```|~~~)/.test(line)) continue; // 围栏包裹的补丁: 标记行不是正文
-    if (/^\s*@@/.test(line)) {
-      // 新 hunk: 前一个 hunk 先成块 (hunk 之间不连续, 合并必然 not-found)
-      if (cur.touched) pushBlock(cur);
-      cur.search = [];
-      cur.replace = [];
+    const mm = line.match(CODEX_MOVE_RE);
+    if (mm) {
+      out.unsupported.push({ kind: "Move", path: mm[1].trim() });
+      if (cur) cur.kind = "__skip__";   // 移动语义无法用 SR 表达 → 该段整体不应用
       continue;
     }
-    const c = line[0];
-    if (c === "+" || c === "-") {
-      (c === "+" ? cur.replace : cur.search).push(line.slice(1));
-      cur.touched = true;
-      continue;
+    if (/^\s*@@/.test(line)) { flushHunk(); curHunk = []; continue; }
+    if (/^\\s*No newline at end of file/i.test(line)) continue;
+    const c0 = line[0];
+    if (c0 === "+" || c0 === "-" || c0 === " ") {
+      if (!cur) continue;
+      if (!curHunk) curHunk = [];       // 无 @@ 的段 (如 Add File) 自动开一个 hunk
+      curHunk.push({ type: c0, text: line.slice(1) });
     }
-    if (c === " ") { cur.search.push(line.slice(1)); cur.replace.push(line.slice(1)); cur.touched = true; continue; }
-    if (line === "") {
-      // 裸空行 = 空上下文行, 但只在 hunk 已开始后才算 (段间空行不能污染 SEARCH)
-      if (cur.touched) { cur.search.push(""); cur.replace.push(""); }
-      continue;
-    }
-    out.unsupported.push({ kind: "非补丁行", detail: line.trim().slice(0, 60) });
-    cur = null;
   }
-  flush();
-  if (out.blocks.length) {
-    for (const b of out.blocks) if (!out.paths.includes(b.path)) out.paths.push(b.path);
-  }
+  flushFile();
   return out;
 }
 
-// 供 apply_patch 与权限层共用的落点清单 (SR 块路径 ∪ codex 表头路径)
-export function codexPatchPaths(text) {
-  return parseCodexPatch(text).paths;
+// ---- 补丁落点解析 (2026-10-09 补) ----
+// 三种合法写法必须被同等识别, 且绝不能把代码行误当文件名:
+//   ① args.path 参数 (调用方显式给) ② <<<<<<< SEARCH 的【上一行】 ③ 块内首行 / codex 表头
+// `  return a - b;` 这种代码行含空格与分号, 必须判为"不是路径" —— 否则会去改一个叫
+// "return a - b;" 的文件, 或更糟: 权限层据此认为落点可证明而放行。
+export function looksLikePath(s) {
+  const t = String(s == null ? "" : s).trim().replace(/^[\[\]`"']+|[\[\]`"']+$/g, "");
+  if (!t || t.length > 200) return false;
+  if (/\s/.test(t)) return false;
+  if (/[;=(){}<>|*?"',]/.test(t)) return false;
+  // 必须"像文件": 有扩展名或有目录分隔符。
+  // 刻意不放过裸词 —— `<<<<<<< SEARCH` 后紧跟的 `old` / `new` 是最常见的误判源,
+  // 一旦被当成文件名就会去新建一个叫 old 的文件 (实测复现过), 或让权限层误以为落点可证明。
+  return /\.[A-Za-z0-9]+$/.test(t) || /[\\/]/.test(t);
 }
 
-// 支持的补丁格式说明 (工具错误里回灌给模型, 不进 schema 描述 → 不占每请求上下文)
-export const PATCH_FORMAT_HELP =
-  "apply_patch 支持两种补丁: " +
-  "(1) SEARCH/REPLACE 块 —— 可选一行文件名 + `<<<<<<< SEARCH` / 原文(须与文件现有内容逐字一致) / `=======` / 新文 / `>>>>>>> REPLACE`, 可多块多文件, 省略文件名时传 path 参数, 新建文件则 SEARCH 留空; " +
-  "(2) codex 风格 `*** Begin Patch` / `*** Update File: 路径` / `@@` / `-旧行` `+新行` / `*** End Patch` (纯新增用 `*** Add File:`)。" +
-  "不支持 `*** Delete File:` 与 `*** Move File:`/`*** Move to:` (删除请改用 delete_file 工具)。所有落点都必须在工作区内。";
-
-// 补丁目标无法确定时的可行动错误 (2026-10-05 "已修复"幻觉复盘): 无目标的 SR 块是最高频
-// 写法, headless 下权限层 ask→deny 只给一句通用审批文案, 模型不知道错在哪就放弃编造完成。
-// 权限层 (permissions/index.js) 与工具 (tools/v3.js) 共用本常量 + patchTargetPreview,
-// 保证模型从哪条路拿到的都是"三种合法写法点名 + 实际收到的内容"。
-export const MISSING_TARGET_HELP =
-  "无法从补丁内容确定目标文件 (拒绝猜测落点)。请三选一: " +
-  "(1) 传 path 参数; " +
-  "(2) 在 <<<<<<< SEARCH 的上一行写文件名; " +
-  "(3) 用 codex 表头 *** Update File: <路径> (在 *** Begin Patch / *** End Patch 内)。";
-
-// 补丁内容前两行摘录 (给错误文案用, 让模型能对照自己实际吐了什么)
-export function patchTargetPreview(content, maxLines = 2, maxChars = 160) {
-  const s = String(content || "").split(/\r?\n/).slice(0, maxLines).join(" / ").trim();
-  if (!s) return "(未收到任何 content 文本)";
-  return s.length > maxChars ? s.slice(0, maxChars) + "…" : s;
+/**
+ * 为每个 SEARCH/REPLACE 块解析出目标文件。
+ * @returns {Array<string|null>} 与 blocks 一一对应, null = 落点不可确定
+ */
+export function resolvePatchTargets(content, blocks) {
+  const text = String(content || "");
+  const list = Array.isArray(blocks) ? blocks : parseEditBlocks(text);
+  const lines = text.split(/\r?\n/);
+  const out = [];
+  let cursor = 0;
+  for (const b of list) {
+    let idx = -1;
+    for (let i = cursor; i < lines.length; i++) {
+      if (/^<{5,}\s*SEARCH/i.test(lines[i].trim())) { idx = i; break; }
+    }
+    if (idx === -1) {
+      // codex 块 (没有 SEARCH 标记): 直接信块内 path
+      out.push(looksLikePath(b && b.path) ? String(b.path).trim() : null);
+      continue;
+    }
+    cursor = idx + 1;
+    const inside = String((b && b.path) || "").trim();
+    const above = idx > 0 ? lines[idx - 1].trim() : "";
+    out.push(looksLikePath(inside) ? inside : (looksLikePath(above) ? above : null));
+  }
+  return out;
 }

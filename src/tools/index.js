@@ -10,19 +10,9 @@ export { registerDocumentTools } from "./document.js";
 // 记忆治理 + 审计 + 运维 (吸收自 ppx-v2)
 export { registerGovernanceTools } from "./governance.js";
 export { registerGitTools } from "./git.js";
-export { registerVoiceTools, resolveVoice, resolveLocalAsr, voiceStatus } from "./voice.js";
-// v3.1: 内置 JS 沙箱执行器 (CodeAct) + 语音活动检测 (VAD)
-export { registerSandboxTools, runInSandbox } from "./sandbox.js";
-export { registerVadTools, energyVad, parseWavPcm16 } from "./vad.js";
-// 2026-10-07 全能超级 Agent: 编排自省 + 技能库扩展
-export { registerOrchestrationTools, CAPABILITY_AXES } from "./orchestration.js";
-export { registerSkillHubTools } from "./skill-hub.js";
-// 2026-10-07 吸收自 TencentCloud/Octop: 专家库/人格/市场 + 团队房间
-export { registerExpertHubTools } from "./expert-hub.js";
-export { registerTeamRoomTools, makeLegionExecutor, makeHostExecutor, resolveMemberSpec, expandMembers } from "./team-room.js";
-export { runTeam, delegateTimeoutMs } from "./delegate.js";
-export { ConcurrencyGovernor, getGovernor, configureGovernor, resetGovernor, governorOptsFromConfig } from "../orchestrator/governor.js";
-export { TEAMS, TOPOLOGIES, resolveTeam, teamExperts, teamCatalog, teamRiskProfile } from "../orchestrator/teams.js";
-export { ExpertPackCatalog, createPackCatalog, installPack, packRootsFromConfig, PACK_CATEGORIES } from "../orchestrator/expert-pack.js";
-export { TeamRoom, TeamJobTracker, INBOX_STATUS, SPEAKER, composeFollowup } from "../orchestrator/room.js";
-export { sessionKeyFor, parseSessionKey, normalizeSessionKey, roomKey } from "../orchestrator/session-key.js";
+// 2026-10-09: 补齐统一出口 —— 以下模块早已实现, 但没从这里再导出,
+// 而 v31-embed-local / write-selfcheck / postcondition-gate 等测试按"统一出口"约定 import。
+export { jsExportSelfCheck } from "../core/postcondition.js";
+export { runInSandbox, registerSandboxTools } from "./sandbox.js";
+export { parseWavPcm16, energyVad, registerVadTools } from "./vad.js";
+export { escapePS, buildTTSCommand, speakText, registerVoiceTools, resolveVoice, resolveLocalAsr, voiceStatus } from "./voice.js";

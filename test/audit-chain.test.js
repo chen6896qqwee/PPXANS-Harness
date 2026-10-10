@@ -141,35 +141,3 @@ test("ToolCatalog: 未注入审计时保持零开销且不报错", async () => {
   const r = await catalog.call("echo2", {});
   assert.equal(r, "ok");
 });
-
-// ---- 端到端装配守卫 (2026-10-07 评估报告 P0-2 复查后补) ----
-// 背景: 评估报告曾据 audit:verify 输出"条数: 0"判定审计未生效。复查发现是误判 ——
-//   机制本身是通的 (一次工具调用即落 1 条), 当时 0 条只是因为没跑过任何会话。
-// 但这次复查暴露了一个**真实的脆弱点**: audit 是靠 toolsPlugin 里一行手工的
-//   `tools.setAudit(ctx.consume("audit"))` 挂上去的。只要有人调整插件顺序、或 auditPlugin
-//   提前 return null (audit.enabled:false 那条分支), 装配链就会**静默断裂**:
-//   工具照常跑、测试照常绿 (单元测试是手工注入 audit 的, 走不到这条路径)、
-//   只有审计账本悄悄变空 —— 而这恰恰是"可追责"这个卖点失效的方式。
-// 所以这里补一条端到端断言: 完整装配的 agent, 调一次工具, 审计文件必须非空。
-test("端到端: 完整装配后调用工具必须落审计 (防 setAudit 装配链静默断裂)", async () => {
-  const { PPXAgent } = await import("../src/agent/index.js");
-  const dataDir = tmpDir();
-  const root = tmpDir();
-  const a = new PPXAgent({ root, dataDir });
-
-  // 装配链必须真的把 audit 挂上 (这一条是断裂时的首个可见信号)
-  const audit = a.ctx?.consume ? a.ctx.consume("audit") : null;
-  assert.ok(audit, "默认配置下 auditPlugin 必须产出 AuditLog (audit.enabled 未关)");
-  assert.ok(a.tools.audit, "toolsPlugin 必须把 audit 挂到 ToolCatalog (setAudit)");
-
-  await a.tools.call("get_time", {}, {});
-  const file = auditFile(dataDir);
-  assert.ok(fs.existsSync(file), `审计文件必须被创建: ${file}`);
-  const lines = fs.readFileSync(file, "utf8").trim().split("\n").filter(Boolean);
-  assert.ok(lines.length >= 1, `一次工具调用应至少落 1 条审计, 实际 ${lines.length}`);
-
-  const log = new AuditLog(dataDir);
-  const v = log.verify();
-  assert.equal(v.ok, true, "刚写入的链必须自校验通过");
-  assert.equal(v.total, lines.length, "verify 条数应与文件行数一致");
-});

@@ -7,7 +7,7 @@ cd /d "%~dp0"
 cls
 echo.
 echo   ============================================
-echo     皮皮虾 PPXANS-Harness v3.2.2 高级菜单
+echo     皮皮虾 PPXANS-Harness v3.0.0 高级菜单
 echo   ============================================
 echo.
 echo    [1] Web 应用      (内核+界面 单进程, 自动开浏览器)
@@ -16,9 +16,10 @@ echo    [3] HTTP 服务     (仅接口, 含 /mcp 端点)
 echo    [4] CLI 聊天      (终端直接对话)
 echo    [5] 自愈体检      (启动体检 + 审计链校验)
 echo    [6] 全量测试      (node --test)
-echo    [7] 退出
+echo    [7] 旧版 Next.js 界面 (需先 npm run web:build, 双进程)
+echo    [8] 退出
 echo.
-set /p choice=  请选择 (1-7): 
+set /p choice=  请选择 (1-8): 
 
 if "%choice%"=="1" goto web
 if "%choice%"=="2" goto webnoopen
@@ -26,7 +27,8 @@ if "%choice%"=="3" goto serve
 if "%choice%"=="4" goto chat
 if "%choice%"=="5" goto selfheal
 if "%choice%"=="6" goto test
-if "%choice%"=="7" exit /b 0
+if "%choice%"=="7" goto nextweb
+if "%choice%"=="8" exit /b 0
 echo  无效选择，按任意键重试...
 pause >nul
 goto menu
@@ -80,5 +82,20 @@ echo.
 echo  [PPX] 全量测试...
 echo.
 call npm test
+pause
+goto menu
+
+:nextweb
+if not exist "web\.next" (
+    echo.
+    echo  [PPX] 前端尚未构建，先执行 npm run web:build ...
+    echo.
+    call npm run web:build
+    if errorlevel 1 ( pause & goto menu )
+)
+echo.
+echo  [PPX] 启动旧版双进程界面：内核 8899 + Next 3000
+echo.
+call npm run web:next
 pause
 goto menu

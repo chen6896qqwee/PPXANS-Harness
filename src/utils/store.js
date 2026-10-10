@@ -2,7 +2,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { debug, warn } from "../utils/logger.js";
 
 export function ensureDir(dir) {
   fs.mkdirSync(dir, { recursive: true });
@@ -21,7 +20,7 @@ export function atomicWrite(file, data) {
       return;
     } catch (e) {
       if (attempt >= 2) {
-        try { fs.unlinkSync(tmp); } catch (e) { debug(`[utils/store] 已忽略异常: ${e && e.message ? e.message : e}`); }
+        try { fs.unlinkSync(tmp); } catch {}
         throw new Error(`原子写失败: ${file} (${e.message})`);
       }
       const end = Date.now() + 30;
@@ -38,10 +37,9 @@ export function readJson(file, fallback = null) {
     return JSON.parse(raw);
   } catch (e) {
     // v3.0.1 (P0#1): 解析失败不再完全静默 —— 至少留一条 warn。
-    // 注意: 此处**不动文件** (不自作主张改名/删除) —— healer 等组件对损坏文件
-    // 有自己的备份恢复契约 (如 healer.js 把 facts.json 改名为 .corrupt-<ts> 后重建),
-    // 低层 readJson 若抢先把文件改名会破坏该契约 (实测把 selfheal-bench 炸出 ENOENT)。
-    warn(`[utils/store] JSON 解析失败, 返回 fallback (文件保留): ${file} (${e && e.message ? e.message : e})`);
+    // 注意: 此处**不动文件** (不自作主张改名/删除) —— 调用方按 parseFailed 自行留档。
+    // v2026-10-04 (P2#15 同步): 独立版无 logger 模块, 用 console.warn 保持同等可见度
+    console.warn(`[utils/store] JSON 解析失败, 返回 fallback (文件保留): ${file} (${e && e.message ? e.message : e})`);
     return fallback;
   }
 }
@@ -57,7 +55,7 @@ export function readJsonGuarded(file, fallback = null) {
     if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1);
     return { data: JSON.parse(raw), existedBefore: true, parseFailed: false };
   } catch (e) {
-    warn(`[utils/store] JSON 损坏 (文件保留待恢复): ${file} (${e && e.message ? e.message : e})`);
+    console.warn(`[utils/store] JSON 损坏 (文件保留待恢复): ${file} (${e && e.message ? e.message : e})`);
     return { data: fallback, existedBefore: true, parseFailed: true };
   }
 }
@@ -86,7 +84,7 @@ function _pidAlive(pid) {
 // 只是一个"刚开始执行"的 Promise —— 控制权在函数体内**第一个 await** 处就交回事件循环, 而那时
 // 临界区远未结束。于是锁在最需要它的地方静默失效: 两个进程各自"持锁"交错做同一批读-改-写,
 // 后写的那一份用基于过期状态的整文件覆盖前一份 —— 本仓库已因此真丢过用户数据
-// (见 memory/l2.js:69-106 与 test/scene-id-backfill-2026-10-04.test.js, 同为"锁外合并"竞态)。
+// (见 memory/l2.js 与 test/scene-id-backfill-2026-10-04.test.js, 同为"锁外合并"竞态)。
 // 取舍: 与其假装持锁, 不如当场拒绝。AsyncFunction 在**取锁之前**就抛错 (回调一次都不会被执行);
 // 同步函数返回 thenable 的情况只能事后判定 (它的同步前半段已跑过), 同样抛错并说清互斥已失效。
 function _isThenable(v) {
@@ -116,15 +114,31 @@ function _callSyncFn(api, file, fn) {
 export function withFileLock(file, fn, { timeoutMs = 3000, pollMs = 20, staleMs = 15000 } = {}) {
   _assertSyncFn("withFileLock", file, fn);
   const lock = file + ".lock";
+  // 本次持有的锁令牌 (pid:ts)。释放时只删"内容仍是自己令牌"的锁文件 ——
+  //   (2026-10-10 修复) 原 finally 无条件 rmSync, 存在这样的竞态: 本进程的锁被判陈旧强取后,
+  //   强取方新建了自己的锁; 而本进程 fn() 一返回就执行 finally, 把【对方的锁】删了 ——
+  //   结果锁在双方都以为持有的窗口里凭空消失 (残留 .lock / 双写风险)。
+  //   高并发压测下可复现 (test/lock-two-process-rmw.test.js D 组偶发 "收尾后仍有 .lock")。
+  let myToken = null;
   const acquire = () => {
     try {
       const fd = fs.openSync(lock, "wx"); // 'wx': 已存在则抛错 (原子)
-      try { fs.writeSync(fd, `${process.pid}:${Date.now()}`); } catch (e) { debug(`[utils/store] 已忽略异常: ${e && e.message ? e.message : e}`); }
+      const token = `${process.pid}:${Date.now()}`;
+      try { fs.writeSync(fd, token); } catch {}
       fs.closeSync(fd);
+      myToken = token;
       return true;
     } catch {
       return false;
     }
+  };
+  // 仅当锁文件内容正是本次令牌时才删除 —— 借"令牌比对"消除误删他锁的竞态。
+  const releaseIfOwn = () => {
+    if (!myToken) return;
+    try {
+      if (fs.readFileSync(lock, "utf8").trim() === myToken) fs.rmSync(lock, { force: true });
+    } catch { /* 锁已被他人取走/不存在 → 无副作用 */ }
+    myToken = null;
   };
   // 陈旧锁判定 (v3.0.1 P1#5): 持有者进程已死 / 锁超长持有 / 自进程残留 → 可抢; 活跃进程持有 → 不可抢
   const canSteal = () => {
@@ -136,7 +150,7 @@ export function withFileLock(file, fn, { timeoutMs = 3000, pollMs = 20, staleMs 
         if (pid === process.pid) return true;                       // 自进程残留
         if (!_pidAlive(pid)) return true;                           // 持有者已死 (崩溃残留)
         if (Date.now() - Number(m[2]) > staleMs) return true;       // 超长持有视为陈旧 (防 pid 复用误判)
-        return false;                                               // 活跃进程持锁: 不抢
+        return false;                                               // 活跃进程持有: 不抢
       }
       // 兼容旧格式 (纯 pid) / 无法解析: 按 mtime 与 pid 存活判
       const legacyPid = parseInt(raw, 10);
@@ -152,7 +166,7 @@ export function withFileLock(file, fn, { timeoutMs = 3000, pollMs = 20, staleMs 
     if (Date.now() - start > timeoutMs) {
       // v3.0.1 (P1#5): 活跃进程持锁 → 抛错而非抢锁 (宁可失败不可双写损坏)
       if (!canSteal()) throw new Error(`文件锁被活跃进程持有, 等待 ${timeoutMs}ms 后放弃: ` + lock);
-      try { fs.rmSync(lock, { force: true }); } catch (e) { debug(`[utils/store] 已忽略异常: ${e && e.message ? e.message : e}`); } // 陈旧锁强取
+      try { fs.rmSync(lock, { force: true }); } catch {} // 陈旧锁强取 (此处无 myToken, 不涉误删)
       if (!acquire()) throw new Error("文件锁获取超时: " + lock);
       break;
     }
@@ -161,7 +175,7 @@ export function withFileLock(file, fn, { timeoutMs = 3000, pollMs = 20, staleMs 
   try {
     return _callSyncFn("withFileLock", file, fn);
   } finally {
-    try { fs.rmSync(lock, { force: true }); } catch (e) { debug(`[utils/store] 已忽略异常: ${e && e.message ? e.message : e}`); }
+    releaseIfOwn(); // 只删自己的锁, 不误删强取方的锁
   }
 }
 
@@ -179,6 +193,83 @@ export function withFileLocks(files, fn, opts) {
     ? _callSyncFn("withFileLocks", label, fn)
     : withFileLock(list[i], () => step(i + 1), opts));
   return step(0);
+}
+
+// ---- 带锁的 JSON 集合存储 (2026-10-10) ----
+// 背景: failure-episode.js / asset-hub.js 等"CLI + Web + 自愈探针共写"的 JSON 数组文件,
+//   旧实现是"构造时读一次 + 每次动作全量重写" —— 中间既无文件锁也无锁内重读,
+//   于是后写一方把对手刚落盘的内容整段覆盖 (病历/资产静默丢失)。
+//   本辅助把正确形状收敛成一处, 避免每个存储各写一遍 (重复实现正是口径漂移的温床):
+//     取锁 → 锁内重读磁盘 → 读损坏则改名 .corrupt-<ts> 留档 → 交给 mutate 合并 → 原子全量写。
+// 约束与 withFileLock 一致: mutate 必须**同步** (锁内不得 await), 否则互斥形同虚设。
+//
+// @param {string} file 目标 JSON 文件
+// @param {() => any[]} fallback 磁盘不存在/损坏时的初始集合 (通常返回 [])
+// @param {(disk: any[]) => any[] | void} mutate 拿到"磁盘最新态"后原地改或返回新数组
+// @param {{warnTag?: string}} [opts] warnTag 出现在失败日志里, 标明出处
+// @returns {{ok: boolean, data: any[], error?: Error, corrupted?: string|null}}
+export function mutateJsonCollection(file, fallback, mutate, { warnTag = "store", memory = null, idKey = "id" } = {}) {
+  let corrupted = null;
+  let data = [];
+  const run = () => {
+    // 锁内重读: 拿到对手进程的最新落盘, 而不是自己构造时的旧快照
+    const g = readJsonGuarded(file, null);
+    let disk;
+    if (g.parseFailed && g.existedBefore) {
+      // 损坏: 先改名留档 (绝不静默用空数组覆盖), 再以回退集合继续
+      corrupted = archiveCorrupt(file);
+      disk = fallback();
+    } else {
+      disk = Array.isArray(g.data) ? g.data : fallback();
+    }
+    // 并集合并: 磁盘最新态 + 本实例内存态 (按 id 去重) ——
+    //   上次写失败残留在内存里的记录不会被这次落盘吞掉 (内存/磁盘重新对齐)。
+    data = memory ? unionById(disk, memory, idKey) : disk;
+    const next = mutate(data);
+    if (Array.isArray(next)) data = next;
+    writeJson(file, data);
+  };
+  try {
+    withFileLock(file, run);
+    return { ok: true, data, corrupted };
+  } catch (e) {
+    // 写盘失败要"响但不断": 结构化返回 + warn 出声, 不抛断调用链
+    // (调用方把已改的内存态保留在自身字段里, 下次成功写入时全量补上)
+    // 用 console.log 而非 console.warn: 与项目既有 warn 出口一致 (走 stdout, 可被日志采集),
+    //   且不引入对 logger 模块的依赖 (store 是底层工具, 保持零依赖)。
+    console.log(`[warn] [${warnTag}] 落盘失败 (内存态保留, 下次写入补齐): ${file} (${e && e.message ? e.message : e})`);
+    return { ok: false, data, error: e, corrupted };
+  }
+}
+
+// 按 id 做并集: primary 顺序优先, secondary 中未出现过的追加到尾部。
+// 用途: 跨进程/跨实例共享的集合在"锁内重读磁盘 + 合并内存"时不丢任何一方。
+export function unionById(primary, secondary, idKey = "id") {
+  const out = Array.isArray(primary) ? [...primary] : [];
+  const seen = new Set(out.map((x) => (x ? x[idKey] : undefined)));
+  for (const x of (Array.isArray(secondary) ? secondary : [])) {
+    if (!x) continue;
+    const k = x[idKey];
+    if (k != null && seen.has(k)) continue;
+    if (k != null) seen.add(k);
+    out.push(x);
+  }
+  return out;
+}
+
+// 把损坏文件改名留档 .corrupt-<ts>; 已有存档时不覆盖 (两次损坏各留一份)。
+// 返回存档路径; 无法读取原文件 (不存在等) 返回 null。
+export function archiveCorrupt(file) {
+  try {
+    if (!fs.existsSync(file)) return null;
+    let dest = `${file}.corrupt-${Date.now()}`;
+    let n = 0;
+    while (fs.existsSync(dest)) dest = `${file}.corrupt-${Date.now()}-${++n}`;
+    fs.renameSync(file, dest);
+    return dest;
+  } catch {
+    return null;
+  }
 }
 
 export function readText(file, fallback = "") {

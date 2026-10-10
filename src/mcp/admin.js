@@ -8,7 +8,7 @@ import {
 import { getSettings, updateSettings } from "../config/settings.js";
 import { createTaskBoard } from "./tasks.js";
 import { ensureDir } from "../utils/store.js";
-import { warn, debug } from "../utils/logger.js";
+import { warn } from "../utils/logger.js";
 import path from "node:path";
 
 // 任务面板技能模板库: 按技能预置步骤列表, 新建任务时可选 (供 web 前端渲染下拉)
@@ -79,7 +79,7 @@ export const TASK_TEMPLATES = [
 // 写配置前确保 config 目录存在 (空 root / 首次启动时 agent 自愈建目录是异步的,
 // 若目录缺失, withFileLock 的 openSync(wx) 抛 ENOENT 会被误判为"锁冲突"并超时)
 function ensureConfigDir(root) {
-  try { ensureDir(path.join(root, "config")); } catch (e) { debug(`[mcp/admin] 已忽略异常: ${e && e.message ? e.message : e}`); }
+  try { ensureDir(path.join(root, "config")); } catch {}
 }
 
 const str = (v, d = "") => (v == null ? d : String(v));
@@ -309,14 +309,7 @@ function taskTools(agent, taskBoard) {
         if (!t) throw new Error("任务不存在");
         taskBoard.update({ id, status: "running" });
         const prompt = str(args.prompt) || `执行任务「${t.title}」: ${t.description || ""}`;
-        let reply;
-        try {
-          reply = await agent.chat(prompt, { sessionKey: "task:" + id });
-        } catch (e) {
-          // 2026-10-03 修复 (P1): chat 抛错时任务永久卡 running (僵尸运行态), 回滚为 failed
-          try { taskBoard.update({ id, status: "failed" }); } catch { /* 状态回滚失败不再抛 */ }
-          throw e;
-        }
+        const reply = await agent.chat(prompt, { sessionKey: "task:" + id });
         // 全部步骤置 done, 任务置 done
         taskBoard.complete(id, reply);
         return { ok: true, id, result: reply };

@@ -5,8 +5,15 @@ import { PPXAgent } from "./agent/index.js";
 const root = process.cwd();
 // 可选: 独立数据目录 (多进程军团隔离, 避免互踩同一个 data/)
 // 可选: 全局共享目录 (跨 agent 共享经验库 = ANS 全局记忆)
+// v3.2.4 (2026-10-09): 父进程经 PPX_AGENT_CONFIG_JSON 传入已解析配置 —— 沙箱/自定义
+//   configFile 场景下 worker cwd 没有 config/ppx.json, 此前会退化成"无模型"子 agent。
+let configOverride = null;
+if (process.env.PPX_AGENT_CONFIG_JSON) {
+  try { configOverride = JSON.parse(process.env.PPX_AGENT_CONFIG_JSON); } catch { configOverride = null; }
+}
 const agent = new PPXAgent({
   root,
+  ...(configOverride ? { config: configOverride } : {}),
   dataDir: process.env.PPX_AGENT_DATA_DIR || undefined,
   globalDataDir: process.env.PPX_AGENT_GLOBAL_DATA_DIR || undefined,
 });

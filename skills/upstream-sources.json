@@ -1,7 +1,7 @@
 {
   "$comment": "可信上游技能源清单 (离线随包分发)。用途: skill_import 不给 repo 时列出可装来源, 或按 name (源 id / 技能名) 解析出仓库引用 —— 让'装技能'从'你得先知道 GitHub 上有个 repo'变成'说个名字'。零依赖: 这个文件是手工维护 + 逐个验证过的白名单, 不做任何在线搜索 (在线搜索意味着任意第三方代码可被一句话拉进来)。",
   "version": 1,
-  "updated": "2026-10-07",
+  "updated": "2026-10-08",
   "sources": [
     {
       "id": "anthropics",
@@ -18,8 +18,17 @@
       "repo": "addyosmani/agent-skills",
       "license": "MIT",
       "verified": true,
-      "imported": 0,
-      "note": "生产级工程技能集 (为 coding agent 设计), 偏工程实践与代码质量。102k★。"
+      "imported": 8,
+      "note": "生产级工程技能集 (为 coding agent 设计), 偏工程实践与代码质量。102k★。2026-10-08 导入 8 个: context-engineering/doubt-driven-development/spec-driven-development/security-and-hardening/observability-and-instrumentation/api-and-interface-design/code-simplification/performance-optimization (选材原则: 与自研技能去重, 对齐差距清单)。"
+    },
+    {
+      "id": "superpowers",
+      "name": "obra/superpowers",
+      "repo": "obra/superpowers",
+      "license": "MIT",
+      "verified": true,
+      "imported": 2,
+      "note": "GitHub 最高星技能框架 (方法论: TDD/系统化调试/计划执行)。2026-10-08 只导入 2 个无重复项: using-git-worktrees/receiving-code-review。其余 (brainstorming/TDD/verification/writing-plans/systematic-debugging 等) 与自研 brainstorm/plan/verify/debug/test-first 主题重叠, 刻意不导 —— 同一主题双技能会稀释模型选择。"
     },
     {
       "id": "wshobson",
@@ -49,6 +58,16 @@
     "skill-creator": "anthropics",
     "academy-guide": "anthropics",
     "claude-api": "anthropics",
-    "discernment-nudge": "anthropics"
+    "discernment-nudge": "anthropics",
+    "context-engineering": "addyosmani",
+    "doubt-driven-development": "addyosmani",
+    "spec-driven-development": "addyosmani",
+    "security-and-hardening": "addyosmani",
+    "observability-and-instrumentation": "addyosmani",
+    "api-and-interface-design": "addyosmani",
+    "code-simplification": "addyosmani",
+    "performance-optimization": "addyosmani",
+    "using-git-worktrees": "superpowers",
+    "receiving-code-review": "superpowers"
   }
 }

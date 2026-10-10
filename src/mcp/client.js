@@ -5,12 +5,12 @@
 // 可靠性: 请求超时 + 断连时拒绝所有 pending 请求 (不再永久挂起)。
 import { spawn, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { warn, debug } from "../utils/logger.js";
+import { warn } from "../utils/logger.js";
 
 const require = createRequire(import.meta.url);
 // 客户端版本随包走, 不硬编码 (外部体检: 曾写死 0.1.0 与 package.json 漂移, server.js 已修, 此处补齐)
 let PKG_VERSION = "0.0.0";
-try { PKG_VERSION = require("../../package.json").version || "0.0.0"; } catch (e) { debug(`[mcp/client] 已忽略异常: ${e && e.message ? e.message : e}`); }
+try { PKG_VERSION = require("../../package.json").version || "0.0.0"; } catch {}
 
 const PROTOCOL_VERSION = "2024-11-05";      // stdio 本地服务器广泛兼容的版本
 const HTTP_PROTOCOL_VERSION = "2025-03-26"; // Streamable HTTP 传输对应的协议版本
@@ -170,11 +170,11 @@ class StdioTransport {
       const pid = this.proc.pid;
       // v1.0.8: 杀进程树 (npx/uvx 会派生子进程, 只 kill 直接子进程会泄漏)
       if (process.platform === "win32") {
-        try { spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore", timeout: 5000 }); } catch (e) { debug(`[mcp/client] 已忽略异常: ${e && e.message ? e.message : e}`); }
+        try { spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore", timeout: 5000 }); } catch {}
       } else {
-        try { process.kill(-pid, "SIGTERM"); } catch (e) { debug(`[mcp/client] 已忽略异常: ${e && e.message ? e.message : e}`); } // 负 pid = 整个进程组
+        try { process.kill(-pid, "SIGTERM"); } catch {} // 负 pid = 整个进程组
       }
-      try { this.proc.kill(); } catch (e) { debug(`[mcp/client] 已忽略异常: ${e && e.message ? e.message : e}`); }
+      try { this.proc.kill(); } catch {}
     }
     this.proc = null;
   }

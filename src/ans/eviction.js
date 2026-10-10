@@ -12,7 +12,7 @@
 //   默认只"报告 + 标记", 硬删除交给 FactStore 既有 _prune (超 maxFacts 时)。本模块产出治理信号, 不越权改数据。
 import { loadAgentState, saveAgentState } from "../utils/json-state.js";
 import { charBigrams, setOverlap } from "../utils/similarity.js";
-import { info, debug } from "../utils/logger.js";
+import { info } from "../utils/logger.js";
 
 // 冗余判定阈值 (bigram overlap 相似度, 0~1; 中文同义变体通常 >0.6)
 const SIM_THRESHOLD = 0.6;
@@ -73,7 +73,7 @@ export function scan(agent) {
       try {
         const sim = setOverlap(fa, bigrams.get(g.id));
         if (sim > bestSim) { bestSim = sim; best = g; }
-      } catch (e) { debug(`[ans/eviction] 已忽略异常: ${e && e.message ? e.message : e}`); }
+      } catch {}
     }
     if (best && bestSim >= SIM_THRESHOLD) {
       const aKeep = (f.importance || 0) + (f.hits || 0);

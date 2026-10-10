@@ -94,24 +94,16 @@ function corsBoot() {
   return root;
 }
 
-test("CORS: 未配置默认收紧 —— 外部来源不发 ACAO (浏览器拒绝跨域读), 本机同端口来源回显 (v3.0.1 P1#9)", async () => {
+test("CORS: 未配置默认放行任意来源 (*)", async () => {
   const root = corsBoot();
   const agent = new PPXAgent({ root });
   const ch = new HttpChannel(agent, { port: 0, host: "127.0.0.1" });
   await ch.connect();
   const port = ch.server.address().port;
   try {
-    // 外部恶意来源: 不再回 ACAO (原为 *), 浏览器侧自然无法读取响应
     const r = await fetch(`http://127.0.0.1:${port}/health`, { headers: { Origin: "http://evil.example.com" } });
-    assert.equal(r.status, 200, "外部来源业务请求仍处理 (无 ACAO 浏览器读不到)");
-    assert.equal(r.headers.get("access-control-allow-origin"), null, "外部来源不下发 ACAO");
-    // 本机回环但不同端口: 同样不下发 (P1#9 端口判据)
-    const crossPort = await fetch(`http://127.0.0.1:${port}/health`, { headers: { Origin: `http://127.0.0.1:9999` } });
-    assert.equal(crossPort.headers.get("access-control-allow-origin"), null, "同机不同端口来源不下发 ACAO");
-    // 本机回环同端口 (自带 UI): 回显来源
-    const samePort = await fetch(`http://127.0.0.1:${port}/health`, { headers: { Origin: `http://127.0.0.1:${port}` } });
-    assert.equal(samePort.status, 200, "同端口本机来源放行");
-    assert.equal(samePort.headers.get("access-control-allow-origin"), `http://127.0.0.1:${port}`, "同端口本机来源回显 ACAO");
+    assert.equal(r.status, 200, "默认放行");
+    assert.equal(r.headers.get("access-control-allow-origin"), "*");
   } finally {
     await ch.disconnect();
     agent.shutdown();

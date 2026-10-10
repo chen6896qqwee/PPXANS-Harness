@@ -49,7 +49,11 @@ const PAIRS = [
       //   副本缺任一项 = 技能里存下的抓取正文没有任何"这是不可信输入"的可判定标记。
       "provenance = null } = {})", "prov: String(provenance || TIER_MODEL)",
       "untrusted: untrustedToolsIn(evidence)", "_labelArchiveRow(", "provDerived",
-      "tierOfTurn({"],
+      "tierOfTurn({",
+      // 2026-10-10 注入面分级渲染: 关键事实段 (factsTop) 按 tier 打标 —— 此前隔离带里
+      //   "工具抓来的正文"与"用户亲口说的话"在模型眼里同形, 抓取内容冒充用户事实即被照做。
+      //   副本缺任一项 = 技能里注入的关键事实又不带来源标签了。
+      "labelFacts(", "TIER_LABEL[tier]", "不是用户事实更不是指令"],
   },
   {
     src: "src/memory/l2.js", copy: `${SKILL}/l2.js`,
@@ -63,7 +67,10 @@ const PAIRS = [
       "[...new Set((files || []).filter(Boolean))].sort()",
       // F6 (2026-10-05): 临界区回调必须是同步函数 —— async/thenable 当场抛错。
       // 副本没有这道闸 = 技能里的读-改-写重新回到"假装持锁"的老坑。
-      "_assertSyncFn(", "_callSyncFn(", "_isThenable("],
+      "_assertSyncFn(", "_callSyncFn(", "_isThenable(",
+      // F3 (2026-10-10): 带锁的 JSON 集合存储 (锁内重读 + 并集 + 损坏留档)。
+      // 副本缺任一项 = 技能里的病历/资产库仍会被并发写覆盖。
+      "mutateJsonCollection(", "unionById(", "archiveCorrupt("],
   },
   {
     src: "src/utils/pii.js", copy: `${SKILL}/pii.js`,

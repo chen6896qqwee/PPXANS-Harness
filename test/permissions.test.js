@@ -128,6 +128,62 @@ test("workspace 沙箱: cwd 越界也拒绝", async () => {
   assert.equal(d.decision, "deny");
 });
 
+// ---- P1-1 回归 (2026-10-10): URL 不是本地路径 ----
+// 病根: collectPaths 裸正则把 https://host/path 切成 s://host/path, path.resolve 把 s: 当盘符
+//   → 误判"路径越界", git clone / curl / npm --registry 全被拦且理由是假的。
+// 本组锁两件事: ①URL 命令不再被误判越界 ②真实越界仍被拦(修复不得放宽安全边界)。
+test("P1-1: git clone https://... 不再被误判为路径越界", async () => {
+  const root = tmpDir();
+  const eng = createPermissionEngine({
+    sandbox: SandboxPolicy.WORKSPACE_WRITE,
+    workspaceRoot: root,
+    approvalMode: AskForApproval.ON_REQUEST,
+  });
+  const d = await eng.check("run_command", { command: "git clone https://github.com/a/b.git" });
+  assert.notEqual(d.decision, "deny", `URL 不应触发越界 deny, 实际: ${d.decision} / ${d.reason}`);
+});
+
+test("P1-1: curl https://... 与 npm --registry=https://... 不误判越界", async () => {
+  const root = tmpDir();
+  const eng = createPermissionEngine({
+    sandbox: SandboxPolicy.WORKSPACE_WRITE,
+    workspaceRoot: root,
+    approvalMode: AskForApproval.ON_REQUEST,
+  });
+  const a = await eng.check("run_command", { command: "curl https://api.example.com/v1/data" });
+  assert.notEqual(a.decision, "deny", "curl URL 不应越界 deny");
+  const b = await eng.check("run_command", { command: "npm install --registry=https://registry.npmjs.org express" });
+  assert.notEqual(b.decision, "deny", "npm --registry URL 不应越界 deny");
+});
+
+test("P1-1: URL 命令里夹带真实越界路径仍被拦 (修复未放宽边界)", async () => {
+  const root = tmpDir();
+  const eng = createPermissionEngine({
+    sandbox: SandboxPolicy.WORKSPACE_WRITE,
+    workspaceRoot: root,
+    approvalMode: AskForApproval.ON_REQUEST,
+  });
+  const evil = path.resolve(root, "..", "evil.sh");
+  // URL + 真实越界路径混在同一条命令里: 剔 URL 后仍必须抓到越界
+  const d = await eng.check("run_command", { command: `curl https://example.com/x -o ${evil}` });
+  assert.equal(d.decision, "deny", "URL 之外的真实越界路径必须仍被拦");
+  assert.ok(d.reason.includes("越界"));
+});
+
+test("P1-1: 经典越界命令不受影响 (cat /etc/passwd 风格)", async () => {
+  const root = tmpDir();
+  const eng = createPermissionEngine({
+    sandbox: SandboxPolicy.WORKSPACE_WRITE,
+    workspaceRoot: root,
+    approvalMode: AskForApproval.ON_REQUEST,
+  });
+  const outside = path.isAbsolute(root)
+    ? path.join(path.parse(root).root, "etc", "passwd")
+    : "/etc/passwd";
+  const d = await eng.check("run_command", { command: `cat ${outside}` });
+  assert.equal(d.decision, "deny", "绝对路径越界必须被拦");
+});
+
 test("网络关闭: http 类工具升级 ask", async () => {
   const eng = createPermissionEngine({
     networkAccess: false,

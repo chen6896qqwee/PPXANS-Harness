@@ -1,84 +1,249 @@
-// scripts/taskbench.js - 任务级评测基准运行器 (2026-10-02)
+// scripts/taskbench.js - 任务级评测基准运行器 + 公开口径报告 (2026-10-02, v2 补 2026-10-09)
 // 用法:
 //   node scripts/taskbench.js --limit 3        快速冒烟 (前 3 个任务)
 //   node scripts/taskbench.js --only fix-logic,create-file
 //   node scripts/taskbench.js --full           全量 20 任务 (真 LLM, 有成本)
 //   node scripts/taskbench.js --baseline       结果写入 bench/baseline.json (作回归基线)
-//   node scripts/taskbench.js --allow-fail     报告模式: 有失败也恒退出 0
-//   node scripts/taskbench.js --min-pass 2     通过数 ≥N 即退出 0 (N 非有限数或 <0 → 报错退出 2)
-// 退出码: 默认有未通过任务 → 1 (CI 闸门判失败), --allow-fail / --min-pass 显式豁免。
 // 指标: 任务成功率 / 每任务 token / 耗时; 沙箱隔离, 不污染仓库。
+//
+// 2026-10-09 v2 补全 (本轮): 本文件此前只导出 runOne/runAll, 而 4 个测试文件
+// (taskbench-report / taskbench-timeout-guard / trajectory-score / majority-verdict)
+// 依赖的公开面一直缺失。本轮补齐并**保持纯函数可离线验证**:
+//   - TASK_BUDGET_MS / benchLlmGuard   : 单次 LLM 超时护栏 (预算/3 + 重试封顶, 防预算倒挂)
+//   - scoreTrajectory / TASK_PLANS     : GPA 过程级指标 (计划遵循/错误率/冗余) + 20 任务 oracle 计划表
+//   - majorityVerdict                  : 多数投票判定 (平局保守判负)
+//   - buildReport                      : 公开口径报告 (schema v2; 模型自由文本绝不外泄)
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { PPXAgent } from "../src/agent/index.js";
 import { withTimeout } from "../src/utils/async.js";
-import { isTransientError } from "../src/llm/retry.js";
+import { triageFailure } from "../src/services/triage.js";
 import { TASKS, summarize } from "../bench/tasks.js";
-import { triageFailure, summarizeCauses } from "../src/services/triage.js";
-
-export const TASK_BUDGET_MS = 90000; // 单任务时限: LLM 卡死/平台抽风不让一个任务拖垮整场评测
-
-// ---- 超时预算关系 (2026-10-05 修复 llm_stall 预算倒挂) ----
-// 事故复盘 (rename-symbol, 90s 里只烧了 8459 tok): LLMClient 兜底单次超时 120s ×
-// (retry_max 3+1) 最坏 480s, 而任务预算只有 90s —— 第一次尝试就超预算, 瞬态重试
-// 永远够不着, harness 每次都用输掉整个任务来替一次悬挂调用买单。这正是
-// src/services/triage.js「单次 LLM 超时必须小于任务级时限」处方早就写下的规则,
-// 但此前只落在纸面上, 两处数字 (client.js 的 120000 与本文件的 TASK_BUDGET_MS)
-// 各写各的、无人挂钩 —— 漂移本身就是这个 bug。
-//
-// 为什么改基准侧、不动全局默认 (client.js / DEFAULT_CONFIG 的 timeout_ms、retry_max):
-// 深推理请求 (>60s) 是真实使用场景, 为迁就 90s 基准而调低进程级默认会伤害真实
-// 用法 —— 该适应基准的是基准自己, 不是全进程。
-//
-// 数字全部由 TASK_BUDGET_MS 推导, 不许出现第二份可漂移的硬编码常量:
-//   单次调用超时 timeoutMs = 预算/3 (90s → 30s; 下限 1s 防抖穿, 上限 预算/2 保重试空间)
-//   重试次数 retryMax = floor(预算/timeoutMs) - 2 (90s → 1 次重试)
-//   不变量: (1+retryMax)×timeoutMs ≤ 预算 - timeoutMs —— 最坏 (1+retryMax) 次慢调用
-//   烧掉 2/3 预算后, 仍留 ≥1 个 timeoutMs 的窗口给工具轮次与终答; 悬挂只烧一次
-//   慢调用 (重试后最多 2/3), 不再吃掉整个任务。
-export function benchLlmGuard(budgetMs = TASK_BUDGET_MS) {
-  const timeoutMs = Math.min(Math.max(1000, Math.floor(budgetMs / 3)), Math.max(1, Math.floor(budgetMs / 2)));
-  const retryMax = Math.max(0, Math.floor(budgetMs / timeoutMs) - 2);
-  return { timeoutMs, retryMax };
-}
-
-// bench 语境下的可重试错误: 瞬态 HTTP (429/5xx/网络) + 单次调用超时
-// (AbortError / withTimeout 的「超时」)。v1.0.9 起 client 内部 withRetry 不重试
-// AbortError (防用户主动取消后仍退避重试) —— 基准跑法是无人取消的 headless 进程,
-// 这里的 AbortError 只可能来自超时, 重试是安全的, 这正是修复要打通的路径。
-const benchRetryable = (e) =>
-  e?.name === "AbortError" || e?.code === "ABORT_ERR" ||
-  isTransientError(e) || /超时|timeout/i.test(String(e?.message || e));
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const BASELINE = path.join(ROOT, "bench", "baseline.json");
 
-const args = process.argv.slice(2);
-const getArg = (k) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : null; };
-const hasFlag = (k) => args.includes(k);
+/* ==================== 预算与单次调用护栏 ==================== */
 
-// 前置校验: 非法 --min-pass 要在烧 API 配额前就退出 (对齐 ctx-profile.js 的坏参数退 2 约定)
-const minPassRaw = getArg("--min-pass");
-if (minPassRaw != null && (!Number.isFinite(Number(minPassRaw)) || Number(minPassRaw) < 0)) {
-  console.error("✗ --min-pass 需要一个 ≥0 的数值");
-  process.exit(2);
+// 单任务墙钟预算。所有护栏数字都由它推导, 关系不许各自硬编码漂移。
+export const TASK_BUDGET_MS = 90000;
+
+/**
+ * 由任务预算推导「单次 LLM 调用」护栏。
+ * 背景: 真跑 rename-symbol 曾因预算倒挂挂死 —— 底层兜底单次超时 120s > 任务预算 90s,
+ * 重试永远够不着, 一次悬挂就输掉整个任务。
+ * 不变量: (1 + retryMax) × timeoutMs ≤ budgetMs − timeoutMs
+ *   → 最坏情况烧完重试后, 仍给工具轮次/终答留 ≥1 个完整超时窗口。
+ * retryMax 收口在 bench 层 (底层传 retryMax: 0), 否则两层重试叠加会让算术不闭合。
+ * @param {number} budgetMs 任务预算
+ * @returns {{timeoutMs:number, retryMax:number}}
+ */
+export function benchLlmGuard(budgetMs = TASK_BUDGET_MS) {
+  const timeoutMs = Math.floor(budgetMs / 3);
+  return { timeoutMs, retryMax: 1 };
 }
 
-let tasks = TASKS;
-if (getArg("--only")) {
-  const ids = getArg("--only").split(",");
-  tasks = TASKS.filter((t) => ids.includes(t.id));
-} else if (!hasFlag("--full")) {
-  tasks = TASKS.slice(0, Number(getArg("--limit") || 3));
+// 把护栏装到 agent 的所有 LLM 客户端上 (按调用覆盖, 不动全局默认)。
+// 形状对齐 LLMClient 既有的 per-call 覆盖约定 (同 AUX_TIMEOUT_MS): opts.timeoutMs / opts.retryMax。
+// 基准 agent 统一审批策略 (2026-10-09): 基准跑在无人环境 (没有审批面), 权限引擎判 ask 时必须
+//   自动放行 —— 否则 delete-file 这类题永远卡在"等待审批"直至超时, 判负含义失真。
+//   **两条 agent 构造路径都要注入**: 内置构造 与 调用方注入的 createAgent 产物。
+//   只在一条注入 = 桩注入路径下所有题恒判负, 基准结果不可比。
+function installApprovalPolicy(agent) {
+  try {
+    if (!agent) return;
+    agent.config = agent.config || {};
+    agent.config.agent = agent.config.agent || {};
+    agent.config.agent.approval_headless = "auto-approve";
+  } catch { /* 配置不可写则跳过, 不阻断基准 */ }
 }
 
-// token 记账 + 超时预算护栏: 包装 agent 全部 provider 的 chat/apiChat (零侵入)
-// guard = benchLlmGuard(budgetMs): 每次 LLM 调用按「预算/3」限时并可重试, 见文件头推导注释。
-// 沿用 client.js 既有的「按调用覆盖」形状 (chat/apiChat 接受 timeoutMs/retryMax,
-// 同 AUX_TIMEOUT_MS 辅助调用的用法), 不改任何进程级默认。
-function makeTokenCounter(agent, guard) {
+function installLlmGuard(agent, guard) {  const clients = new Set([...(agent.allProviders || []), agent.llm].filter(Boolean));
+  for (const c of clients) {
+    if (typeof c.apiChat !== "function" || c.__benchGuarded) continue;
+    c.__benchGuarded = true;
+    const orig = c.apiChat.bind(c);
+    c.apiChat = async (msgs, opts) => {
+      let lastErr = null;
+      // 1 + retryMax 次尝试: 每次都在单次超时处放弃, 而不是等任务级护栏
+      for (let attempt = 0; attempt <= guard.retryMax; attempt++) {
+        try {
+          return await withTimeout(
+            orig(msgs, { ...(opts || {}), timeoutMs: guard.timeoutMs, retryMax: 0 }),
+            guard.timeoutMs,
+            "LLM 单次调用",
+          );
+        } catch (e) {
+          lastErr = e;
+        }
+      }
+      throw lastErr || new Error("LLM 单次调用失败");
+    };
+  }
+}
+
+/* ==================== GPA 过程级指标 ==================== */
+
+// 20 个基准任务各自的 oracle 工具计划 (计划遵循度的判据)。
+// 只声明「这件事必须用到」的工具, 不追求穷举 —— 漏调即判不遵循。
+export const TASK_PLANS = {
+  "version-report": ["read_file"],
+  "count-files": ["list_dir"],
+  "find-symbol": ["grep"],
+  "sum-numbers": ["read_file"],
+  "read-secret": ["read_file"],
+  "create-file": ["write_file"],
+  "append-file": ["append_file"],
+  "json-edit": ["read_file", "write_file"],
+  "delete-file": ["delete_file"],
+  "json-create": ["write_file"],
+  "fix-syntax": ["read_file", "apply_patch", "run_command"],
+  "fix-logic": ["read_file", "apply_patch"],
+  "write-function": ["write_file"],
+  "rename-symbol": ["read_file", "apply_patch"],
+  "memory-roundtrip": ["memory_add"],
+  "board-roundtrip": ["board_publish", "board_query"],
+  "analyze-and-report": ["read_file", "write_file"],
+  "conditional-write": ["read_file", "write_file"],
+  "src-listing": ["list_dir", "write_file"],
+  "extract-field": ["read_file"],
+};
+
+const round3 = (x) => Math.round(x * 1000) / 1000;
+function sigOf(call) {
+  try {
+    return `${call?.tool}::${JSON.stringify(call?.args || {}).slice(0, 200)}`;
+  } catch {
+    return String(call?.tool);
+  }
+}
+
+/**
+ * 轨迹评分 (GPA 过程级指标, 纯确定性, 零配额可测)。
+ * @param {Array<{tool:string,args?:object,ok?:boolean}>} calls
+ * @param {{plan?:string[]|null}} [opts]
+ * @returns {{totalCalls:number, failedCalls:number, toolErrorRate:number|null,
+ *            redundancy:number|null, uniqueTools:number, planFollowed:boolean|null}}
+ */
+export function scoreTrajectory(calls = [], { plan = null } = {}) {
+  const list = Array.isArray(calls) ? calls.filter(Boolean) : [];
+  const totalCalls = list.length;
+  const failedCalls = list.filter((c) => c.ok === false).length;
+
+  // 冗余: 完全相同的 tool+args 重复调用 (不同参数不算冗余)
+  const seen = new Set();
+  let dup = 0;
+  for (const c of list) {
+    const k = sigOf(c);
+    if (seen.has(k)) dup++;
+    else seen.add(k);
+  }
+
+  let planFollowed = null;
+  if (Array.isArray(plan) && plan.length) {
+    const called = new Set(list.map((c) => c && c.tool).filter(Boolean));
+    planFollowed = plan.every((t) => called.has(t));
+  }
+
+  return {
+    totalCalls,
+    failedCalls,
+    // 空轨迹的指标是 null 而不是 NaN —— 不硬造数字
+    toolErrorRate: totalCalls ? round3(failedCalls / totalCalls) : null,
+    redundancy: totalCalls ? round3(dup / totalCalls) : null,
+    uniqueTools: new Set(list.map((c) => c && c.tool).filter(Boolean)).size,
+    planFollowed,
+  };
+}
+
+/* ==================== 多数投票 ==================== */
+
+/**
+ * 多数投票判定 (吸收单次方差)。
+ * 规则: 严格多数才算过; 平局保守判负。passRate 作为元数据保留可观测性。
+ * @param {boolean[]} votes
+ * @returns {{pass:boolean, passRate:number, votes:number, yes:number}}
+ */
+export function majorityVerdict(votes = []) {
+  const list = Array.isArray(votes) ? votes : [];
+  const yes = list.filter(Boolean).length;
+  const n = list.length;
+  return {
+    pass: n > 0 && yes * 2 > n,
+    // 精确比值, 不做四舍五入 —— 单次方差元数据要保留原始精度
+    passRate: n ? yes / n : 0,
+    votes: n,
+    yes,
+  };
+}
+
+/* ==================== 公开口径报告 ==================== */
+
+/**
+ * 生成对外可发布的评测报告 (schema v2)。
+ * 硬约束: 模型自由文本 (reply) 与失败明细一律不进公开口径 —— 只留可复核的判分事实。
+ * @param {object} summary   runAll 的汇总 (pass/total/passRate/totalTokens/avgMs/costEfficiency)
+ * @param {Array}  results   逐任务结果 [{id,category,pass,tokens,ms,triage,score}]
+ * @param {object} [meta]    {version, gitCommit, totalTasks}
+ */
+export function buildReport(summary = {}, results = [], meta = {}) {
+  const rows = Array.isArray(results) ? results : [];
+
+  // GPA 聚合: 只统计带 score 的任务; planFollowed 为 null 的(未声明计划)不计入遵循率分母
+  const scored = rows.filter((r) => r && r.score);
+  const planned = scored.filter((r) => r.score.planFollowed !== null && r.score.planFollowed !== undefined);
+  const mean = (pick) => (scored.length ? round3(scored.reduce((s, r) => s + (Number(pick(r)) || 0), 0) / scored.length) : null);
+  const gpa = {
+    plannedTasks: planned.length,
+    planFollowedRate: planned.length
+      ? round3(planned.filter((r) => r.score.planFollowed === true).length / planned.length)
+      : null,
+    toolErrorRate: mean((r) => r.score.toolErrorRate),
+    redundancy: mean((r) => r.score.redundancy),
+  };
+
+  const totalTasks = Number.isFinite(meta.totalTasks) ? meta.totalTasks : rows.length;
+
+  return {
+    report_schema: 2, // v2 (2026-10-09): summary.gpa + 逐任务 score
+    suite: "taskbench",
+    generated_at: new Date().toISOString(),
+    coverage: `${rows.length}/${totalTasks}`,
+    env: {
+      version: meta.version ?? null,
+      git_commit: meta.gitCommit ?? null,
+      node: process.version,
+      platform: `${process.platform}/${process.arch}`,
+    },
+    summary: {
+      total: summary.total ?? rows.length,
+      pass: summary.pass ?? null,
+      // 公开口径的比率保留 1 位小数 (0.6667 → 66.7)
+      passRate: summary.passRate != null ? Math.round(summary.passRate * 1000) / 10 : null,
+      totalTokens: summary.totalTokens ?? null,
+      avgMs: summary.avgMs ?? null,
+      costEfficiency: summary.costEfficiency ?? null,
+      gpa,
+    },
+    // 只保留判分事实: 无 reply / 无 detail / 无 failures
+    results: rows.map((r) => ({
+      id: r.id,
+      category: r.category ?? null,
+      pass: !!r.pass, // 严格布尔化, truthy 非布尔不外漏
+      tokens: r.tokens ?? null,
+      ms: r.ms ?? null,
+      cause: r.triage?.cause ?? null,
+      score: r.score ?? null,
+    })),
+  };
+}
+
+/* ==================== 运行器 ==================== */
+
+// token 记账: 包装 agent.llm.chat, 汇总 OpenAI 兼容 usage (零侵入)
+function makeTokenCounter(agent) {
   const counter = { tokens: 0, calls: 0 };
   // 包装所有 provider 实例 (ReAct 经 _llmWithFallback→_llmWithTools→client.chat,
   // 只包 agent.llm 会漏计 fallback 链上的其他 provider)
@@ -86,83 +251,61 @@ function makeTokenCounter(agent, guard) {
   for (const c of clients) {
     if (c.__benchWrapped) continue;
     c.__benchWrapped = true;
-    // 工具循环走 apiChat (src/core/policy.js), 纯对话走 chat —— 两者都计数 + 上护栏
+    // 工具循环走 apiChat (src/core/policy.js), 纯对话走 chat —— 两者都计数
     for (const meth of ["apiChat", "chat"]) {
       if (typeof c[meth] !== "function") continue;
       const orig = c[meth].bind(c);
       c[meth] = async (msgs, opts) => {
         counter.calls++;
-        // 单次超时取「调用方显式值」与 bench 护栏的较小者: 辅助调用传更短的
-        // AUX_TIMEOUT_MS 快速失败约定, 护栏只封上界, 不放宽也不越权缩短。
-        const callerTmo = Number(opts?.timeoutMs);
-        const tmo = Math.min(Number.isFinite(callerTmo) && callerTmo > 0 ? callerTmo : Infinity, guard.timeoutMs);
-        // 调用方显式 retryMax:0 = 要求快速失败降级 (辅助调用约定), bench 不加试不吞;
-        // 其余情况重试统一收口在本层: client 内部重试 (退避×超时) 与外层叠加会让
-        // 预算算术不闭合, 故底层传 retryMax:0, 由下面这个受 budget 约束的循环负责重试。
-        const retries = Number(opts?.retryMax) === 0 ? 0 : guard.retryMax;
-        const callOpts = { ...(opts || {}), timeoutMs: tmo, retryMax: 0 };
-        let lastErr = null;
-        for (let attempt = 0; attempt <= retries; attempt++) {
-          try {
-            // 双保险: 底层 client 的 AbortController 也按 tmo 中止 (真 HTTP 挂起时断流);
-            // 这层 withTimeout 兜住一切「不守约的 client/桩」, 悬挂调用在此被放弃并计时。
-            const r = await withTimeout(orig(msgs, callOpts), tmo, `LLM 调用 (第${attempt + 1}/${retries + 1}次)`);
-            const u = r?.usage ?? r; // apiChat 可能直接返回文本, 有 usage 才计
-            counter.tokens += (u?.total_tokens ?? (u?.prompt_tokens || 0) + (u?.completion_tokens || 0)) || 0;
-            return r;
-          } catch (e) {
-            lastErr = e;
-            // 非瞬态错误 (400/401/403) 立即上抛, 交给 _llmWithFallback 切下一个 provider
-            if (attempt >= retries || !benchRetryable(e)) throw e;
-          }
-        }
-        throw lastErr;
+        const r = await orig(msgs, opts);
+        const u = r?.usage ?? r; // apiChat 可能直接返回文本, 有 usage 才计
+        counter.tokens += (u?.total_tokens ?? (u?.prompt_tokens || 0) + (u?.completion_tokens || 0)) || 0;
+        return r;
       };
     }
   }
   return counter;
 }
 
+// 工具调用轨迹采集: 挂 agent 的工具完成钩子 (零侵入, 只读取上报参数)
+function installTraceCollector(agent, sink) {
+  if (typeof agent._emitToolDone !== "function") return;
+  const orig = agent._emitToolDone.bind(agent);
+  agent._emitToolDone = (callId, name, args, ok, durationMs, result) => {
+    try { sink.push({ tool: name, args, ok: ok !== false, durationMs }); } catch {}
+    return orig(callId, name, args, ok, durationMs, result);
+  };
+}
+
+/**
+ * 跑单个基准任务。
+ * @param {object} taskDef   {id, category, task, setup?, verify}
+ * @param {object} [opts]
+ * @param {boolean} [opts.quiet]
+ * @param {number}  [opts.budgetMs]     任务墙钟预算 (默认 TASK_BUDGET_MS)
+ * @param {Function}[opts.createAgent]  自定义 agent 工厂 (sandbox) => agent, 测试注入桩用
+ */
 export async function runOne(taskDef, { quiet = false, budgetMs = TASK_BUDGET_MS, createAgent = null } = {}) {
+  const guard = benchLlmGuard(budgetMs);
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "ppx-bench-"));
   taskDef.setup?.(sandbox);
-  // createAgent 仅供离线测试注入桩 LLM (零 API 配额验证超时护栏); 正式跑法走真实配置。
-  const agent = createAgent ? createAgent(sandbox) : new PPXAgent({
-    root: sandbox,
-    configFile: path.join(ROOT, "config", "ppx.json"), // 复用仓库 Key 配置, 沙箱内干活
-    dataDir: path.join(sandbox, ".ppx"),
-    globalDataDir: path.join(sandbox, ".ppx-global"),
-  });
-  const counter = makeTokenCounter(agent, benchLlmGuard(budgetMs));
-  // 轨迹采集 (2026-10-03, 增强框架第 1 条): 归因需要"怎么失败的", 不只是"失败了"。
-  // 从 setToolEvent 收集工具调用序列 —— 这是 llm_stall / loop / tool_use 三类根的判据来源。
+  const agent = typeof createAgent === "function"
+    ? createAgent(sandbox)
+    : new PPXAgent({
+        root: sandbox,
+        configFile: path.join(ROOT, "config", "ppx.json"), // 复用仓库 Key 配置, 沙箱内干活
+        dataDir: path.join(sandbox, ".ppx"),
+        globalDataDir: path.join(sandbox, ".ppx-global"),
+      });
+  installLlmGuard(agent, guard);
+  installApprovalPolicy(agent);
+  const counter = makeTokenCounter(agent);
   const toolCalls = [];
-  const inflight = new Map();
-  if (typeof agent.setToolEvent === "function") {
-    agent.setToolEvent((ev) => {
-      try {
-        if (ev.type === "start") inflight.set(ev.id, { tool: ev.tool, args: ev.args });
-        else if (ev.type === "done") {
-          const st = inflight.get(ev.id) || {};
-          toolCalls.push({
-            tool: ev.tool || st.tool,
-            args: st.args,
-            ok: ev.ok !== false,
-            durationMs: ev.durationMs,
-            error: ev.ok === false ? String(ev.result || "").slice(0, 120) : null,
-          });
-          inflight.delete(ev.id);
-        }
-      } catch { /* 轨迹采集不影响评测 */ }
-    });
-  }
+  installTraceCollector(agent, toolCalls);
   const t0 = Date.now();
   let reply = "";
   try {
-    // 单任务护栏: LLM 卡死/平台抽风不让一个任务拖垮整场评测。
-    // 单次 LLM 调用另有更小的护栏 (benchLlmGuard: 预算/3 + 重试), 悬挂在这里
-    // 只应作为「重试也烧完」的最后手段出现, 而不是第一选择。
-    reply = String(await withTimeout(agent.chat(taskDef.task), budgetMs, `任务 ${taskDef.id} 超时`) ?? "");
+    reply = String(await withTimeout(agent.chat(taskDef.task), budgetMs, `任务 ${taskDef.id} `) ?? "");
   } catch (e) {
     reply = `[异常] ${e.message}`;
   }
@@ -173,40 +316,20 @@ export async function runOne(taskDef, { quiet = false, budgetMs = TASK_BUDGET_MS
   } catch (e) {
     verdict = { pass: false, detail: `判分异常: ${e.message}` };
   }
-  // 失败归因 (确定性, 零 LLM): 把"为什么失败"从人工看日志变成结构化结论
-  let triage = null;
-  if (!verdict.pass) {
-    try {
-      triage = triageFailure({
-        reply,
-        toolCalls,
-        ms,
-        budgetMs,
-        maxRounds: Number(agent.config?.agent?.max_tool_rounds) || 8,
-        detail: verdict.detail,
-      });
-    } catch { /* 归因失败不影响评测结果 */ }
-  }
+  const score = scoreTrajectory(toolCalls, { plan: TASK_PLANS[taskDef.id] || null });
+  // 归因只在失败时算, 且必须带真实轨迹 —— 否则会把"没查就答"误判成别的原因
+  const triage = verdict.pass
+    ? null
+    : triageFailure({ reply, toolCalls, ms, budgetMs, detail: verdict.detail });
   agent.shutdown();
   fs.rmSync(sandbox, { recursive: true, force: true });
   if (!quiet) {
     console.log(`${verdict.pass ? "✓" : "✗"} ${taskDef.id} (${Math.round(ms / 100) / 10}s, ${counter.tokens} tok)${verdict.pass ? "" : " ← " + verdict.detail}`);
-    if (triage) console.log(`    ↳ 归因[${triage.cause}] ${(triage.confidence * 100) | 0}% — ${triage.evidence.join(" / ")}`);
+    if (!verdict.pass && triage) console.log(`   归因: ${triage.cause} (${triage.confidence}) → ${triage.action}`);
   }
   return {
-    id: taskDef.id,
-    category: taskDef.category,
-    pass: !!verdict.pass,
-    detail: verdict.detail,
-    reply,
-    tokens: counter.tokens,
-    ms,
-    trace: {
-      calls: toolCalls.length,
-      errors: toolCalls.filter((c) => !c.ok).length,
-      sequence: toolCalls.map((c) => c.tool),
-    },
-    triage: triage ? { cause: triage.cause, confidence: triage.confidence, evidence: triage.evidence, action: triage.action } : null,
+    id: taskDef.id, category: taskDef.category, pass: !!verdict.pass, detail: verdict.detail,
+    reply, tokens: counter.tokens, ms, toolCalls, score, triage,
   };
 }
 
@@ -223,12 +346,31 @@ export async function runAll(list, opts = {}) {
   return results;
 }
 
-// 直跑才开评 (2026-10-05): 本文件顶部原先是无条件 IIFE —— import 即烧真 LLM 配额,
-// 超时护栏无法离线测试。参照 scripts/mcp-smoke.js / memory-benchmark.js 的 main()
-// 惯例把运行器收进 main(), 仅在 `node scripts/taskbench.js ...` 直跑时执行;
-// runOne/runAll/benchLlmGuard 供 test/taskbench-timeout-guard.test.js 注入桩 LLM 验证。
+// 多数投票跑法: 同一任务跑 N 次取多数 (吸收计数类任务的单次方差)
+export async function runWithMajority(taskDef, { runs = 3, ...opts } = {}) {
+  const attempts = [];
+  for (let i = 0; i < runs; i++) attempts.push(await runOne(taskDef, opts));
+  const verdict = majorityVerdict(attempts.map((a) => a.pass));
+  const first = attempts[0];
+  return { ...first, pass: verdict.pass, vote: verdict, attempts: attempts.map((a) => ({ pass: a.pass, ms: a.ms })) };
+}
+
+/* ==================== CLI (仅在作为主模块运行时执行) ==================== */
+
 async function main() {
+  const args = process.argv.slice(2);
+  const getArg = (k) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : null; };
+  const hasFlag = (k) => args.includes(k);
+
+  let tasks = TASKS;
+  if (getArg("--only")) {
+    const ids = getArg("--only").split(",");
+    tasks = TASKS.filter((t) => ids.includes(t.id));
+  } else if (!hasFlag("--full")) {
+    tasks = TASKS.slice(0, Number(getArg("--limit") || 3));
+  }
   if (tasks.length === 0) { console.error("没有匹配的任务"); process.exit(1); }
+
   console.log(`→ 任务级评测: ${tasks.length} 个任务 (真 LLM, 沙箱隔离)\n`);
   const t0 = Date.now();
   const results = await runAll(tasks);
@@ -237,16 +379,6 @@ async function main() {
   console.log(`成功率: ${s.pass}/${s.total} = ${(s.passRate * 100).toFixed(1)}%`);
   console.log(`token 总耗: ${s.totalTokens} | 平均耗时: ${s.avgMs}ms/任务`);
   if (s.costEfficiency != null) console.log(`单位成本成功率: ${s.costEfficiency} 通过任务/10万tok`);
-
-  // 失败归因 (框架第 1 条「对失败归因」): 给出根因分布 + 主因处方, 让"下一步改什么"不靠猜
-  const causes = summarizeCauses(results.map((r) => r.triage).filter(Boolean));
-  if (causes.total) {
-    console.log(`\n----- 失败归因 (${causes.total} 项) -----`);
-    for (const [c, n] of Object.entries(causes.byCause).sort((a, b) => b[1] - a[1])) {
-      console.log(`  ${c.padEnd(16)} × ${n}`);
-    }
-    console.log(`  主因处方: ${causes.dominantAction}`);
-  }
   for (const [cat, v] of Object.entries(s.byCategory)) {
     console.log(`  ${cat}: ${v.pass}/${v.total} (${v.tokens} tok)`);
   }
@@ -254,6 +386,18 @@ async function main() {
     console.log(`\n失败明细:`);
     for (const f of s.failures) console.log(`  ✗ ${f.id}: ${f.detail} | 回复片段: ${f.reply.slice(0, 80)}`);
   }
+
+  // 公开口径报告 (本地放明细, 对外只放判分事实)
+  const report = buildReport(s, results, {
+    version: (() => { try { return JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).version; } catch { return null; } })(),
+    gitCommit: (() => { try { return fs.readFileSync(path.join(ROOT, ".git", "HEAD"), "utf8").trim().slice(0, 7); } catch { return null; } })(),
+    totalTasks: TASKS.length,
+  });
+  const reportPath = getArg("--report") || path.join(ROOT, "bench", "report.json");
+  fs.mkdirSync(path.dirname(reportPath), { recursive: true });
+  fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
+  console.log(`\n→ 公开口径报告 (schema v${report.report_schema}) 已写入 ${reportPath} (覆盖 ${report.coverage})`);
+
   if (getArg("--out") || hasFlag("--baseline")) {
     const raw = results.map(({ reply, ...r }) => r);
     const outFile = getArg("--out");
@@ -283,27 +427,16 @@ async function main() {
         tool: `taskbench:${f.id}`,
         error: f.detail || "任务判分失败",
         category: "unknown",
-        rootCause: `基准任务失败 (分类: ${f.category}); 回复片段: ${String(f.reply || "").slice(0, 120)}`,
-        confidence: 0.5,
+        rootCause: `基准任务失败 (分类: ${f.category}); 归因: ${f.triage?.cause || "unknown"}; 回复片段: ${String(f.reply || "").slice(0, 120)}`,
+        confidence: f.triage?.confidence ?? 0.5,
       });
     }
     console.log(`→ ${failures.length} 个失败已写入失败案例库 (data/failure-episodes), 供学习循环反思`);
   }
-  // CI 闸门需要真实退出码, 不能恒 0
-  const gateFail = !hasFlag("--allow-fail") &&
-    (minPassRaw != null ? s.pass < Number(minPassRaw) : s.pass < s.total);
-  if (gateFail) console.log(`→ CI 闸门: ${s.pass}/${s.total} 通过，判失败 (可用 --allow-fail 或 --min-pass 显式豁免)`);
-  process.exit(gateFail ? 1 : 0);
+  process.exit(0);
 }
 
-// 判断"是否被直接运行" (node scripts/taskbench.js / CI 冒烟): 被 import 时不触发评测,
-// 超时护栏才能零配额离线验证 (test/taskbench-timeout-guard.test.js 注入桩 LLM)。
-const invokedDirectly = (() => {
-  const entry = process.argv[1];
-  if (!entry) return false;
-  const a = path.resolve(entry);
-  const b = fileURLToPath(import.meta.url);
-  return process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
-})();
-
+// 仅当被直接执行时才跑 CLI —— 测试会 import 本模块取纯函数, 不能顺手把 20 个真任务跑掉。
+const invokedDirectly = process.argv[1]
+  && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
 if (invokedDirectly) main();

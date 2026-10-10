@@ -6,18 +6,14 @@ import os from "node:os";
 import path from "node:path";
 import zlib from "node:zlib";
 import { ocrImage } from "./ocr.js";
-import { debug } from "../utils/logger.js";
+import { safePath } from "./builtin.js";
 
 const MAX_CHARS = 20000; // 单文档返回上限
 
-// 安全路径: 阻止逃出工作目录 (防路径穿越, 与 builtin.js 同策略)
-function safePath(root, p) {
-  const resolved = path.resolve(root, p);
-  if (resolved !== root && !resolved.startsWith(root + path.sep)) {
-    throw new Error(`路径越界拒绝: ${p}`);
-  }
-  return resolved;
-}
+// 安全路径: 统一走 builtin.js 的 safePath (前缀 + realpath 双重校验)。
+// 2026-10-10 修复 (A5): 此前本文件自带一份**弱化版** —— 只有字符串前缀检查、无 realpath,
+//   于是工作区内一个指向外部的 symlink 就能绕过它读越界文件 (注释却自称"与 builtin.js 同策略",
+//   口径与实现不符)。现直接复用唯一实现, 消除安全不变量的第 N 套分叉。
 
 // 解码 PDF 文本字符串: 处理 UTF-16BE (FE FF BOM) 与 UTF-8 与转义字符
 function decodePdfString(latin1Str) {
@@ -150,7 +146,7 @@ export async function readDocumentText(filePath, ocrOpts, _ocrFn = ocrImage) {
         for (let i = 0; i < jpegs.length; i++) {
           const tmp = path.join(tmpDir, `page-${i + 1}.jpg`);
           fs.writeFileSync(tmp, jpegs[i]);
-          try { parts.push(await _ocrFn(tmp, ocrOpts)); } catch (e) { debug(`[tools/document] 已忽略异常: ${e && e.message ? e.message : e}`); }
+          try { parts.push(await _ocrFn(tmp, ocrOpts)); } catch {}
         }
       } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -166,8 +162,7 @@ export function registerDocumentTools(catalog, { rootDir }) {
   // 1. 读文档 (加载器, PDF 扫描件自动 OCR)
   catalog.register({
     name: "read_document",
-    // 只读: safePath 锁工作区 + 解析文本返回, 不写盘 (扫描件分支的 OCR 也只是"取文字", 无状态变更)
-    capability: { riskLevel: "low", readOnly: true, destructive: false, sideEffect: "none" },
+    capability: { readOnly: true, riskLevel: "low", sideEffect: "none" },
     description: "读取本地文档并转纯文本。支持 .txt/.md/.json/.csv/.html/.pdf (文字型 PDF 直接提取, 扫描件 PDF 自动 OCR)。用于读文档/报告/数据文件后回答问题。",
     parameters: {
       type: "object",
@@ -194,10 +189,7 @@ export function registerDocumentTools(catalog, { rootDir }) {
   // 2. OCR 识别图片/扫描件文字
   catalog.register({
     name: "ocr_image",
-    // 判定说明: 它跑的是**固定**二进制 (tesseract) 或可选云 OCR, 执行的不是模型现写的代码,
-    // 也不改任何状态 → 与 read_document/vad_detect 同档 (readOnly:true)。
-    // 与 code_act/code_run (模型现写脚本 → 非只读) 的区分点在这里。
-    capability: { riskLevel: "low", readOnly: true, destructive: false, sideEffect: "none" },
+    capability: { readOnly: true, riskLevel: "low", sideEffect: "none" },
     description: "识别图片或扫描件里的文字 (OCR)。需系统安装 tesseract (含中文语言包) 或配置 config.ocr 云 key。用于 read_image/read_document 读到图片却无法理解文字时。",
     parameters: {
       type: "object",
@@ -227,8 +219,7 @@ export function registerDocumentTools(catalog, { rootDir }) {
   // 3. 文档入库 (RAG): 读文档 → 分块 → 存记忆 (带 scope 隔离)
   catalog.register({
     name: "ingest_document",
-    // RAG 入库: 分块后批量写长期记忆 (持久状态变更) → 非只读; medium (增量写入, 可用 memory_forget 逐条撤)
-    capability: { riskLevel: "medium", readOnly: false, destructive: false, sideEffect: "memory" },
+    capability: { readOnly: false, riskLevel: "medium", sideEffect: "workspace" },
     description: "读取文档, 分块后写入长期记忆 (RAG 入库), 之后可被语义检索命中。scope 用于隔离文档来源 (如 '公司制度'/'项目文档'), 避免与其他记忆混淆。",
     parameters: {
       type: "object",

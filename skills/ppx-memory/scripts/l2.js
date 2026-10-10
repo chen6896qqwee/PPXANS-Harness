@@ -39,6 +39,31 @@ function mergeOne(a, b) {
   };
 }
 
+// F8 (2026-10-04): 无 id 场景的**内容签名** —— 只取 name + facts 的 id/内容, 刻意不含 keywords /
+//   description 等会被规范化改写的字段, 保证"同一条 v1 场景"在原始形态与规范化形态下签名一致。
+function sceneSig(s) {
+  const facts = Array.isArray(s && s.facts)
+    ? s.facts.map((f) => (f && (f.id || f.content)) || "").join(",")
+    : "";
+  return `${String((s && s.name) || "")}|${facts}`;
+}
+
+// FNV-1a 32-bit → 定长 7 位 base36 (恒 [0-9a-z]{7})。选内容哈希而非随机短号的原因:
+//   两个进程各自给同一条无 id 场景补号必须**一致**, 否则"按 id 取并集"会把一条场景裂成两条
+//   (随机号只是把丢更新换成了丢重复)。
+function fnv1a(str) {
+  let h = 0x811c9dc5;
+  const s = String(str);
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h >>> 0;
+}
+function derivedSceneId(sig) {
+  return "s_h" + fnv1a(sig).toString(36).padStart(7, "0");
+}
+
 export class SceneStore {
   constructor(dataDir) {
     this.dir = path.join(dataDir, "memory", "l2");
@@ -60,16 +85,48 @@ export class SceneStore {
       currentVersion: SCENES_SCHEMA_VERSION,
     });
     this.scenes = Array.isArray(mig.data) ? mig.data : [];
+    // F8 一次性迁移 (2026-10-04): SCENES_SCHEMA_VERSION=1 的"纯数组"基线里从没补过 id,
+    //   旧 mergeScenes 直接把无 id 场景跳过 —— 一次普通 assign() 之后, 它连同承载的 facts
+    //   就从 scenes.json 消失。构造期补号并落盘; 常态 (全部有 id) 一个字节都不写。
+    if (this.scenes.some((s) => !s || !s.id)) {
+      try { this._save(); } catch { /* 落盘失败不阻断构造, 下次真实写入会再迁移 */ }
+    }
   }
 
   // 磁盘态与内存态合并 (按 id 取并集): 军团多进程共享 dataDir 时,
   // 锁外基于过期内存做增删再整体写盘会覆盖掉别的进程已落盘的场景 (丢更新)。
+  // F8 (2026-10-04): 无 id 场景不再被静默跳过 —— 确定性补号 (s_h + 内容哈希) 后再并集。
+  //   同内容 ⟹ 同签名 ⟹ 同号 ⟹ 并成一条 (不裂); 仅"真撞号且异内容"才加 _2 后缀消歧。
   static mergeScenes(disk, mem) {
     const byId = new Map();
-    const put = (s) => {
-      if (!s || !s.id) return;
-      const cur = byId.get(s.id);
-      byId.set(s.id, cur ? mergeOne(cur, s) : { ...s, facts: Array.isArray(s.facts) ? [...s.facts] : [], keywords: Array.isArray(s.keywords) ? [...s.keywords] : [] });
+    const sigToId = new Map(); // 内容签名 -> 补号 (保证同内容拿到同一个号)
+    const put = (raw) => {
+      if (!raw || typeof raw !== "object") return;
+      let id;
+      if (raw.id) {
+        // 显式 id = 它就是那条场景 (磁盘/内存两个版本): 永远合并, 绝不因内容差异加后缀。
+        //   (内存里的副本可能比磁盘旧 —— 补号后磁盘被别的进程追加了 facts, 签名就会不同;
+        //    此时若照加后缀, 同一条场景会裂成 id 与 id_2 两条。)
+        id = String(raw.id);
+      } else {
+        const sig = sceneSig(raw);
+        id = sigToId.get(sig) || derivedSceneId(sig);
+        // 真撞号: 该补号已被**异内容**场景占用 → 后来者加后缀消歧 (不并掉任何一条)。
+        if (byId.has(id) && sceneSig(byId.get(id)) !== sig) {
+          let n = 2;
+          while (byId.has(id + "_" + n)) n++;
+          id = id + "_" + n;
+        }
+        sigToId.set(sig, id); // 同内容重复喂入 → 都落到同一个 (可能是加过后缀的) 号
+      }
+      const cur = byId.get(id);
+      const merged = cur ? mergeOne(cur, raw) : {
+        ...raw,
+        facts: Array.isArray(raw.facts) ? [...raw.facts] : [],
+        keywords: Array.isArray(raw.keywords) ? [...raw.keywords] : [],
+      };
+      merged.id = id; // mergeOne 可能以无 id 的 raw 那份为准, 补号必须落在结果上
+      byId.set(id, merged);
     };
     for (const s of disk || []) put(s);
     for (const s of mem || []) put(s);   // 内存后入 = 本进程变更优先

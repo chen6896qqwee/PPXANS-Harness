@@ -30,6 +30,11 @@ export class WechatWebhookChannel extends Channel {
     this.lastUser = null; // 最近收到消息的用户 ID, 供主动提醒(广播)回发
   }
 
+  // 2026-10-10 (S6): 未配 token 时是否允许放行 —— 仅当显式 opt-in (与飞书通道同语义)
+  _allowUnauthenticated() {
+    return this.agent?.config?.security?.allow_unauthenticated_webhooks === true;
+  }
+
   async connect() {
     this.connected = true;
     return this;
@@ -53,9 +58,6 @@ export class WechatWebhookChannel extends Channel {
   mount(server, httpChannel = null) {
     const register = this._registrar(server, httpChannel);
     register(this.path, async (req, res) => {
-      // P0 (2026-10-04): 鉴权先于读体。未配置回调密钥 → fail-closed 拒绝 (原实现跳过全部验签)
-      const denied = this._webhookSecretGate(this.token);
-      if (denied) return this._sendJson(res, 403, { error: denied });
       const u = new URL(req.url || "/", "http://localhost");
       const body = req.method === "POST" ? await this._readBody(req) : "";
       const query = {
@@ -79,11 +81,15 @@ export class WechatWebhookChannel extends Channel {
   // 加密模式: 外层 XML 含 <Encrypt>, 解密得内层明文消息
   // v1.0.8 安全加固: 配置了 token 时所有模式都必须验签 (明文/加密/echostr), 防伪造消息驱动 agent
   async handleWebhook(body, query = {}) {
-    // fail-closed: 未配置回调密钥时不处理任何消息 (除非显式 allow_unauthenticated_webhooks)
-    const gate = this._webhookSecretGate(this.token);
-    if (gate) return { error: gate };
     const raw = typeof body === "string" ? body : JSON.stringify(body);
     const { msg_signature, timestamp, nonce } = query;
+
+    // 2026-10-10 安全修复 (S6): 未配置 token = 无法验签 = fail closed。
+    //   原实现只在 `this.token` 存在时才验签, 未配置即"任何伪造 XML 都能驱动 agent"。
+    //   与飞书通道同语义: 本地调试需显式开 allow_unauthenticated_webhooks。
+    if (!this.token && !this._allowUnauthenticated()) {
+      return { error: "未配置 token, 拒绝处理 webhook (防伪造消息驱动 agent)。本地调试请设 security.allow_unauthenticated_webhooks=true" };
+    }
 
     // URL 验证 (GET echostr, 明文模式验签后直接回显)
     if (query.echostr) {

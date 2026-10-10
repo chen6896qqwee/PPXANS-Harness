@@ -7,12 +7,9 @@
 //   事件条数 (walThreshold) 与字节水位 (walSizeBytes >= FactStore 的 walMaxBytes)。
 //   compact 顺序恒为"先写全量快照, 再清 WAL"(见 fact-store._flushLocked), 所以任何时刻
 //   (含清空的瞬间) 快照∪WAL 都覆盖此前全部已提交变更 = 不丢耐久性, 且重放结果与裁剪前等价。
-//   注: 本模块只被 FactStore 消费; 与 src/protocol/index.js 内联的 eq.wal.jsonl 无关
-//   (那份是只增不删且无人回放的另一个 WAL, 不在此约束范围内)。
 import fs from "node:fs";
 import path from "node:path";
 import { ensureDir } from "./store.js";
-import { debug } from "../utils/logger.js";
 
 export function walFileOf(file) {
   return file + ".wal";
@@ -41,7 +38,7 @@ export function readWal(walFile) {
 
 // 清空 WAL (compact 成功后调用; 与 append 同一锁内执行, 防丢事件)
 export function truncateWal(walFile) {
-  try { fs.rmSync(walFile, { force: true }); } catch (e) { debug(`[utils/wal] 已忽略异常: ${e && e.message ? e.message : e}`); }
+  try { fs.rmSync(walFile, { force: true }); } catch {}
 }
 
 // 当前 WAL 字节数 (不存在 = 0)。

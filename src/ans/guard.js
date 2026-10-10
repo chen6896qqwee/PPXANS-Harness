@@ -12,7 +12,7 @@
 //   blocked 恒为 0 = "假绿灯"。新增: 显式危险工具集 + 参数级判定 (mode/hard/quarantine),
 //   并统一判定函数供总线/catalog 两路径复用。审计写失败不再静默 (warn + writeFailures)。
 import { hasPII } from "../utils/pii.js";
-import { warn, debug } from "../utils/logger.js";
+import { warn } from "../utils/logger.js";
 
 // 危险 verb 前缀: 命中且未显式白名单放行 → 需单次审批或拒绝
 const DANGEROUS_RE = /^(delete|remove|clear|wipe|drop|purge|truncate|overwrite)/i;
@@ -146,7 +146,7 @@ export function installGuardOnCatalog(catalog, guardHandle) {
         // 同步状态到 guard 的 lastVerdict (可观测)
         const st = guardHandle._state;
         st.lastVerdict = { verdict: "block", verb, note: reason || "dangerous-not-whitelisted" };
-      } catch (e) { debug(`[ans/guard] 已忽略异常: ${e && e.message ? e.message : e}`); }
+      } catch {}
     }
     return { decision: "deny", reason: "免疫闸门: 危险工具未授信: " + verb, priority: 100 };
   }, { name: "immune-guard", priority: 100 });

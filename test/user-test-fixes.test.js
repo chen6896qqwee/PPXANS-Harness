@@ -138,7 +138,7 @@ test("P2-3: 占位符 model 的本地 provider 不再被判为可用/选为主�
 });
 
 test("P2-3: provider 占位字段可被定位 (供启动告警精确提示)", () => {
-  const p = { id: "volcengine", base_url: "https://ark.cn-beijing.volces.com/api/v3", model: "REPLACE_WITH_YOUR_ENDPOINT" };
+  const p = { id: "example-vendor", base_url: "https://llm.example.com/v1", model: "REPLACE_WITH_YOUR_ENDPOINT" };
   assert.equal(hasPlaceholderField(p), true);
   assert.equal(hasPlaceholderField({ id: "x", base_url: "https://api.deepseek.com/v1", model: "deepseek-chat" }), false);
 });

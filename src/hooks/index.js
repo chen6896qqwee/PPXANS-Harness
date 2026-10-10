@@ -17,9 +17,6 @@ export function createHookRegistry() {
   const _hooks = new Map(); // event -> [{ fn, priority, timeoutMs }]
 
   // 注册钩子, 返回解绑函数
-  // opts.failClosed: 仅对 PreToolUse 有意义 —— 该钩子抛异常/超时时按"否决"处理而非放行。
-  //   安全类钩子 (命令守卫/权限前置校验/注入检测) 默认 fail-open: 一旦它自己坏了,
-  //   结果就是"检查缺失但工具照跑", 静默失去防护 (2026-10-04 加, 配合 onSecurity 用)。
   function on(event, fn, opts = {}) {
     if (!HOOK_EVENTS.includes(event)) {
       throw new Error("未知钩子事件: " + event);
@@ -31,7 +28,9 @@ export function createHookRegistry() {
       fn,
       priority: opts.priority ?? 100,
       timeoutMs: opts.timeoutMs ?? 3000,
-      failClosed: !!opts.failClosed,
+      // 安全钩子 (fail-closed): 故障/超时时按"拒绝"处理, 而非静默放行
+      security: opts.security === true,
+      failClosed: opts.failClosed === true,
     };
     if (!_hooks.has(event)) _hooks.set(event, []);
     _hooks.get(event).push(entry);
@@ -41,6 +40,12 @@ export function createHookRegistry() {
       const i = arr.indexOf(entry);
       if (i >= 0) arr.splice(i, 1);
     };
+  }
+
+  // 注册"安全钩子": 只挂 PreToolUse (唯一有否决语义的事件), 故障/超时 → fail-closed 拒绝。
+  // 与普通 on() 的区别: 普通钩子崩了只是少一层校验 (不阻断); 安全钩子是防线本体, 崩了必须拒绝。
+  function onSecurity(fn, opts = {}) {
+    return on("PreToolUse", fn, { ...opts, security: true });
   }
 
   // 触发事件: 按 priority 升序依次 await 执行
@@ -72,10 +77,15 @@ export function createHookRegistry() {
 
       if (err) {
         results.push({ error: err, timedOut });
-        // fail-closed: 声明了"我是安全闸门"的 PreToolUse 钩子故障 = 拒绝, 不是放行
-        if (h.failClosed && event === "PreToolUse") {
+        // 安全钩子 (fail-closed): 仅对**有否决语义的事件** (PreToolUse) 生效 —— 故障 = 无法判定 = 拒绝。
+        // 其它事件 (SessionStart 等) 没有否决语义, 即便显式 failClosed 也不得制造假阻断。
+        if (event === "PreToolUse" && (h.security === true || h.failClosed === true)) {
           blocked = true;
-          if (!blockReason) blockReason = `安全钩子故障已按 fail-closed 拒绝 (${timedOut ? "超时" : "异常"}): ${err}`;
+          if (!blockReason) {
+            blockReason = timedOut
+              ? `fail-closed: 安全钩子超时 (${err})`
+              : `fail-closed: 安全钩子故障 (${err})`;
+          }
         }
         continue;
       }
@@ -93,16 +103,6 @@ export function createHookRegistry() {
     }
 
     return { blocked, reason: blockReason, results, additionalContext };
-  }
-
-  // 安全类 PreToolUse 钩子: 抢在高优先级先跑 + 故障即拒绝 (fail-closed)
-  // 普通业务钩子继续用 on(); 防护性钩子用这个, 免得它自己崩了就静默放行。
-  function onSecurity(fn, opts = {}) {
-    return on("PreToolUse", fn, {
-      priority: opts.priority ?? 10,
-      timeoutMs: opts.timeoutMs ?? 3000,
-      failClosed: true,
-    });
   }
 
   return { on, onSecurity, emit, events: HOOK_EVENTS.slice() };

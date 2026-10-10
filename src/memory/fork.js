@@ -7,7 +7,6 @@ import fs from "node:fs";
 import path from "node:path";
 import { ensureDir, writeText, readText } from "../utils/store.js";
 import { lexicalSimilarity } from "../evolve/playbook.js";
-import { debug } from "../utils/logger.js";
 
 // 从主 agent 导出记忆快照到子 dataDir
 // 快照内容: L1 facts (top N) + L3 persona (若存在) + 全局经验精选 (top M)
@@ -26,7 +25,7 @@ export function exportMemorySnapshot({ agent, toDataDir, factsLimit = 50, experi
       writeText(path.join(snapDir, "facts.md"), `# L1 事实快照 (fork 基线)\n${lines}\n`);
       wrote.facts = top.length;
     }
-  } catch (e) { debug(`[memory/fork] 已忽略异常: ${e && e.message ? e.message : e}`); }
+  } catch {}
 
   // L3 persona: 主 agent 画像 (用户画像 + agent 人格)
   // 修复 (2026-09-17): 原调用 agent.personaStore.read() —— PersonaStore 并不存在 read(),
@@ -45,7 +44,7 @@ export function exportMemorySnapshot({ agent, toDataDir, factsLimit = 50, experi
         wrote.persona = true;
       }
     }
-  } catch (e) { debug(`[memory/fork] 已忽略异常: ${e && e.message ? e.message : e}`); }
+  } catch {}
 
   // 全局经验精选
   try {
@@ -57,7 +56,7 @@ export function exportMemorySnapshot({ agent, toDataDir, factsLimit = 50, experi
         wrote.experience = list.length;
       }
     }
-  } catch (e) { debug(`[memory/fork] 已忽略异常: ${e && e.message ? e.message : e}`); }
+  } catch {}
 
   return { wrote, path: snapDir };
 }

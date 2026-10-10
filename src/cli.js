@@ -1,29 +1,61 @@
 #!/usr/bin/env node
 // src/cli.js - 皮皮虾 CLI 交互入口 (readline 历史 + interrupt 中断)
 import { ensureUTF8Console } from "./utils/winutf8.js";
+import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import { PPXAgent } from "./agent/index.js";
 import { suggestProactive } from "./ans/proactive.js";
-import { installCrashGuard } from "./utils/crashguard.js";
 
 ensureUTF8Console();
-// v3.0.1 (P1#6): CLI 直跑入口装全局异常兜底 —— 此前只有 server 入口装了, chat 直跑时
-// 任何未捕获 rejection (调度器/proactive ticker/流式回调) 会按 Node>=15 默认行为直接杀进程
-installCrashGuard({ tag: "ppx-cli" });
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+// ---- argv 早退闸门 (2026-10-09) ----
+// 必须放在【构造 PPXAgent 之前】: 否则 `ppx --version` 会全家桶启动 (自愈扫描 + 插件装配 +
+// 工具注册 + 主动任务定时器) 再进交互 REPL, 永远不退出 —— 违反 npm bin 惯例。
+// test/cli-gate.test.js 锁死该行为 (此前该闸门缺失, 测试一直是红的)。
+const ARGV = process.argv.slice(2);
+function pkgVersion() {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).version || "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
+if (ARGV.includes("--version") || ARGV.includes("-v")) {
+  console.log(`ppxans-harness (PPXANS-Harness) v${pkgVersion()}`);
+  process.exit(0);
+}
+if (ARGV.includes("--help") || ARGV.includes("-h")) {
+  console.log(`皮皮虾 (PPXANS-Harness) v${pkgVersion()}
+
+用法: ppx [选项]
+  (无参数)              进入交互式对话 REPL
+  ppx --version, -v     显示版本号后退出
+  ppx --help, -h        显示本用法后退出
+
+其他入口:
+  ppx-serve             仅启动 HTTP 服务 (无 Web 界面)
+  ppx-web               启动 Web UI 并自动打开浏览器
+  ppx-channels          渠道 (飞书/微信) 配置与连通测试
+  ppx-setup             模型配置向导
+
+REPL 内命令:
+  quit | exit | q       退出
+  /stop                 中断当前任务
+  /reset                清空当前会话
+  /proactive            主动提醒 (扫描记忆待办)`);
+  process.exit(0);
+}
+
 const agent = new PPXAgent({ root: ROOT });
-// 2026-10-05: 终端聊天有人在场 (能接住 clarify 的反问), 但没有 Web 审批面 —— 单独标记,
-// 让 clarify 在 CLI 保持原行为; 审批链路不受此标记影响 (仍按 hasApprovalSurface 走)。
-agent.markHumanChannel(true);
 
 console.log("======================================");
 console.log("  皮皮虾 (PPX) - 自我修复·自我学习 Agent");
 console.log(`  记忆:${agent.facts.count()}条 | 经验:${agent.experience.lessons.length}条`);
 console.log(`  模型: ${agent.llm ? "已配置" : "未配置(离线记忆模式)"}`);
 console.log("  命令: quit/exit 退出 | /stop 中断当前任务 | /reset 清空会话");
-console.log("        /plan 进入计划模式(只读) | /do 退出计划模式恢复执行");
 console.log("        /proactive 主动提醒(扫描记忆待办) | /proactive-done <id> 标记待办完成 | ↑↓ 浏览历史 | Ctrl+C 中断(再按一次退出)");
 console.log("======================================");
 
@@ -33,13 +65,6 @@ const rl = readline.createInterface({
   prompt: "皮皮虾> ",
   terminal: true,
 });
-
-// 模式可见 (2026-10-05 /plan 修复): 提示符实时显示当前计划模式, 用户不会"不知不觉卡在 plan 里"。
-// 状态在 agent 侧按会话存 (CLI 单会话 = "default"), 这里只读展示, 不改判定口径。
-function refreshPrompt() {
-  try { rl.setPrompt(agent.isPlanMode("default") ? "皮皮虾[plan]> " : "皮皮虾> "); } catch { /* 提示符刷新失败不影响对话 */ }
-}
-refreshPrompt();
 
 let busy = false; // 防止任务执行中重复输入
 
@@ -57,15 +82,12 @@ if (agent.config.agent?.proactive?.enabled) {
 rl.on("line", async (line) => {
   const text = line.trim();
   if (!text) return rl.prompt();
-  if (busy) {
-    // 2026-10-03 修复: 原 silently 忽略, 用户以为输入丢失。改为可判读提示。
-    console.log("  (任务执行中, 输入已忽略; /stop 可中断当前任务)");
-    return rl.prompt();
-  }
+  if (busy) return rl.prompt(); // 上一轮任务未结束, 忽略输入 (可用 /stop 或 Ctrl+C 打断)
 
   // 退出
   if (["quit", "exit", "q"].includes(text.toLowerCase())) {
-    await agent.shutdown(); // 军团子进程回收是异步的, 不 await 就是紧随其后的 exit 的孤儿
+    // 2026-10-10 (L2): shutdown 已异步化, await 确保军团子进程回收完成再退出, 不留孤儿进程
+    await agent.shutdown();
     console.log("皮皮虾 收工, 已保存记忆。");
     process.exit(0);
   }
@@ -78,7 +100,6 @@ rl.on("line", async (line) => {
   // 清空会话
   if (text === "/reset") {
     agent.resetSession("default");
-    refreshPrompt(); // 全新会话: 计划态一并清零, 提示符同步
     console.log("(会话已清空)");
     return rl.prompt();
   }
@@ -118,19 +139,18 @@ rl.on("line", async (line) => {
     console.log("\n[错误] " + e.message + "\n");
   } finally {
     busy = false;
-    refreshPrompt(); // /plan /do 都经由这里落到 agent.chat, 提示符随之反映模式
   }
   rl.prompt();
 });
 
 // Ctrl+C: 第一次中断任务, 第二次退出
 let ctrlC = 0;
-rl.on("SIGINT", async () => {
+rl.on("SIGINT", () => {
   ctrlC += 1;
   if (ctrlC >= 2) {
-    await agent.shutdown();
-    console.log("\n皮皮虾 收工。");
-    process.exit(0);
+    // 2026-10-10 (L2): await 军团回收后再退出 (shutdown 已异步化)
+    agent.shutdown().finally(() => { console.log("\n皮皮虾 收工。"); process.exit(0); });
+    return;
   }
   agent.interrupt();
   console.log("\n(已中断, 再按一次 Ctrl+C 退出)");

@@ -2,7 +2,7 @@
 // 目标: "本地默认优先, 云端可自由接入"
 //   - 占位死配置过滤: model 含 REPLACE_WITH_YOUR_ENDPOINT 等占位符的 provider 视为不可用(省得误选+报噪音警告)
 //   - 本地优先(默认): 本地测试直接用本地模型 (lmstudio/ollama, 127.0.0.1 即零配置可用), 配真实云端 key 也先走本地
-//   - 云端优先(可选): 设 agent.model_preference=cloud → 配真 key 的云端排前 (深度/智谱/千问/火山/OpenAI), 本地兜底
+//   - 云端优先(可选): 设 agent.model_preference=cloud → 配真 key 的云端排前 (DeepSeek/智谱/通义千问/OpenAI), 本地兜底
 //   - 健康排序: 启动时异步探测各 provider /models, 能连的排前, 连不上自动降级
 // 全部 provider 均为自研 http 底座 (OpenAI 兼容 API 直连), 无外部引擎依赖。
 // 用法 (与旧 builtin.resolveLLM 同签名, 向后兼容):
@@ -38,7 +38,7 @@ function isLocal(p) {
 export function isUsableProvider(prov) {
   if (!prov) return false;
   // 占位 model/base_url 的死配置直接判不可用
-  // (volcengine 的 REPLACE_WITH_YOUR_ENDPOINT, 以及模板里 lmstudio 的 YOUR_LOCAL_MODEL_NAME)
+  // (如 REPLACE_WITH_YOUR_ENDPOINT, 以及模板里 lmstudio 的 YOUR_LOCAL_MODEL_NAME)
   if (isPlaceholder(prov.model) || isPlaceholder(prov.base_url)) return false;
   if (hasRealKey(prov)) return true;          // 云端真 key
   if (isLocal(prov)) return true;              // 本地推理零配置可用

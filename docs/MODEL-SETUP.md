@@ -32,6 +32,21 @@ node bin/ppx-setup.js --aux off          # 取消, 恢复全走主模型
 
 ## 二、内置厂商预设
 
+### 向量记忆: 开箱即用, 无需配置
+
+记忆检索 (FactStore) 默认就是 **dense+BM25 混合检索**:
+- **零配置**: 内置本地哈希向量化 (字符 n-gram, 零网络零 Key) — 开箱即有模糊匹配/错别字容忍。
+- **可选升级**: 配置 `config.embedding` (OpenAI 兼容 /embeddings 端点) 获得真语义向量;
+  外部端点连续 2 次失败自动熔断切本地, 死端点不拖慢检索。
+
+### 语音 TTS: 开箱即用 (tts 工具)
+
+Agent 可直接调用 `tts` 工具朗读文本:
+- **Windows**: 系统内置 SAPI (PowerShell), 零安装直接出声
+- **macOS**: say; **Linux**: 需安装 espeak (`apt install espeak`)
+- 可选: `rate` 语速 (-10~10)、`voice` 发音人
+- 边界: 语音转文字 (ASR) 需云厂商 Key, 暂不在开箱范围
+
 ### 云端 (需 API Key)
 
 | 厂商 | 预设 id | base_url (内置) | 环境变量 | 默认模型 |
@@ -40,7 +55,6 @@ node bin/ppx-setup.js --aux off          # 取消, 恢复全走主模型
 | 智谱 GLM | `zhipu` | https://open.bigmodel.cn/api/paas/v4 | `ZHIPU_API_KEY` | glm-4.7 |
 | 阿里通义千问 | `dashscope` | https://dashscope.aliyuncs.com/compatible-mode/v1 | `DASHSCOPE_API_KEY` | qwen-max |
 | 月之暗面 Kimi | `moonshot` | https://api.moonshot.cn/v1 | `MOONSHOT_API_KEY` | kimi-k2-0711-preview |
-| 火山方舟豆包 | `volcengine` | https://ark.cn-beijing.volces.com/api/v3 | `VOLCENGINE_API_KEY` | 填接入点 ID (ep-xxx) |
 | OpenAI | `openai` | https://api.openai.com/v1 | `OPENAI_API_KEY` | gpt-4o-mini |
 | Anthropic | `anthropic` | https://api.anthropic.com/v1 (OpenAI 兼容层) | `ANTHROPIC_API_KEY` | claude-sonnet-4-5 |
 | Google Gemini | `gemini` | https://generativelanguage.googleapis.com/v1beta/openai/ | `GEMINI_API_KEY` | gemini-2.5-flash |
@@ -84,6 +98,6 @@ PPXANS 对外集成面统一收敛到 **MCP (Model Context Protocol)**:
 ## 四、探活失败排查
 
 1. Key 是否复制完整 / 是否已开通对应模型权限
-2. 模型名是否正确 (火山方舟需填接入点 ID `ep-xxx`)
+2. 模型名是否正确 (部分厂商要求填**部署/接入点 ID** 而不是模型名, 按其控制台给出的标识填)
 3. 本地厂商: LM Studio / Ollama 服务是否已启动
 4. 手动复测: `node bin/ppx-setup.js --provider <id> --key <key>` 会再次探活

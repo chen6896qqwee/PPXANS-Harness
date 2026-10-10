@@ -1,11 +1,11 @@
 // src/config/index.js - 统一配置中心
 // 职责: 加载 config/ppx.json|yaml → 深度合并默认值 → 环境变量覆盖 → 校验
 // 目标: 让用户"自由定制"有统一入口, 配置错误有友好提示 (不再静默失败)
-// 用法: import { loadConfig, validateConfig, DEFAULT_CONFIG } from "./config/index.js"
+// 用法: import { loadConfig, validateConfig, DEFAULT_CONFIG } from "./index.js"
 import fs from "node:fs";
 import path from "node:path";
 import { readJson, readText } from "../utils/store.js";
-import { warn, debug } from "../utils/logger.js";
+import { warn } from "../utils/logger.js";
 import { isPlaceholder } from "./placeholder.js";
 
 // ---- 默认配置 (用户未写的字段用这些兜底) ----
@@ -27,6 +27,10 @@ export const DEFAULT_CONFIG = {
     ],
     // 主动任务生成 (ANS 自主性): 定时扫描记忆生成主动提醒, 默认关闭避免打扰
     proactive: { enabled: true, interval_ms: 3600000 }, // 温和默认: 1h扫描, 无待办不打扰(24h去重)
+    // 军团并发配额 (2026-10-09 补默认值): legion_status / legion_set_concurrency 与并发治理器
+    //   都读 config.agent.legion.max_concurrent_agents —— 此前默认配置里没有这个键,
+    //   工具一执行就 "Cannot read properties of undefined"。
+    legion: { max_concurrent_agents: 8, max_concurrent_per_call: 4 },
     // 工具循环阈值 (可调): 最大工具轮次 / 工具结果裁剪预算 / 工具错误重试次数
     max_tool_rounds: 8,
     tool_result_budget: 4000,
@@ -36,210 +40,50 @@ export const DEFAULT_CONFIG = {
     tool_timeout_ms: 30000,
     // 模型优先级(local 本地优先/cloud 云端优先): 本地测试默认 local, 直接走本地模型; 配云端 key 也先本地
     model_preference: "local",
-    // ---- 以下均为"代码一直在读、但此前从未在这里声明"的键 (2026-10-05 诚实回填) ----
-    // 默认值逐一等于消费者里的硬编码兜底 (标在注释尾部), 行为零变化;
-    // 反向守卫 test/config-consistency.test.js 保证今后不再出现"读取但未声明"的漂移。
-    // 审批链路 (消费点 src/agent/index.js / src/plugin/v3.js):
-    approval_mode: "on-request",      // v3.js permissionsPlugin (|| "on-request")
-    approval_timeout_ms: 120000,      // index.js 审批等待时限 (|| 120000); 超时=拒绝
-    approval_cache: true,             // index.js 会话内同命令批准不重复 ask (!== false)
-    approval_headless_wait: false,    // index.js:847 无审批入口时是否继续死等 (!== true; false=立即拒绝)
-    sandbox: "workspace-write",       // v3.js (|| SandboxPolicy.WORKSPACE_WRITE)
-    network_access: true,             // v3.js (!== false)
-    permission_rules: [],             // v3.js 用户自定义规则 (Array.isArray 兜底 [])
-    capability_gate: true,            // index.js 能力闸门 (!== false)
-    auto_approve_high_risk: false,    // index.js 高危自动批准 (!! 默认关)
-    guardAllowList: [],               // index.js installGuard 豁免名单 (|| [])
-    turn_projection: true,            // index.js 每轮生命周期投影 (!== false)
-    // 工具循环阈值补充 (消费点 src/core/policy.js ToolLoopPolicy):
-    explore_break_limit: 3,           // 连续只读无产出熔断 (|| DEFAULT_EXPLORE_BREAK)
-    repeat_flag_limit: 2,             // 同工具+args 重复告警 (|| DEFAULT_REPEAT_FLAG)
-    parallel_tool_calls: true,        // 同轮独立工具并发执行 (!== false)
-    // 缓存 TTL (消费点 src/agent/index.js):
-    health_cache_ms: 30000,           // provider 健康探测结果缓存 (? 30000; 0=关闭)
-    stats_cache_ms: 2000,             // /api/stats 聚合缓存 (?? 2000; 0=关闭)
-    // 自进化提炼 (消费点 src/selfheal/evolve.js, 整组传入):
-    evolve: { enabled: true, every_calls: 20, min_interval_ms: 30000, upgrade_uses: 3 },
-    // ---- 军团并发治理 (2026-10-07 全能超级 Agent 扩容) ----
-    // 消费点 src/orchestrator/governor.js governorOptsFromConfig + src/orchestrator/legion.js
-    // max_concurrent_agents 是**进程级硬上限** (同时活着的子 agent 进程数), 与单次派发宽度解耦:
-    //   嵌套委派 (子 agent 再派子 agent) 因此不会乘法爆炸。用户可运行期调 (legion_set_concurrency)。
-    legion: {
-      default_size: 2,               // legion 模式默认军团规模 (原 config.orchestrator.size 的继承者)
-      max_concurrent_agents: 8,      // 全局同时存活子 agent 上限
-      max_concurrent_per_call: 4,    // 单次 spawn_agent / DAG 层内 最大并行宽度
-      queue_timeout_ms: 300000,      // 排队等槽位的耐心 (超时=明确失败, 不无限挂起)
-      delegate_timeout_ms: 120000,   // 单个子任务最长等待 (原 tools/delegate.js DELEGATE_TIMEOUT_MS)
-      kill_on_finish: true,          // 委派结束回收子进程 (长跑进程防堆积; 关掉仅供调试)
-      // 跨进程配额账本 (2026-10-07 P0-3): 子 agent 是**真子进程**, 进程级单例治理器管不到隔壁 pid。
-      //   开启后 "机器上同时在跑几个子 agent" 由共享账本仲裁 (文件锁 + 死 pid 回收)。
-      //   默认关: 单进程是绝大多数场景, 无谓的文件锁只会拖慢委派; 嵌套委派/多实例部署时再开。
-      //   账本不可用时 fail-open 降级为单进程配额, 并在 legion_status 的 crossProcess.unavailable 如实计数。
-      cross_process_quota: false,
-    },
-    // ---- 能力边界与人类监督 (2026-10-07) ----
-    // 消费点 src/ans/boundary.js (boundaryPrompt 注入静态区 / detectHighRisk 动态护栏)
-    boundary: {
-      enabled: true,
-      high_risk_domains: ["medical", "legal", "finance", "security", "compliance"],
-      require_human_review: true,    // 关键决策交回人类把关 (不做最终决定)
-      weak_risk: true,               // 弱信号护栏 (泛化求助信号也提醒, 关掉则只认强关键词)
-      extra_limits: [],              // 用户自定义追加边界条款 (逐条注入)
-    },
   },
   user: { name: "兄弟" },
   providers: [],
-  // 技能库 (2026-10-07 内置技能层 v2): 多源装配 + 领域二级目录
-  // 消费点 src/skills/registry.js skillRootsFromConfig / createSkillLoader + src/agent/prompts.js _skillsPrompt
-  skills: {
-    builtin: true,                 // 随包分发的内置技能库 (skills/)
-    user_dir: "~/.ppx/skills",     // 用户级技能根 (跨项目复用; 空串 = 关闭)
-    project_dir: "",               // 项目级技能根 (空 = 关闭)
-    extra_dirs: [],                // 附加根 (团队盘 / 下载的 GitHub 技能包), 优先级最低
-    max_depth: 2,                  // 领域层级深度: 2 = 支持 skills/<domain>/<skill>/
-    prompt_hot_shown: 8,           // system prompt 里附上描述的"常用技能"条数 (名册本身全量列出)
-    prompt_desc_cap: 120,          // 常用技能单条 description 截断长度
-  },
-  // 专家库 (2026-10-07 吸收 TencentCloud/Octop): 专家从"代码常量"变成"可分发的内容资产"
-  // 消费点 src/orchestrator/expert-pack.js packRootsFromConfig + src/plugin/builtin.js
-  experts: {
-    builtin: true,                 // 随包分发的内置专家包 (experts/<id>/{manifest.json,SOUL.md})
-    user_dir: "~/.ppx/experts",    // 用户级专家库根 (自己加包/导入市场包, 不动源码; 空串=关闭)
-    project_dir: "",               // 项目级专家库根 (空 = 关闭)
-    extra_dirs: [],                // 附加专家库根 (团队共享盘), 优先级最低
-  },
   memory: {
-    // 记忆存储后端: "json" (默认, 纯文件+WAL) | "sqlite" (内嵌库, 需 Node>=22.5) | "auto" (优先 sqlite)
-    // sqlite 收益: 增量写 (800 条实测 18.7x 更快) / 事务并发 / 崩溃可恢复 / 规模增长不退化
-    backend: "json",
-    // 注: 原预留的 enabled / token_budget / compile_threshold 因代码始终未读取, 已从默认配置移除
-    //   (记忆常开; token 预算走 history_token_budget; 场景聚类 compile 未实现)。
+    enabled: true,
+    token_budget: 2500,
     decay_per_day: 0.02,
     hit_bonus: 5,
     base_importance: 10,
+    compile_threshold: 4.5,
     forget_speed: 1,
     max_history_items: 40,          // 会话历史条数上限 (信息量感知裁剪)
     history_token_budget: 4000,     // 会话历史 token 预算
     context_window: 8192,           // provider 上下文窗口兜底 (未知窗口时的保守默认, 溢出防护)
     context_window_ratio: 0.6,      // 历史+工具结果占用上下文窗口的安全比例上限
     max_facts: 1000,                // L1 原子记忆总量上限 (防膨胀, 超限裁剪最弱)
-    ttl_days: 90,                   // L1 默认存活期: 超 ttl_days 未访问 -> 每日治理软归档 (可 restore 回滚, 0=不做 TTL 治理)
     session_max_age_days: 30,       // 会话日志保留天数 (启动时清理过期会话, 0=不清理)
-    // L1 增量落盘 WAL (消费点 src/plugin/builtin.js: new FactStore(dataDir, { wal: true, walThreshold: 50, ...config.memory })):
-    wal: true,                      // 变更走追加日志而非全量原子写 (设 false 显式关回旧行为)
-    walThreshold: 50,               // 追加多少条后 compact 全量写 (camel 键, 与 FactStore opts 同名)
   },
   experience: { enabled: true },
   // selfheal.max_restart_attempts 已在 v1.1.0 移除: 代码无任何消费 (死配置)
   selfheal: { enabled: true, check_interval_ms: 60000 },
-  // ---- 以下组同样是"代码一直在读、但此前从未在这里声明"的键 (2026-10-05 诚实回填) ----
-  // 成本预算 (消费点 src/agent/index.js 预算闸门 + src/llm/pricing.js 价格解析):
-  budget: {
-    usd: 0,            // 进程累计支出上限 USD; 0/非正数 = 不限 (Number 兜底等价)
-    model_prices: {},  // 模型价格覆盖 (USD/1M tokens), {} = 只用内置表
-  },
-  // 辅助任务分层路由 (消费点 src/agent/index.js: config.model_routing?.aux, 空 = 辅助调用跟随主模型):
-  model_routing: { aux: "" },
-  // 工具调用审计哈希链 (消费点 src/plugin/builtin.js, === false 才关):
-  audit: { enabled: true },
-  // 协议总线 WAL (消费点 src/plugin/v3.js, !== false):
-  protocol: { wal_enabled: true },
-  // OCR (消费点 src/tools/document.js ocr_image, 逐字段兜底同名):
-  ocr: { tesseract: "tesseract", lang: "chi_sim", cloud: null },
-  tools: {
-    enabled: true,
-    custom_dir: "custom-tools",
-    disabled: [],
-    // 工具披露策略 (2026-10-03, 上下文工程): 只把核心工具的**完整 schema** 随请求发给 LLM,
-    // 其余工具只列名不列参数, agent 需要时用 enable_capability 加载。
-    // 实测: 64 工具若全量发 schema 是一笔可观开销; 核心 23 个的 schema ≈ 2477 tok,
-    // 加上 _context() 注入合计固定开销 ≈ 4285 tok/请求 (用 npm run bench:ctx 复核)。
-    // 与 tools.disabled 正交 —— 未披露的工具仍可被 catalog.call 调用, 只是不进 LLM 的 tools 参数。
-    // 设 progressive: false 可恢复"全量披露"(旧行为)。
-    progressive: true,
-    core: [
-      // 文件 / 系统 (search_files/apply_patch/repo_map 2026-10-04 补披露:
-      //   此前"代码检索"根本没有工具入口, agent 只能 list_dir + 逐个 read_file, 定位一个符号
-      //   要烧掉几轮往返 —— 两个基准任务因此超时; apply_patch/repo_map 则是已实现却从不进
-      //   schema 的死能力, 模型看不到就不会用)
-      "read_file", "search_files", "write_file", "append_file", "delete_file", "list_dir",
-      "apply_patch", "repo_map", "run_command",
-      // 网络
-      "web_search", "fetch_page", "http_request",
-      // 记忆
-      "memory_add", "memory_search", "memory_forget",
-      // 技能与元能力 (元能力必须常驻, 否则无法加载其余工具)
-      "load_skill", "skill_search",
-      "list_capabilities", "enable_capability", "disable_capability",
-      // 多 Agent 协作 (2026-10-07): 委派与班组是本项目的核心能力面, 必须常驻 —— 它此前不在
-      //   核心名单里, 模型只能从【按需工具】的一行名字猜到 spawn_agent 存在, 等于协作能力被
-      //   半隐身。legion_status 同列: 派发前不查并发上限就会派出必排队的批量任务。
-      "spawn_agent", "legion_status", "team_list",
-      // 基础
-      "get_time", "clarify", "notify",
-    ],
-  },
-  // 语音能力 (ASR 语音转文本 + TTS 文本转语音): 走 OpenAI 兼容 HTTP 端点, 零运行时依赖。
-  // 留空时 voice_transcribe / voice_speak 会返回"未配置"提示并给出配法; 填 base_url + api_key_env 即生效。
-  // 兼容 OpenAI / 硅基流动 / 火山 / 智谱 / 本地 whisper.cpp server 等任意 OpenAI 兼容端点。
-  // 注: asr.backend="local" 走本地 whisper (可选依赖 nodejs-whisper), 该分支的 model 默认是
-  //   whisper 自带 "base" 档 —— 故不在此声明 asr.model 的本地语义, local 专属字段
-  //   (model_root_path/auto_download/language/local timeout) 见 src/tools/voice.js。
-  voice: {
-    enabled: true,
-    asr: { backend: "cloud", base_url: "", api_key: "", api_key_env: "", model: "whisper-1", timeout_ms: 120000 },
-    tts: { base_url: "", api_key: "", api_key_env: "", model: "tts-1", voice: "alloy", format: "mp3", timeout_ms: 120000 },
-  },
-  // 向量检索 (可选): 配了 embedding.base_url+key 才走 dense, 否则纯 BM25。
-  // 消费点 src/llm/embedder.js createEmbedder (整组传入, 字段兜底在本地)。
-  // 不声明 model: 云端默认 "text-embedding-3-small"、本地 backend 默认 Xenova 小模型, 两分支默认不同,
-  //   单一默认值会串味 —— 想用哪个就显式写 model (见 local-embedder.js)。
-  embedding: { backend: "cloud", base_url: "", api_key: "", api_key_env: "" },
+  tools: { enabled: true, custom_dir: "custom-tools", disabled: [] },
   plugins: { dir: "plugins" },
   mcp: { servers: [], auto_connect: false },
   channels: {
     // cors_origin: CORS 来源白名单 (数组)。空数组/未配置 = 默认 * (兼容); 配置后仅放行白名单浏览器来源 (v1.0.7)
-    http: {
-      enabled: true,
-      port: 8899,
-      host: "127.0.0.1", // HttpChannel 构造默认 (channels/index.js 展开 cfg 传入)
-      auth_token: "",
-      cors_origin: [],
-      // MCP 标准端点 (消费点 src/channels/http.js, 整组读出后逐字段兜底):
-      mcp: {
-        enabled: true,      // !== false
-        path: "/mcp",       // || "/mcp"
-        legacy_rest: true,  // !== false; false = 退役 /api/* REST (返回 410 引导 /mcp)
-      },
-    },
-    feishu: { enabled: false, appId: "", appSecret: "", verifyToken: "", webhookPath: "/feishu/webhook" },
+    http: { enabled: true, port: 8899, auth_token: "", cors_origin: [] },
+    feishu: { enabled: false, appId: "", appSecret: "", verifyToken: "" },
     wechat: { enabled: false, path: "/wechat/webhook", token: "", encodingAESKey: "", corpId: "", corpSecret: "", agentId: "" },
     log: { enabled: false, target: "console" },
   },
-  // allow_inline_exec: 放开 `node -e` / `python -c` / `bash -c` 这类内联执行 (默认关; allow_all 也不放开)
-  // allow_unauthenticated_webhooks: 允许"未配置回调密钥"的 webhook 通道收流量 (默认关 = fail-closed, 只供本地调试)
-  security: { allow_all: false, command_timeout_ms: 30000, code_act: false, deny: [], allow_inline_exec: false, allow_unauthenticated_webhooks: false },
+  security: { allow_all: false, command_timeout_ms: 30000, code_act: false, deny: [] },
 };
 
-// 深拷贝 (只处理 JSON 可表达的值, 配置树足够了)
-function deepClone(v) {
-  if (Array.isArray(v)) return v.map(deepClone);
-  if (v && typeof v === "object") {
-    const o = {};
-    for (const k of Object.keys(v)) o[k] = deepClone(v[k]);
-    return o;
-  }
-  return v;
-}
-
 // 深度合并: override 优先, base 缺字段用默认值 (数组/标量直接覆盖)
-// ⚠ 2026-10-03 修复: 原实现 `{ ...base }` 只做浅拷贝, 未被 override 覆盖的嵌套分支
-//   (对象/数组) 会**沿用 DEFAULT_CONFIG 的同一个引用**。后果: 任何实例级配置修改都会
-//   污染全局默认值 —— 实测 `c1.tools.progressive = false` 会让 `DEFAULT_CONFIG` 一起变,
-//   且同进程内后续所有实例、乃至其他测试用例都被带偏 (同进程多 agent 场景同样中招)。
-//   改为先深拷贝 base 再合并, 保证实例配置与全局默认彻底隔离。
 function deepMerge(base, override) {
-  const out = deepClone(base);
+  // 2026-10-10 修复: 原 `{...base}` 只做浅拷贝 —— 顶层对象是新的, 但嵌套对象仍是 DEFAULT_CONFIG
+  //   的**同一个引用**。任一实例改 `config.memory.xxx` 就会污染全局默认值, 后续所有 agent 跟着变
+  //   (实测: 一个测试设 budget=30 后, 其它 agent 的历史预算也被改小, 证据被误折叠)。
+  //   改为递归克隆 base 的每个嵌套值, 彻底断开与默认值的共享。
+  const out = Array.isArray(base) ? base.map(cloneDeep) : {};
+  if (!Array.isArray(base)) {
+    for (const key of Object.keys(base)) out[key] = cloneDeep(base[key]);
+  }
   for (const key of Object.keys(override || {})) {
     const bv = out[key];
     const ov = override[key];
@@ -250,6 +94,17 @@ function deepMerge(base, override) {
     }
   }
   return out;
+}
+
+// 深克隆普通对象/数组 (供 deepMerge 断开与 DEFAULT_CONFIG 的引用共享)
+function cloneDeep(v) {
+  if (Array.isArray(v)) return v.map(cloneDeep);
+  if (v && typeof v === "object") {
+    const o = {};
+    for (const k of Object.keys(v)) o[k] = cloneDeep(v[k]);
+    return o;
+  }
+  return v;
 }
 
 // ---- YAML 解析 (从 agent/index.js 迁移, 支持子集: 键值/嵌套/数组项) ----
@@ -304,7 +159,7 @@ function parseYaml(file) {
 
   function parseScalar(v) {
     if (v === "") return "";
-    if (/^[\[{]/.test(v)) { try { return JSON.parse(v.replace(/'/g, '"')); } catch (e) { debug(`[config/index] 已忽略异常: ${e && e.message ? e.message : e}`); } }
+    if (/^[\[{]/.test(v)) { try { return JSON.parse(v.replace(/'/g, '"')); } catch {} }
     if (/^-?\d+(\.\d+)?$/.test(v)) return Number(v);
     if (v === "true") return true;
     if (v === "false") return false;

@@ -8,7 +8,6 @@
 //   - Origin 校验防 DNS rebinding; 本地默认只绑 127.0.0.1
 import { McpServer, McpError, MCP_ERROR, MODERN_PROTOCOL_VERSION, SERVER_INFO_META_KEY } from "./server.js";
 import { readBody, sendJson, SSE_HEADERS } from "../utils/http.js";
-import { debug } from "../utils/logger.js";
 
 const MAX_BODY = 1024 * 1024; // 1MB
 
@@ -48,7 +47,7 @@ export function createMcpHttpHandler(server, opts = {}) {
     try {
       // 1. 方法限制: 只收 POST
       if (req.method !== "POST") {
-        sendJson(res, 405, { error: "method not allowed" }, { headers: { "Allow": "POST" } });
+        sendJson(res, 405, { error: "不支持的请求方法" }, { headers: { "Allow": "POST" } });
         return;
       }
 
@@ -152,7 +151,7 @@ export function createMcpHttpHandler(server, opts = {}) {
           const err = e instanceof McpError ? e : new McpError(MCP_ERROR.INTERNAL_ERROR, e.message || "internal error");
           res.write(sseMessage({ jsonrpc: "2.0", id: msg.id, error: { code: err.code, message: err.message, ...(err.data ? { data: err.data } : {}) } }));
         } finally {
-          try { res.end(); } catch (e) { debug(`[mcp/http] 已忽略异常: ${e && e.message ? e.message : e}`); }
+          try { res.end(); } catch {}
         }
         return;
       }
@@ -173,7 +172,7 @@ export function createMcpHttpHandler(server, opts = {}) {
       // 外层兜底 (不应发生)
       try {
         sendJson(res, 500, { jsonrpc: "2.0", error: { code: -32603, message: e.message || "internal error" } });
-      } catch (e) { debug(`[mcp/http] 已忽略异常: ${e && e.message ? e.message : e}`); }
+      } catch {}
     }
   };
 }
@@ -191,9 +190,7 @@ export function createMcpEndpoint(agent, opts = {}) {
     authenticated: opts.authenticated,
     rateLimit: opts.rateLimit,
     allowedOrigins: opts.allowedOrigins,
-    // 2026-10-03 修复 (P2): 原工厂吞掉 skipOriginCheck —— channels/http.js 显式传
-    // skipOriginCheck: true (宿主 CORS 白名单已统一处理 Origin), 但工厂不转发 →
-    // handler 内部仍用默认回环正则二次校验, 契约失真 (宿主白名单形同虚设)。
+    // 2026-10-10 修复: 工厂吞参 —— skipOriginCheck 未透传, 宿主已统一处理 CORS 时仍被二次拦截 403。
     skipOriginCheck: opts.skipOriginCheck,
     onError: opts.onError,
   });

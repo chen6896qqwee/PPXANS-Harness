@@ -2,8 +2,8 @@
 // 升级: 能力缝三分法(Definition元数据/Provider实现/Consumer策略) + 热挂载(enable/disable/unregister) + 元数据枚举
 // P0 (2026-09-15): 策略订阅者链 + deny-wins 合并 (吸收 Aegis/HookBus 治理语义) ——
 //   安全策略 (命令守卫/免疫闸门/防注入) 挂到工具执行唯一收口, 成为架构不变量而非可选行为
-import { info, warn } from "../utils/logger.js";
-import { normalizeMeta, runWithPolicy, toDescriptor, deprecatedHint, TOOL_ERROR_PREFIX } from "./seam.js";
+import { info } from "../utils/logger.js";
+import { normalizeMeta, runWithPolicy, toDescriptor, TOOL_ERROR_PREFIX } from "./seam.js";
 // 熔断器 (src/bus/): 保护策略链不被故障订阅者反复拖累 —— 这正是该模块注释声明的设计意图。
 // 接线前它是"完整实现但零消费者"的预留件 (2026-09-17 接入)。
 import { CircuitBreaker } from "../bus/circuit-breaker.js";
@@ -66,25 +66,13 @@ export function validateArgs(meta, args) {
   return problems.length ? problems.join("; ") : null;
 }
 
-// F5 (2026-10-05): 控制台日志只呈现"调用形状" —— 参数名列表, 取值一律不落 stdout。
-// 有意不复用 audit-chain 的 scrubArgs: 那是"落盘账本"的截断+掩码策略, 值本身仍会进文件;
-// 控制台没有取证需求, 少一个泄密面比多一个预览更省事 (参见 catalog.call)。
-function argNamesOf(args) {
-  if (!args || typeof args !== "object" || Array.isArray(args)) return "";
-  return Object.keys(args).join(", ");
-}
-
 export class ToolCatalog {
   constructor() {
     this.tools = new Map(); // name -> meta (Definition + Provider)
     this.policySubscribers = []; // 策略订阅者: { fn(name,args,ctx)->Decision|null, priority, name }
-    // 工具披露策略 (2026-10-03, 上下文工程): 与 enabled **正交** —— 控制"给 LLM 看哪些",
-    // 不影响"能调用哪些"。动机: 59 个工具的 JSON schema 实测约占 6725 tok/请求,
-    // 占空会话固定开销的 82%, 而单个任务通常只用 3–5 个工具。
-    // 未披露的工具仍可被 catalog.call 调用 (内部链路与既有测试完全不受影响),
-    // 只是不出现在 toOpenAI() 的 tools 参数里; agent 可通过 enable_capability 动态披露。
-    this.exposeSet = null; // null = 全部披露 (向后兼容默认)
-    this._deprecatedWarned = new Set(); // 弃用告警去重 (见 call 内注释)
+    // 按需工具暴露名单: null = 全部对 LLM 可见; Set = 仅该名单进函数数组,
+    //   其余降级为【按需工具】静态区名单 (名字可见、schema 不占 tool 数组)。
+    this._exposure = null;
   }
 
   // ---- Definition + Provider 注册 ----
@@ -106,26 +94,14 @@ export class ToolCatalog {
   }
 
   // ---- 能力声明查询 (ZCode PermissionToolCapability 语义) ----
-  // F1 (2026-10-05): 兜底必须是**失败关闭**。
-  // 旧兜底把一切未声明工具报成 {riskLevel:"low", readOnly:true, sideEffect:"none"}, 而
-  // permissions 的能力门正是拿 readOnly 判 plan 模式与只读沙箱 —— 于是 46/64 个未声明工具
-  // 里包含 code_act / spawn_agent / git_commit / memory_import 这类执行与写入工具, 它们
-  // 在「只读」标签下被直通 (实测: plan+READ_ONLY 全部 allow)。现改为非只读兜底:
-  //   - readOnly:false → plan 模式一律拒绝、只读沙箱升级审批 (permissions 侧按声明裁定)
-  //   - riskLevel:"medium" → 默认(workspace-write/on-request)模式下**不**新增审批:
-  //     能力门只对 high/critical/alwaysAsk 升级 (见 src/permissions/index.js askByCap),
-  //     所以新工具忘了声明能力时失去的是「只读」豁免, 而不是把正常模式变成处处弹窗。
-  //   - 真正该静默只读的工具必须由注册方显式声明 readOnly:true (test/capability-guard.test.js
-  //     用真目录把这条钉成不变量: 任何 catalog.register 缺 capability 直接红)。
-  // 例外: category=system/net 的保守默认保留 (system 仍按高风险破坏性处理)。
+  // 未声明时按 category/power 推断保守默认: system 域一律视为高风险
   getCapability(name) {
     const t = this.tools.get(name);
     if (!t) return null;
     if (t.capability) return t.capability;
-    if (t.category === "system") return { riskLevel: "high", readOnly: false, destructive: true, sideEffect: "system" };
-    if (t.category === "net") return { riskLevel: "medium", readOnly: false, destructive: false, sideEffect: "network" };
-    // 未知能力 = 不假定只读 (fail closed)
-    return { riskLevel: "medium", readOnly: false, destructive: false, sideEffect: "unknown" };
+    if (t.category === "system") return { readOnly: false, riskLevel: "high", destructive: true, sideEffect: "system" };
+    if (t.category === "net") return { readOnly: false, riskLevel: "high", destructive: false, sideEffect: "network" };
+    return { readOnly: false, riskLevel: "medium", destructive: false, sideEffect: "unknown" };
   }
 
   // ---- 热挂载: 启用/禁用 ----
@@ -143,63 +119,39 @@ export class ToolCatalog {
     return true;
   }
 
-  // ---- OpenAI 兼容的 tools 格式 (给 LLM 用, 只含 启用且已披露 的项) ----
-  // 前缀缓存加固 (2026-10-05, cache-audit 检查 c 的观测项): 按名称字节序输出, 不再依赖
-  // Map 注册时序。tools 数组位于请求序列化最前端, 是 provider 最长公共前缀的第一段 ——
-  // 注册顺序今天恒定, 但任何装配时序改动 (插件加载顺序/条件注册) 都会静默作废整个缓存前缀。
-  // 纯排序: 条目内容与集合完全不变, 只有输出次序确定化。
+  // ---- OpenAI 兼容的 tools 格式 (给 LLM 用, 只含启用项) ----
+  // 2026-10-05 契约 E: 输出恒按【名称字节升序】—— 注册时序抖动 (插件加载顺序/Map 插入序)
+  //   不得改变数组字节序, 否则每次启动都作废 provider 端的前缀缓存。
   toOpenAI() {
     return [...this.tools.values()]
-      .filter((t) => t.enabled && this.isExposed(t.name))
-      .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+      .filter((t) => t.enabled && this._isExposed(t.name))
       .map((t) => ({
         type: "function",
-        function: {
-          name: t.name,
-          // 弃用标记直接进描述: LLM 只看得到 description, 标记不进这里等于没标
-          description: t.deprecated ? `${deprecatedHint(t.deprecated)} ${t.description}` : t.description,
-          parameters: t.parameters,
-        },
-      }));
+        function: { name: t.name, description: t.description, parameters: t.parameters },
+      }))
+      .sort((a, b) => (a.function.name < b.function.name ? -1 : a.function.name > b.function.name ? 1 : 0));
   }
 
-  // 已弃用工具清单 (供自省与迁移检查)
-  deprecatedTools() {
-    return [...this.tools.values()]
-      .filter((t) => t.deprecated)
-      .map((t) => ({ name: t.name, ...t.deprecated }))
-      .sort((a, b) => (a.name < b.name ? -1 : 1));
-  }
-
-  // ---- 披露策略 (与 enabled 正交) ----
-  // setExposure(["read_file", ...]) → 只把列出的工具给 LLM; setExposure(null) → 恢复全量
+  // ---- 按需工具 (2026-10-05 前缀缓存契约 E) ----
+  // setExposure(names): 限定进 LLM 函数数组的工具; 其余启用工具降级为"按需"——
+  //   名字仍出现在 system 静态区【按需工具】名单里 (见 agent prompts), schema 不占 tool 数组。
+  //   传 null/非数组 = 撤销限制 (全部可见)。返回 this 便于链式。
   setExposure(names) {
-    if (names === null || names === undefined) {
-      this.exposeSet = null;
-      return;
-    }
-    this.exposeSet = new Set(names);
-  }
-
-  expose(name) {
-    if (this.exposeSet) this.exposeSet.add(name);
+    this._exposure = Array.isArray(names) ? new Set(names.map(String)) : null;
     return this;
   }
 
-  isExposed(name) {
-    return this.exposeSet === null || this.exposeSet.has(name);
+  _isExposed(name) {
+    return !this._exposure || this._exposure.has(name);
   }
 
-  // 已注册但未披露给 LLM 的工具名 (供 _context 生成"按需启用"提示)。只算 enabled 的 ——
-  // 被 tools.disabled 显式关掉的工具既不可调用也不该提示。
-  // 排序 (2026-10-05): 这份名单被拼进 system 静态区的【按需工具】块, 与 toOpenAI 同理,
-  // Map 注册序一旦抖动就作废前缀缓存 —— 纯排序, 集合不变。
+  // 被隐藏出 LLM 函数数组的启用工具名 (供静态区【按需工具】名单使用), 恒名称升序。
   hiddenFromLLM() {
-    if (!this.exposeSet) return [];
+    if (!this._exposure) return [];
     return [...this.tools.values()]
-      .filter((t) => t.enabled && !this.exposeSet.has(t.name))
+      .filter((t) => t.enabled && !this._isExposed(t.name))
       .map((t) => t.name)
-      .sort();
+      .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   }
 
   // ---- 审计: 可选注入审计哈希链 (未注入时零开销, 保持向后兼容) ----
@@ -275,18 +227,11 @@ export class ToolCatalog {
     if (!meta) {
       return `${TOOL_ERROR_PREFIX} 未知工具: ${name}`;
     }
-    // 参数形态归一 (2026-10-05 真跑基准里 list_dir 的"执行报错"来源之一): 无必填参数的工具
-    // 被以 undefined/null 调用时 (模型给空调用、provider 回传 "null" 字面量), validateArgs
-    // 已按 {} 放过校验, 但 execute 里 args.path 直接 TypeError → [工具错误]。
-    // 原则: 通过校验的 args 形状必须就是 execute 拿到的形状, 校验与执行不能各看一份。
-    if (!args || typeof args !== "object") args = {};
-    // 弃用告警 (只打一次/工具/进程): 存量链路还要跑完, 这里只提醒不阻断。
-    // 用 Set 去重 —— 不加会让一个被反复调用的弃用工具把日志刷爆, 反而没人看得见。
-    if (meta.deprecated && !this._deprecatedWarned.has(name)) {
-      this._deprecatedWarned.add(name);
-      const d = meta.deprecated;
-      warn(`[tools] 调用了已弃用工具 ${name}${d.replacedBy ? ` (改用 ${d.replacedBy})` : ""}${d.since ? ` — 自 ${d.since} 起` : ""}${d.note ? `: ${d.note}` : ""}`);
-    }
+    // args 归一 (2026-10-10 修复): 无必填参数的工具常被 LLM 以 undefined/null 调用,
+    //   一路透传到 execute 里做 `args.path` 即 TypeError。在统一收口处归一为 {}，
+    //   让 execute 永远拿到对象; 有必填参数的工具仍由 validateArgs 正常判"参数错误"
+    //   (归一不得把"缺参"变成静默成功)。
+    if (args === undefined || args === null) args = {};
     // 参数校验先行 (在权限/策略之前: 参数都错了就别问权限)
     const argProblem = validateArgs(meta, args);
     if (argProblem) {
@@ -295,20 +240,22 @@ export class ToolCatalog {
         : "";
       return `${TOOL_ERROR_PREFIX} ${name}: 参数错误 — ${argProblem}.${hint}`;
     }
-    // F5 (2026-10-05): 只打**参数名**, 不打值。
-    // 旧实现 `tool: ${name}(${JSON.stringify(args)})` 把整份 args 原样写进控制台:
-    //   实测一次 write_file(200KB) 输出 205,233 字节, 且 content 里的 api_key=… 明文可见。
-    //   审计链那边是 scrubArgs(500 字截断 + 密钥掩码) 后落盘 (src/audit/audit-chain.js),
-    //   这一行等于把同一个洞重新打开; .bat/.vbs 启动器还常开着可见控制台。
-    // 参数值如需取证请看审计账本, 控制台只留调用形状 (工具名 + 形参名)。
-    info(`tool: ${name}(${argNamesOf(args)})`);
+    // F5 不变量 (2026-10-05): 调用日志只打参数名清单, 不打任何参数值 ——
+    // 旧实现 JSON.stringify(args) 会把 200KB 正文/密钥/token 原样写进 stdout。
+    info(`tool: ${name}(${Object.keys(meta.parameters?.properties || {}).join(", ")})`);
     // P0: 策略链先行 (deny-wins) —— 免疫闸门/命令守卫/防注入在此拦截, 不可被旁路
     const policy = await this._runPolicyChain(name, args, ctx);
     if (policy.decision === "deny") {
-      return `${TOOL_ERROR_PREFIX} ${name}: 策略拦截: ${policy.reason || "未授权"}`;
+      const reason = `策略拦截: ${policy.reason || "未授权"}`;
+      // 2026-10-10 修复 (P1-2): 被拦调用原先直接 return, 账本里查无此条 ——
+      // "可审计"的核心恰恰是"拦了什么"。补记 ok=false + 原因 (审计写入失败不阻断)。
+      try { this.audit?.append({ tool: name, args, ok: false, error: reason, ms: 0 }); } catch { /* 审计降级不阻塞 */ }
+      return `${TOOL_ERROR_PREFIX} ${name}: ${reason}`;
     }
     if (policy.decision === "ask") {
-      return `${TOOL_ERROR_PREFIX} ${name}: 需要人工审批: ${policy.reason || "敏感操作"}`;
+      const reason = `需要人工审批: ${policy.reason || "敏感操作"}`;
+      try { this.audit?.append({ tool: name, args, ok: false, error: reason, ms: 0 }); } catch { /* 审计降级不阻塞 */ }
+      return `${TOOL_ERROR_PREFIX} ${name}: ${reason}`;
     }
     if (!this.audit) return runWithPolicy(meta, args, ctx);
     const t0 = Date.now();

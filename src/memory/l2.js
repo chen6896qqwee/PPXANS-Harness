@@ -39,6 +39,31 @@ function mergeOne(a, b) {
   };
 }
 
+// F8 (2026-10-04): 无 id 场景的**内容签名** —— 只取 name + facts 的 id/内容, 刻意不含 keywords /
+//   description 等会被规范化改写的字段, 保证"同一条 v1 场景"在原始形态与规范化形态下签名一致。
+function sceneSig(s) {
+  const facts = Array.isArray(s && s.facts)
+    ? s.facts.map((f) => (f && (f.id || f.content)) || "").join(",")
+    : "";
+  return `${String((s && s.name) || "")}|${facts}`;
+}
+
+// FNV-1a 32-bit → 定长 7 位 base36 (恒 [0-9a-z]{7})。选内容哈希而非随机短号的原因:
+//   两个进程各自给同一条无 id 场景补号必须**一致**, 否则"按 id 取并集"会把一条场景裂成两条
+//   (随机号只是把丢更新换成了丢重复)。
+function fnv1a(str) {
+  let h = 0x811c9dc5;
+  const s = String(str);
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h >>> 0;
+}
+function derivedSceneId(sig) {
+  return "s_h" + fnv1a(sig).toString(36).padStart(7, "0");
+}
+
 export class SceneStore {
   constructor(dataDir) {
     this.dir = path.join(dataDir, "memory", "l2");
@@ -60,72 +85,48 @@ export class SceneStore {
       currentVersion: SCENES_SCHEMA_VERSION,
     });
     this.scenes = Array.isArray(mig.data) ? mig.data : [];
-    // 一次性迁移 (F8): v1 "纯数组"里遗留的无 id 场景在启动时就确定性补号并落盘,
-    //   不等"下一次写"才修 (磁盘结构不变, 故 SCENES_SCHEMA_VERSION 仍是 1, 无需注册版本迁移)。
-    //   常态 (全部有 id) 零写盘; 锁内读-改-写。
-    // 2026-10-04 (F8 修正): 迁移不再走 _save() 把"刚读出来的这批行"同时当磁盘态和内存态
-    //   喂给并集两侧 (此刻两者本是同一份数据, 自己并自己) —— 那等于把迁移的正确性押在
-    //   "并集恰好能认出同内容重复"上, 与 mergeScenes 的修复互相掩盖, 旧实现正是借此在
-    //   构造期就把同一条场景写成 base/base_2 两行并落盘。现在只以磁盘最新态为单一输入。
-    if (this.scenes.some((s) => s && !s.id)) {
-      withFileLock(this.file, () => {
-        const diskNow = readJson(this.file, null);
-        // 重读失败 (损坏/半截) 时绝不写空: 打损坏标记由 _writeLocked 覆盖前留档, 并以
-        //   构造时成功读到的内存行为唯一输入补号, 保住刚加载到的场景。
-        if (!Array.isArray(diskNow) && fs.existsSync(this.file)) this._corruptPending = true;
-        this.scenes = SceneStore.mergeScenes(Array.isArray(diskNow) ? diskNow : this.scenes, []);
-        this._writeLocked();
-      });
+    // F8 一次性迁移 (2026-10-04): SCENES_SCHEMA_VERSION=1 的"纯数组"基线里从没补过 id,
+    //   旧 mergeScenes 直接把无 id 场景跳过 —— 一次普通 assign() 之后, 它连同承载的 facts
+    //   就从 scenes.json 消失。构造期补号并落盘; 常态 (全部有 id) 一个字节都不写。
+    if (this.scenes.some((s) => !s || !s.id)) {
+      try { this._save(); } catch { /* 落盘失败不阻断构造, 下次真实写入会再迁移 */ }
     }
   }
 
   // 磁盘态与内存态合并 (按 id 取并集): 军团多进程共享 dataDir 时,
   // 锁外基于过期内存做增删再整体写盘会覆盖掉别的进程已落盘的场景 (丢更新)。
-  // 2026-10-04 (F8): 无 id 的历史场景不再被静默丢弃, 而是**确定性补 id**。
-  //   旧实现 `if (!s || !s.id) return;` 直接跳过 —— SCENES_SCHEMA_VERSION=1 的"纯数组"基线里
-  //   没有任何地方补过 id, 于是 v1 遗留的无 id 场景在一次 assign() 之后连同它承载的 facts
-  //   一起从 scenes.json 消失。丢的是用户记忆, 按数据丢失处理。
-  //   为什么用内容哈希而不是 shortId 随机: 两个进程各自给同一条无 id 场景补的 id 相同,
-  //   "并集按 id 去重"天然成立 (随机 id 会把一条场景裂成两条, 再次触发覆盖式丢失)。
-  // 2026-10-04 (F8 修正): 补号识别"同一条场景", 而不是"逢撞号就加后缀"。
-  //   同内容 ⟹ 同一基数号 ⟹ 认出是同一场景直接并进来 (两侧各补一次号 / 重复喂入
-  //   都不再裂成两条); 只有同号但内容确不相同 (32bit 哈希真撞车, 或某行显式 id 恰好
-  //   等于别人的补号基数) 才是两条场景, 用 _2/_3 后缀消歧。旧写法把这两种混为一谈,
-  //   同内容重复被写成 base 与 base_2 两行, facts 从此各长各的、永不合流 —— 与 F8
-  //   同一丢失类 (一条场景裂成两条), 只是换了机制。判"同内容"要比指纹**原文**而非
-  //   截断哈希 (FNV-1a 32bit 可撞; 且合流后行会长大, 现算哈希不再等于当初的号)。
+  // F8 (2026-10-04): 无 id 场景不再被静默跳过 —— 确定性补号 (s_h + 内容哈希) 后再并集。
+  //   同内容 ⟹ 同签名 ⟹ 同号 ⟹ 并成一条 (不裂); 仅"真撞号且异内容"才加 _2 后缀消歧。
   static mergeScenes(disk, mem) {
     const byId = new Map();
-    // id -> 该行补号时的内容指纹原文 (仅补号行有; 有显式 id 的行按当前内容现算比对)
-    const keyById = new Map();
-    // "场景内容"的稳定指纹原文: 补号哈希与"是否同一条场景"的判定共用同一份 key
-    const keyOf = (s) => JSON.stringify({
-      name: s.name || "", created: s.created || "", lastUpdated: s.lastUpdated || "",
-      keywords: s.keywords || [], facts: (Array.isArray(s.facts) ? s.facts : []).map((f) => (f && (f.id || f.content)) || ""),
-    });
-    // FNV-1a 32bit (零依赖, 不需要 crypto)
-    const hashOf = (key) => {
-      let h = 2166136261 >>> 0;
-      for (let i = 0; i < key.length; i++) { h ^= key.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
-      return h.toString(36).padStart(7, "0");
-    };
-    const put = (s) => {
-      if (!s) return;
-      let e = s;
-      if (!s.id) {
-        const key = keyOf(s);
-        const base = "s_h" + hashOf(key);
-        let id = base, n = 2;
-        // 占号者是否就是同一条场景: 补过号的比当初指纹原文; 显式 id 的按当前内容现算
-        const sameScene = (occId) => keyById.has(occId)
-          ? keyById.get(occId) === key
-          : keyOf(byId.get(occId)) === key;
-        while (byId.has(id) && !sameScene(id)) id = base + "_" + n++;
-        keyById.set(id, key);
-        e = { ...s, id };
+    const sigToId = new Map(); // 内容签名 -> 补号 (保证同内容拿到同一个号)
+    const put = (raw) => {
+      if (!raw || typeof raw !== "object") return;
+      let id;
+      if (raw.id) {
+        // 显式 id = 它就是那条场景 (磁盘/内存两个版本): 永远合并, 绝不因内容差异加后缀。
+        //   (内存里的副本可能比磁盘旧 —— 补号后磁盘被别的进程追加了 facts, 签名就会不同;
+        //    此时若照加后缀, 同一条场景会裂成 id 与 id_2 两条。)
+        id = String(raw.id);
+      } else {
+        const sig = sceneSig(raw);
+        id = sigToId.get(sig) || derivedSceneId(sig);
+        // 真撞号: 该补号已被**异内容**场景占用 → 后来者加后缀消歧 (不并掉任何一条)。
+        if (byId.has(id) && sceneSig(byId.get(id)) !== sig) {
+          let n = 2;
+          while (byId.has(id + "_" + n)) n++;
+          id = id + "_" + n;
+        }
+        sigToId.set(sig, id); // 同内容重复喂入 → 都落到同一个 (可能是加过后缀的) 号
       }
-      const cur = byId.get(e.id);
-      byId.set(e.id, cur ? mergeOne(cur, e) : { ...e, facts: Array.isArray(e.facts) ? [...e.facts] : [], keywords: Array.isArray(e.keywords) ? [...e.keywords] : [] });
+      const cur = byId.get(id);
+      const merged = cur ? mergeOne(cur, raw) : {
+        ...raw,
+        facts: Array.isArray(raw.facts) ? [...raw.facts] : [],
+        keywords: Array.isArray(raw.keywords) ? [...raw.keywords] : [],
+      };
+      merged.id = id; // mergeOne 可能以无 id 的 raw 那份为准, 补号必须落在结果上
+      byId.set(id, merged);
     };
     for (const s of disk || []) put(s);
     for (const s of mem || []) put(s);   // 内存后入 = 本进程变更优先

@@ -76,22 +76,46 @@ export function createSkillLoader(config, root) {
 
 // 一步装配: 配置 → (roots + loader + registry)。agent 与 toolsPlugin 共用这一个入口,
 // 保证"读技能"的实例只有一份 (两份实例会各自维护缓存与使用计数, 覆盖率与热度统计会分叉)。
+// ---- 评测期技能过滤钩子 (2026-10-09 补) ----
+// skill-eval 需要"只跑子集"的能力: PPX_DISABLE_SKILLS="a,b" 环境变量按 id 禁用技能。
+// 不设该 env 时行为完全不变 (零侵入), 这也是它被设计成 env 而非配置项的原因 —— 评测的临时开关
+// 不该污染用户 config。
+export function disabledSkillsFromEnv() {
+  const raw = process.env.PPX_DISABLE_SKILLS;
+  if (!raw) return [];
+  return [...new Set(String(raw).split(/[,\s]+/).map((s) => s.trim().toLowerCase()).filter(Boolean))];
+}
+
+// 把 env 里的禁用清单作用到注册表上, 并返回该清单 (无 env → 空数组)
+export function applySkillEvalFilter(registry) {
+  const list = disabledSkillsFromEnv();
+  if (registry) registry.disabledSkills = list;
+  return list;
+}
+
 export function createSkillRegistry(config, root) {
   const roots = skillRootsFromConfig(config, root);
   const loader = new SkillLoader({ roots, maxDepth: config?.skills?.max_depth });
-  return new SkillRegistry({ loader, roots });
+  const reg = new SkillRegistry({ loader, roots });
+  applySkillEvalFilter(reg);
+  return reg;
 }
 
 export class SkillRegistry {
-  constructor({ loader = null, roots = [], domains = SKILL_DOMAINS } = {}) {
+  constructor({ loader = null, roots = [], domains = SKILL_DOMAINS, disabledSkills = [] } = {}) {
     this.roots = roots;
     this.domains = domains;
     this.loader = loader || new SkillLoader({ roots });
+    this.disabledSkills = disabledSkills;
   }
 
   // 全部技能 (可过滤)
   list({ domain = null, source = null, q = null } = {}) {
     let out = this.loader.list();
+    if (this.disabledSkills && this.disabledSkills.length) {
+      const off = new Set(this.disabledSkills);
+      out = out.filter((s) => !off.has(String(s.id).toLowerCase()));
+    }
     if (domain) out = out.filter((s) => s.domain === domain);
     if (source) out = out.filter((s) => s.source === source);
     if (q) {

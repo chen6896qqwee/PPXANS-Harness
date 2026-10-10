@@ -4,21 +4,22 @@
 // 原则: 策略与执行分离 — agent 只负责"调 LLM、跑工具、传消息",
 //       循环何时停、降档、重试、注入方向盘, 全由本模块决策。
 //       依赖全部注入 (llm/tools/runTool/shrinkMessages/...), 无 agent 引用, 可独立测试。
+// TOOL_ERROR_PREFIX 走 core/errors.js (纯常量, 零依赖) ——
+//   原先从 ../tools/index.js 导入, 构成 core → tools 反向边 (与 tools → core/postcondition 成环)。
+//   常量已下沉到 core(L1), 这里接上即可断环 (2026-10-10 arch-guard 检出 core → tools → core)。
 import { TOOL_ERROR_PREFIX } from "./errors.js";
-// 回合后置条件闸门 (2026-10-05): 收尾前的确定性自检 + 可行动反馈, 实现在 src/core/postcondition.js
-import {
-  runPostChecks, buildVerifyFeedback, formatGateFailure, distillTurnResult,
-  DEFAULT_MAX_CHECKS_PER_TURN, DEFAULT_MAX_VERIFY_SPAWNS, DEFAULT_TURN_VERIFY_BUDGET_MS,
-} from "./postcondition.js";
-import { warn, debug } from "../utils/logger.js";
+import { warn } from "../utils/logger.js";
+import { runPostChecks, buildVerifyFeedback, formatGateFailure } from "./postcondition.js";
 
 // ---- 阈值默认值 (config.agent.* 可覆盖) ----
 export const DEFAULT_MAX_TOOL_ROUNDS = 8;
 export const DEFAULT_TOOL_RESULT_BUDGET = 4000; // L4 toolResultBudget: 工具结果超过此长度裁剪, 防撑爆上下文
+// 对外错误文案统一转译 (含 llmFailedHint) —— 与 agent/_shortReason 共用同一实现, 防口径漂移
+import { llmFailedHint } from "../utils/public-error.js";
 export const DEFAULT_MAX_TOOL_ERROR_RETRY = 2;
 export const DEFAULT_OVERFLOW_SHRINK_MAX = 2;
-// 后置校验失败后的修正机会上限 (小, 且必须小): 拦一次→模型改→再拦→再改→再拦不动就诚实收尾。
-// 没有这个 bound, 一个"永远不可能通过"的检查会把回合活锁到 maxRounds 烧光。
+// 回合级后置校验闸门 (2026-10-05): 收尾前 harness 自跑确定性检查, 不过则经 steering 通道把
+// 失败喂回模型修正 —— 修正机会上限 2 次, 用尽则诚实上报 (不是无限重试, 也不是静默放行)。
 export const DEFAULT_MAX_POSTCHECK_RETRY = 2;
 
 // P0③ harness 融断: 探索连击 / 重复命令 阈值 (config.agent.explore_break_limit / repeat_flag_limit 可调)
@@ -30,28 +31,6 @@ export const EXPLORE_TOOLS = new Set([
   "read_file", "list_dir", "web_search", "fetch_page", "memory_search", "read_document",
   "get_time", "read_image", "ocr_image", "list_schedules", "list_capabilities", "replay_session",
 ]);
-
-// 单段别名配置读取的归一 (0 是合法值, 不能用 `||` 兜; 非有限数/负数才回落默认)
-function localNum(v, def) {
-  const n = Number(v);
-  return Number.isFinite(n) && n >= 0 ? n : def;
-}
-
-// 本轮任务的原始用户诉求 (多模态 content 取文本段拼接)。
-// 必须从 seedMessages 取: 循环中途注入的方向盘/校验反馈同样是 role=user,
-// "最后一条 user"到收尾时早已是 harness 自己的话, 拿它判"用户是否要求改文件"必错。
-function seedUserText(seedMessages) {
-  const list = Array.isArray(seedMessages) ? seedMessages : [];
-  for (let i = list.length - 1; i >= 0; i--) {
-    const m = list[i];
-    if (!m || m.role !== "user") continue;
-    if (typeof m.content === "string") return m.content;
-    if (Array.isArray(m.content)) {
-      return m.content.map((c) => (c && c.type === "text" ? String(c.text || "") : "")).join(" ");
-    }
-  }
-  return "";
-}
 
 // 判断是否为「上下文溢出」错误 (常见信号: 消息含 context/length/token/window, 或 HTTP 400/413)
 // 注意: AbortError(用户取消/内部超时中止) 一律不算溢出, 沿用 retry.js 不重试约定。
@@ -70,9 +49,11 @@ export function isOverflowError(e) {
 }
 
 // LLM 调用失败的兜底提示: 附排查指引, 避免裸抛错误对用户不友好
-export function LLM_FAILED_HINT(message) {
-  return `[皮皮虾] LLM 调用失败: ${message}
-排查指引: 1) 检查 config/ppx.json 的 providers 是否配置了可用的 API key (export XXX_API_KEY=...); 2) 本地模型 (lmstudio) 是否在运行; 3) 启动 ppx-serve 看日志确认模型加载。`;
+// 2026-10-09: 不再直接拼 ${message} 原文 —— 那会把 ERR_HTTP_HEADERS_SENT / EPIPE / 原始 JSON
+//   这类内部细节漏给用户。改为走 utils/public-error 的统一转译 (与降级路径 _shortReason 同一口径)。
+// 参数兼容: 可传 Error 对象, 也可传字符串 (历史调用方传的是 e.message)。
+export function LLM_FAILED_HINT(err) {
+  return llmFailedHint(err);
 }
 
 // L4 toolResultBudget: 裁剪超长工具结果, 保留头尾关键信息 (默认 4000, config.agent.tool_result_budget 可调)
@@ -108,7 +89,7 @@ export async function callWithTimeoutRetry({
   budgetMs = null,           // 工具超时预算 (toolTimeoutOf 注入, 事件采集用)
   onEvent = null,
 }) {
-  const ev = (type, payload) => { if (onEvent) { try { onEvent(type, payload); } catch (e) { debug(`[core/policy] 已忽略异常: ${e && e.message ? e.message : e}`); } } };
+  const ev = (type, payload) => { if (onEvent) { try { onEvent(type, payload); } catch {} } };
   const t0 = Date.now();
   let result = await runTool(name, args);
   let elapsedMs = Date.now() - t0;
@@ -133,8 +114,6 @@ export async function callWithTimeoutRetry({
 // ---- 工具循环策略状态机 ----
 // 每轮工具循环的决策都收敛到这里: 阈值从 config 读, 状态在实例内, 判定是纯方法。
 // 换策略 = 换这个类, 不动 agent 主循环。
-// 阈值读取一律走 localNum(c.xxx) 这种"别名后的单段读取", 与既有 c.explore_break_limit 同款
-// (test/config-consistency.test.js 的反向守卫只静态扫 `config.x.y` 两段以上字面量)。
 export class ToolLoopPolicy {
   constructor(cfg = {}) {
     const c = cfg || {};
@@ -144,23 +123,19 @@ export class ToolLoopPolicy {
     this.exploreBreak = Number(c.explore_break_limit) || DEFAULT_EXPLORE_BREAK;
     this.repeatFlag = Number(c.repeat_flag_limit) || DEFAULT_REPEAT_FLAG;
     this.overflowShrinkMax = DEFAULT_OVERFLOW_SHRINK_MAX;
+    // 回合级后置校验闸门 (2026-10-05): 默认开 —— 不藏在配置后面的默认关里。
+    this.postCheck = c.postcondition_gate !== false;
+    // 脏配置回落默认而不是 NaN; 0 是合法值 (拦一次即诚实收尾)
+    const retries = Number(c.postcondition_retries);
+    this.maxPostCheckRetry = Number.isFinite(retries) && retries >= 0 ? retries : DEFAULT_MAX_POSTCHECK_RETRY;
+    this.postCheckRetries = 0;
     // 同轮独立工具调用并发执行 (2026-10-01 优化): 默认开, agent.parallel_tool_calls=false 回退串行
     this.parallelToolCalls = c.parallel_tool_calls !== false;
-    // ---- 回合后置条件闸门 (2026-10-05, 真跑基准"宣称完成而字节不支持"复盘) ----
-    // 默认开且窄: 只在本轮确有写类调用成功落盘、且对其碰过的文件跑出来的确定性检查确实不过时
-    // 才拒绝收尾。关掉它只有一条显式路径 (agent.postcondition_gate=false), 不提供"默认关+
-    // 文档里藏着"的退路 —— 上一轮那种"装了旋钮没接线"的教训不再重复。
-    this.postCheck = c.postcondition_gate !== false;
-    this.maxPostCheckRetry = localNum(c.postcondition_retries, DEFAULT_MAX_POSTCHECK_RETRY);
-    this.postCheckMaxChecks = localNum(c.postcondition_max_checks, DEFAULT_MAX_CHECKS_PER_TURN);
-    this.postCheckMaxSpawns = localNum(c.postcondition_max_spawns, DEFAULT_MAX_VERIFY_SPAWNS);
-    this.postCheckBudgetMs = localNum(c.postcondition_budget_ms, DEFAULT_TURN_VERIFY_BUDGET_MS);
     // 运行时状态 (每轮循环实例持有, 重启归零)
     this.errorRetries = 0;
     this.exploreStreak = 0;
     this.seenSig = new Map();
     this.overflowShrinks = 0;
-    this.postCheckRetries = 0;
   }
 
   // 溢出判定: 是否该降档裁剪后重试 (未超降档次数上限 && 确实是溢出错误)
@@ -186,7 +161,7 @@ export class ToolLoopPolicy {
     let repeatHit = false;
     for (const tc of called) {
       let a = {};
-      try { a = JSON.parse(tc.function.arguments || "{}"); } catch (e) { debug(`[core/policy] 已忽略异常: ${e && e.message ? e.message : e}`); }
+      try { a = JSON.parse(tc.function.arguments || "{}"); } catch {}
       const sig = (tc.function?.name || "") + "::" + JSON.stringify(a).slice(0, 120);
       this.seenSig.set(sig, (this.seenSig.get(sig) || 0) + 1);
       if (this.seenSig.get(sig) >= this.repeatFlag) repeatHit = true;
@@ -211,17 +186,6 @@ export class ToolLoopPolicy {
     return true;
   }
 
-  // ---- 回合后置校验: 是否还给一次修正机会 ----
-  // 与 shouldRetryErrors 同款"次数闸门", 但对象不同: 那条管工具**调用报错**, 这条管
-  // "调用都成功了、回复却与磁盘字节不符" (MAST 归因里的 task-verification 缺口)。
-  // bound 小 (默认 2) 是硬要求: 检查可能永远不可能通过 (模型压根没打算写文件),
-  // 没有 bound 就会和 maxRounds 一起把回合活锁成纯烧 token。
-  shouldRetryPostCheck() {
-    if (this.postCheckRetries >= this.maxPostCheckRetry) return false;
-    this.postCheckRetries++;
-    return true;
-  }
-
   // ---- 自省裁决 (Reflective 内核): 对工具失败做语义分类, 决定重试策略 ----
   // 在机械次数重试之上加一道闸门: 硬拒绝类错误 (黑名单/审批拒/权限/deny/DENY_HINT)
   // 不许盲目改写命令绕过, 直接拦停; 可修正类错误才走次数重试。
@@ -239,6 +203,15 @@ export class ToolLoopPolicy {
     // 可修正类错误 (命令不存在/文件缺失/参数错等): 走次数重试道
     return { action: "retry", reason: "可修正错误, 喂回模型重试 (仍受次数上限约束)" };
   }
+
+  // 后置校验失败后是否还给它一次修正机会 (调用即计数)。
+  // 计数器封顶 → 第 3 次必然 false, 不可能活锁; 用尽后由调用方走诚实上报。
+  shouldRetryPostCheck() {
+    if (!this.postCheck) return false;
+    if (this.postCheckRetries >= this.maxPostCheckRetry) return false;
+    this.postCheckRetries++;
+    return true;
+  }
 }
 
 // ---- 工具循环主驱动 (原 PPXAgent._llmWithTools) ----
@@ -255,10 +228,6 @@ export class ToolLoopPolicy {
 //   onEvent          (type, payload) => void, 可选策略事件回调 (工具失败路径: 溢出降档/熔断/错误重试/超时), 供 trace 埋点
 //   isIdempotentTool (name) => boolean, 工具是否幂等可安全重试 (默认全 true)
 //   toolTimeoutOf    (name) => number|null, 工具超时预算 (事件采集用, 默认 null)
-//   postCondition    { rootDir, capabilityOf?, exec? } | null, 回合后置条件闸门依赖:
-//                    rootDir 是工作区根 (没有它无从查盘 → 闸门整段失效),
-//                    capabilityOf(name) 查工具能力声明 (判定只读/写类, 缺省用内置名单),
-//                    exec 注入 `node --check` 执行器 (测试计数 spawn 用, 缺省真子进程)
 export async function runToolLoop({
   seedMessages,
   llm,
@@ -267,28 +236,29 @@ export async function runToolLoop({
   isInterrupted = () => false,
   onStep = null,
   onEvent = null,
+  // onAssistantMsg (2026-10-10): 每轮模型回包后回调 { round, content, toolCalls } —— 供调用方
+  //   采集"轮内中间草稿"(带工具调用的半成品回答), 落进 memory/turns 的可重建上下文。
+  //   不影响任何既有语义: 不传即零开销。
+  onAssistantMsg = null,
   isIdempotentTool = () => true,
   toolTimeoutOf = () => null,
   runTool,
   shrinkMessages,
   histTokenCap = () => 8192,
+  // 回合级后置校验的注入点 (2026-10-05): { rootDir, capabilityOf, exec }。
+  // 不传 = 不启用闸门 (纯逻辑测试/无工作区的调用方不受影响)。
   postCondition = null,
 }) {
   const policy = new ToolLoopPolicy(config.agent || config);
   let messages = [...seedMessages];
-  const ev = (type, payload) => { if (onEvent) { try { onEvent(type, payload); } catch (e) { debug(`[core/policy] 已忽略异常: ${e && e.message ? e.message : e}`); } } };
-  // ---- 回合后置条件闸门的本轮状态 (2026-10-05) ----
-  // 插在这里而不是 chat()/chatStream() 的理由: 全仓只有 runToolLoop 这一处同时看得见
-  //   (a) 本轮跑过哪些工具 (turnCalls)、(b) 每次调用的 args 与 result、(c) 模型刚生成的终稿。
-  //   chat() 只拿到返回的字符串; _runTool 只有单次调用, 看不见"回合"这个整体。
-  // 无 rootDir (老调用方/纯逻辑测试) → gate=null → 整段行为与此前逐字节一致。
-  const gate = policy.postCheck && postCondition && postCondition.rootDir ? postCondition : null;
-  const turnCalls = [];                    // [{name,args,result}] 按发生顺序, 闸门唯一的文件清单来源
-  const taskUserText = seedUserText(seedMessages); // 原始诉求 (steering 也注入 role=user, 故只能按 seed 取)
+  // 本回合同的工具调用轨迹 ({name, args, result}) —— 后置校验据此判断"本轮到底动过什么"
+  const turnCalls = [];
+  const userMsg = [...seedMessages].reverse().find((m) => m && m.role === "user")?.content || "";
+  const ev = (type, payload) => { if (onEvent) { try { onEvent(type, payload); } catch {} } };
 
   for (let round = 0; round < policy.maxRounds; round++) {
     if (isInterrupted()) return "[皮皮虾] 任务已被中断 (operator cancelled).";
-    if (onStep) { try { onStep({ type: "step", round, maxRounds: policy.maxRounds, ts: Date.now() }); } catch (e) { debug(`[core/policy] 已忽略异常: ${e && e.message ? e.message : e}`); } }
+    if (onStep) { try { onStep({ type: "step", round, maxRounds: policy.maxRounds, ts: Date.now() }); } catch {} }
 
     let resp;
     try {
@@ -311,67 +281,50 @@ export async function runToolLoop({
 
     const msg = resp.message;
     messages.push(msg);
+    if (onAssistantMsg) { try { onAssistantMsg({ round, content: msg.content || "", toolCalls: msg.tool_calls || [] }); } catch { /* 采集异常不阻断主链 */ } }
 
     const toolCalls = msg.tool_calls;
     if (!toolCalls || toolCalls.length === 0) {
       const draft = msg.content || "[皮皮虾] (无回复)";
-      // ---- 回合后置条件闸门 (2026-10-05, 真跑基准"宣称完成而字节不支持"复盘) ----
-      // 模型不再发工具调用 = 它认为本轮可以说完了。就在把这句话交给用户之前, harness 自己
-      // 跑一遍确定性检查 (src/core/postcondition.js): 本轮写过的文件此刻在盘上到底成不成立、
-      // 以及"有没有只在回复里声称改好却一个写工具都没调"。
-      // 失败不堵墙: 走既有 steering 通道 (role=user 追加一条可行动反馈) 让模型修, 修好再收尾。
-      // 失败的那条 assistant 草稿原样留在 messages 里 —— 历史 append-only, 绝不抹改。
-      if (gate && !isInterrupted()) {
-        let verdict = null;
-        try {
-          verdict = await runPostChecks({
-            rootDir: gate.rootDir,
-            capabilityOf: gate.capabilityOf,
-            exec: gate.exec,
-            calls: turnCalls,
-            finalMessage: draft,
-            userMessage: taskUserText,
-            maxChecks: policy.postCheckMaxChecks,
-            maxSpawns: policy.postCheckMaxSpawns,
-            budgetMs: policy.postCheckBudgetMs,
-          });
-        } catch (e) {
-          // 闸门自身故障绝不拦轮 (可观测的 fail-open): 校验器坏了不能演变成"对话不可用"
-          debug(`[core/policy] 后置校验异常, 本轮跳过: ${e && e.message ? e.message : e}`);
-          ev("tool/postcheck_error", { round, message: String((e && e.message) || e).slice(0, 160) });
-        }
-        if (verdict) {
-          ev("tool/postcheck", {
-            round, ran: verdict.ran, spawns: verdict.spawns, skipped: verdict.skipped,
-            checked: verdict.checked, failures: verdict.failures.length, ms: verdict.ms,
-          });
-          if (verdict.failures.length) {
-            if (policy.shouldRetryPostCheck()) {
-              ev("tool/postcheck_retry", {
-                round, attempt: policy.postCheckRetries, max: policy.maxPostCheckRetry,
-                checks: verdict.failures.map((f) => f.id),
-              });
-              messages.push({
-                role: "user",
-                content: buildVerifyFeedback({
-                  failures: verdict.failures, notes: verdict.notes,
-                  attempt: policy.postCheckRetries, max: policy.maxPostCheckRetry,
-                }),
-              });
-              continue;
-            }
-            // 修正机会用尽 → 诚实上报, 绝不给一条干净的 "done" (项目规则: 没有工具可以宣称
-            // 自己证明不了的成功; 反过来, 回合也不许替模型把未证明的完成洗白)
-            ev("tool/postcheck_exhausted", {
-              round, attempts: policy.postCheckRetries, checks: verdict.failures.map((f) => f.id),
+      // ---- 回合级后置校验闸门 (2026-10-05) ----
+      // 提示词纪律与写后自查只覆盖单次调用; 这里补的是**回合级**: 收尾前 harness 自己跑确定性
+      // 检查, 不过则经既有 steering 通道把失败喂回模型 (可行动、非堵墙), 修正机会 ≤2,
+      // 用尽则诚实上报 (没有哪个工具可以宣称自己证明不了的成功)。
+      if (postCondition && postCondition.rootDir && policy.postCheck) {
+        const gate = await runPostChecks({
+          rootDir: postCondition.rootDir,
+          calls: turnCalls,
+          finalMessage: draft,
+          userMessage: userMsg,
+          capabilityOf: postCondition.capabilityOf || null,
+          exec: postCondition.exec,
+        });
+        ev("tool/postcheck", {
+          round, failures: gate.failures.length, notes: gate.notes.length,
+          checked: gate.checked, ran: gate.ran, spawns: gate.spawns, ms: gate.ms,
+        });
+        if (gate.failures.length) {
+          const checks = gate.failures.map((f) => f.id);
+          if (policy.shouldRetryPostCheck()) {
+            ev("tool/postcheck_retry", {
+              round, attempt: policy.postCheckRetries, max: policy.maxPostCheckRetry, checks, ms: gate.ms,
             });
-            warn(`后置校验未通过 × ${verdict.failures.length} 项, 修正机会 ${policy.postCheckRetries}/${policy.maxPostCheckRetry} 用尽: `
-              + verdict.failures.map((f) => f.message).join(" | ").slice(0, 220));
-            return formatGateFailure({
-              failures: verdict.failures, notes: verdict.notes,
-              attempts: policy.postCheckRetries, draft,
+            messages.push({
+              role: "user",
+              content: buildVerifyFeedback({
+                failures: gate.failures, notes: gate.notes,
+                attempt: policy.postCheckRetries, max: policy.maxPostCheckRetry,
+              }),
             });
+            continue;
           }
+          ev("tool/postcheck_exhausted", {
+            round, attempts: policy.postCheckRetries, failures: gate.failures.length, checks,
+          });
+          return formatGateFailure({
+            failures: gate.failures, notes: gate.notes,
+            attempts: policy.postCheckRetries, draft,
+          });
         }
       }
       return draft;
@@ -386,24 +339,9 @@ export async function runToolLoop({
     for (const tc of toolCalls) {
       if (tc.type === "function" && tc.function) {
         let args = {};
-        try { args = JSON.parse(tc.function.arguments || "{}"); } catch (e) { debug(`[core/policy] 已忽略异常: ${e && e.message ? e.message : e}`); }
+        try { args = JSON.parse(tc.function.arguments || "{}"); } catch {}
         callable.push({ tc, args });
       }
-    }
-    // v3.2.3 (P2#13): tool_calls 存在但全部无法解析 (type!=function / function 缺失) 时,
-    // callable 为空 → 本轮不产生任何 tool 消息 → 下一轮请求因 assistant.tool_calls 无对应
-    // tool 响应直接 400, 8 轮循环全烧在 400 上零产出。补占位 tool 消息 (tool_call_id 对齐,
-    // 内容为可判读错误) 让模型收到纠错机会, 不再产生空转轮次。
-    if (callable.length === 0) {
-      for (const tc of toolCalls) {
-        messages.push({
-          role: "tool",
-          tool_call_id: tc.id,
-          _id: tc.id,
-          content: toToolContent(TOOL_ERROR_PREFIX + "工具调用格式无效 (缺少 function 字段), 请以正确的 function 调用格式重试或直接回答用户。", policy.resultBudget),
-        });
-      }
-      continue;
     }
     // v1.6.0 第四刀语义保留: 超时检测 + 幂等重试一次 (tool/timeout 事件采集 P50/P95/P99 数据基础)
     const execOne = ({ tc, args }) => callWithTimeoutRetry({
@@ -413,18 +351,22 @@ export async function runToolLoop({
       isIdempotent: isIdempotentTool(tc.function.name),
       budgetMs: toolTimeoutOf(tc.function.name),
       onEvent,
-    }).then((r) => {
-      // 后置条件闸门要的是"本轮到底跑了哪些调用"的事实 (args + 回执里的 bytes/syntax/file)。
-      // 结果原文可长达几百 KB, 入队前蒸馏成摘要 (20 并发下不撑爆堆); 闸门关闭 (gate=null) 时整段不发生。
-      if (gate) turnCalls.push({ name: tc.function.name, args, result: distillTurnResult(r.result) });
-      return { tc, ...r };
-    });
+    }).then((r) => ({ tc, ...r }));
     const errors = [];
     const collect = (tc, result) => {
-      // 2026-10-03 修复 (P1): 原 tool 消息只有非标 `_id`, 缺 OpenAI 规范要求的 tool_call_id
-      // → 严格校验后端 (OpenAI 官方 / vLLM) 第二轮必 400。补上标准字段; `_id` 保留兼容内部消费方
-      messages.push({ role: "tool", tool_call_id: tc.id, _id: tc.id, content: toToolContent(result, policy.resultBudget) });
+      // 2026-10-10 修复 (P1): 原用 `_id` 传工具调用 id —— 这是非标准字段, 严格 OpenAI 兼容
+      //   后端在第二轮会因"tool 消息缺 tool_call_id / 无法与 assistant tool_calls.id 配对"回 400。
+      //   现携带标准 `tool_call_id`; `_id` 保留供内部追踪 (不发送给后端的场景仍可用)。
+      messages.push({
+        role: "tool",
+        tool_call_id: tc.id,
+        _id: tc.id,
+        content: toToolContent(result, policy.resultBudget),
+      });
       if (result.startsWith(TOOL_ERROR_PREFIX)) errors.push(result);
+      let a = {};
+      try { a = JSON.parse(tc.function?.arguments || "{}"); } catch {}
+      turnCalls.push({ name: tc.function?.name || "", args: a, result });
     };
     if (policy.parallelToolCalls) {
       const settled = await Promise.all(callable.map(execOne));
