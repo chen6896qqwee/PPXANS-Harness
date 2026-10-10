@@ -1,0 +1,380 @@
+{
+  "schema": "ppx-p0-release-evaluation-v1",
+  "startedAt": "2026-10-10T14:36:56.477Z",
+  "completedAt": "2026-10-10T14:42:23.549Z",
+  "model": "deepseek-flash",
+  "priceSource": "https://api-docs.deepseek.com/quick_start/pricing/",
+  "priceCheckedAt": "2026-10-10",
+  "currency": "USD",
+  "priceBasis": "off-peak weekend; provider usage times published rates; not an invoice",
+  "priceBook": {
+    "deepseek-flash": {
+      "hit": 0.003,
+      "miss": 0.15,
+      "output": 0.6
+    },
+    "deepseek-v4-pro": {
+      "hit": 0.022,
+      "miss": 0.66,
+      "output": 1.98
+    }
+  },
+  "taskVersion": "synthetic-p0-v3",
+  "repeatsPerTask": 5,
+  "taskCount": 40,
+  "successes": 38,
+  "completionRate": 0.95,
+  "proposals": 153,
+  "unknownTools": 0,
+  "unknownToolRate": 0.0,
+  "schemaInvalidParameters": 0,
+  "parameterHallucinationRate": 0.0,
+  "shadowCallRate": 0.0,
+  "semanticReviewStatus": "All final-cohort proposals and final action claims reviewed against actual artifacts and dispatch/result receipts",
+  "recoverableTasks": 15,
+  "recoveredTasks": 15,
+  "recoveryRate": 1.0,
+  "knownCostUsd": 0.04736269800000001,
+  "totalCostUsd": 0.047362697999999995,
+  "costPerSuccessfulTaskUsd": 0.001246386789473684,
+  "unknownCostTasks": 0,
+  "limits": "One model, eight synthetic tasks and five repeats each; not production load/stability or all-language coverage. 100% safety inspection and 5% quality sampling have not been deployed. Business idempotency is still required for semantic aliases and irreversible remote actions. PII masks recognizable configured patterns; buffers increase time to first output. Windows Node 24.19 force-exit native race and no-force-exit lingering handles remain documented.",
+  "baseCommit": "873cfdb1477660defb1524aaff43f8d3394cd4d1",
+  "sourceSha256": {
+    "src/agent/index.js": "3061a45520f7e7abf9e37c897ddcee4c00587e45670c87432ae72744346ed281",
+    "src/core/policy.js": "cc643e93f9aab33ce4ddef55e15c2bca7f2ab815c3b456f83b1003ad61a2f921",
+    "src/core/tool-result.js": "b99c86e4c5c9d3873f8f79bf2247ea44848913b0ab872a78c58585ab2fa30f07",
+    "src/core/postcondition.js": "661d5758a58d28e95d745d5725170c89f24e0158b1553075fb02b1a16508f282",
+    "src/tools/catalog.js": "6f5eb5d4546bf6e8355273458a82fb6f5a3d4998b7ddff2a0e544539c8c3756e",
+    "src/tools/seam.js": "be11a459ce0a04790e6b0ffce86ff7adc7883513e6a160d3b8f1c89ce058f1ab",
+    "src/tools/builtin.js": "ab47eb40ce11663c6200dd2b555971f0350a6e491e1d125ca8405e2ecf270f49",
+    "src/tools/document.js": "69fceb287412a376e6dd3f6b426cfe515276a5d3ca4dd2a54913c7447c864a0c",
+    "src/utils/pii-output.js": "5fc41526a7a281593133bae9defaa87e3d197d3e92a340914a444b2e439ecff3",
+    "src/channels/http.js": "adb8e299d38ee8a977d7c96ca9cafa2c980d6c53ed1d452e6b2b1fb19af26fc9",
+    "src/mcp/server.js": "d7fdd25b73ac0ed23ee3e8f52601f4b57fdbf2ac768d59d61cb08db4724f8ac1",
+    "src/llm/client.js": "fea6feb2738501a4e16c91f664d822bbf5a234eebb88c6e82dfebb7cea6f4482",
+    "src/llm/pricing.js": "c79e5991151093f97da00717edc8f5077d7cb7a0d064909cde6510c3b7aa4bdb",
+    "scripts/p0-live-acceptance.mjs": "a3e869d83bbaf61377950158e512ebf65395275444cc5393b602ec54b9c2157c",
+    "src/agent/prompts.js": "fa9d1f590507497b7140d6ab7a776c2d36220771517d8614f976319d1e3b2ca4"
+  },
+  "testedSourceSha256": {
+    "src/agent/index.js": "3061a45520f7e7abf9e37c897ddcee4c00587e45670c87432ae72744346ed281",
+    "src/core/policy.js": "cc643e93f9aab33ce4ddef55e15c2bca7f2ab815c3b456f83b1003ad61a2f921",
+    "src/core/tool-result.js": "62bf755a0beb5ba548c96974133aac33700043c7d38526c64033af06b6e4025e",
+    "src/core/postcondition.js": "661d5758a58d28e95d745d5725170c89f24e0158b1553075fb02b1a16508f282",
+    "src/tools/catalog.js": "6f5eb5d4546bf6e8355273458a82fb6f5a3d4998b7ddff2a0e544539c8c3756e",
+    "src/tools/seam.js": "be11a459ce0a04790e6b0ffce86ff7adc7883513e6a160d3b8f1c89ce058f1ab",
+    "src/tools/builtin.js": "ab47eb40ce11663c6200dd2b555971f0350a6e491e1d125ca8405e2ecf270f49",
+    "src/tools/document.js": "69fceb287412a376e6dd3f6b426cfe515276a5d3ca4dd2a54913c7447c864a0c",
+    "src/utils/pii-output.js": "5fc41526a7a281593133bae9defaa87e3d197d3e92a340914a444b2e439ecff3",
+    "src/channels/http.js": "adb8e299d38ee8a977d7c96ca9cafa2c980d6c53ed1d452e6b2b1fb19af26fc9",
+    "src/mcp/server.js": "d7fdd25b73ac0ed23ee3e8f52601f4b57fdbf2ac768d59d61cb08db4724f8ac1",
+    "src/llm/client.js": "fea6feb2738501a4e16c91f664d822bbf5a234eebb88c6e82dfebb7cea6f4482",
+    "src/llm/pricing.js": "c79e5991151093f97da00717edc8f5077d7cb7a0d064909cde6510c3b7aa4bdb",
+    "scripts/p0-live-acceptance.mjs": "a3e869d83bbaf61377950158e512ebf65395275444cc5393b602ec54b9c2157c",
+    "src/agent/prompts.js": "fa9d1f590507497b7140d6ab7a776c2d36220771517d8614f976319d1e3b2ca4"
+  },
+  "postAcceptanceNonFunctionalChanges": [
+    "Removed one extra blank EOF line in src/core/tool-result.js; no executable code changes"
+  ],
+  "artifactStateSuccesses": 40,
+  "artifactStateCompletionRate": 1.0,
+  "completionWilson95": [
+    0.8349612263085947,
+    0.9861793326138512
+  ],
+  "parameterHallucinations": 0,
+  "reviewableActionClaims": 103,
+  "shadowCalls": 0,
+  "unsupportedVerificationClaims": 0,
+  "allUnsupportedActionClaims": 0,
+  "recoveryWilson95": [
+    0.7961166989641604,
+    1
+  ],
+  "actualDispatchResultReceipts": 140,
+  "successfulDispatchReceipts": 135,
+  "billingRequests": 205,
+  "billingCostCoverage": 1.0,
+  "latencyMs": {
+    "mean": 8172.475,
+    "p50": 7530.5,
+    "p95NearestRank": 16874
+  },
+  "byTask": {
+    "create-json": {
+      "tasks": 5,
+      "passes": 5,
+      "knownCostUsd": 0.00552162,
+      "meanLatencyMs": 7163.2
+    },
+    "csv-summary": {
+      "tasks": 5,
+      "passes": 5,
+      "knownCostUsd": 0.006904464,
+      "meanLatencyMs": 9624.6
+    },
+    "command-recovery": {
+      "tasks": 5,
+      "passes": 5,
+      "knownCostUsd": 0.0066495059999999995,
+      "meanLatencyMs": 9292
+    },
+    "provider-fallback": {
+      "tasks": 5,
+      "passes": 5,
+      "knownCostUsd": 0.005127708,
+      "meanLatencyMs": 7356.2
+    },
+    "stream-provider-fallback": {
+      "tasks": 5,
+      "passes": 5,
+      "knownCostUsd": 0.007273956,
+      "meanLatencyMs": 10023.6
+    },
+    "memory-restart": {
+      "tasks": 5,
+      "passes": 3,
+      "knownCostUsd": 0.010560036,
+      "meanLatencyMs": 13853.6
+    },
+    "pii-http-tools": {
+      "tasks": 5,
+      "passes": 5,
+      "knownCostUsd": 0.0034842059999999997,
+      "meanLatencyMs": 4384.8
+    },
+    "pii-mcp-direct": {
+      "tasks": 5,
+      "passes": 5,
+      "knownCostUsd": 0.001841202,
+      "meanLatencyMs": 3681.8
+    }
+  },
+  "fullRegression": {
+    "exitCode": 0,
+    "counts": {
+      "tests": 1695,
+      "pass": 1691,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 4,
+      "duration_ms": 105877.8318
+    },
+    "wallSeconds": 106.018,
+    "node": "v24.21.0",
+    "testFiles": 216,
+    "forceExit": true,
+    "isolation": "fresh current repair tree; system TEMP outside ancestor repo; no credential env; network-gated tests off; preserved nested skills/data"
+  },
+  "developmentHistory": [
+    {
+      "cohort": "live-smoke-v1",
+      "state": "complete",
+      "savedTaskReceipts": 1,
+      "artifactPasses": 1,
+      "unknownCostReceipts": 0,
+      "knownCostUsd": 0.000964554,
+      "interruptedUnsavedTrials": 0,
+      "note": "Development and interrupted attempts are retained; excluded from final release rate. Unsaved in-flight usage may be unknown."
+    },
+    {
+      "cohort": "live-smoke-v2",
+      "state": "complete",
+      "savedTaskReceipts": 6,
+      "artifactPasses": 5,
+      "unknownCostReceipts": 0,
+      "knownCostUsd": 0.008041979999999999,
+      "interruptedUnsavedTrials": 0,
+      "note": "Development and interrupted attempts are retained; excluded from final release rate. Unsaved in-flight usage may be unknown."
+    },
+    {
+      "cohort": "live-smoke-v3",
+      "state": "complete",
+      "savedTaskReceipts": 1,
+      "artifactPasses": 0,
+      "unknownCostReceipts": 1,
+      "knownCostUsd": 0.00062175,
+      "interruptedUnsavedTrials": 0,
+      "note": "Development and interrupted attempts are retained; excluded from final release rate. Unsaved in-flight usage may be unknown."
+    },
+    {
+      "cohort": "live-final-v1",
+      "state": "complete",
+      "savedTaskReceipts": 35,
+      "artifactPasses": 35,
+      "unknownCostReceipts": 0,
+      "knownCostUsd": 0.041058564,
+      "interruptedUnsavedTrials": 0,
+      "note": "Development and interrupted attempts are retained; excluded from final release rate. Unsaved in-flight usage may be unknown."
+    },
+    {
+      "cohort": "live-final-v2",
+      "state": "interrupted",
+      "savedTaskReceipts": 26,
+      "artifactPasses": 26,
+      "unknownCostReceipts": 0,
+      "knownCostUsd": 0.02957973,
+      "interruptedUnsavedTrials": 1,
+      "note": "Development and interrupted attempts are retained; excluded from final release rate. Unsaved in-flight usage may be unknown."
+    },
+    {
+      "cohort": "live-final-v3",
+      "state": "interrupted",
+      "savedTaskReceipts": 1,
+      "artifactPasses": 1,
+      "unknownCostReceipts": 0,
+      "knownCostUsd": 0.001165554,
+      "interruptedUnsavedTrials": 1,
+      "note": "Development and interrupted attempts are retained; excluded from final release rate. Unsaved in-flight usage may be unknown."
+    },
+    {
+      "cohort": "live-acceptance-final",
+      "state": "complete",
+      "savedTaskReceipts": 40,
+      "artifactPasses": 37,
+      "unknownCostReceipts": 0,
+      "knownCostUsd": 0.04710612,
+      "interruptedUnsavedTrials": 0,
+      "note": "Development and interrupted attempts are retained; excluded from final release rate. Unsaved in-flight usage may be unknown."
+    },
+    {
+      "cohort": "live-disabled-tools-recheck",
+      "state": "complete",
+      "savedTaskReceipts": 5,
+      "artifactPasses": 5,
+      "unknownCostReceipts": 0,
+      "knownCostUsd": 0.0016114319999999999,
+      "interruptedUnsavedTrials": 0,
+      "note": "Development and interrupted attempts are retained; excluded from final release rate. Unsaved in-flight usage may be unknown."
+    }
+  ],
+  "qualityNotes": [
+    {
+      "id": "create-json-3",
+      "notes": [
+        "对合法尾随换行追加确认问题，增加交互负担。"
+      ]
+    },
+    {
+      "id": "csv-summary-3",
+      "notes": [
+        "拟用 Python 只比较所有地区总计，无法单独证明按地区聚合正确；它被拒绝，实际验收靠文件产物与人工复算。"
+      ]
+    },
+    {
+      "id": "csv-summary-5",
+      "notes": [
+        "最终供用户自行执行的代码写成 print(t)==json.load(...)，只输出 t 后比较 None 与对象，不会打印一致性判定；这段建议代码未被工具调用，不属于实际调用参数幻觉。"
+      ]
+    },
+    {
+      "id": "provider-fallback-2",
+      "notes": [
+        "回复提及“这次的重复提示”容易混淆真实用户与内部提示；实际用户只有一次追加请求。"
+      ]
+    },
+    {
+      "id": "provider-fallback-5",
+      "notes": [
+        "最终建议 Get-Content | Measure-Object -Line 只能辅助数文本行，不能验证字节数、BOM 和行尾符全部细节；不应泛作完整字节核对。"
+      ]
+    },
+    {
+      "id": "stream-provider-fallback-1",
+      "notes": [
+        "产物多一个空行，模型如实说明。当前产物契约仅要求 nonce 一次且原内容保留，未要求严格无空行；不能把通过率解释为格式完美。"
+      ]
+    },
+    {
+      "id": "stream-provider-fallback-4",
+      "notes": [
+        "模型把 PX-a7a3fca5 的 11 字符及实际 LF 说成 10 字符与 CRLF 两字节。回执数值 12 正确，解释错误；未伪造工具调用或写入参数。"
+      ]
+    },
+    {
+      "id": "stream-provider-fallback-5",
+      "notes": [
+        "多一个空行属于当前验收未约束的格式瑕疵，且工具选择过重；仍只写入一次，没有回退重放。"
+      ]
+    },
+    {
+      "id": "memory-restart-1",
+      "notes": [
+        "首次回复只有 '工具调用轮次过多, 已停止'，没有向用户确认保存结果。产物契约通过不代表首次交互成功；重启后召回答案和独立 facts 文件回执正确。",
+        "memory_add 的用户来源文字被存储层去除/归类为 model-inferred，模型最终如实显示实际 provenance，不应把内容注释视为可靠来源标签。"
+      ]
+    },
+    {
+      "id": "memory-restart-2",
+      "notes": [
+        "首次保存回复是轮次耗尽提示；仍已真实落库并在重启后正确回答。",
+        "recallReply 的 '刚查过' 有前一轮真实 memory_search 与 facts 读取回执，但重启后的模型轮次没有新增显式工具调用；不能把此轮宣传为重启后新派发了 memory_search，可能使用持久会话与自动记忆上下文。"
+      ]
+    },
+    {
+      "id": "memory-restart-4",
+      "notes": [
+        "对 provenance '与直接写入不符' 的解释带有推断；写入方式本身不能决定事实来源级别。这是对来源标签的表达瑕疵，不是调用或参数幻觉。"
+      ]
+    },
+    {
+      "id": "memory-restart-5",
+      "notes": [
+        "已完成简单保存后仍追问用途、提出改标签，交互不够简短；对默认 model-inferred 归类的解释不应替代来源制度的实际语义。"
+      ]
+    },
+    {
+      "id": "pii-http-tools-2",
+      "notes": [
+        "模型声称 '没有外发到任何地方'；本测试确有 DeepSeek 远端模型请求。这种绝对措辞不能作为数据未离开本机的保证，应与未向其他收件人分享区分。非未派发工具调用或验证步骤宣称。"
+      ]
+    },
+    {
+      "id": "pii-http-tools-3",
+      "notes": [
+        "简单验收后提出额外掩码格式选项，回复较冗长；验收已经通过无需反问。"
+      ]
+    },
+    {
+      "id": "pii-http-tools-4",
+      "notes": [
+        "对将来处理真实 PII 和日志的绝对承诺尚未由该合成样本验证，不应作为生产安全保证。"
+      ]
+    },
+    {
+      "id": "pii-http-tools-5",
+      "notes": [
+        "'未做任何外发' 的绝对措辞不准确，存在已授权的真实 DeepSeek 模型请求；不能据此宣传数据从未离开本机。"
+      ]
+    },
+    {
+      "id": "pii-mcp-direct-4",
+      "notes": [
+        "假设用户可能想写文件或调用接口并提出后续问题，属于可删的无关说明；当前任务本身已经完成。"
+      ]
+    },
+    {
+      "id": "pii-mcp-direct-5",
+      "notes": [
+        "'没有任何外发动作' 不能理解为数据未离开本机，本轮有真实远端模型请求；该无操作共享措辞应收窄。"
+      ]
+    }
+  ],
+  "knownUnsatisfactoryUserVisibleReplies": [
+    "memory-restart-1",
+    "memory-restart-2"
+  ],
+  "originalZipSha256": "cc853934ac9423a00a2912af5dd35cc646b6213133dcc2bf8fc1d3dbee144710",
+  "productionSafetyDetectionCoverage": null,
+  "productionQualitySampleRate": null,
+  "definitions": {
+    "completion": "Strict task completion: target artifact/state, required readback and genuine receipts, plus an acceptable user-visible reply. Artifact/state completion is separately reported; two error-only first replies count as strict failures despite persisted memory and correct restart recall.",
+    "unknownTool": "Absent tool name among structured model proposals / all proposals; known-but-disabled is separate.",
+    "parameterHallucination": "Schema/JSON failure or semantically unsupported parameter / proposals; ordinary execution fault and authorized approval denial are separate.",
+    "shadowCall": "Claimed or encoded tool operation without dispatch/receipt / reviewable final action claims. Unsupported verification claims reported separately; classes may overlap.",
+    "recovery": "Completed controlled recoverable-fault task with intended committed side effect count / fault tasks actually injected.",
+    "cost": "All provider requests in release cohort, including failed tasks, retries, fallback, and auxiliary calls, divided by successful tasks; published-tariff estimate, not invoice.",
+    "singleStep": "Raw dispatch success includes deliberate failure fixtures and safe refusals; it is not model tool-choice accuracy or global task success."
+  }
+}

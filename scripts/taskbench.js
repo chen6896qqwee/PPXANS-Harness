@@ -20,7 +20,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { PPXAgent } from "../src/agent/index.js";
 import { withTimeout } from "../src/utils/async.js";
 import { triageFailure } from "../src/services/triage.js";
-import { TASKS, summarize } from "../bench/tasks.js";
+import { TASKS, summarize, VERIFIER_VERSION } from "../bench/tasks.js";
+import { estimateCost, usageTokens } from "../src/llm/pricing.js";
+import { TOOL_ERROR_PREFIX } from "../src/tools/catalog.js";
+import { toolResultStatus, toolResultContent } from "../src/core/tool-result.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const BASELINE = path.join(ROOT, "bench", "baseline.json");
@@ -194,7 +197,10 @@ export function buildReport(summary = {}, results = [], meta = {}) {
   // GPA 聚合: 只统计带 score 的任务; planFollowed 为 null 的(未声明计划)不计入遵循率分母
   const scored = rows.filter((r) => r && r.score);
   const planned = scored.filter((r) => r.score.planFollowed !== null && r.score.planFollowed !== undefined);
-  const mean = (pick) => (scored.length ? round3(scored.reduce((s, r) => s + (Number(pick(r)) || 0), 0) / scored.length) : null);
+  const mean = (pick) => {
+    const values = scored.map(pick).filter((v) => typeof v === "number" && Number.isFinite(v));
+    return values.length ? round3(values.reduce((s, v) => s + v, 0) / values.length) : null;
+  };
   const gpa = {
     plannedTasks: planned.length,
     planFollowedRate: planned.length
@@ -209,6 +215,7 @@ export function buildReport(summary = {}, results = [], meta = {}) {
   return {
     report_schema: 2, // v2 (2026-10-09): summary.gpa + 逐任务 score
     suite: "taskbench",
+    verifier_version: VERIFIER_VERSION,
     generated_at: new Date().toISOString(),
     coverage: `${rows.length}/${totalTasks}`,
     env: {
@@ -225,6 +232,13 @@ export function buildReport(summary = {}, results = [], meta = {}) {
       totalTokens: summary.totalTokens ?? null,
       avgMs: summary.avgMs ?? null,
       costEfficiency: summary.costEfficiency ?? null,
+      knownTokens: summary.knownTokens ?? null,
+      totalCostUsd: summary.totalCostUsd ?? null,
+      knownCostUsd: summary.knownCostUsd ?? null,
+      tokensPerSuccess: summary.tokensPerSuccess ?? null,
+      costUsdPerSuccess: summary.costUsdPerSuccess ?? null,
+      usageCoverage: summary.usageCoverage ?? null,
+      costCoverage: summary.costCoverage ?? null,
       gpa,
     },
     // 只保留判分事实: 无 reply / 无 detail / 无 failures
@@ -236,6 +250,14 @@ export function buildReport(summary = {}, results = [], meta = {}) {
       ms: r.ms ?? null,
       cause: r.triage?.cause ?? null,
       score: r.score ?? null,
+      costUsd: r.costUsd ?? null,
+      usageKnownCalls: r.usageKnownCalls ?? null,
+      usageUnknownCalls: r.usageUnknownCalls ?? null,
+      costUnknownCalls: r.costUnknownCalls ?? null,
+      vote: r.vote ?? null,
+      selectedAttempt: r.selectedAttempt ?? null,
+      // Repeat accounting is public, but replies/arguments/results remain private.
+      attempts: r.attempts?.map((a) => ({ pass: a.pass, tokens: a.tokens, knownTokens: a.knownTokens, ms: a.ms, costUsd: a.costUsd, usageUnknownCalls: a.usageUnknownCalls, costUnknownCalls: a.costUnknownCalls })) ?? null,
     })),
   };
 }
@@ -244,7 +266,17 @@ export function buildReport(summary = {}, results = [], meta = {}) {
 
 // token 记账: 包装 agent.llm.chat, 汇总 OpenAI 兼容 usage (零侵入)
 function makeTokenCounter(agent) {
-  const counter = { tokens: 0, calls: 0 };
+  const counter = { tokens: 0, knownTokens: 0, calls: 0, usageKnownCalls: 0, usageUnknownCalls: 0, costUnknownCalls: 0, knownCostUsd: 0, costUsd: 0 };
+  const account = (client, usage, model) => {
+    const tokens = usageTokens(usage);
+    const cost = estimateCost(model || client.model, usage, agent.config?.budget?.model_prices);
+    if (tokens === null) counter.usageUnknownCalls++;
+    else { counter.knownTokens += tokens; counter.usageKnownCalls++; }
+    if (cost === null) counter.costUnknownCalls++;
+    else counter.knownCostUsd += cost;
+    counter.tokens = counter.usageUnknownCalls ? null : counter.knownTokens;
+    counter.costUsd = counter.costUnknownCalls ? null : counter.knownCostUsd;
+  };
   // 包装所有 provider 实例 (ReAct 经 _llmWithFallback→_llmWithTools→client.chat,
   // 只包 agent.llm 会漏计 fallback 链上的其他 provider)
   const clients = new Set([...(agent.allProviders || []), agent.llm].filter(Boolean));
@@ -257,10 +289,27 @@ function makeTokenCounter(agent) {
       const orig = c[meth].bind(c);
       c[meth] = async (msgs, opts) => {
         counter.calls++;
-        const r = await orig(msgs, opts);
-        const u = r?.usage ?? r; // apiChat 可能直接返回文本, 有 usage 才计
-        counter.tokens += (u?.total_tokens ?? (u?.prompt_tokens || 0) + (u?.completion_tokens || 0)) || 0;
-        return r;
+        try {
+          const r = await orig(msgs, opts);
+          account(c, r?.usage, r?.model);
+          return r;
+        } catch (e) {
+          account(c, e?.usage, e?.model);
+          throw e;
+        }
+      };
+    }
+    if (typeof c.streamChat === "function") {
+      const orig = c.streamChat.bind(c);
+      c.streamChat = async (msgs, opts = {}) => {
+        counter.calls++;
+        let accounted = false;
+        try {
+          return await orig(msgs, { ...opts, onUsage: (usage, meta) => {
+            if (!accounted) { account(c, usage, meta?.model); accounted = true; }
+            opts.onUsage?.(usage, meta);
+          } });
+        } finally { if (!accounted) account(c, null); }
       };
     }
   }
@@ -269,12 +318,113 @@ function makeTokenCounter(agent) {
 
 // 工具调用轨迹采集: 挂 agent 的工具完成钩子 (零侵入, 只读取上报参数)
 function installTraceCollector(agent, sink) {
+  let receiptSeq = 0;
+  // Catalog calls also cover local-intent paths that bypass _runTool. An
+  // executed receipt must originate here, not from a final-text claim.
+  if (typeof agent.tools?.call === "function") {
+    const origCall = agent.tools.call.bind(agent.tools);
+    agent.tools.call = async (name, args, ctx = {}) => {
+      const callId = `bench-${++receiptSeq}`;
+      const t0 = Date.now();
+      try {
+        let status = null;
+        const result = await origCall(name, args, { ...ctx, onOutcome: (outcome) => {
+          status = outcome;
+          ctx.onOutcome?.(outcome);
+        } });
+        // Typed provider status is authoritative. Successful read_file content
+        // may itself be JSON containing error/ok fields; never interpret that
+        // data as a second status protocol.
+        status ||= name === "read_file" && typeof result === "string"
+          ? { ok: !result.startsWith(TOOL_ERROR_PREFIX), error: null }
+          : toolResultStatus(result);
+        const ok = status.ok === true;
+        sink.push({ callId, tool: name, args, ok, status, durationMs: Date.now() - t0, result: String(toolResultContent(result) ?? ""), error: ok ? null : (status.error || String(toolResultContent(result) ?? "")), receipt: true });
+        return result;
+      } catch (e) {
+        sink.push({ callId, tool: name, args, ok: false, durationMs: Date.now() - t0, result: null, error: String(e?.message || e), receipt: true });
+        throw e;
+      }
+    };
+  }
   if (typeof agent._emitToolDone !== "function") return;
   const orig = agent._emitToolDone.bind(agent);
   agent._emitToolDone = (callId, name, args, ok, durationMs, result) => {
-    try { sink.push({ tool: name, args, ok: ok !== false, durationMs }); } catch {}
+    try {
+      const receipt = sink.findLast((call) => call.tool === name && call.args === args && !call.agentCallId);
+      if (receipt) {
+        receipt.agentCallId = callId;
+        // A failed agent-level outcome may further restrict, never upgrade,
+        // the provider's recorded status.
+        if (ok !== true) { receipt.ok = false; receipt.error ||= String(result ?? ""); }
+      }
+      else sink.push({ callId, tool: name, args, ok: ok === true, durationMs, result: String(result ?? ""), error: ok === true ? null : String(result ?? ""), receipt: false });
+    } catch {}
     return orig(callId, name, args, ok, durationMs, result);
   };
+}
+
+const EXEC_TOOLS = ["run_command", "code_act"];
+const READ_TARGETS = { "version-report": "package.json", "sum-numbers": "numbers.txt", "read-secret": "config.ini", "extract-field": "users.json" };
+const WRITE_TARGETS = { "create-file": "notes/todo.txt", "append-file": "log.txt", "json-edit": "config.json", "delete-file": "obsolete.txt", "json-create": "person.json", "fix-syntax": "broken.js", "fix-logic": "calc.js", "write-function": "utils.js", "rename-symbol": "rename-me.js", "analyze-and-report": "report.txt", "conditional-write": "enabled.txt", "src-listing": "lib-list.txt" };
+function targetMatches(call, target, sandbox) {
+  if (typeof call.args?.path !== "string") return false;
+  const normalize = (p) => process.platform === "win32" ? p.toLowerCase() : p;
+  return normalize(path.resolve(sandbox, call.args.path)) === normalize(path.resolve(sandbox, target));
+}
+function receiptText(call) {
+  const text = String(call.result ?? "").replace(/\r\n/g, "\n");
+  // Execute tools render an out-of-band status header before stdout. Remove
+  // only that documented header, not arbitrary file contents or JSON fields.
+  return (EXEC_TOOLS.includes(call.tool) ? text.replace(/^\[exit=[^\n]*\]\n/, "") : text).trim();
+}
+function observedSource(call, target, ctx) {
+  if (call.tool !== "read_file" && !EXEC_TOOLS.includes(call.tool)) return false;
+  if (call.tool === "read_file" && !targetMatches(call, target, ctx.sandbox)) return false;
+  try {
+    const source = ctx.sourceContents?.[target] ?? fs.readFileSync(path.join(ctx.sandbox, target), "utf8");
+    return receiptText(call) === String(source).replace(/\r\n/g, "\n").trim();
+  } catch { return false; }
+}
+function observedItems(call, ctx) {
+  if (call.tool !== "list_dir" && !EXEC_TOOLS.includes(call.tool)) return false;
+  if (call.tool === "list_dir" && !targetMatches(call, "items", ctx.sandbox)) return false;
+  try {
+    const expected = ctx.sourceItems ?? fs.readdirSync(path.join(ctx.sandbox, "items")).sort();
+    const actual = receiptText(call).split("\n").map((line) => path.posix.basename(line.replace(/^\[F\] /, "").trim().replace(/\\/g, "/"))).sort();
+    return JSON.stringify(actual) === JSON.stringify(expected);
+  } catch { return false; }
+}
+
+// Objective artifacts and actual execution evidence are separate checks. The
+// offline oracle evaluates artifact validity; runOne additionally requires the
+// receipt. An equivalent command/patch strategy may produce the same artifact.
+export function verifyTaskCompletion(taskDef, result, ctx) {
+  const artifact = taskDef.verify(result, ctx);
+  if (!artifact?.pass || result.executionError) return result.executionError ? { pass: false, detail: result.executionError } : artifact;
+  if (!TASKS.some((t) => t.id === taskDef.id)) return artifact;
+  const calls = (result.toolCalls || []).filter((call) => call.receipt === true && call.ok === true);
+  const executable = (call) => EXEC_TOOLS.includes(call.tool);
+  let evidenced = false;
+  if (READ_TARGETS[taskDef.id]) evidenced = calls.some((call) => observedSource(call, READ_TARGETS[taskDef.id], ctx));
+  else if (WRITE_TARGETS[taskDef.id]) evidenced = calls.some((call) => executable(call) || call.tool === "apply_patch" || (["write_file", "append_file", "delete_file"].includes(call.tool) && targetMatches(call, WRITE_TARGETS[taskDef.id], ctx.sandbox)));
+  else if (taskDef.id === "count-files") evidenced = calls.some((call) => observedItems(call, ctx));
+  else if (taskDef.id === "find-symbol") evidenced = calls.some((call) => {
+    if (observedSource(call, "pricing.js", ctx)) return true;
+    // search_files lists names only, which cannot establish a symbol definition.
+    // repo_map returns an actual code skeleton tying the symbol to its file.
+    if (call.tool !== "repo_map") return false;
+    try {
+      const map = JSON.parse(String(call.result ?? ""));
+      return typeof map.text === "string" && map.text.split(/\r?\n/).some((line) => /\bcalcDiscount\b/.test(line) && /\/\/ pricing\.js:\d+\s*$/.test(line));
+    } catch { return false; }
+  });
+  else if (taskDef.id === "memory-roundtrip") evidenced = calls.some((call) => call.tool === "memory_add" && String(call.args?.content ?? "").includes("基准测试口令-蓝鲸99"));
+  else if (taskDef.id === "board-roundtrip") {
+    const published = calls.findIndex((call) => call.tool === "board_publish" && call.args?.content === "军团暗号-QW7");
+    evidenced = published >= 0 && calls.some((call, index) => index > published && call.tool === "board_query" && String(call.result ?? "").includes("军团暗号-QW7"));
+  }
+  return evidenced ? artifact : { pass: false, detail: "产物/答案正确, 但缺少与任务匹配的真实成功执行回执" };
 }
 
 /**
@@ -289,6 +439,12 @@ export async function runOne(taskDef, { quiet = false, budgetMs = TASK_BUDGET_MS
   const guard = benchLlmGuard(budgetMs);
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "ppx-bench-"));
   taskDef.setup?.(sandbox);
+  // Freeze read-task sources before the agent runs, so changing a fixture and
+  // reading the replacement cannot count as observing the original input.
+  const sourceContents = {};
+  const sourceTarget = READ_TARGETS[taskDef.id] || (taskDef.id === "find-symbol" ? "pricing.js" : null);
+  if (sourceTarget) sourceContents[sourceTarget] = fs.readFileSync(path.join(sandbox, sourceTarget), "utf8");
+  const sourceItems = taskDef.id === "count-files" ? fs.readdirSync(path.join(sandbox, "items")).sort() : null;
   const agent = typeof createAgent === "function"
     ? createAgent(sandbox)
     : new PPXAgent({
@@ -297,22 +453,25 @@ export async function runOne(taskDef, { quiet = false, budgetMs = TASK_BUDGET_MS
         dataDir: path.join(sandbox, ".ppx"),
         globalDataDir: path.join(sandbox, ".ppx-global"),
       });
-  installLlmGuard(agent, guard);
   installApprovalPolicy(agent);
   const counter = makeTokenCounter(agent);
+  // Count every guarded retry, including failed/abandoned attempts.
+  installLlmGuard(agent, guard);
   const toolCalls = [];
   installTraceCollector(agent, toolCalls);
   const t0 = Date.now();
   let reply = "";
+  let executionError = null;
   try {
     reply = String(await withTimeout(agent.chat(taskDef.task), budgetMs, `任务 ${taskDef.id} `) ?? "");
   } catch (e) {
     reply = `[异常] ${e.message}`;
+    executionError = `运行异常: ${e.message}`;
   }
   const ms = Date.now() - t0;
   let verdict;
   try {
-    verdict = taskDef.verify({ reply, tokens: counter.tokens, ms }, { sandbox });
+    verdict = verifyTaskCompletion(taskDef, { reply, tokens: counter.tokens, ms, toolCalls, executionError }, { sandbox, sourceContents, sourceItems, dataDir: agent.dataDir || path.join(sandbox, ".ppx"), globalDataDir: agent.globalDataDir || path.join(sandbox, ".ppx-global") });
   } catch (e) {
     verdict = { pass: false, detail: `判分异常: ${e.message}` };
   }
@@ -321,15 +480,18 @@ export async function runOne(taskDef, { quiet = false, budgetMs = TASK_BUDGET_MS
   const triage = verdict.pass
     ? null
     : triageFailure({ reply, toolCalls, ms, budgetMs, detail: verdict.detail });
-  agent.shutdown();
+  await agent.shutdown();
   fs.rmSync(sandbox, { recursive: true, force: true });
   if (!quiet) {
     console.log(`${verdict.pass ? "✓" : "✗"} ${taskDef.id} (${Math.round(ms / 100) / 10}s, ${counter.tokens} tok)${verdict.pass ? "" : " ← " + verdict.detail}`);
     if (!verdict.pass && triage) console.log(`   归因: ${triage.cause} (${triage.confidence}) → ${triage.action}`);
   }
+  const pending = Math.max(0, counter.calls - counter.usageKnownCalls - counter.usageUnknownCalls);
+  const accounting = { ...counter, usageUnknownCalls: counter.usageUnknownCalls + pending, costUnknownCalls: counter.costUnknownCalls + pending };
+  if (pending) { accounting.tokens = null; accounting.costUsd = null; }
   return {
     id: taskDef.id, category: taskDef.category, pass: !!verdict.pass, detail: verdict.detail,
-    reply, tokens: counter.tokens, ms, toolCalls, score, triage,
+    reply, ...accounting, ms, toolCalls, score, triage,
   };
 }
 
@@ -339,7 +501,7 @@ export async function runAll(list, opts = {}) {
     try {
       results.push(await runOne(t, opts));
     } catch (e) {
-      results.push({ id: t.id, category: t.category, pass: false, detail: `运行器异常: ${e.message}`, tokens: 0, ms: 0 });
+      results.push({ id: t.id, category: t.category, pass: false, detail: `运行器异常: ${e.message}`, tokens: null, costUsd: null, ms: 0 });
       if (!opts.quiet) console.log(`✗ ${t.id} (运行器异常: ${e.message})`);
     }
   }
@@ -348,17 +510,22 @@ export async function runAll(list, opts = {}) {
 
 // 多数投票跑法: 同一任务跑 N 次取多数 (吸收计数类任务的单次方差)
 export async function runWithMajority(taskDef, { runs = 3, ...opts } = {}) {
+  if (!Number.isSafeInteger(runs) || runs < 1) throw new RangeError("runs must be a positive integer");
   const attempts = [];
   for (let i = 0; i < runs; i++) attempts.push(await runOne(taskDef, opts));
   const verdict = majorityVerdict(attempts.map((a) => a.pass));
-  const first = attempts[0];
-  return { ...first, pass: verdict.pass, vote: verdict, attempts: attempts.map((a) => ({ pass: a.pass, ms: a.ms })) };
+  const selectedAttempt = Math.max(0, attempts.findIndex((a) => a.pass === verdict.pass));
+  const sum = (key) => attempts.reduce((s, a) => s + (Number(a[key]) || 0), 0);
+  const completeSum = (key) => attempts.every((a) => typeof a[key] === "number" && Number.isFinite(a[key])) ? sum(key) : null;
+  return { ...attempts[selectedAttempt], pass: verdict.pass, selectedAttempt, vote: verdict, attempts,
+    tokens: completeSum("tokens"), knownTokens: sum("knownTokens"), costUsd: completeSum("costUsd"), knownCostUsd: sum("knownCostUsd"),
+    calls: sum("calls"), usageKnownCalls: sum("usageKnownCalls"), usageUnknownCalls: sum("usageUnknownCalls"), costUnknownCalls: sum("costUnknownCalls"), ms: sum("ms") };
 }
 
 /* ==================== CLI (仅在作为主模块运行时执行) ==================== */
 
-async function main() {
-  const args = process.argv.slice(2);
+export function exitCodeForResults(results) { return results.length > 0 && results.every((r) => r.pass === true) ? 0 : 1; }
+export async function main(args = process.argv.slice(2), opts = {}) {
   const getArg = (k) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : null; };
   const hasFlag = (k) => args.includes(k);
 
@@ -373,7 +540,7 @@ async function main() {
 
   console.log(`→ 任务级评测: ${tasks.length} 个任务 (真 LLM, 沙箱隔离)\n`);
   const t0 = Date.now();
-  const results = await runAll(tasks);
+  const results = await runAll(tasks, opts);
   const s = summarize(results);
   console.log(`\n===== 汇总 (${Math.round((Date.now() - t0) / 1000)}s) =====`);
   console.log(`成功率: ${s.pass}/${s.total} = ${(s.passRate * 100).toFixed(1)}%`);
@@ -433,10 +600,10 @@ async function main() {
     }
     console.log(`→ ${failures.length} 个失败已写入失败案例库 (data/failure-episodes), 供学习循环反思`);
   }
-  process.exit(0);
+  return exitCodeForResults(results);
 }
 
 // 仅当被直接执行时才跑 CLI —— 测试会 import 本模块取纯函数, 不能顺手把 20 个真任务跑掉。
 const invokedDirectly = process.argv[1]
   && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
-if (invokedDirectly) main();
+if (invokedDirectly) main().then((code) => { process.exitCode = code; }).catch((e) => { console.error(`评测运行器失败: ${e.message}`); process.exitCode = 1; });

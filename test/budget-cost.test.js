@@ -51,9 +51,9 @@ test("pricing: 前缀最长命中, glm-4-flash 不误入 glm-4 收费档", () =>
   assert.equal(resolvePrice("deepseek-chat").completion, 1.1);
 });
 
-test("pricing: 未知模型返回 null, estimateCost 记 0 不编数字", () => {
+test("pricing: 未知模型返回 null, estimateCost 保持未知", () => {
   assert.equal(resolvePrice("totally-unknown-model-xyz"), null);
-  assert.equal(estimateCost("totally-unknown-model-xyz", { prompt_tokens: 999999, completion_tokens: 999999 }), 0);
+  assert.equal(estimateCost("totally-unknown-model-xyz", { prompt_tokens: 999999, completion_tokens: 999999 }), null);
 });
 
 test("pricing: override 精确命中 > 前缀命中 > 内置表", () => {

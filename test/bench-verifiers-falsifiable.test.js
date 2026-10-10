@@ -159,16 +159,18 @@ test("反向自检 D: 把判分器换回「修复前的旧写法」, 门禁必�
 // ---- 公平的另一半: 收紧判分器的同时, 正确产物的合理变体必须仍然判正 ----
 // (第四次偏袒的教训: 修「太松」很容易顺手把正确答案一起打死。每一处收紧都配正例。)
 const ACCEPTS = [
-  ["version-report", "带解释的正确版本号", () => "package.json 的 version 字段是 7.7.7"],
-  ["version-report", "版本号被中文引号包住", () => "「7.7.7」"],
-  ["count-files", "带单位与完整句子", () => "items 目录下共有 6 个 .txt 文件"],
-  ["count-files", "数字紧跟中文 (无空格)", () => "6个"],
-  ["sum-numbers", "写出算式再给结论", () => "17 + 25 + 8 = 50, 合计 50。"],
-  ["extract-field", "句子里含独立数字 2", () => "有 2 个用户的 email 以 @bench.dev 结尾"],
+  // v3 tasks explicitly ask for one value. Harmless surrounding whitespace is
+  // accepted; semantic free-form responses require a separate model reviewer.
+  ["version-report", "完整版本号", () => "7.7.7"],
+  ["version-report", "完整版本号带尾换行", () => "7.7.7\n"],
+  ["count-files", "数字按显式输出契约", () => "6"],
+  ["count-files", "数字带空白", () => " 6\n"],
+  ["sum-numbers", "结果数字", () => "50"],
+  ["extract-field", "结果数字带换行", () => "2\n"],
   // find-symbol 的既定意图: 两个文件名都提 = 没做出指认 (test/taskbench.test.js 早已钉住),
   // 所以「正确 + 顺带解释 unrelated.js」这种写法判负是边界而不是偏袒, 这里用不点名的解释。
-  ["find-symbol", "只指认正确文件并解释", () => "定义在 pricing.js (另一个文件里只有一个常量)"],
-  ["read-secret", "带键名的完整值", () => "token = sk-bench-42"],
+  ["find-symbol", "完整文件名", () => "pricing.js"],
+  ["read-secret", "完整值带尾换行", () => "sk-bench-42\n"],
   ["create-file", "内容带尾换行与额外一行 (边界: 只要求含指定内容)", ({ sandbox }) => {
     W(sandbox, "notes/todo.txt", "买牛奶\n\n(备注: 顺路)\n"); return "已创建";
   }],
@@ -191,8 +193,8 @@ const ACCEPTS = [
   ["src-listing", "带目录前缀的一行一个", ({ sandbox }) => {
     W(sandbox, "lib-list.txt", "lib/a.js\nlib/b.js\n"); return "已写入";
   }],
-  ["analyze-and-report", "不带「共」字的等价表述", ({ sandbox }) => {
-    W(sandbox, "report.txt", "4 行\n"); return "已写入";
+  ["analyze-and-report", "按题面 共 N 行 格式允许空白", ({ sandbox }) => {
+    W(sandbox, "report.txt", "共4行\n"); return "已写入";
   }],
   ["fix-syntax", "改成字符串拼接 (逻辑不变, 修法语写法不同)", ({ sandbox }) => {
     W(sandbox, "broken.js", "export function greet(name) {\n  return \"hi \" + name;\n}\n"); return "已修复";

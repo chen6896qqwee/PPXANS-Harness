@@ -10,6 +10,7 @@
 import { TOOL_ERROR_PREFIX } from "./errors.js";
 import { warn } from "../utils/logger.js";
 import { runPostChecks, buildVerifyFeedback, formatGateFailure } from "./postcondition.js";
+import { toolResultStatus, toolResultContent, toolOutcome } from "./tool-result.js";
 
 // ---- 阈值默认值 (config.agent.* 可覆盖) ----
 export const DEFAULT_MAX_TOOL_ROUNDS = 8;
@@ -67,7 +68,7 @@ export function trimToolResult(r, budget = DEFAULT_TOOL_RESULT_BUDGET) {
 
 // 工具结果 → OpenAI 消息 content: 图片 data URL 转 image_url 块 (多模态), 否则文本裁剪
 export function toToolContent(result, budget = DEFAULT_TOOL_RESULT_BUDGET) {
-  const s = String(result || "");
+  const s = String(toolResultContent(result) || "");
   if (/^data:image\/[a-z0-9.+-]+;base64,/i.test(s)) {
     return [{ type: "image_url", image_url: { url: s } }];
   }
@@ -80,7 +81,7 @@ export function toToolContent(result, budget = DEFAULT_TOOL_RESULT_BUDGET) {
 // 边界 (最小版本): 不搞退避/熔断/自适应预算 — 留到有真实超时数据后 (第五刀) 再设计。
 // 返回: { result, elapsedMs, timedOut, retried }
 export function isTimeoutResult(r) {
-  return typeof r === "string" && r.startsWith(TOOL_ERROR_PREFIX) && r.includes("超时");
+  return toolResultStatus(r).timedOut;
 }
 
 export async function callWithTimeoutRetry({
@@ -241,6 +242,8 @@ export async function runToolLoop({
   //   不影响任何既有语义: 不传即零开销。
   onAssistantMsg = null,
   isIdempotentTool = () => true,
+  isReadOnlyTool = () => false,
+  canonicalizeToolArgs = (_name, args) => args,
   toolTimeoutOf = () => null,
   runTool,
   shrinkMessages,
@@ -248,15 +251,44 @@ export async function runToolLoop({
   // 回合级后置校验的注入点 (2026-10-05): { rootDir, capabilityOf, exec }。
   // 不传 = 不启用闸门 (纯逻辑测试/无工作区的调用方不受影响)。
   postCondition = null,
+  // Turn-local state survives provider handoff; never use it across user turns.
+  loopState = null,
 }) {
-  const policy = new ToolLoopPolicy(config.agent || config);
-  let messages = [...seedMessages];
+  const state = loopState || {};
+  const policy = state.policy ||= new ToolLoopPolicy(config.agent || config);
+  let messages = state.messages ||= [...seedMessages];
   // 本回合同的工具调用轨迹 ({name, args, result}) —— 后置校验据此判断"本轮到底动过什么"
-  const turnCalls = [];
+  const turnCalls = state.turnCalls ||= [];
   const userMsg = [...seedMessages].reverse().find((m) => m && m.role === "user")?.content || "";
   const ev = (type, payload) => { if (onEvent) { try { onEvent(type, payload); } catch {} } };
+  const callKey = (name, args) => {
+    const stable = (v) => Array.isArray(v) ? v.map(stable)
+      : v && typeof v === "object" ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, stable(v[k])])) : v;
+    return `${name}:${JSON.stringify(stable(canonicalizeToolArgs(name, args)))}`;
+  };
+  // Each actual dispatch supplies one handoff receipt, including failed/unknown
+  // outcomes: a timeout or nonzero exit does not prove no side effect committed.
+  // Consume it once so
+  // the model can still request another deliberate identical operation after
+  // seeing that the first replay did not commit. Reused receipts are not commits.
+  const protectedReceipts = new Map();
+  if (state.resuming) {
+    for (const c of turnCalls) {
+      const status = c.status || toolResultStatus(c.result);
+      if (c.receiptReused || status.dispatched === false || isReadOnlyTool(c.name) || isIdempotentTool(c.name)) continue;
+      // Original proposals and authoritative executed args are aliases for one
+      // dispatch, not two receipts. Consuming either alias consumes both.
+      const retained = { receipt: toolOutcome(c.result, status), consumed: false };
+      const keys = new Set([callKey(c.name, c.args), callKey(c.name, c.proposalArgs ?? c.args)]);
+      for (const key of keys) {
+        if (!protectedReceipts.has(key)) protectedReceipts.set(key, []);
+        protectedReceipts.get(key).push(retained);
+      }
+    }
+  }
 
-  for (let round = 0; round < policy.maxRounds; round++) {
+  for (let round = state.nextRound || 0; round < policy.maxRounds; round++) {
+    state.nextRound = round;
     if (isInterrupted()) return "[皮皮虾] 任务已被中断 (operator cancelled).";
     if (onStep) { try { onStep({ type: "step", round, maxRounds: policy.maxRounds, ts: Date.now() }); } catch {} }
 
@@ -274,13 +306,19 @@ export async function runToolLoop({
         ev("tool/overflow", { round, shrink: policy.overflowShrinks, max: policy.overflowShrinkMax });
         warn(`上下文溢出, 降档裁剪后重试 (${policy.overflowShrinks}/${policy.overflowShrinkMax}): ${String(e?.message || e).slice(0, 120)}`);
         messages = shrinkMessages(messages, cap);
+        state.messages = messages;
+        state.nextRound = round + 1;
         continue;
       }
+      // Only model-request failures may trigger provider handoff. An uncertain
+      // tool/verification exception must not be retried as a fresh task.
+      if (e && typeof e === "object") e.ppxModelRequestFailure = true;
       throw e;
     }
 
     const msg = resp.message;
     messages.push(msg);
+    state.nextRound = round + 1;
     if (onAssistantMsg) { try { onAssistantMsg({ round, content: msg.content || "", toolCalls: msg.tool_calls || [] }); } catch { /* 采集异常不阻断主链 */ } }
 
     const toolCalls = msg.tool_calls;
@@ -344,38 +382,59 @@ export async function runToolLoop({
       }
     }
     // v1.6.0 第四刀语义保留: 超时检测 + 幂等重试一次 (tool/timeout 事件采集 P50/P95/P99 数据基础)
-    const execOne = ({ tc, args }) => callWithTimeoutRetry({
-      name: tc.function.name,
-      args,
-      runTool,
-      isIdempotent: isIdempotentTool(tc.function.name),
-      budgetMs: toolTimeoutOf(tc.function.name),
-      onEvent,
-    }).then((r) => ({ tc, ...r }));
+    const execOne = ({ tc, args }) => {
+      const key = callKey(tc.function.name, args);
+      const retained = protectedReceipts.get(key)?.find((entry) => !entry.consumed);
+      if (retained) {
+        retained.consumed = true;
+        ev("tool/replay_prevented", { tool: tc.function.name, reason: "one previous non-idempotent dispatch receipt consumed during provider handoff" });
+        return Promise.resolve({ tc, result: retained.receipt, receiptReused: true, elapsedMs: 0, timedOut: false, retried: false });
+      }
+      return callWithTimeoutRetry({
+        name: tc.function.name,
+        args,
+        runTool,
+        isIdempotent: isIdempotentTool(tc.function.name),
+        budgetMs: toolTimeoutOf(tc.function.name),
+        onEvent,
+      }).then((r) => ({ tc, ...r }));
+    };
     const errors = [];
-    const collect = (tc, result) => {
+    const collect = (tc, result, receiptReused = false) => {
       // 2026-10-10 修复 (P1): 原用 `_id` 传工具调用 id —— 这是非标准字段, 严格 OpenAI 兼容
       //   后端在第二轮会因"tool 消息缺 tool_call_id / 无法与 assistant tool_calls.id 配对"回 400。
       //   现携带标准 `tool_call_id`; `_id` 保留供内部追踪 (不发送给后端的场景仍可用)。
+      let contentForModel = toToolContent(result, policy.resultBudget);
+      if (receiptReused) {
+        const notice = toolResultStatus(result).ok
+          ? "[回执复用] 这是本轮先前调用的回执; 本次未再次执行该非幂等操作。"
+          : "[回执复用] 先前调用返回失败或结果未知, 不能据此断定未提交; 本次未再次执行该非幂等操作。";
+        contentForModel = Array.isArray(contentForModel)
+          ? [...contentForModel, { type: "text", text: notice }]
+          : contentForModel + "\n" + notice;
+      }
       messages.push({
         role: "tool",
         tool_call_id: tc.id,
         _id: tc.id,
-        content: toToolContent(result, policy.resultBudget),
+        content: contentForModel,
       });
-      if (result.startsWith(TOOL_ERROR_PREFIX)) errors.push(result);
+      const status = toolResultStatus(result);
+      const content = toolResultContent(result);
+      if (!status.ok) errors.push(String(content));
       let a = {};
       try { a = JSON.parse(tc.function?.arguments || "{}"); } catch {}
-      turnCalls.push({ name: tc.function?.name || "", args: a, result });
+      turnCalls.push({ name: tc.function?.name || "", args: status.executedArgs ?? a,
+        proposalArgs: a, result: content, status, receiptReused });
     };
     if (policy.parallelToolCalls) {
       const settled = await Promise.all(callable.map(execOne));
-      for (const { tc, result } of settled) collect(tc, result);
+      for (const { tc, result, receiptReused } of settled) collect(tc, result, receiptReused);
     } else {
       // 串行回退路径 (旧行为): 逐个执行 + 逐个回传
       for (const item of callable) {
-        const { result } = await execOne(item);
-        collect(item.tc, result);
+        const { result, receiptReused } = await execOne(item);
+        collect(item.tc, result, receiptReused);
       }
     }
     if (policy.shouldRetryErrors(errors)) {

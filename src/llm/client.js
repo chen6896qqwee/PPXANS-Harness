@@ -23,6 +23,7 @@ export class LLMClient {
     this.context_window = Number(provider.context_window) || Number(provider.models?.context_window) || 8192;
     this.timeoutMs = provider.timeout_ms || 120000;
     this.retryMax = provider.retry_max ?? 3; // 单次调用内瞬态错误重试次数 (429/5xx/timeout)
+    this.streamUsage = provider.stream_usage !== false;
   }
 
   // 原生 chat (无工具)
@@ -34,7 +35,7 @@ export class LLMClient {
     // 本地推理模型兜底: thinking 吃满 token 时 content 为空, 用 reasoning_content 降级, 避免误判"断线/失败"并写入污染记忆
     if (!content && m1?.reasoning_content) content = "[思考] " + m1.reasoning_content;
     if (!content) throw new Error("LLM 返回空内容");
-    return { content, usage: data?.usage };
+    return { content, usage: data?.usage, model: data?.model || this.model };
   }
 
   // API chat (支持工具调用), 返回完整 message (含 tool_calls)
@@ -71,6 +72,7 @@ export class LLMClient {
         tool_calls: toolCalls,
       },
       usage: data?.usage,
+      model: data?.model || this.model,
     };
   }
 
@@ -135,20 +137,27 @@ export class LLMClient {
 
   // 流式 chat: 逐块回调 (SSE), 返回累积文本
   // onDelta(content) 每次增量, onDone(full) 结束
-  async streamChat(messages, { temperature = 0.7, maxTokens = 4096, onDelta, signal } = {}) {
+  async streamChat(messages, { temperature = 0.7, maxTokens = 4096, onDelta, onUsage, signal } = {}) {
     if (!this.apiKey) throw new Error(`[皮皮虾] LLM 缺少 API key`);
     const url = `${this.baseUrl}/chat/completions`;
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), this.timeoutMs);
     const extSig = signal || null;
     // { once: true } (2026-09-18 修复): 复用同一 signal 的多次流式对话不再累积监听器
-    if (extSig) extSig.addEventListener("abort", () => ctrl.abort(), { once: true });
+    const abort = () => ctrl.abort();
+    if (extSig) {
+      if (extSig.aborted) abort();
+      else extSig.addEventListener("abort", abort, { once: true });
+    }
     let full = "";
+    let usage = null;
+    let returnedModel = this.model;
     try {
       const resp = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${this.apiKey}` },
-        body: JSON.stringify({ model: this.model, messages, temperature, max_tokens: maxTokens, stream: true }),
+        body: JSON.stringify({ model: this.model, messages, temperature, max_tokens: maxTokens, stream: true,
+          ...(this.streamUsage ? { stream_options: { include_usage: true } } : {}) }),
         signal: ctrl.signal,
       });
       if (!resp.ok) {
@@ -175,6 +184,8 @@ export class LLMClient {
           if (data === "[DONE]") { streamDone = true; break; }
           try {
             const j = JSON.parse(data);
+            if (j.usage && typeof j.usage === "object") usage = j.usage;
+            if (j.model) returnedModel = j.model;
             const delta = j.choices?.[0]?.delta?.content;
             if (delta) { full += delta; onDelta && onDelta(delta); }
           } catch {}
@@ -183,6 +194,10 @@ export class LLMClient {
       return full;
     } finally {
       clearTimeout(timer);
+      extSig?.removeEventListener("abort", abort);
+      // Keep the string return contract. A missing terminal usage is unknown,
+      // including aborted streams; report it explicitly instead of zero tokens.
+      onUsage?.(usage, { model: returnedModel, providerId: this.providerId });
     }
   }
 }

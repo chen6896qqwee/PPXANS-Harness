@@ -40,13 +40,14 @@ test("HTTP 通道: 超大请求体返回 413 (不挂死)", { timeout: 20000 }, a
   try {
     const res = await fetch(`http://127.0.0.1:${port}/message`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: "Bearer tok" },
+      headers: { "Content-Type": "application/json", Authorization: "Bearer tok", Connection: "close" },
       body: JSON.stringify({ text: "x".repeat(2 * 1024 * 1024) }),
     });
     assert.equal(res.status, 413, "超过 1MB 应回 413 且响应可达");
+    await res.arrayBuffer();
   } finally {
     await ch.disconnect();
-    agent.shutdown();
+    await agent.shutdown();
   }
 });
 
@@ -61,13 +62,14 @@ test("MCP HTTP: 超大请求体返回 400 (不挂死)", { timeout: 20000 }, asyn
   try {
     const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", Connection: "close" },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping", pad: "x".repeat(2 * 1024 * 1024) }),
     });
     assert.equal(res.status, 400, "超过 1MB 应回 400 且响应可达");
+    await res.arrayBuffer();
   } finally {
     await new Promise((r) => server.close(r));
-    agent.shutdown();
+    await agent.shutdown();
   }
 });
 
@@ -81,10 +83,11 @@ test("AML server: 超大请求体返回 413 (不挂死)", { timeout: 20000 }, as
   try {
     const res = await fetch(`http://127.0.0.1:${port}/v1/memories/add`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", Connection: "close" },
       body: JSON.stringify({ scope: "s", messages: [{ content: "x".repeat(2 * 1024 * 1024) }] }),
     });
     assert.equal(res.status, 413, "超过 1MB 应回 413 且响应可达");
+    await res.arrayBuffer();
   } finally {
     await new Promise((r) => server.close(r));
   }

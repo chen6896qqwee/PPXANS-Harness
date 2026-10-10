@@ -264,14 +264,14 @@ test("检索/文件/综合类判分不受 ESM 改动影响 (意图不变)", () =
     byId("find-symbol").setup(d);
     // find-symbol 靠回复文本判, 且 setup 不应被塞进 package.json (夹具本身无需 ESM)
     assert.equal(fs.existsSync(path.join(d, "package.json")), false);
-    assert.equal(judge("find-symbol", d, "定义在 pricing.js").pass, true);
+    assert.equal(judge("find-symbol", d, "pricing.js").pass, true);
     assert.equal(judge("find-symbol", d, "在 unrelated.js").pass, false);
   } finally { fs.rmSync(d, { recursive: true, force: true }); }
 
   const d2 = mk();
   try {
     byId("version-report").setup(d2);
-    assert.equal(judge("version-report", d2, "版本 7.7.7").pass, true);
+    assert.equal(judge("version-report", d2, "7.7.7").pass, true);
     assert.equal(judge("version-report", d2, "版本 1.2.3").pass, false);
   } finally { fs.rmSync(d2, { recursive: true, force: true }); }
 
@@ -296,7 +296,7 @@ test("检索/文件/综合类判分不受 ESM 改动影响 (意图不变)", () =
   const d5 = mk();
   try {
     byId("sum-numbers").setup(d5);
-    assert.equal(judge("sum-numbers", d5, "合计 50").pass, true);
+    assert.equal(judge("sum-numbers", d5, "50").pass, true);
     assert.equal(judge("sum-numbers", d5, "合计 49").pass, false);
   } finally { fs.rmSync(d5, { recursive: true, force: true }); }
 });

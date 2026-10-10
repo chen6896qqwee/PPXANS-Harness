@@ -9,6 +9,7 @@ import { scrubPII } from "../utils/pii.js";
 import { LocalShellProvider } from "../seam/shell.js";
 import { checkCommand, DENY_HINT } from "./command-guard.js";
 import { formatToolResultHeader, countLines } from "./seam.js";
+import { toolOutcome } from "../core/tool-result.js";
 import { jsSyntaxOutcome, jsExportSelfCheck, DEFAULT_SYNTAX_TIMEOUT_MS, JS_SELF_CHECK_EXT } from "../core/postcondition.js";
 // 来源分级渲染 (memory_search / 记忆检索路径): 让"工具抓来的正文"带隔离标签进模型上下文
 import { describeHits } from "../memory/provenance.js";
@@ -162,7 +163,7 @@ export function registerBuiltinTools(catalog, { rootDir, facts, memory }) {
       if (!fs.existsSync(p)) return JSON.stringify({ error: `文件不存在: ${args.path}` });
       const content = fs.readFileSync(p, "utf8");
       // v1.0.9: 输出 PII 脱敏 (与 run_command/code_act 一致, 文件可能含密钥/手机号)
-      return scrubPII(content).cleaned.slice(0, 20000);
+      return toolOutcome(scrubPII(content).cleaned.slice(0, 20000));
     },
   });
 
@@ -219,6 +220,7 @@ export function registerBuiltinTools(catalog, { rootDir, facts, memory }) {
     description: "向文件末尾追加内容 (不覆盖原文件)。文件不存在时等同创建。",
     parameters: {
       type: "object",
+      additionalProperties: false,
       properties: {
         path: { type: "string", description: "文件路径" },
         content: { type: "string", description: "要追加的内容 (追加在文件末尾)" },
@@ -383,8 +385,10 @@ export function registerBuiltinTools(catalog, { rootDir, facts, memory }) {
       // B1: 工具结果标准化 — 统一元数据头, 模型可判成败 (吸收 codex format_exec_output_for_model)
       const timedOut = !!(r && r.timedOut);
       const head = formatToolResultHeader({ ms, lineCount: timedOut ? 0 : countLines(r.stdout + " " + (r.stderr || "")), timedOut, timedOutMs: opts.command_timeout_ms || 30000, exitCode: r.code });
-      if (!r.ok && timedOut) return head + "\n[工具错误] run_command: 超时";
-      if (!r.ok) return head + "\n[工具错误] run_command: " + (r.stderr || r.stdout || "");
+      if (!r.ok) {
+        const content = head + "\n[工具错误] run_command: " + (timedOut ? "超时" : (r.stderr || r.stdout || ""));
+        return toolOutcome(content, { ok: false, timedOut, exitCode: r.code ?? null, error: content });
+      }
       const out = r.stdout + (r.stderr ? "\n[stderr] " + r.stderr : "");
       const cleaned = scrubPII(out).cleaned.slice(0, 20000) || "(无输出)";
       return head + "\n" + cleaned;
