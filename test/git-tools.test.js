@@ -53,7 +53,7 @@ test("git_diff: 显示改动内容, staged 过滤生效", async () => {
 });
 
 test("git_log: 结构化历史", async () => {
-  const { run, tool } = setup("lg");
+  const { run: _run, tool } = setup("lg");
   const log = JSON.parse(await tool("git_log").execute({ n: 5 }));
   assert.ok(Array.isArray(log.commits));
 });

@@ -7,7 +7,6 @@ import { fileURLToPath } from "node:url";
 import { PPXAgent } from "../src/agent/index.js";
 import { TOOL_ERROR_PREFIX } from "../src/tools/index.js";
 
-const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 function tmpRoot(n){ return fs.mkdtempSync(path.join(os.tmpdir(),`ppx-${n}-`)); }
 
 test("方法型Skill: 三个工具已注册", () => {

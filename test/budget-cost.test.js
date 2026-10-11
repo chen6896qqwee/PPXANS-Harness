@@ -14,7 +14,6 @@ import { fileURLToPath } from "node:url";
 import { PPXAgent } from "../src/agent/index.js";
 import { estimateCost, resolvePrice } from "../src/llm/pricing.js";
 
-const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), "ppx-budget-"));
 
 function writeConfig(root, cfg) {
@@ -98,7 +97,7 @@ function budgetSetup(root, budgetCfg) {
 test("budget: 达到 budget.usd 后 chat 拒绝继续调用模型", async () => {
   const root = tmp();
   // 每次调用 $0.00045, 上限 $0.0005 → 第 2 次调用后超限
-  const { agent, client, callsRef } = budgetSetup(root, { usd: 0.0005 });
+  const { agent, client: _client, callsRef } = budgetSetup(root, { usd: 0.0005 });
   try {
     const r1 = await agent.chat("hello budget");
     assert.equal(r1, "ok", "未超限前正常应答");
@@ -106,7 +105,7 @@ test("budget: 达到 budget.usd 后 chat 拒绝继续调用模型", async () => 
     assert.ok(agent.usageStats.cost > 0, "cost 应有金额");
     assert.ok(!agent._budgetExceeded, "未达限不置位");
 
-    const r2 = await agent.chat("hello again");
+    await agent.chat("hello again");
     assert.equal(callsRef.calls, 2); // 第二次仍放行 (放行后才判定超限)
     assert.ok(agent._budgetExceeded, "达限应置位");
 

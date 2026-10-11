@@ -1,7 +1,7 @@
 // test/command-guard.test.js - 命令守卫 (吸收 Hermes approval: 三层防线 + 反混淆 + 信号可读化)
 import test from "node:test";
 import assert from "node:assert";
-import { checkCommand, normalizeCommand, globToRegExp, HARD_BLOCK, isDeniedCommand, isAllowedCommand, DENY_HINT } from "../src/tools/command-guard.js";
+import { checkCommand, normalizeCommand, globToRegExp, isDeniedCommand, isAllowedCommand, DENY_HINT } from "../src/tools/command-guard.js";
 import { LocalShellProvider } from "../src/seam/shell.js";
 
 // ---- 反混淆规范化 ----

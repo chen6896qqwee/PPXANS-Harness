@@ -6,7 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { info, warn } from "../utils/logger.js";
-import { Context, PLUGIN_ACCESS } from "./context.js";
+import { PLUGIN_ACCESS } from "./context.js";
 
 export { Context } from "./context.js";
 

@@ -6,7 +6,6 @@ import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { PPXAgent } from "../src/agent/index.js";
 
-const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 function tmpRoot(n){ return fs.mkdtempSync(path.join(os.tmpdir(),`ppx-${n}-`)); }
 
 test("场景系统: 手动创建场景含人设/介绍/能力", () => {

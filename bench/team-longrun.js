@@ -61,7 +61,6 @@ function stubExecutor({ latencyMs = 5, jitterMs = 8 } = {}) {
 
 async function runTopology(topology, tasks) {
   const teamId = Object.keys(TEAMS).find((k) => TEAMS[k].topology === topology) || Object.keys(TEAMS)[0];
-  const team = TEAMS[teamId];
   const experts = teamExperts(teamId);
   const stub = stubExecutor();
   const members = experts.slice(0, 4).map((e, i) => ({

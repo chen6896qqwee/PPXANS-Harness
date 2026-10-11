@@ -6,7 +6,6 @@
 //     + node:vm 新上下文 (V8 自建 intrinsics, 无 require/process/fetch/fs, 纯计算)。
 //   - 上下文不接收任何宿主 realm 对象 (2026-10-04 复审封堵 Promise→constructor→process 跳跃),
 //     因此脚本层面拿不到环境变量与文件系统。仍非 OS 级强隔离边界: 不受信场景请配审批链。
-import path from "node:path";
 import { Worker } from "node:worker_threads";
 import { TOOL_ERROR_PREFIX } from "./seam.js";
 import { debug } from "../utils/logger.js";

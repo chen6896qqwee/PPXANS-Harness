@@ -2,7 +2,6 @@
 // 解析 LLM 输出的编辑块, 应用 (精确/去首尾空行/模糊匹配), 生成回灌提示。
 // 纯 Node、零依赖、ESM。
 
-import { strict as assert } from "node:assert";
 
 // ---- 解析: 容错处理围栏/冒号/反引号/多块 ----
 // 块格式:

@@ -124,7 +124,6 @@ function parseYaml(file) {
 
   const root = {};
   const stack = []; // { indent, obj, key }
-  let arrIndent = -1;
 
   for (const { indent, text } of lines) {
     const arrM = text.match(/^-\s+/);

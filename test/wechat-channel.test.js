@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert";
 import { WechatWebhookChannel } from "../src/channels/wechat.js";
-import { decryptMsg, verifySignature, generateSignature, encryptMsg } from "../src/channels/wechat-crypto.js";
+import { decryptMsg, generateSignature, encryptMsg } from "../src/channels/wechat-crypto.js";
 
 const KEY = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG";
 const CORP = "wx1234567890";

@@ -285,7 +285,7 @@ export class Scheduler {
 
   // 清理所有定时器 (进程关停时调用, 防 daily/repeating 任务把事件循环挂住不退出)
   shutdown() {
-    for (const [id, t] of this.timers) { try { clearTimeout(t); } catch {} }
+    for (const [_id, t] of this.timers) { try { clearTimeout(t); } catch {} }
     this.timers.clear();
   }
 }

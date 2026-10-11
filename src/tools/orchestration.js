@@ -9,9 +9,9 @@
 //
 // 全部工具都显式声明 capability —— 见 test/capability-guard.test.js 的不变量。
 
-import { getGovernor, governorOptsFromConfig } from "../orchestrator/governor.js";
-import { listTeams, teamCatalog, teamRiskProfile, TEAMS } from "../orchestrator/teams.js";
-import { listExperts, expertCatalog, EXPERTS, HIGH_RISK_DOMAINS } from "../orchestrator/experts.js";
+import { getGovernor } from "../orchestrator/governor.js";
+import { teamCatalog, teamRiskProfile, TEAMS } from "../orchestrator/teams.js";
+import { expertCatalog, EXPERTS, HIGH_RISK_DOMAINS } from "../orchestrator/experts.js";
 import { assessBoundary, CAPABILITY_BOUNDARIES } from "../ans/boundary.js";
 
 // 九维核心能力 → 本仓库的实际承载体 (用于 capability_matrix 的诚实自述)

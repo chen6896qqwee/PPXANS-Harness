@@ -30,7 +30,7 @@ for (const f of before) {
 
 const kept = [];
 let removed = 0;
-for (const [key, arr] of groups) {
+for (const [_key, arr] of groups) {
   if (arr.length === 1) { kept.push(arr[0]); continue; }
   // 保留 score+hits 最高; 其余合并进 winner (hits 累加, 时间取最新)
   const winner = [...arr].sort((a, b) => (b.score + b.hits) - (a.score + a.hits))[0];

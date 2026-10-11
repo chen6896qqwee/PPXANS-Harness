@@ -144,7 +144,7 @@ test("P2 exportAll: sqlite 与 JSON 后端同返回形状 { version, exportedAt,
 test("P3 切换 json→sqlite: 空 sqlite 首用时一次性导入 facts.json, 保留 id/status/版本链/TTL 窗口", { skip: SQL() }, () => {
   const dir = tmp("mig-j2s");
   const js = new FactStore(dir);
-  const keep = js.add("用户偏好深色主题", { importance: 12 });
+  js.add("用户偏好深色主题", { importance: 12 });
   const ttl = js.add("周报临时备忘", { ttlDays: 3, validTo: new Date(Date.now() + 86400000).toISOString() });
   const gone = js.add("将被遗忘的事实");
   js.forget(gone.id, { reason: "误记" });

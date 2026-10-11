@@ -7,7 +7,7 @@ import assert from "node:assert";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { verifySkill, requiredSections, groundedInTools } from "../src/skills/verify.js";
+import { verifySkill } from "../src/skills/verify.js";
 import { PPXAgent } from "../src/agent/index.js";
 
 const GOOD = "## 流程\n1. 调用 read_file 读文件\n2. 检查路径\n## 反合理化\n偷懒=拒绝\n## 验证\n输出文件内容";

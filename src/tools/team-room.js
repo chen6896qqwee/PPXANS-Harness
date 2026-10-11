@@ -17,11 +17,9 @@
 import path from "node:path";
 import fs from "node:fs";
 import { TeamRoom, INBOX_STATUS, SPEAKER } from "../orchestrator/room.js";
-import { getGovernor } from "../orchestrator/governor.js";
 import { resolveExpert, HIGH_RISK_DOMAINS } from "../orchestrator/experts.js";
 import { resolveTeam } from "../orchestrator/teams.js";
 import { roomKey } from "../orchestrator/session-key.js";
-import { ensureDir, readJson } from "../utils/store.js";
 import { debug } from "../utils/logger.js";
 
 const DEFAULT_DISPATCH_TIMEOUT_MS = 180000;

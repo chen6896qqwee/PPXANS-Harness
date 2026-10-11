@@ -5,7 +5,7 @@ import path from "node:path";
 import fs from "node:fs";
 import os from "node:os";
 import { PPXAgent } from "../src/agent/index.js";
-import { L0Recorder, SceneStore, PersonaStore } from "../src/memory/index.js";
+import { L0Recorder } from "../src/memory/index.js";
 
 // 每个测试用独立临时数据目录, 避免数据污染
 function tmpRoot(name) {

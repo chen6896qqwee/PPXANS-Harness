@@ -28,7 +28,6 @@ test("Reward: EWMA 成功推动权重上升, 失败拉低", () => {
   assert.ok(bad.weight < 0.4, "连续失败权重应<0.4, got "+bad.weight);
   // 成功 1 次后依然偏低但应略升
   record(agent, { tool: "run_command", ok: true });
-  const after = agent.bus ? 0 : 0; // 占位
   const again = summarize(agent).tools.find((t)=>t.name==="run_command");
   assert.ok(again.weight > bad.weight, "成功一次后权重应上升");
   agent.shutdown();

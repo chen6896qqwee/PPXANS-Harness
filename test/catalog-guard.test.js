@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert";
 import { ToolCatalog, consolidateDecisions } from "../src/tools/catalog.js";
-import { installGuard, installGuardOnCatalog } from "../src/ans/guard.js";
+import { installGuardOnCatalog } from "../src/ans/guard.js";
 
 function makeCatalog() {
   const catalog = new ToolCatalog();

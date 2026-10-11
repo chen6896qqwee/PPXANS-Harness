@@ -4,7 +4,6 @@ import assert from "node:assert";
 import path from "node:path";
 import os from "node:os";
 import fs from "node:fs";
-import { fileURLToPath } from "node:url";
 import { PPXAgent } from "../src/agent/index.js";
 
 function tmpRoot(n){ return fs.mkdtempSync(path.join(os.tmpdir(), `ppx-${n}-`)); }

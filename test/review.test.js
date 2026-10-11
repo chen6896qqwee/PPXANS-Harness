@@ -103,7 +103,7 @@ test("runReview: 全流程产出 P0/P1/P2 报告", () => {
     "}",
     "",
   ].join("\n"));
-  const { issues, graded, report } = runReview({ files: [f] });
+  const { issues: _issues, graded, report } = runReview({ files: [f] });
   assert.ok(graded.high.length >= 1, "P0 至少 1 条(密钥)");
   assert.ok(graded.medium.length >= 1, "P1 至少 1 条(空catch)");
   assert.ok(graded.low.length >= 1, "P2 至少 1 条(FIXME)");

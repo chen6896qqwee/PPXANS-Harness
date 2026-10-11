@@ -5,7 +5,7 @@
 import path from "node:path";
 import {
   parseEditBlocks, parseCodexPatch,
-  PATCH_FORMAT_HELP, MISSING_TARGET_HELP, patchTargetPreview,
+  MISSING_TARGET_HELP, patchTargetPreview,
   looksLikePath, resolvePatchTargets,
 } from "../edit/editblock.js";
 

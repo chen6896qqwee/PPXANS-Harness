@@ -21,7 +21,6 @@ import { logicalDay } from "../src/utils/store.js";
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SESS_URL = pathToFileURL(path.join(ROOT, "src", "memory", "session.js")).href;
 const STORE_URL = pathToFileURL(path.join(ROOT, "src", "utils", "store.js")).href;
-const DAY = 86400000;
 
 function tmp(name) { return fs.mkdtempSync(path.join(os.tmpdir(), `ppx-${name}-`)); }
 

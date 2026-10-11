@@ -4,7 +4,7 @@ import assert from "node:assert";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { parseFrontmatter, parseSections, SkillLoader } from "../src/skills/loader.js";
+import { parseSections, SkillLoader } from "../src/skills/loader.js";
 
 test("parseSections 解析 ## 章节", () => {
   const md = `# 标题\n\n## 流程\n1. 做 A\n2. 做 B\n\n## 反合理化\n- 借口\n\n## 验证\n- [ ] 证据\n`;

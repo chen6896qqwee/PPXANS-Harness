@@ -30,7 +30,6 @@ if (!fs.existsSync(IMAGE)) {
 const buf = fs.readFileSync(IMAGE);
 const dataUrl = `data:image/png;base64,${buf.toString("base64")}`;
 
-const client0 = null; // 占位: 候选链探活后确定 client
 
 (async () => {
   let client = null;

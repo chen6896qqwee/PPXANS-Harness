@@ -15,7 +15,6 @@ import { readBody } from "../src/utils/http.js";
 import { EventTracer } from "../src/core/trace.js";
 import { FactStore } from "../src/memory/fact-store.js";
 
-const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 function tmpRoot(n) { return fs.mkdtempSync(path.join(os.tmpdir(), `ppx-fix-${n}-`)); }
 
 // ---- 1. PostToolUse additionalContext 集成 (原为 const result 重新赋值 TypeError) ----

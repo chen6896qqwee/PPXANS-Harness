@@ -24,5 +24,4 @@ for (const r of results) {
   for (const w of r.warnings) console.log(`    [${w.id}] ${w.msg}`);
 }
 console.log(`\n=== Skill 检查: ${pass} 全过 / ${warn} 有告警 / ${fail} 不合格 ===`);
-const bad = strict ? pass + warn : pass + warn + fail;
 process.exit((strict ? warn : fail) > 0 ? 1 : 0);

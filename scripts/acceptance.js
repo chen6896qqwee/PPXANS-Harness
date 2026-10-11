@@ -156,7 +156,6 @@ async function functionalSuite() {
 // ============ 二、安全红队 ============
 async function securitySuite() {
   const agent = makeAgentOnRoot(root);
-  const sec = agent.config.security; // { allow_all:false, code_act:false }
 
   // 命令白名单: 高危命令拦截
   const dangerous = [

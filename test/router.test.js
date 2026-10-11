@@ -4,9 +4,7 @@ import { isUsableProvider, resolveLLM, resolveAllLLMs, orderByHealth, resolvePre
 
 const base = { id: "openai", base_url: "https://api.x.com/v1", api_key: "sk-real-123" };
 const local = { id: "lmstudio", base_url: "http://127.0.0.1:1234/v1", api_key: "lm-studio", model: "local-q8" };
-const baseCfg = { id: "dash", base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1", api_key: "sk-real", model: "qwen-turbo" };
 const placeholder = { id: "example-vendor", base_url: "https://llm.example.com/v1", api_key: "sk-real", model: "REPLACE_WITH_YOUR_ENDPOINT" };
-const envkey = { id: "deepseek", base_url: "https://api.deepseek.com/v1", api_key_env: "DEEPSEEK_API_KEY", model: "deepseek-chat" };
 
 test("router: 占位死配置判不可用", () => {
   assert.equal(isUsableProvider(placeholder), false, "REPLACE_WITH 占位被过滤");

@@ -25,7 +25,6 @@ import { PPXAgent } from "../../src/agent/index.js";
 // 2. 本项目自建 .tmp 目录 (scripts/.tmp) — 供将来想留在工作区内的脚本使用
 const LIB_DIR = path.dirname(fileURLToPath(import.meta.url)); // scripts/lib
 const SCRIPT_DIR = path.dirname(LIB_DIR);                       // scripts
-const PROJECT_ROOT = path.dirname(SCRIPT_DIR);                  // 项目根
 
 export const SAFE_TMP_ROOTS = [
   path.resolve(os.tmpdir()),

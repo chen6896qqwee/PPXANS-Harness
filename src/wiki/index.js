@@ -6,7 +6,7 @@
 // 零依赖, 复用 repomap 的扫描与符号索引 (defRecords 已含 file/line/sig)。
 import fs from "node:fs";
 import path from "node:path";
-import { scanRepo, extractSymbols, DEFAULT_IGNORE } from "../repomap/index.js";
+import { scanRepo, DEFAULT_IGNORE } from "../repomap/index.js";
 
 // 敏感文件名模式 (ZCode Wiki 同款语义): 命中即从 wiki 中排除, 不读不引
 export const SENSITIVE_PATTERNS = [

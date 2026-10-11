@@ -101,7 +101,7 @@ export async function runSupervisor({ legion, agents = [], task = "", judge = ""
     }
 
     // 分歧检测
-    const { consensus, divergent, clusters } = findDisagreement(results, { minConsensus });
+    const { consensus, divergent, clusters: _clusters } = findDisagreement(results, { minConsensus });
     const roundRec = { round: r + 1, results, consensus, divergent, feedback: [] };
 
     // 监督者评审: 有 LLM 且有多结果时, 让监督者决定是否接受或给反馈

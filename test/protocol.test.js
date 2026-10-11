@@ -96,7 +96,7 @@ test("ProtocolBus: submitUserTurn/interrupt 写入 SQ, close 可调用", () => {
   assert.ok(bus.sq && bus.eq);
   const id = bus.submitUserTurn("hello");
   assert.equal(bus.sq.nextIdle().id, id);
-  const iid = bus.interrupt();
+  bus.interrupt();
   assert.equal(bus.sq.nextIdle().type, OpType.INTERRUPT);
   assert.doesNotThrow(() => bus.close());
 });

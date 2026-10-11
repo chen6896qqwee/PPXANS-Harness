@@ -6,7 +6,6 @@ import os from "node:os";
 import fs from "node:fs";
 import { spawnSync } from "node:child_process";
 import { PPXAgent } from "../src/agent/index.js";
-import { FactStore } from "../src/memory/fact-store.js";
 
 function tmpRoot(n) { return fs.mkdtempSync(path.join(os.tmpdir(), `ppx-dd-${n}-`)); }
 

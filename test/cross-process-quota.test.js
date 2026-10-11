@@ -9,7 +9,7 @@ import assert from "node:assert";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { CrossProcessQuota, pidAlive } from "../src/orchestrator/quota-file.js";
 import { ConcurrencyGovernor, resetGovernor } from "../src/orchestrator/governor.js";
 

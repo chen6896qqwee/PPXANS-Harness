@@ -18,7 +18,6 @@ function check(results, name, ok, note = "") {
 export async function runDoctor({ net = false } = {}) {
   console.log("皮皮虾体检 (doctor)\n");
   const results = [];
-  const cfgFile = path.join(ROOT, "config", "ppx.json");
 
   // 1. Node 版本
   const major = Number(process.version.slice(1).split(".")[0]);

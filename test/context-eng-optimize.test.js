@@ -4,7 +4,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { PPXAgent } from "../src/agent/index.js";
-import { LLMClient } from "../src/llm/client.js";
 
 // v0.6.6 优化测试: _trimHistory 信息量感知裁剪 + _proxyChat 动态 token 预算
 // 直接调真实路径, 不注入 mock 绕过 (上一轮复审核实的约定)

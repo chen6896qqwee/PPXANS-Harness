@@ -4,7 +4,6 @@ import path from "node:path";
 import os from "node:os";
 import fs from "node:fs";
 import { PPXAgent } from "../src/agent/index.js";
-import { installGuard } from "../src/ans/guard.js";
 
 function tmp(n){ return fs.mkdtempSync(path.join(os.tmpdir(), `ppx-guard-${n}-`)); }
 

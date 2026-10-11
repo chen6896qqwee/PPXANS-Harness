@@ -69,7 +69,6 @@ test("deriveCompacted: compaction 追加 → 重投影为摘要", () => {
 test("eventsByDay: 结果一致, append 后自动重算", () => {
   const d = tmp();
   const s = new SessionStore(d);
-  const dayStr = "2026-08-15";
   const t = new Date(2026, 7, 15, 12, 0, 0).getTime(); // 本地 2026-08-15 中午
   s.append("k", EVENTS.USER, { content: "a" }, t);
   assert.equal(s.eventsByDay("2026-08-15").length, 1);

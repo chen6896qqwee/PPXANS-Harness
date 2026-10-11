@@ -8,7 +8,6 @@ import { fileURLToPath } from "node:url";
 import { PPXAgent } from "../src/agent/index.js";
 import { Scheduler } from "../src/tools/index.js";
 
-const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const NET = process.env.PPX_NET_TEST === "1";
 function tmpRoot(n){ return fs.mkdtempSync(path.join(os.tmpdir(), `ppx-${n}-`)); }
 

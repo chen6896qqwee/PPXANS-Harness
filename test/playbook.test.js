@@ -24,7 +24,7 @@ test("playbook: ADD 增量合并, 带 kind/evidence_ref", () => {
 
 test("playbook: UPDATE 改内容/计数, REMOVE 删除", () => {
   const pb = { base: "", bullets: [{ id: "b1", kind: "strategy", content: "旧内容", counters: { helpful: 0, harmful: 0 } }], version: 1 };
-  const { playbook, applied } = applyDelta(pb, [
+  const { playbook, applied: _applied } = applyDelta(pb, [
     { op: "UPDATE", id: "b1", content: "新内容", counters: { helpful: 1 } },
   ]);
   assert.equal(playbook.bullets[0].content, "新内容");
