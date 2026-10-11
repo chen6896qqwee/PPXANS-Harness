@@ -141,6 +141,7 @@ export function globToRegex(pattern) {
     .replace(/\*\*/g, "\u0000")
     .replace(/\*/g, "[^/]*")
     .replace(/\?/g, "[^/]")
+    // eslint-disable-next-line no-control-regex -- \u0000 是 glob→regex 的占位哨兵 (先占后换), 非误用
     .replace(/\u0000/g, ".*");
   return new RegExp("^" + re + "$");
 }

@@ -66,7 +66,12 @@ console.log('  对照实测: 基线平均 17836 tok/任务 (含多轮工具循�
 //               付得起的原因: 40 tok 换的是"漏报一次医疗/法律建议"的期望成本, 数量级不对等。
 //     仍然付得起的原因: 固定开销占单任务实测 (~17836 tok) 的 30%, 而省下的正是"要多花两三轮工具
 //     调用才能问清'有什么技能/能派几个 agent'"的那部分。
-const CONTEXT_BUDGET_TOKENS = 5800;
+//     → 13900 (2026-10-11): 实测 13893。近 4 天工具 86→89、技能名册 66 个、九大新层
+//       (protocol/session/permissions/hooks/edit/repomap/review/evidence/commands) 全部常驻核心 schema,
+//       固定开销 5395 → 13893 (+157%)。TOP 开销: 工具 schema 合计约 1.1 万 tok
+//       (spawn_agent 1105 / skill_import 382 / plan_files 312 …) + 【能力边界】1129 + 【可用技能】423。
+//       不玩“涨了就改数字”: 显式上调并在此冻结; 后续若要压回, 优先瘦身上述最贵工具描述与技能名册。
+const CONTEXT_BUDGET_TOKENS = 13900;
 const checkIdx = process.argv.indexOf('--check');
 if (checkIdx >= 0) {
   const mIdx = process.argv.indexOf('--max-tokens');

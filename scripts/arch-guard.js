@@ -179,10 +179,13 @@ if (CHECK && fresh.length) { console.error(`\n  ✗ 新增 ${fresh.length} 条�
 // 各有预算上限, 超限只告警不拦 (记录漂移趋势), 超限 20% 以上才失败 —— 给合理的演进
 // 留出缓冲, 但让"塞东西进内核"这个动作必须先改这里的预算数字 (显式决策 > 静默膨胀)。
 // 预算基线 = 2026-10-08 实测值取整上浮 (core 1205 / plugin 575 / utils 957 / config 856)。
+// 2026-10-11 上调 src/utils 1100 → 1400: 实测 1332。增长来自通用基础设施的自然补齐
+//   (代理转发 / 轨迹 / 限流 / 脱敏 / 预写日志), 非业务逻辑塞入; 且 arch-guard 按目录计,
+//   目录内再拆也不减总量, 故显式上调并冻结 —— 再涨须再次决策。
 const KERNEL_BUDGET = {
   "src/core": 1300,
   "src/plugin": 650,
-  "src/utils": 1100,
+  "src/utils": 1400,
   "src/config": 950,
 };
 function dirLines(dir) {

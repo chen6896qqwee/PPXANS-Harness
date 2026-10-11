@@ -38,7 +38,7 @@ export function groupChanges(diffTextOrFileList) {
   const map = new Map();
   for (const f of files) {
     const dir = f.includes("/") || f.includes("\\") ? f.replace(/[\\/][^\\/]+$/, "") : "(root)";
-    const ext = (f.match(/\.([a-zA-Z0-9]+)$/) || [, ""])[1].toLowerCase();
+    const ext = (f.match(/\.([a-zA-Z0-9]+)$/) || ["", ""])[1].toLowerCase();
     const key = `${dir}::${ext || "none"}`;
     if (!map.has(key)) map.set(key, { key, dir, ext, files: [], kind: inferKind(f) });
     map.get(key).files.push(f);

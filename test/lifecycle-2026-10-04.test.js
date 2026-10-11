@@ -54,7 +54,10 @@ test("L1 Legion.killAgent: 摘除登记并真的终止子进程", async () => {
   assert.equal(r.reply, "ok-chat");
   assert.equal(await L.killAgent("w1"), true);
   assert.deepEqual(L.list(), [], "回收后不再登记");
-  await new Promise((res) => setTimeout(res, 120));
+  // 轮询等子进程真的退出: 固定 120ms 在高并发 (全套件并行) 下不够, 曾导致 flaky ——
+  // Windows 回收进程偶发偏慢。改成每 20ms 查一次, 最多等 5s。
+  const t0 = Date.now();
+  while (procAlive(pid) && Date.now() - t0 < 5000) await new Promise((res) => setTimeout(res, 20));
   assert.equal(procAlive(pid), false, "子进程应真的退出");
   assert.equal(await L.killAgent("w1"), false, "重复回收幂等");
   await L.shutdownAll();
