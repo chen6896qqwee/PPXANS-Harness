@@ -21,15 +21,20 @@ const line = (label, s) => {
 
 console.log('=== 单次请求的上下文构成 (空会话, 无历史) ===\n');
 
+// 2026-10-11: 【工作目录】注入的是真实绝对路径, 测量值随 checkout 路径长度漂移
+//   (本地 13893 vs CI windows 13884, 差 9 tok)。闸门量的是"固定开销", 不是本机路径 ——
+//   测量前把 root 归一化成定长占位符, 保证任何机器/任何路径下数字一致。
+const norm = (s) => (root ? String(s || '').split(root).join('<ROOT>') : String(s || ''));
+
 // 1. 工具 schema (每次请求都要带)
 const tools = a.tools.toOpenAI();
 const toolJson = JSON.stringify(tools);
-const tTools = line(`工具 schema (${tools.length} 个)`, toolJson);
+const tTools = line(`工具 schema (${tools.length} 个)`, norm(toolJson));
 
 // 2. system prompt / 上下文注入
 let ctx = '';
 try { ctx = a._context('随便问个问题'); } catch (e) { ctx = '(调用失败: ' + e.message + ')'; }
-const tCtx = line('_context() 全部注入', ctx);
+const tCtx = line('_context() 全部注入', norm(ctx));
 
 // 3. 记忆/经验注入部分
 const parts = {};
