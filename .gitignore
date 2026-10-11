@@ -5,6 +5,10 @@ config/ppx.yml
 
 # 运行时数据 / 记忆 / 审计账本 (本地状态, 非源码)
 data/
+# 例外: skills/data/ 是产品技能 (data-profiling / decision-matrix / metric-analysis),
+#   曾被上面的 data/ 规则误吞导致干净 clone 少 3 个技能、README 数字闸门红 (2026-10-11)
+!skills/data/
+!skills/data/**
 *.log
 logs/
 
