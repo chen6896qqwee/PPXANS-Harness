@@ -1,6 +1,6 @@
 # 🦐 PPXANS-Harness
 
-<!-- readme-sync: {"tools":89,"skills":66,"core_schema":89,"ctx_tokens":13879,"mcp_tools":91,"tests":1637} -->
+<!-- readme-sync: {"tools":89,"skills":66,"core_schema":89,"ctx_tokens":13546,"mcp_tools":91,"tests":1637} -->
 
 **皮皮虾神经系（ANS）+ Harness 一体化智能体内核** —— 纯 Node.js、**零运行时依赖**的可审计自主智能体。
 

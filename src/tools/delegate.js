@@ -13,8 +13,8 @@
 //   - 账本 ledger: 全程记录审查/修复轮次, 熔断时未决发现交主 agent 裁定
 import path from "node:path";
 import { Legion } from "../orchestrator/legion.js";
-import { resolveExpert, listExperts, normalizePersona, registerUserExpert, resolveExpertWithUser, saveUserExperts } from "../orchestrator/experts.js";
-import { resolveTeam, teamExperts, teamRiskProfile, listTeams } from "../orchestrator/teams.js";
+import { resolveExpert, normalizePersona, registerUserExpert, resolveExpertWithUser, saveUserExperts } from "../orchestrator/experts.js";
+import { resolveTeam, teamExperts, teamRiskProfile } from "../orchestrator/teams.js";
 import { withTimeout } from "../utils/async.js";
 import { profileFromEngine, childSpawnEnv } from "../permissions/intersection.js";
 import { currentTrace } from "../core/trace.js";
@@ -507,7 +507,7 @@ export function registerDelegateTools(catalog, opts = {}) {
   catalog.register({
     name: "spawn_agent",
     capability: { readOnly: false, riskLevel: "medium", sideEffect: "system" },
-    description: "派生子 agent 处理子任务并等待结果。适合需要专门角色、并行、或隔离执行的任务 (如数据分析、代码审查、多角度论证)。子 agent 共享全局经验库。支持: 单个 task; 或 tasks 数组并行派发多个子 agent + perspectives 差异化视角; arbitrate=true 时主 agent 仲裁聚合各方结果; review=true 时走 SDD 审查循环: 实施者干活 -> 只读审查者挑问题 -> 修复 -> 复审, 达上限熔断停放交主 agent 裁定 (单任务直接审查; 多任务每个子任务独立一对实施+审查, 可配 arbitrate 聚合)。",
+    description: "派生子 agent 处理子任务并等待结果, 适合需要专门角色、并行或隔离执行的任务。子 agent 共享全局经验库。task 单任务 / tasks 数组并行多任务; perspectives 注入差异化视角; arbitrate=true 主 agent 仲裁聚合; review=true 走 SDD 审查循环 (实施→只读审查→修复→复审, 达上限熔断交主 agent 裁定)。",
     parameters: {
       type: "object",
       properties: {
@@ -520,9 +520,9 @@ export function registerDelegateTools(catalog, opts = {}) {
         review: { type: "boolean", description: "SDD 审查循环: 实施者 -> 只读审查者 -> 发现问题自动修复复审, 达上限熔断, 默认 false。单 task 与多 tasks 均支持" },
         fix_rounds: { type: "number", description: "审查循环最大修复轮数 (review=true 时生效, 默认 3, 上限 5)" },
         share_board: { type: "boolean", description: "子任务结论自动发布到军团共享记忆板 (board_query 可查), 仲裁前主 agent 自动读板。默认 true" },
-        expert: { type: "string", description: `固化专家角色 (单任务)。名册: ${listExperts()}。专家自带角色名+专属视角 (只读专家自动禁修改工具)` },
+        expert: { type: "string", description: "固化专家角色 (单任务)。用 expert_list 工具查全部专家 id; 专家自带角色名+专属视角 (只读专家自动禁修改工具)" },
         experts: { type: "array", items: { type: "string" }, description: "每任务一个专家 (与 tasks 一一对应, 优先于 expert)。如 [\"code\",\"design\",\"security\"] 三任务分派代码/设计/安全专家" },
-        team: { type: "string", description: `班组名 (整体接管分工, 按班组拓扑编排成员): ${listTeams()}` },
+        team: { type: "string", description: "班组名 (整体接管分工, 按班组拓扑编排成员), 用 team_list 工具查全部班组 id" },
         topology: { type: "string", description: "临时专家组拓扑 (与 experts 同用时生效): pipeline=前环产出喂后环 / parallel=各自产出再仲裁 / debate=正反两方 / review=实施+只读审查" },
       },
     },

@@ -284,7 +284,8 @@ export function archiveCorrupt(file) {
 export function readText(file, fallback = "") {
   try {
     if (!fs.existsSync(file)) return fallback;
-    return fs.readFileSync(file, "utf8");
+    // 剥 UTF-8 BOM (U+FEFF): Windows 编辑器常带 BOM, 若不剥会漏进 system prompt / JSON.parse 报错。
+    return fs.readFileSync(file, "utf8").replace(/^\uFEFF/, "");
   } catch {
     return fallback;
   }

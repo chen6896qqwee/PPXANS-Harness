@@ -110,7 +110,9 @@ const sized = tools.map((t) => ({
 for (const s of sized.slice(0, 10)) console.log('  ' + s.name.padEnd(24) + '≈' + String(s.tok).padStart(5) + ' tok  (描述 ' + s.descLen + ' 字)');
 
 console.log('\n=== _context() 分节拆解 ===');
-const blocks = ctx.split(/\n(?=【)/).map((b) => [b.slice(0, 24).replace(/\n/g, ' '), b]);
+// 按【区块头 与 顶层 markdown # 标题 切块: persona / 画像 无【前缀, 若只按【切会被并入
+//   【能力边界】块, 虚报后者 tok (2026-10-11 修正测量假象; 与闸门无关——闸门只认 total)。
+const blocks = ctx.split(/\n(?=【|# )/).map((b) => [b.slice(0, 24).replace(/\n/g, ' '), b]);
 for (const [head, body] of blocks.sort((x, y) => y[1].length - x[1].length).slice(0, 12)) {
   console.log('  ' + String(est(body)).padStart(6) + ' tok  ' + head);
 }
