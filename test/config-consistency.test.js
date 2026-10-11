@@ -44,6 +44,12 @@ const CONSUMED = {
   "user.name": "src/agent/index.js userName (persona 称呼)",
   // providers
   "providers": "src/plugin/builtin.js resolveAllLLMs + config/providers CRUD",
+  // llm (运行时模型/思考强度选择, 2026-10-11 Web UI 模型胶囊/思考强度滑杆)
+  "llm.provider": "src/llm/router.js explicitProvider 显式选定 provider + src/channels/http.js /api/llm 读写",
+  "llm.reasoning": "src/llm/router.js reasoningOpts → src/llm/client.js _thinkParams 按厂商家族注入思考参数 + /api/llm",
+  // network (2026-10-11 国内访问 GitHub 等被墙站点的代理)
+  "network.proxy": "src/utils/http-proxy.js configuredProxy 显式代理地址 (http://127.0.0.1:7890)",
+  "network.auto_proxy": "src/utils/http-proxy.js resolveProxy 未显式配置时自动探测本地常见代理端口",
   // memory (decay/importance/forget 由 src/memory/fact-store.js snake 兼容读取)
   "memory.decay_per_day": "src/memory/fact-store.js FactStore 衰减率",
   "memory.hit_bonus": "src/memory/fact-store.js 命中加分",

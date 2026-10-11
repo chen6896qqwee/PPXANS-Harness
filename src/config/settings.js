@@ -25,7 +25,11 @@ export const SETTINGS_FIELDS = {
   agent: ["name", "mode", "citation_rule", "system_extra", "values"],
   mcp: ["servers", "auto_connect"],
   tools: ["disabled"],
+  llm: ["provider", "reasoning"],
 };
+
+// 思考强度合法值 (与前端滑杆档位一致)
+export const REASONING_LEVELS = ["auto", "off", "low", "medium", "high", "max"];
 
 // MCP 服务器字段白名单 (防注入任意字段)
 export const MCP_SERVER_KEYS = ["command", "args", "env", "prefix", "url", "headers", "timeout", "name"];
@@ -57,6 +61,10 @@ function sanitizeSettings(cfg) {
     },
     tools: {
       disabled: Array.isArray(cfg.tools?.disabled) ? cfg.tools.disabled : [],
+    },
+    llm: {
+      provider: cfg.llm?.provider || "",
+      reasoning: REASONING_LEVELS.includes(cfg.llm?.reasoning) ? cfg.llm.reasoning : "auto",
     },
   };
   return out;
@@ -109,6 +117,7 @@ export function updateSettings(root, patch) {
     cfg.agent = { ...(cfg.agent || {}), ...pick(patch.agent, SETTINGS_FIELDS.agent) };
     cfg.mcp = { ...(cfg.mcp || {}), ...pick(patch.mcp, SETTINGS_FIELDS.mcp) };
     cfg.tools = { ...(cfg.tools || {}), ...pick(patch.tools, SETTINGS_FIELDS.tools) };
+    cfg.llm = { ...(cfg.llm || {}), ...pick(patch.llm, SETTINGS_FIELDS.llm) };
 
     // 校验
     const port = cfg.channels.http.port;
@@ -137,6 +146,13 @@ export function updateSettings(root, patch) {
     if (cfg.tools.disabled != null) {
       if (!Array.isArray(cfg.tools.disabled)) throw new Error("tools.disabled 必须是字符串数组");
       if (cfg.tools.disabled.some((t) => typeof t !== "string")) throw new Error("tools.disabled 必须是字符串数组");
+    }
+    // llm.provider / llm.reasoning: 白名单校验 (空 provider = 自动选择)
+    if (cfg.llm.provider != null && String(cfg.llm.provider) !== "") {
+      if (!/^[a-zA-Z][a-zA-Z0-9_-]{0,29}$/.test(String(cfg.llm.provider))) throw new Error("llm.provider 必须是合法 provider id");
+    }
+    if (cfg.llm.reasoning != null && !REASONING_LEVELS.includes(cfg.llm.reasoning)) {
+      throw new Error(`llm.reasoning 必须是 ${REASONING_LEVELS.join(" / ")}`);
     }
 
     writeConfigAtomic(root, cfg);

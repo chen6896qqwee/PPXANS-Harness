@@ -32,6 +32,10 @@
     lifeTimer: null,
     apprTimer: null,
     lastTokens: null,
+    pendingFiles: [],   // 已上传待发送的图片相对路径 (uploads/xx.png)
+    activeSpace: null, // 当前选中的空间名 (新会话自动归入)
+    wsSub: "",         // 工作区子目录 (相对路径; 空 = 整个工作区)
+    llm: null,         // /api/llm 状态快照 (模型/思考强度/语音能力)
   };
 
   var $ = function (id) { return document.getElementById(id); };
@@ -289,6 +293,12 @@
     S.session = "s_" + Date.now();
     $("sessTitle").textContent = "新会话";
     localStorage.setItem("ppx_session", S.session);
+    // 空间绑定: 从空间进入的新会话自动归属该空间, 同项目不再重复建散会话
+    if (S.activeSpace) {
+      var list = spaces();
+      var sp = list.find(function (x) { return x.name === S.activeSpace; });
+      if (sp) { sp.sessionKey = S.session; saveSpaces(list); }
+    }
     clearStream();
     $("hero").hidden = false;
     $("stream").hidden = true;
@@ -327,6 +337,170 @@
   }
 
   $("btnNew").onclick = newSession;
+
+  /* ================= 侧栏: 任务 (TaskBoard 只读视图) ================= */
+  function loadTasks() {
+    get("/api/tasks").then(function (j) {
+      var tasks = (j && j.tasks) || [];
+      var el = $("taskList");
+      $("taskCount").textContent = tasks.length ? String(tasks.length) : "";
+      if (!tasks.length) { el.innerHTML = '<div class="empty">暂无任务 · 发送 /task 创建</div>'; return; }
+      var ST = { todo: "待办", running: "进行", done: "完成", failed: "失败" };
+      el.innerHTML = "";
+      tasks.slice(0, 30).forEach(function (t) {
+        var b = document.createElement("button");
+        b.className = "sess task-" + (t.status || "todo");
+        b.innerHTML = ico("list", 13) + '<span class="t">' + esc(t.title || t.id) + '</span><span class="badge ts-' + esc(t.status || "todo") + '">' + esc(ST[t.status] || t.status || "") + "</span>";
+        b.title = (t.description || t.title || "") + (t.steps && t.steps.length ? " · 步骤 " + t.steps.filter(function (s) { return s.status === "done"; }).length + "/" + t.steps.length : "");
+        b.onclick = function () {
+          var lines = ["## 任务 · " + (t.title || t.id), "状态: **" + (ST[t.status] || t.status) + "**"];
+          if (t.description) lines.push(t.description);
+          (t.steps || []).forEach(function (s, i) { lines.push((s.status === "done" ? "- [x]" : "- [ ]") + " " + (s.title || ("步骤 " + (i + 1)))); });
+          if (t.result) lines.push("结果: " + t.result);
+          evAgent().innerHTML = renderMd(lines.join("\n"));
+          toBottom(true);
+        };
+        el.appendChild(b);
+      });
+    }).catch(function () {
+      $("taskList").innerHTML = '<div class="empty">任务面板不可用</div>';
+      $("taskCount").textContent = "";
+    });
+  }
+
+  /* ================= 侧栏: 空间 (按项目聚合会话, 防止重复开新会话) ================= */
+  // 空间 = { name, root(相对路径, 空 = 皮皮虾根目录), sessionKey(绑定的会话) }。
+  // 点空间: 工作区面板聚焦到该子目录 + 复用已绑定会话 (没有才建新) → 同一项目不散落重复会话。
+  function bootRoot() {
+    try { return (window.__PPX_BOOTSTRAP__ && window.__PPX_BOOTSTRAP__.root) || ""; } catch (e) { return ""; }
+  }
+  function rootName() {
+    var r = bootRoot();
+    return r ? r.split(/[\\/]/).filter(Boolean).pop() || "皮皮虾" : "皮皮虾";
+  }
+  // 兼容旧数据: 早期空间存的是绝对路径 → 落回相对路径 (相对皮皮虾根目录)
+  function relOfRoot(root) {
+    var r = String(root || "").trim().replace(/^[\\/]+|[\\/]+$/g, "");
+    if (!r) return "";
+    var base = bootRoot().replace(/[\\/]+$/, "");
+    if (/^[a-zA-Z]:[\\/]/.test(r) || r.startsWith("/")) {
+      if (base && r.toLowerCase().startsWith(base.toLowerCase() + "\\")) return r.slice(base.length + 1).replace(/\\/g, "/");
+      if (base && r.toLowerCase().startsWith(base.toLowerCase() + "/")) return r.slice(base.length + 1);
+      return r; // 工作区外的绝对路径: 后端越界拦截, 保留原样以显式失败
+    }
+    return r;
+  }
+  function spaces() {
+    try { return JSON.parse(localStorage.getItem("ppx_spaces") || "[]"); } catch (e) { return []; }
+  }
+  function saveSpaces(list) {
+    try { localStorage.setItem("ppx_spaces", JSON.stringify(list)); } catch (e) {}
+  }
+  function renderSpaces() {
+    var el = $("spaceList");
+    var list = spaces();
+    if (!list.length) {
+      var em = document.createElement("div");
+      em.className = "empty";
+      em.innerHTML = "暂无空间<br><button class=\"btn xs\" id=\"spaceEmptyAdd\">＋ 新建空间</button>";
+      el.innerHTML = ""; el.appendChild(em);
+      em.querySelector("#spaceEmptyAdd").onclick = function () { openDirModal("space"); };
+      return;
+    }
+    el.innerHTML = "";
+    list.forEach(function (sp, i) {
+      var rel = relOfRoot(sp.root);
+      var b = document.createElement("button");
+      b.className = "sess" + (S.activeSpace === sp.name ? " on" : "");
+      b.innerHTML = ico("space", 13) + '<span class="t">' + esc(sp.name) + '</span><span class="del">' + ico("trash", 13) + "</span>";
+      b.title = "目录: " + (rel ? rootName() + " / " + rel : rootName() + " (根目录)") + "\n点击进入该空间 (切工作区 + 复用会话)";
+      b.onclick = function (e) {
+        if (e.target.closest(".del")) {
+          if (!confirm("删除空间「" + sp.name + "」? (会话不会被删除)")) return;
+          list.splice(i, 1); saveSpaces(list);
+          if (S.activeSpace === sp.name) S.activeSpace = null;
+          renderSpaces();
+          return;
+        }
+        S.activeSpace = sp.name;
+        S.wsSub = rel;                 // 工作区面板聚焦到该空间目录
+        loadTree();
+        var bound = sp.sessionKey && S.sessions.find(function (s) { return s.key === sp.sessionKey; });
+        if (bound) switchSession(bound.key, bound.title || bound.name);
+        else { newSession(); }         // newSession 会把新会话绑回该空间
+        renderSpaces();
+      };
+      el.appendChild(b);
+    });
+  }
+
+  /* ---- 空间 / 目录选择弹层 (替代原生 prompt) ---- */
+  var dirPick = { mode: "space", rel: "" };
+  function openDirModal(mode, preset) {
+    dirPick.mode = mode;
+    dirPick.rel = String(preset || "");
+    $("dirTitle").textContent = mode === "space" ? "新建空间" : "选择工作区目录";
+    $("dirNameRow").hidden = mode !== "space";
+    $("dirOk").textContent = mode === "space" ? "创建" : "确定";
+    $("dirName").value = "";
+    $("dirMask").hidden = false;
+    $("dirModal").hidden = false;
+    loadDirModal();
+    if (mode === "space") setTimeout(function () { $("dirName").focus(); }, 30);
+  }
+  function closeDirModal() { $("dirMask").hidden = true; $("dirModal").hidden = true; }
+  function loadDirModal() {
+    var rel = dirPick.rel;
+    var parts = rel ? rel.split("/").filter(Boolean) : [];
+    var crumbs = ['<button data-p="">' + esc(rootName()) + "</button>"];
+    var acc = "";
+    parts.forEach(function (p) {
+      acc = acc ? acc + "/" + p : p;
+      crumbs.push('<i>/</i><button data-p="' + esc(acc) + '">' + esc(p) + "</button>");
+    });
+    $("dirCrumb").innerHTML = crumbs.join("");
+    $("dirCrumb").querySelectorAll("button").forEach(function (b) {
+      b.onclick = function () { dirPick.rel = b.getAttribute("data-p"); loadDirModal(); };
+    });
+    $("dirPickTxt").textContent = rel ? rootName() + " / " + rel : rootName() + " (根目录)";
+    $("dirList").innerHTML = '<div class="empty">加载中…</div>';
+    get("/api/workspace/tree?maxDepth=1" + (rel ? "&root=" + encodeURIComponent(rel) : "")).then(function (j) {
+      var t = j && j.tree;
+      var nodes = Array.isArray(t) ? t : ((t && t.children) || (j && j.items) || []);
+      var dirs = (nodes || []).filter(function (n) { return (n.type === "dir" || n.dir) && !String(n.name || "").startsWith("."); });
+      var el = $("dirList");
+      if (!dirs.length) { el.innerHTML = '<div class="empty">' + (rel ? "该目录下没有子文件夹" : "根目录下没有子文件夹") + "</div>"; return; }
+      el.innerHTML = "";
+      dirs.forEach(function (d) {
+        var b = document.createElement("button");
+        b.className = "mdir";
+        b.innerHTML = ico("folder", 13) + '<span class="nm">' + esc(d.name) + "</span>" + ico("chev-r", 12);
+        b.onclick = function () { dirPick.rel = d.path || (rel ? rel + "/" + d.name : d.name); loadDirModal(); };
+        el.appendChild(b);
+      });
+    }).catch(function (e) {
+      $("dirList").innerHTML = '<div class="empty">目录读取失败: ' + esc(e && e.message || "未知错误") + "</div>";
+    });
+  }
+  $("btnSpaceAdd").onclick = function () { openDirModal("space"); };
+  $("dirClose").onclick = closeDirModal;
+  $("dirCancel").onclick = closeDirModal;
+  $("dirMask").onclick = closeDirModal;
+  $("dirModal").addEventListener("click", function (e) { e.stopPropagation(); });
+  $("dirName").addEventListener("keydown", function (e) { if (e.key === "Enter") $("dirOk").click(); });
+  $("dirOk").onclick = function () {
+    if (dirPick.mode === "dir") { S.wsSub = dirPick.rel; closeDirModal(); loadTree(); return; }
+    var name = ($("dirName").value || "").trim() || (dirPick.rel ? dirPick.rel.split("/").pop() : "新空间");
+    var list = spaces();
+    if (list.find(function (x) { return x.name === name; })) { toast("同名空间已存在", true); return; }
+    list.unshift({ name: name, root: dirPick.rel, sessionKey: null });
+    saveSpaces(list);
+    closeDirModal();
+    renderSpaces();
+    toast("空间已创建: " + name + (dirPick.rel ? " (" + dirPick.rel + ")" : " (皮皮虾根目录)"));
+  };
+
+  /* ================= 侧栏: 会话 ================= */
   $("btnSessRefresh").onclick = loadSessions;
   $("btnSessSearch").onclick = function () {
     var q = prompt("搜索会话:");
@@ -369,7 +543,17 @@
 
   function evUser(text) {
     var d = addEv("ev-user");
-    d.innerHTML = '<div class="bubble">' + esc(text) + "</div>";
+    var html = '<div class="bubble">' + esc(text) + "</div>";
+    // 图片预览: 抽出消息里的图片路径 (uploads/xx.png 或任意 .png 路径) → 内联缩略图
+    var imgs = [];
+    String(text).replace(/[^\s"'`，。；;：:,，()（）]+\.(?:png|jpe?g|gif|webp|bmp)/gi, function (m) { imgs.push(m); return m; });
+    if (imgs.length) {
+      html += '<div class="msg-imgs">' + imgs.map(function (p) {
+        var src = encodeURI("/" + p.replace(/^\//, ""));
+        return '<a href="' + esc(src) + '" target="_blank" rel="noopener"><img loading="lazy" src="' + esc(src) + '" alt="图片"></a>';
+      }).join("") + "</div>";
+    }
+    d.innerHTML = html;
     toBottom(true);
     return d;
   }
@@ -505,14 +689,18 @@
     b.classList.toggle("stop", on);
     b.innerHTML = on ? ico("stop-dot", 16) : ico("send", 16);
     b.title = on ? "停止生成 (Esc)" : "发送 (Enter)";
-    b.disabled = on ? false : !$("inp").value.trim();
+    b.disabled = on ? false : (!$("inp").value.trim() && !S.pendingFiles.length);
     $("footNote").textContent = on ? "生成中… Esc 停止" : "Enter 发送 · Shift+Enter 换行 · / 唤起命令面板";
   }
 
   function send() {
     var t = $("inp").value.trim();
-    if (!t) return;
+    if (!t && !S.pendingFiles.length) return;
     if (S.streaming) { toast("生成中, 已请求停止"); stopGen(); return; }
+    // 已上传图片: 把相对路径拼进消息 (visionUserContent 会自动抽路径注入多模态)
+    if (S.pendingFiles.length) t = S.pendingFiles.join(" ") + (t ? "\n" + t : "");
+    S.pendingFiles = [];
+    renderAttChips();
     $("inp").value = "";
     autosize();
     hidePalette();
@@ -690,16 +878,23 @@
   }
 
   /* --- 文件树 --- */
+  // 2026-10-11 修复: 后端返回的 tree 是【根节点对象】{name,path,type,children},
+  //   旧代码把它当数组 forEach → TypeError 被 catch 吞成"工作区不可用"(实测截图复现)。
+  //   另支持子目录浏览 (?root=相对路径), 越界由后端 resolveInside 拦截。
   function loadTree() {
-    var url = "/api/workspace/tree" + (S.wsRoot ? "?path=" + encodeURIComponent(S.wsRoot) : "");
+    var url = "/api/workspace/tree?maxDepth=3" + (S.wsSub ? "&root=" + encodeURIComponent(S.wsSub) : "");
     get(url).then(function (j) {
-      var tree = (j && (j.tree || j.items)) || [];
-      S.wsRoot = j && j.root ? j.root : S.wsRoot;
-      $("wsRoot").textContent = S.wsRoot || "工作区";
+      var root = (j && j.root) || S.wsRoot || "";
+      S.wsRoot = root;
+      var t = j && j.tree;
+      var nodes = Array.isArray(t) ? t : ((t && t.children) || (j && j.items) || []);
+      $("wsRoot").textContent = (root ? root.split(/[\\/]/).pop() : "工作区") + (S.wsSub ? " / " + S.wsSub : "");
+      $("wsRoot").title = root + (S.wsSub ? " / " + S.wsSub : "");
       $("wsTree").innerHTML = "";
-      renderTree($("wsTree"), tree, 0);
-    }).catch(function () {
-      $("wsTree").innerHTML = '<div class="empty">工作区不可用</div>';
+      if (!nodes.length) { $("wsTree").innerHTML = '<div class="empty">目录为空</div>'; return; }
+      renderTree($("wsTree"), nodes, 0);
+    }).catch(function (e) {
+      $("wsTree").innerHTML = '<div class="empty">工作区不可用: ' + esc(e && e.message || "加载失败") + "</div>";
     });
   }
   function renderTree(container, nodes, depth) {
@@ -733,10 +928,8 @@
   }
   $("fvClose").onclick = function () { $("fileView").hidden = true; };
   $("btnWsRefresh").onclick = loadTree;
-  $("btnWsRoot").onclick = function () {
-    var p = prompt("工作区目录:", S.wsRoot || "");
-    if (p) { S.wsRoot = p; loadTree(); }
-  };
+  // 切换工作区子目录: 复用目录选择弹层 (替代原生 prompt)
+  $("btnWsRoot").onclick = function () { openDirModal("dir", S.wsSub || ""); };
 
   /* --- 目标看板 --- */
   function loadGoal() {
@@ -1153,11 +1346,275 @@
   }
   $("inp").addEventListener("input", function () {
     autosize();
-    $("btnSend").disabled = !S.streaming && !$("inp").value.trim();
+    updSendState();
     var v = $("inp").value;
     if (v.charAt(0) === "/" && !S.streaming) showPalette(v.slice(1).split(/\s/)[0]);
     else hidePalette();
   });
+  function updSendState() {
+    $("btnSend").disabled = !S.streaming && !$("inp").value.trim() && !S.pendingFiles.length;
+  }
+
+  /* ================= 附件上传 (任意文件; 图片额外走多模态注入) ================= */
+  var IMG_RE = /\.(png|jpe?g|gif|webp|bmp)$/i;
+  function fmtSize(n) {
+    if (!n && n !== 0) return "";
+    if (n < 1024) return n + "B";
+    if (n < 1024 * 1024) return (n / 1024).toFixed(0) + "KB";
+    return (n / 1024 / 1024).toFixed(1) + "MB";
+  }
+  function renderAttChips() {
+    var el = $("attChips");
+    el.innerHTML = S.pendingFiles.map(function (p, i) {
+      var name = p.split("/").pop();
+      var isImg = IMG_RE.test(name);
+      var head = isImg
+        ? '<img src="/' + esc(encodeURI(p)) + '" alt="">'
+        : '<span class="fico">' + ico("file", 13) + "</span>";
+      return '<span class="attchip' + (isImg ? "" : " file") + '">' + head +
+        '<i title="' + esc(p) + '">' + esc(name) + "</i>" +
+        '<button type="button" data-i="' + i + '" title="移除">' + ico("close", 11) + "</button></span>";
+    }).join("");
+    el.hidden = !S.pendingFiles.length;
+    el.querySelectorAll("button").forEach(function (b) {
+      b.onclick = function () { S.pendingFiles.splice(Number(b.getAttribute("data-i")), 1); renderAttChips(); updSendState(); };
+    });
+    updSendState();
+  }
+  function uploadFile(file) {
+    var isImg = IMG_RE.test(file.name) || (file.type || "").indexOf("image/") === 0;
+    var limit = isImg ? 8 * 1024 * 1024 : 20 * 1024 * 1024;
+    if (file.size > limit) { toast((isImg ? "图片" : "文件") + "超过 " + (isImg ? 8 : 20) + "MB", true); return; }
+    var reader = new FileReader();
+    reader.onload = function () {
+      var b64 = String(reader.result).split(",")[1] || "";
+      post("/api/upload", { name: file.name, data: b64 }).then(function (j) {
+        if (j && j.path) {
+          S.pendingFiles.push(j.path);
+          renderAttChips();
+          toast((j.kind === "image" ? "图片" : "文件") + "已就绪: " + j.path.split("/").pop() + " (" + fmtSize(j.bytes) + ")");
+        }
+      }).catch(function (e) { toast("上传失败: " + e.message, true); });
+    };
+    reader.readAsDataURL(file);
+  }
+  $("btnAttach").onclick = function () { $("fileInput").click(); };
+  $("fileInput").onchange = function () {
+    Array.prototype.forEach.call($("fileInput").files, uploadFile);
+    $("fileInput").value = "";
+  };
+  // 粘贴: 截图直接上传 (微信/QQ 截图党的核心路径)
+  $("inp").addEventListener("paste", function (e) {
+    var items = (e.clipboardData && e.clipboardData.items) || [];
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].type && items[i].type.indexOf("image/") === 0) {
+        e.preventDefault();
+        var f = items[i].getAsFile();
+        if (f) uploadFile(new File([f], "paste-" + Date.now() + ".png", { type: f.type }));
+      }
+    }
+  });
+  // 拖拽任意文件到输入区 (图片/文档/代码/压缩包)
+  var composerEl = $("composer");
+  composerEl.addEventListener("dragover", function (e) { e.preventDefault(); composerEl.classList.add("drag"); });
+  composerEl.addEventListener("dragleave", function () { composerEl.classList.remove("drag"); });
+  composerEl.addEventListener("drop", function (e) {
+    e.preventDefault();
+    composerEl.classList.remove("drag");
+    Array.prototype.forEach.call((e.dataTransfer && e.dataTransfer.files) || [], uploadFile);
+  });
+
+  /* ================= 模型切换 + 思考强度 (对接 /api/llm) ================= */
+  var REASON_LABELS = { auto: "自动", off: "关闭", low: "低", medium: "中", high: "High", max: "极高" };
+  function llmPillRender() {
+    var cur = S.llm && S.llm.current;
+    $("pillModelTxt").textContent = cur ? (cur.model || cur.id) : "未配置模型";
+    $("pillModel").title = cur ? ("当前: " + cur.model + " (" + cur.id + ") · 点击切换") : "点击配置模型";
+    $("pillReasonTxt").textContent = REASON_LABELS[S.llm && S.llm.reasoning] || "自动";
+  }
+  function loadLlm() {
+    return get("/api/llm").then(function (j) {
+      if (j && j.ok) { S.llm = j; llmPillRender(); }
+      return j;
+    }).catch(function () { /* 端点不可用: 胶囊保持默认文案 */ });
+  }
+  function closePop() {
+    ["popModel", "popReason"].forEach(function (id) { if ($(id)) $(id).hidden = true; });
+    var a = document.querySelectorAll(".tpill"); a.forEach(function (b) { b.setAttribute("aria-expanded", "false"); });
+  }
+  function renderPopModel() {
+    var j = S.llm || {};
+    var provs = j.providers || [];
+    var html = '<div class="pop-title">选择模型服务</div>';
+    if (!provs.length) html += '<div class="empty">未配置任何 provider · 到右栏「模型」页新增</div>';
+    html += provs.map(function (p) {
+      return '<button class="pop-item' + (p.current ? " on" : "") + '" data-id="' + esc(p.id) + '"' + (p.usable ? "" : " disabled") + ">" +
+        '<span class="pmain"><b>' + esc(p.model || "(未设模型)") + "</b><i>" + esc(p.id) + (p.vision ? " · 视觉" : "") + "</i></span>" +
+        (p.usable ? (p.current ? '<span class="pbadge on">使用中</span>' : '<span class="pbadge">可用</span>') : '<span class="pbadge off">未配置 Key</span>') +
+        "</button>";
+    }).join("");
+    $("popModel").innerHTML = html;
+    $("popModel").querySelectorAll(".pop-item").forEach(function (b) {
+      b.onclick = function () {
+        var id = b.getAttribute("data-id");
+        post("/api/llm", { provider: id }).then(function (r) {
+          S.llm = r; llmPillRender(); closePop();
+          var c = r && r.current;
+          toast("已切换到 " + (c ? c.model + " (" + c.id + ")" : id));
+        }).catch(function (e) { toast("切换失败: " + e.message, true); });
+      };
+    });
+  }
+  function renderPopReason() {
+    var levels = (S.llm && S.llm.reasoning_levels) || ["auto", "off", "low", "medium", "high", "max"];
+    var cur = (S.llm && S.llm.reasoning) || "auto";
+    var idx = Math.max(0, levels.indexOf(cur));
+    var pct = (idx / (levels.length - 1)) * 100;
+    $("popReason").innerHTML =
+      '<div class="pop-title">思考强度<span class="rval" id="rvalTxt">' + esc(REASON_LABELS[cur] || cur) + "</span></div>" +
+      '<div class="rwrap"><div class="rtrack"><div class="rdots">' +
+      levels.map(function () { return "<i></i>"; }).join("") +
+      '</div><div class="rthumb" id="rthumb" style="left:calc(' + pct + '% - ' + (pct * 0.24).toFixed(1) + 'px)"></div></div>' +
+      '<input type="range" id="rrange" min="0" max="' + (levels.length - 1) + '" step="1" value="' + idx + '"></div>' +
+      '<div class="pop-hint">按厂商能力注入: 智谱/方舟 thinking、通义 enable_thinking、OpenAI reasoning_effort; 未支持的模型自动忽略。</div>';
+    var r = $("rrange");
+    var onMove = function () {
+      var v = Number(r.value), lv = levels[v], p2 = (v / (levels.length - 1)) * 100;
+      $("rthumb").style.left = "calc(" + p2 + "% - " + (p2 * 0.24).toFixed(1) + "px)";
+      $("rvalTxt").textContent = REASON_LABELS[lv] || lv;
+    };
+    r.oninput = onMove;
+    r.onchange = function () {
+      var lv = levels[Number(r.value)];
+      post("/api/llm", { reasoning: lv }).then(function (res) {
+        S.llm = res; llmPillRender();
+        toast("思考强度: " + (REASON_LABELS[lv] || lv) + (lv === "auto" ? " (跟随模型默认)" : ""));
+      }).catch(function (e) { toast("设置失败: " + e.message, true); });
+    };
+  }
+  $("pillModel").onclick = function (e) {
+    e.stopPropagation();
+    var open = $("popModel").hidden;
+    closePop();
+    if (open) {
+      loadLlm().then(function () { renderPopModel(); $("popModel").hidden = false; $("pillModel").setAttribute("aria-expanded", "true"); });
+    }
+  };
+  $("pillReason").onclick = function (e) {
+    e.stopPropagation();
+    var open = $("popReason").hidden;
+    closePop();
+    if (open) {
+      loadLlm().then(function () { renderPopReason(); $("popReason").hidden = false; $("pillReason").setAttribute("aria-expanded", "true"); });
+    }
+  };
+  document.addEventListener("click", function (e) {
+    if (!e.target.closest || !e.target.closest(".tpillwrap")) closePop();
+  });
+
+  /* ================= 语音输入 (媒体录音 → /api/voice/transcribe; 无配置时回退浏览器识别) ================= */
+  var rec = { active: false, media: null, chunks: [], stream: null, t0: 0, timer: 0, sr: null };
+  function micBusy(on, label) {
+    var b = $("btnMic");
+    b.classList.toggle("rec", !!on);
+    b.title = label || (on ? "正在聆听… 点击结束" : "语音输入 (轻点开始/结束)");
+  }
+  // 录音 → 16kHz 单声道 WAV (云端 whisper 类接口通用, 避免 webm 兼容坑)
+  function encodeWav(float32, rate) {
+    var len = float32.length, buf = new ArrayBuffer(44 + len * 2), v = new DataView(buf);
+    var ws = function (o, s) { for (var i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+    ws(0, "RIFF"); v.setUint32(4, 36 + len * 2, true); ws(8, "WAVE");
+    ws(12, "fmt "); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+    v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+    ws(36, "data"); v.setUint32(40, len * 2, true);
+    for (var i = 0; i < len; i++) { var s = Math.max(-1, Math.min(1, float32[i])); v.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true); }
+    return new Blob([buf], { type: "audio/wav" });
+  }
+  function blobToWav16k(blob) {
+    return blob.arrayBuffer().then(function (ab) {
+      var AC = window.AudioContext || window.webkitAudioContext;
+      var ctx = new AC();
+      return ctx.decodeAudioData(ab).then(function (audio) {
+        var sr = 16000, len = Math.max(1, Math.round(audio.duration * sr));
+        var off = new OfflineAudioContext(1, len, sr);
+        var src = off.createBufferSource(); src.buffer = audio; src.connect(off.destination); src.start();
+        return off.startRendering();
+      }).then(function (rendered) {
+        return encodeWav(rendered.getChannelData(0), 16000);
+      }).finally(function () { try { ctx.close(); } catch (e) {} });
+    });
+  }
+  function blobToB64(blob) {
+    return new Promise(function (res, rej) {
+      var r = new FileReader();
+      r.onload = function () { res(String(r.result).split(",")[1] || ""); };
+      r.onerror = rej;
+      r.readAsDataURL(blob);
+    });
+  }
+  function insertToInput(text) {
+    var t = $("inp");
+    t.value = (t.value ? t.value.replace(/\s*$/, " ") : "") + text;
+    autosize(); updSendState(); t.focus();
+  }
+  function browserSR() {
+    var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) return null;
+    var r = new SR();
+    r.lang = "zh-CN"; r.interimResults = false; r.maxAlternatives = 1;
+    return r;
+  }
+  function startMic() {
+    // 优先: 已配 ASR → 服务端转写; 未配 → 浏览器识别; 都没有 → 指路
+    var status = (S.llm && S.llm.voice) || {};
+    if (status.asr) {
+      navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
+        rec.stream = stream; rec.chunks = []; rec.t0 = Date.now();
+        var mr = new MediaRecorder(stream);
+        mr.ondataavailable = function (e) { if (e.data && e.data.size) rec.chunks.push(e.data); };
+        mr.onstop = function () {
+          var blob = new Blob(rec.chunks, { type: mr.mimeType || "audio/webm" });
+          rec.stream.getTracks().forEach(function (t) { t.stop(); });
+          micBusy(false);
+          if (Date.now() - rec.t0 < 400) { toast("录音太短"); return; }
+          toast("转写中…");
+          blobToWav16k(blob).catch(function () { return blob; }).then(function (wav) {
+            return blobToB64(wav).then(function (b64) {
+              return post("/api/voice/transcribe", { name: "voice.wav", data: b64, language: "zh" });
+            });
+          }).then(function (r) {
+            if (r && r.text) { insertToInput(r.text); toast("已转写"); }
+            else toast("没有识别到内容", true);
+          }).catch(function (e) { toast("转写失败: " + e.message, true); });
+        };
+        rec.media = mr; mr.start(); rec.active = true;
+        micBusy(true); toast("开始录音 · 再点一下结束");
+      }).catch(function (e) { toast("麦克风不可用: " + (e && e.message || e), true); });
+      return;
+    }
+    var sr = browserSR();
+    if (sr) {
+      rec.sr = sr; rec.active = true; micBusy(true);
+      sr.onresult = function (ev) {
+        var txt = ev.results && ev.results[0] && ev.results[0][0] && ev.results[0][0].transcript;
+        if (txt) { insertToInput(txt); toast("已转写"); }
+      };
+      sr.onerror = function (ev) {
+        toast("浏览器识别失败: " + ((ev && ev.error) || "未知") + " (可在 config.voice.asr 配云端 ASR)", true);
+      };
+      sr.onend = function () { rec.active = false; micBusy(false); };
+      try { sr.start(); toast("正在聆听… (浏览器识别)"); } catch (e) { toast("无法启动识别: " + e.message, true); micBusy(false); rec.active = false; }
+      return;
+    }
+    toast("语音未配置: 浏览器不支持识别, 且 config.voice.asr 未设云端 ASR (base_url + api_key)", true);
+  }
+  function stopMic() {
+    if (rec.media && rec.media.state !== "inactive") rec.media.stop();
+    if (rec.sr) { try { rec.sr.stop(); } catch (e) {} }
+    if (rec.stream) { try { rec.stream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {} }
+    rec.active = false; micBusy(false);
+  }
+  $("btnMic").onclick = function () { if (rec.active) stopMic(); else startMic(); };
   $("inp").addEventListener("keydown", function (e) {
     if (!$("palette").hidden) {
       if (e.key === "ArrowDown") { e.preventDefault(); movePalette(1); return; }
@@ -1226,9 +1683,12 @@
 
     loadCommands();
     loadLifecycle();
+    loadTasks();
+    renderSpaces();
+    loadLlm();
     pollApprovals();
     S.lifeTimer = setInterval(loadLifecycle, 30000);
-    S.apprTimer = setInterval(pollApprovals, 5000);
+    S.apprTimer = setInterval(function () { pollApprovals(); loadTasks(); }, 8000);
     $("inp").focus();
   }
   init();

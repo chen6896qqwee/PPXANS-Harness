@@ -59,23 +59,44 @@ export function resolvePreference(config) {
   return (config?.agent?.model_preference === "cloud") ? "cloud" : "local";
 }
 
+// 思考强度 / 自定义注入参数 (config.llm) 透传给每个 LLMClient
+function reasoningOpts(config) {
+  const l = config?.llm || {};
+  const out = { reasoning: l.reasoning || "auto" };
+  if (l.reasoning_params && typeof l.reasoning_params === "object") out.reasoning_params = l.reasoning_params;
+  return out;
+}
+
+// 用户在 Web UI 显式选定的 provider (config.llm.provider) —— 优先级最高, 但仍要求可用
+function explicitProvider(config) {
+  const id = config?.llm?.provider;
+  if (!id) return null;
+  const p = ((config && config.providers) || []).find((x) => x.id === id);
+  return p && isUsableProvider(p) ? p : null;
+}
+
 export function resolveAllLLMs(config) {
   const provs = (config && config.providers) || [];
   const pref = resolvePreference(config);
-  return orderProviders(provs.filter(isUsableProvider), pref).map((p) => new LLMClient(p));
+  const ro = reasoningOpts(config);
+  return orderProviders(provs.filter(isUsableProvider), pref).map((p) => new LLMClient({ ...p, ...ro }));
 }
 
 export function resolveLLM(config) {
   const provs = (config && config.providers) || [];
+  const ro = reasoningOpts(config);
+  // 显式选择 (Web UI 模型切换): config.llm.provider 优先, 可用才生效
+  const explicit = explicitProvider(config);
+  if (explicit) return new LLMClient({ ...explicit, ...ro });
   // 强制指定: PPX_PROVIDER=<id> (测试/用户显式选择)
   const forced = process.env.PPX_PROVIDER;
   if (forced) {
     const t = provs.find((x) => x.id === forced || x.id === String(forced).toLowerCase());
-    if (t && isUsableProvider(t)) return new LLMClient(t);
+    if (t && isUsableProvider(t)) return new LLMClient({ ...t, ...ro });
   }
   const pref = resolvePreference(config);
   const ordered = orderProviders(provs.filter(isUsableProvider), pref);
-  return ordered.length ? new LLMClient(ordered[0]) : null;
+  return ordered.length ? new LLMClient({ ...ordered[0], ...ro }) : null;
 }
 
 // 异步健康排序: 启动时探测各候选 /models, 能连的排前 (只读, 不改配置)

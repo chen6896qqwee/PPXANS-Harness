@@ -18,7 +18,9 @@ import {
   listProviders, addProvider, updateProvider, removeProvider, reorderProviders, readConfig,
 } from "../config/providers.js";
 import { listPresets } from "../llm/presets.js";
-import { getSettings, updateSettings } from "../config/settings.js";
+import { isUsableProvider } from "../llm/router.js";
+import { resolveVoice, resolveLocalAsr, voiceStatus, cloudTranscribe } from "../tools/voice.js";
+import { getSettings, updateSettings, REASONING_LEVELS } from "../config/settings.js";
 import { suggestProactive } from "../ans/proactive.js";
 import { ensureDir, atomicWrite, readText } from "../utils/store.js";
 import { TokenBucket } from "../utils/rate-limit.js";
@@ -699,6 +701,23 @@ export class HttpChannel extends Channel {
       return true;
     }
     // 通用静态文件服务 (public/ 下任意文件, 含 vendor/ 资源, 防路径穿越)
+    // 上传图片回显: /uploads/<file> → <root>/uploads/ (与 public/ 同为只读静态;
+    // 服务默认只绑 127.0.0.1, 风险面与 public/ 一致; 文件名已在写入时消毒)
+    if (reqPath.startsWith("/uploads/")) {
+      const upDir = path.resolve(this.agent.root, "uploads");
+      // 中文/空格文件名在 URL 里是百分号编码, 必须解码后再拼路径 (2026-10-11 修复: 中文附件回显 404)
+      let rel = "";
+      try { rel = decodeURIComponent(reqPath.replace(/^\/uploads\//, "")); } catch { rel = ""; }
+      const file = path.resolve(upDir, rel);
+      if (rel && file.startsWith(upDir + path.sep) && fs.existsSync(file) && fs.statSync(file).isFile()) {
+        const ext = path.extname(file).toLowerCase();
+        const mime = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp" }[ext] || "application/octet-stream";
+        res.writeHead(200, { "Content-Type": mime, "Cache-Control": "no-store" });
+        res.end(fs.readFileSync(file));
+        return true;
+      }
+      return false;
+    }
     if (!reqPath.startsWith("/api/") && !LEGACY_REST_PATHS.some((p) => reqPath === p)) {
       return this._serveStatic(res, reqPath);
     }
@@ -812,6 +831,57 @@ export class HttpChannel extends Channel {
       case "/api/workspace/read":
         if (!get) return false;
         return this._apiWorkspaceRead(res, req);
+
+      // 文件上传 (Web UI 附件): JSON { name, data(base64) } → 存 <root>/uploads/ → 返回相对路径。
+      //   图片: 路径拼进消息后 visionUserContent 会自动注入多模态 (8MB 上限, 防 base64 撑爆上下文);
+      //   其他文件 (pdf/docx/zip/代码等): 路径进消息文本, agent 用 read_document/read_file 等工具读取 (20MB 上限)。
+      case "/api/upload": {
+        if (req.method !== "POST") return false;
+        const body = await readBody(req, { maxBytes: 28 * 1024 * 1024 }); // base64 ≈ 4/3 原体积
+        if (body === null) { this._json(res, 413, { error: "文件过大 (上限 20MB)" }); return true; }
+        try {
+          const p = JSON.parse(body || "{}");
+          const name = String(p.name || "file.bin").replace(/[^\w.\-\u4e00-\u9fa5]+/g, "_").slice(-80) || "file.bin";
+          const ext = path.extname(name).toLowerCase();
+          const isImg = /^\.(png|jpe?g|gif|webp|bmp)$/.test(ext);
+          const b64 = String(p.data || "").replace(/^data:[^,]*,/, "");
+          const buf = Buffer.from(b64, "base64");
+          const limit = isImg ? 8 * 1024 * 1024 : 20 * 1024 * 1024;
+          if (!buf.length) { this._json(res, 400, { error: "文件为空" }); return true; }
+          if (buf.length > limit) {
+            this._json(res, 413, { error: (isImg ? "图片" : "文件") + "过大 (上限 " + (isImg ? 8 : 20) + "MB)" });
+            return true;
+          }
+          const dir = path.join(this.agent.root, "uploads");
+          ensureDir(dir);
+          // 防覆盖: 同名追加序号
+          let file = path.join(dir, name);
+          if (fs.existsSync(file)) {
+            const stem = name.slice(0, -ext.length) || name;
+            let i = 1;
+            while (fs.existsSync(file)) file = path.join(dir, `${stem}-${i++}${ext}`);
+          }
+          fs.writeFileSync(file, buf);
+          const rel = "uploads/" + path.basename(file);
+          this._json(res, 200, { ok: true, path: rel, bytes: buf.length, kind: isImg ? "image" : "file" });
+        } catch (e) { this._fail(res, e, 400); }
+        return true;
+      }
+
+      // LLM 运行时切换 (Web UI 模型胶囊 / 思考强度滑杆):
+      //   GET  → 现状 + 候选 provider 列表 + 语音能力状态
+      //   POST → { provider?, reasoning? } 写 config.llm 并热重载 LLM 客户端
+      case "/api/llm":
+        return this._apiLlm(req, res);
+
+      // 语音输入: 状态查询 + 音频转写 (复用 tools/voice.js 的云端 ASR)
+      case "/api/voice/status":
+        if (!get) return false;
+        this._json(res, 200, { ok: true, ...voiceStatus(this.agent.config || {}) });
+        return true;
+      case "/api/voice/transcribe":
+        if (req.method !== "POST") return false;
+        return this._apiVoiceTranscribe(req, res);
 
       default:
         return false;
@@ -1125,6 +1195,94 @@ export class HttpChannel extends Channel {
       this._json(res, 200, { ok: true, settings });
     } catch (e) {
       this._fail(res, e);
+    }
+    return true;
+  }
+
+  // ---- LLM 运行时切换 (模型 / 思考强度) ----
+  // 状态视图: 当前实际生效的 provider+model、显式选择、候选列表 (含可用性)、语音能力
+  _llmState() {
+    const cfg = this.agent.config || {};
+    const cur = this.agent.llm || null;
+    const provs = Array.isArray(cfg.providers) ? cfg.providers : [];
+    return {
+      provider: cfg.llm?.provider || "",
+      reasoning: cfg.llm?.reasoning || "auto",
+      reasoning_levels: REASONING_LEVELS,
+      current: cur ? { id: cur.providerId, model: cur.model, vision: !!cur.vision } : null,
+      providers: provs.map((p) => ({
+        id: p.id,
+        model: p.model || "",
+        vision: !!p.vision,
+        usable: isUsableProvider(p),
+        current: !!(cur && cur.providerId === p.id),
+      })),
+      voice: voiceStatus(cfg),
+    };
+  }
+
+  async _apiLlm(req, res) {
+    if (req.method === "GET") {
+      this._json(res, 200, { ok: true, ...this._llmState() });
+      return true;
+    }
+    if (req.method !== "POST") { this._json(res, 405, { error: "方法不允许 (GET / POST)" }); return true; }
+    const body = await this._readBody(req, res);
+    if (body === null) return true;
+    try {
+      const p = JSON.parse(body || "{}");
+      const patch = {};
+      if (p.provider !== undefined) patch.provider = String(p.provider || "");
+      if (p.reasoning !== undefined) patch.reasoning = String(p.reasoning || "auto");
+      if (!Object.keys(patch).length) {
+        this._json(res, 400, { error: "缺少可更新字段 (provider / reasoning)" });
+        return true;
+      }
+      updateSettings(this.agent.root, { llm: patch });
+      this.agent.reloadProviders(); // 重建 LLM 客户端 (新 provider/思考强度立即生效)
+      this._json(res, 200, { ok: true, ...this._llmState() });
+    } catch (e) { this._fail(res, e, 400); }
+    return true;
+  }
+
+  // ---- 语音输入 (Web UI 麦克风): 录音 → 云端 ASR 转写 ----
+  // 请求体 JSON { name, data(base64), language? }; 体积上限放宽到 20MB (音频比图片大)
+  async _apiVoiceTranscribe(req, res) {
+    const raw = await readBody(req, { maxBytes: 20 * 1024 * 1024 });
+    if (raw === null) { this._json(res, 413, { error: "音频过大 (上限 20MB)" }); return true; }
+    const cfg = this.agent.config || {};
+    let tmpPath = "";
+    try {
+      const p = JSON.parse(raw || "{}");
+      const name = String(p.name || "audio.wav").replace(/[^\w.-]+/g, "_").slice(-60) || "audio.wav";
+      const ext = (path.extname(name) || ".wav").toLowerCase();
+      if (![".wav", ".mp3", ".m4a", ".mp4", ".webm", ".ogg", ".opus", ".flac"].includes(ext)) {
+        this._json(res, 400, { error: "不支持的音频格式 (wav/mp3/m4a/webm/ogg/flac)" });
+        return true;
+      }
+      const buf = Buffer.from(String(p.data || "").replace(/^data:[^,]*,/, ""), "base64");
+      if (!buf.length) { this._json(res, 400, { error: "音频为空" }); return true; }
+
+      const cloud = resolveVoice(cfg, "asr");
+      if (!cloud) {
+        const local = resolveLocalAsr(cfg);
+        this._json(res, 400, {
+          error: local
+            ? "本地 ASR 需外部 whisper 二进制, 未内置; 请改配 config.voice.asr 云端端点"
+            : "ASR 未配置: 需在 config/ppx.json 的 voice.asr 设 base_url + api_key (OpenAI 兼容 /audio/transcriptions)",
+        });
+        return true;
+      }
+      const dir = path.join(this.agent.root, "uploads");
+      ensureDir(dir);
+      tmpPath = path.join(dir, `asr-${Date.now()}-${name}`);
+      fs.writeFileSync(tmpPath, buf);
+      const text = await cloudTranscribe(cloud, tmpPath, p.language || "");
+      this._json(res, 200, { ok: true, text: String(text || "").trim() });
+    } catch (e) {
+      this._fail(res, e, 502);
+    } finally {
+      if (tmpPath) { try { fs.unlinkSync(tmpPath); } catch { /* 临时音频清理失败不阻断 */ } }
     }
     return true;
   }

@@ -18,3 +18,7 @@ build/
 .env
 .env.*
 !.env.example
+
+# 本地配置备份(含明文 key)与本地测试产物 — 绝不入库 (2026-10-11)
+config/ppx.json.bak-*
+.ppxtest/

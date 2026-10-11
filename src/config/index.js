@@ -43,6 +43,13 @@ export const DEFAULT_CONFIG = {
   },
   user: { name: "兄弟" },
   providers: [],
+  // LLM 运行时选择 (Web UI 模型切换/思考强度):
+  //   provider  = 显式选定的 provider id (空 = 自动按 model_preference 排序)
+  //   reasoning = auto | off | low | medium | high | max (按厂商家族映射注入; 不支持的不注入)
+  llm: { provider: "", reasoning: "auto" },
+  // 网络代理 (国内访问 GitHub 等被墙站点): proxy 显式配置 (如 http://127.0.0.1:7890),
+  //   auto_proxy = 未显式配置时是否自动探测本地常见代理端口 (clash/v2rayN 等, 默认 true)
+  network: { proxy: "", auto_proxy: true },
   memory: {
     enabled: true,
     token_budget: 2500,

@@ -4,6 +4,7 @@ import net from "node:net";
 import dns from "node:dns/promises";
 import path from "node:path";
 import { ensureDir, readJson, writeJson } from "../utils/store.js";
+import { proxiedFetch, getProxy } from "../utils/http-proxy.js";
 
 // ---------- 网页搜索 (零依赖, 多引擎兜底: tavily/brave[有key] -> DDG) ----------
 // 有 TAVILY_API_KEY / BRAVE_API_KEY 时优先用官方 API, 否则回退加固后的 DDG 解析
@@ -15,19 +16,19 @@ function _decodeDDGUrl(u) {
   return u;
 }
 
-async function searchWeb(query) {
+async function searchWeb(query, proxy = "") {
   const q = encodeURIComponent(query);
 
   // 1. Tavily (官方 API, 需 TAVILY_API_KEY)
   const tavilyKey = process.env.TAVILY_API_KEY;
   if (tavilyKey) {
     try {
-      const r = await fetch("https://api.tavily.com/search", {
+      const r = await proxiedFetch("https://api.tavily.com/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ api_key: tavilyKey, query, max_results: 5 }),
-        signal: AbortSignal.timeout(15000),
-      });
+        timeoutMs: 15000,
+      }, proxy);
       if (r.ok) {
         const j = await r.json();
         const results = (j.results || []).map(x => ({ title: x.title, url: x.url, snippet: x.content }));
@@ -40,10 +41,10 @@ async function searchWeb(query) {
   const braveKey = process.env.BRAVE_API_KEY;
   if (braveKey) {
     try {
-      const r = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${q}&count=5`, {
+      const r = await proxiedFetch(`https://api.search.brave.com/res/v1/web/search?q=${q}&count=5`, {
         headers: { "X-Subscription-Token": braveKey, "Accept": "application/json" },
-        signal: AbortSignal.timeout(15000),
-      });
+        timeoutMs: 15000,
+      }, proxy);
       if (r.ok) {
         const j = await r.json();
         const results = (j.web?.results || []).map(x => ({ title: x.title, url: x.url, snippet: x.description }));
@@ -54,10 +55,10 @@ async function searchWeb(query) {
 
   // 3. DuckDuckGo HTML (免key兜底, 加固解析)
   try {
-    const r = await fetch(`https://html.duckduckgo.com/html/?q=${q}`, {
+    const r = await proxiedFetch(`https://html.duckduckgo.com/html/?q=${q}`, {
       headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
-      signal: AbortSignal.timeout(15000),
-    });
+      timeoutMs: 15000,
+    }, proxy);
     const html = await r.text();
     const results = [];
     // 每次抓一个 result 块: <a class="result__a" href="...">title<\/a> ... <a class="result__snippet"...>snippet<\/a>
@@ -73,10 +74,10 @@ async function searchWeb(query) {
 
   // 4. DuckDuckGo lite (最终兜底)
   try {
-    const r = await fetch(`https://lite.duckduckgo.com/lite/?q=${q}`, {
+    const r = await proxiedFetch(`https://lite.duckduckgo.com/lite/?q=${q}`, {
       headers: { "User-Agent": "Mozilla/5.0" },
-      signal: AbortSignal.timeout(15000),
-    });
+      timeoutMs: 15000,
+    }, proxy);
     const html = await r.text();
     const results = [];
     const re = /<a[^>]+class="result-link"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g;
@@ -122,7 +123,7 @@ export function isPrivateIP(ip) {
   return false;
 }
 
-async function assertPublicUrl(url) {
+async function assertPublicUrl(url, opts = {}) {
   const u = new URL(url);
   if (u.protocol !== "http:" && u.protocol !== "https:") throw new Error("仅允许 http/https");
   const hostname = u.hostname.replace(/^\[|\]$/g, "");
@@ -130,6 +131,10 @@ async function assertPublicUrl(url) {
     if (isPrivateIP(hostname)) throw new Error("SSRF 拒绝: 内网地址 " + hostname);
     return;
   }
+  // 走代理时: 真实连接由代理发起, 本地 DNS 解析结果不再代表实际目标,
+  //   跳过 dns.lookup (避免"污染解析到内网 IP 误杀"或"本地解析失败"阻断代理链路);
+  //   但仍保留上面针对【字面量内网 IP】的硬拦截。
+  if (opts.viaProxy) return;
   const addrs = await dns.lookup(hostname, { all: true, verbatim: true });
   for (const { address } of addrs) {
     if (isPrivateIP(address)) throw new Error("SSRF 拒绝: " + hostname + " 解析到内网 " + address);
@@ -140,17 +145,17 @@ async function assertPublicUrl(url) {
 // fetch 默认 redirect:"follow" 会在每次跳转时重新解析 DNS —— 攻击者用一个公网 URL 302→内网
 // (如 http://127.0.0.1:x 或 http://169.254.169.254/)即可绕过单次 assertPublicUrl。
 // 这里改用 redirect:"manual" 逐跳校验后再继续, 堵住"302 到内网/云元数据"的绕过。
-async function _fetchWithSsrSafe(url, { method = "GET", headers = {}, body, signal, maxRedirects = 5 } = {}) {
+async function _fetchWithSsrSafe(url, { method = "GET", headers = {}, body, signal, maxRedirects = 5 } = {}, proxy = "") {
   let current = url;
   for (let hop = 0; hop <= maxRedirects; hop++) {
-    await assertPublicUrl(current);
-    const resp = await fetch(current, {
+    await assertPublicUrl(current, { viaProxy: !!proxy });
+    const resp = await proxiedFetch(current, {
       method,
       headers,
       body: body !== undefined ? (typeof body === "string" ? body : JSON.stringify(body)) : undefined,
       redirect: "manual",
-      signal,
-    });
+      timeoutMs: 20000,
+    }, proxy);
     if (resp.status >= 300 && resp.status < 400 && resp.headers.has("location")) {
       const loc = resp.headers.get("location");
       current = new URL(loc, current).toString(); // 相对 Location 基于 current 解析成绝对 URL
@@ -163,7 +168,7 @@ async function _fetchWithSsrSafe(url, { method = "GET", headers = {}, body, sign
   throw new Error("SSRF 拒绝: 重定向次数超过 " + maxRedirects);
 }
 
-async function httpRequest({ url, method = "GET", headers = {}, body = null, timeout = 15000 }) {
+async function httpRequest({ url, method = "GET", headers = {}, body = null, timeout = 15000 }, proxy = "") {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeout);
   try {
@@ -172,7 +177,7 @@ async function httpRequest({ url, method = "GET", headers = {}, body = null, tim
       headers: { "User-Agent": "PPX-Agent/0.2", ...headers },
       body,
       signal: ctrl.signal,
-    });
+    }, proxy);
     const text = await resp.text();
     return { status: resp.status, ok: resp.ok, body: text.slice(0, 20000) };
   } finally {
@@ -285,9 +290,17 @@ export function registerAdvancedTools(catalog, { dataDir, scheduler, onMemoryNot
     capability: { readOnly: true, riskLevel: "low", sideEffect: "none" },
     description: "搜索互联网, 返回网页标题+链接+摘要。",
     parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
-    execute: async (args) => {
+    execute: async (args, ctx) => {
       try {
-        const results = await searchWeb(args.query);
+        // 优先: 当前模型的 API 自带联网搜索 (智谱 GLM 等; 不支持/失败则回退外部搜索)
+        const agent = ctx && ctx.agent;
+        const llm = agent && agent.llm;
+        if (llm && typeof llm.nativeWebSearch === "function") {
+          const ans = await llm.nativeWebSearch(args.query);
+          if (ans) return ans;
+        }
+        const proxy = await getProxy(agent && agent.config);
+        const results = await searchWeb(args.query, proxy);
         return results.map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.snippet || ""}`).join("\n");
       } catch (e) {
         return JSON.stringify({ error: `搜索失败: ${e.message}` });
@@ -309,9 +322,10 @@ export function registerAdvancedTools(catalog, { dataDir, scheduler, onMemoryNot
       },
       required: ["url"],
     },
-    execute: async (args) => {
+    execute: async (args, ctx) => {
       try {
-        const r = await httpRequest(args);
+        const proxy = await getProxy(ctx && ctx.agent && ctx.agent.config);
+        const r = await httpRequest(args, proxy);
         return JSON.stringify({ status: r.status, ok: r.ok, body: r.body.slice(0, 5000) });
       } catch (e) {
         return JSON.stringify({ error: `HTTP 请求失败: ${e.message}` });
@@ -371,10 +385,11 @@ export function registerAdvancedTools(catalog, { dataDir, scheduler, onMemoryNot
       properties: { url: { type: "string", description: "要抓取的网页 URL" }, maxChars: { type: "number", description: "返回最大字符数, 默认 20000" } },
       required: ["url"],
     },
-    execute: async (args) => {
+    execute: async (args, ctx) => {
       try {
         const timeout = 15000;
-        const r = await httpRequest({ url: args.url, timeout });
+        const proxy = await getProxy(ctx && ctx.agent && ctx.agent.config);
+        const r = await httpRequest({ url: args.url, timeout }, proxy);
         if (!r.ok) return JSON.stringify({ error: "抓取失败 HTTP " + r.status });
         const text = _htmlToText(r.body);
         const max = Math.min(args.maxChars || 20000, 40000);

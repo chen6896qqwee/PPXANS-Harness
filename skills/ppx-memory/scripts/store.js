@@ -14,17 +14,26 @@ export function atomicWrite(file, data) {
   fs.writeFileSync(tmp, data, "utf8");
   // v1.0.8: rename 覆盖已存在文件在 Windows 并发下可能 EPERM/EEXIST (短窗口), 重试 3 次;
   // 不再降级为非原子直接写 (并发双写可交错损坏文件), 重试仍失败则抛错由调用方处理
-  for (let attempt = 0; ; attempt++) {
+  // v3.2.x (2026-10-10, Windows 并发 EPERM 偶发修复): 原实现 3 次 × 30ms busy-wait 总预算仅
+  //   ~90ms, 高并发 / 杀软 / 索引器短暂持有目标文件时不够 (跨进程同写 daily-state.json 偶发
+  //   "EPERM: operation not permitted, rename tmp -> state")。改为只对可重试错误码
+  //   (EPERM/EEXIST/EBUSY/EACCES) 做指数退避 (5→10→20→40→80→160ms), 总预算 ~500ms,
+  //   用 _syncSleep (Atomics.wait) 替代空转。仍不降级非原子写; 预算耗尽/非可重试错误则抛错。
+  const RETRY = new Set(["EPERM", "EEXIST", "EBUSY", "EACCES"]);
+  const BUDGET_MS = 500;
+  const started = Date.now();
+  let delay = 5;
+  for (;;) {
     try {
       fs.renameSync(tmp, file);
       return;
     } catch (e) {
-      if (attempt >= 2) {
+      if (!RETRY.has(e && e.code) || Date.now() - started + delay > BUDGET_MS) {
         try { fs.unlinkSync(tmp); } catch {}
         throw new Error(`原子写失败: ${file} (${e.message})`);
       }
-      const end = Date.now() + 30;
-      while (Date.now() < end) {} // 短延迟后重试
+      _syncSleep(delay);
+      delay *= 2;
     }
   }
 }

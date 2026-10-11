@@ -107,7 +107,8 @@ export function registerVoiceTools(catalog) {
 }
 
 // 云端 ASR 转写: OpenAI 兼容 /audio/transcriptions (multipart), 零依赖 (Node 原生 fetch/FormData)
-async function cloudTranscribe(cfg, absPath, language) {
+// 2026-10-11: export —— Web UI 语音输入端点 (POST /api/voice/transcribe) 直接复用此实现
+export async function cloudTranscribe(cfg, absPath, language) {
   const base = String(cfg.base_url || "").replace(/\/+$/, "");
   const url = /\/audio\/transcriptions$/.test(base) ? base : `${base}/audio/transcriptions`;
   const buf = fs.readFileSync(absPath);

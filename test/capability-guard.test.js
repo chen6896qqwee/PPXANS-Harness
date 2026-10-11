@@ -173,7 +173,7 @@ const ARGS = {
 // 想让新工具进这张表, 等于承认它不改任何状态, 必须过评审。
 // MCP 第三方工具不在此列 (语义不可知, 一律落失败关闭兜底, 见 F1②)。
 const READ_ONLY_SURFACE = [
-  "board_query", "clarify", "fetch_page", "get_time", "git_diff", "git_log", "git_status",
+  "board_query", "clarify", "fetch_page", "get_time", "git_diff", "git_fetch", "git_log", "git_status",
   "humanize", "list_capabilities", "list_dir", "list_schedules", "memory_list_deleted",
   "memory_search", "ocr_image", "persona_read", "read_document", "read_file", "read_image",
   "replay_session", "repo_map", "review_code", "scene_list", "search_files", "self_diagnose",

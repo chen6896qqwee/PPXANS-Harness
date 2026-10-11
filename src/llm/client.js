@@ -23,12 +23,106 @@ export class LLMClient {
     this.context_window = Number(provider.context_window) || Number(provider.models?.context_window) || 8192;
     this.timeoutMs = provider.timeout_ms || 120000;
     this.retryMax = provider.retry_max ?? 3; // 单次调用内瞬态错误重试次数 (429/5xx/timeout)
+    // 思考强度 (config.llm.reasoning): auto/off/low/medium/high/max
+    // 由 router 注入; 未识别厂商/模型一律不注入参数 (宁可不发, 不发错——乱塞参数会 400)
+    this.reasoning = String(provider.reasoning || "auto").toLowerCase();
+    // 自定义注入逃生口: config.llm.reasoning_params (对象) 原样合并进请求体
+    this.reasoningParams = (provider.reasoning_params && typeof provider.reasoning_params === "object")
+      ? provider.reasoning_params : null;
+  }
+
+  // 思考强度 → 厂商参数映射 (按 base_url 家族 + 模型名白名单, 保守注入)
+  _thinkParams() {
+    if (this.reasoningParams) return { ...this.reasoningParams };
+    const lvl = this.reasoning;
+    const host = String(this.baseUrl || "").toLowerCase();
+    const model = String(this.model || "").toLowerCase();
+    if (!lvl || lvl === "auto") return {};
+    const off = lvl === "off";
+    const on = !off;
+    // 智谱 GLM (open.bigmodel.cn): thinking.type; 仅 4.5+/z1 系支持
+    if (/bigmodel\.cn|zhipu/.test(host)) {
+      if (!/glm-(4\.[5-9]|z1)|glm-5/.test(model)) return {};
+      return { thinking: { type: off ? "disabled" : "enabled" } };
+    }
+    // 火山方舟 Ark: thinking.type; 支持 thinking 的模型族
+    if (/volces\.com|volcengine|ark\.cn/.test(host)) {
+      if (!/doubao-seed|doubao-1\.5|kimi-k2|deepseek-r1|deepseek-v3/.test(model)) return {};
+      return { thinking: { type: on ? "enabled" : "disabled" } };
+    }
+    // 通义 DashScope: enable_thinking (qwen3 系)
+    if (/dashscope/.test(host)) {
+      if (!/qwen3|qwen-3/.test(model)) return {};
+      return { enable_thinking: on };
+    }
+    // OpenAI 推理系: reasoning_effort (off 无法强制关闭, 不注入)
+    if (/api\.openai\.com/.test(host)) {
+      if (off) return {};
+      if (!/^o[1-9]|gpt-5/.test(model)) return {};
+      return { reasoning_effort: lvl === "max" ? "high" : lvl };
+    }
+    return {};
+  }
+
+  // 原生联网搜索 (模型 API 自带, 2026-10-11): 按厂商返回"如何注入联网搜索"的规格, 不支持的返回 null。
+  //   - tool 型: 把 web_search 工具塞进 tools 数组 (智谱 / 火山方舟 / OpenAI)
+  //   - param 型: 顶层开 enable_search 布尔 (通义 DashScope/百炼)
+  //   - DeepSeek 的 chat/completions 官方明确不支持内置搜索 → null (走外部搜索回退)
+  _nativeSearchSpec() {
+    const host = String(this.baseUrl || "").toLowerCase();
+    if (/bigmodel\.cn|zhipu/.test(host)) {
+      return { kind: "tool", tool: { type: "web_search", web_search: { enable: true, require_search: true } }, injectQuery: true };
+    }
+    if (/dashscope|bailian|qwencloud|qianwen|maas\./.test(host)) {
+      return { kind: "param", key: "enable_search", value: true };
+    }
+    if (/volces\.com|volcengine|ark\.cn/.test(host)) {
+      return { kind: "tool", tool: { type: "web_search" }, injectQuery: false };
+    }
+    if (/api\.openai\.com/.test(host)) {
+      return { kind: "tool", tool: { type: "web_search" }, injectQuery: false };
+    }
+    return null;
+  }
+
+  async nativeWebSearch(query, { count = 5, contentSize = "medium", timeoutMs } = {}) {
+    const spec = this._nativeSearchSpec();
+    if (!spec) return null;
+    const messages = [{ role: "user", content: String(query || "") }];
+    try {
+      let data;
+      if (spec.kind === "param") {
+        data = await this._request("/chat/completions", {
+          model: this.model, messages, [spec.key]: spec.value, ...this._thinkParams(),
+        }, { timeoutMs });
+      } else {
+        let tool = spec.tool;
+        if (spec.injectQuery) {
+          tool = {
+            type: "web_search",
+            web_search: {
+              ...spec.tool.web_search,
+              search_query: String(query || ""),
+              count: Math.min(Math.max(Number(count) || 5, 1), 10),
+              content_size: contentSize,
+            },
+          };
+        }
+        data = await this._request("/chat/completions", {
+          model: this.model, messages, tools: [tool], ...this._thinkParams(),
+        }, { timeoutMs });
+      }
+      const m = data?.choices?.[0]?.message;
+      return m?.content ? String(m.content) : null;
+    } catch {
+      return null; // 搜索失败静默回退到外部搜索, 不把主流程带崩
+    }
   }
 
   // 原生 chat (无工具)
   // timeoutMs/retryMax: 可选覆盖 provider 默认 (辅助调用传短超时+禁重试快速失败, 见 AUX_TIMEOUT_MS)
   async chat(messages, { temperature = 0.7, maxTokens = 2048, timeoutMs, retryMax } = {}) {
-    const data = await this._request("/chat/completions", { model: this.model, messages, temperature, max_tokens: maxTokens }, { timeoutMs, retryMax });
+    const data = await this._request("/chat/completions", { model: this.model, messages, temperature, max_tokens: maxTokens, ...this._thinkParams() }, { timeoutMs, retryMax });
     const m1 = data?.choices?.[0]?.message;
     let content = m1?.content;
     // 本地推理模型兜底: thinking 吃满 token 时 content 为空, 用 reasoning_content 降级, 避免误判"断线/失败"并写入污染记忆
@@ -39,7 +133,7 @@ export class LLMClient {
 
   // API chat (支持工具调用), 返回完整 message (含 tool_calls)
   async apiChat(messages, { tools = [], temperature = 0.7, maxTokens = 4096, toolRunner = null, timeoutMs, retryMax } = {}) {
-    const body = { model: this.model, messages, temperature, max_tokens: maxTokens };
+    const body = { model: this.model, messages, temperature, max_tokens: maxTokens, ...this._thinkParams() };
     if (tools.length) body.tools = tools;
     const data = await this._request("/chat/completions", body, { timeoutMs, retryMax });
     const message = data?.choices?.[0]?.message;
@@ -148,7 +242,7 @@ export class LLMClient {
       const resp = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${this.apiKey}` },
-        body: JSON.stringify({ model: this.model, messages, temperature, max_tokens: maxTokens, stream: true }),
+        body: JSON.stringify({ model: this.model, messages, temperature, max_tokens: maxTokens, stream: true, ...this._thinkParams() }),
         signal: ctrl.signal,
       });
       if (!resp.ok) {

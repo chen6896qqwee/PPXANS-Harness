@@ -9,9 +9,12 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { githubMirrorUrls } from "../utils/http-proxy.js";
 
 const OUT_CAP = 4000;
 const MSG_CAP = 500;
+
+const GH_MIRROR_PREFIXES = ["https://ghproxy.net/", "https://ghfast.top/", "https://gh-proxy.com/"];
 
 function findRepoRoot(rootDir) {
   let dir = path.resolve(rootDir);
@@ -39,6 +42,56 @@ function cap(s) {
   return String(s || "").length > OUT_CAP
     ? String(s).slice(0, OUT_CAP) + `\n…[已截断, 共 ${String(s).length} 字符]`
     : String(s || "");
+}
+
+// ---------- 网络类 git (clone/fetch/pull) 镜像兜底 ----------
+// GitHub 直连失败 → 依次试 ghproxy/ghfast/gh-proxy 镜像。纯 execFileSync 参数数组, 无 shell 注入面。
+
+function runGitArgs(cwd, args, timeoutMs) {
+  return execFileSync("git", args, {
+    cwd,
+    timeout: timeoutMs,
+    maxBuffer: 16 * 1024 * 1024,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+}
+
+// clone: 直接跑; github 主机失败按镜像 URL 重试
+function cloneWithMirror(rootDir, repo, dest, { depth = 1, timeoutMs = 180000 } = {}) {
+  const mirrors = githubMirrorUrls(repo) || [];
+  const attempts = [repo, ...mirrors];
+  let lastErr = null;
+  for (const url of attempts) {
+    try {
+      const out = runGitArgs(rootDir, ["clone", "--depth", String(depth), url, dest], timeoutMs);
+      // 走镜像克隆时, origin 会被记成镜像地址 → 改回原始 github 地址,
+      // 让后续 git_pull/git_fetch 用 insteadOf 兜底 (先直连、失败再镜像), 而非永久绑死单一镜像。
+      if (url !== repo) {
+        try { runGitArgs(rootDir, ["-C", dest, "remote", "set-url", "origin", repo], timeoutMs); } catch { /* 忽略 */ }
+      }
+      return { ok: true, url, dest, viaMirror: url !== repo, output: String(out || "").trim() };
+    } catch (e) { lastErr = e; }
+  }
+  throw lastErr || new Error("git clone 失败");
+}
+
+// fetch/pull: 先直连; 失败后用 -c url.<镜像前缀>...insteadOf 重写 github 远程再试 (非 github 远程不受影响)
+function gitWithMirrorFallback(rootDir, baseArgs, { timeoutMs = 180000 } = {}) {
+  const repo = findRepoRoot(rootDir);
+  if (!repo) throw new Error("不在 git 仓库内 (未找到 .git)");
+  try {
+    return { out: runGitArgs(repo, baseArgs, timeoutMs), viaMirror: false };
+  } catch (firstErr) {
+    let lastErr = firstErr;
+    for (const p of GH_MIRROR_PREFIXES) {
+      try {
+        const out = runGitArgs(repo, ["-c", `url.${p}https://github.com/.insteadOf=https://github.com/`, ...baseArgs], timeoutMs);
+        return { out, viaMirror: true, mirror: p };
+      } catch (e) { lastErr = e; }
+    }
+    throw lastErr;
+  }
 }
 
 export function registerGitTools(catalog, { rootDir } = {}) {
@@ -149,6 +202,77 @@ export function registerGitTools(catalog, { rootDir } = {}) {
         return JSON.stringify({ ok: true, hash, message });
       } catch (e) {
         return JSON.stringify({ ok: false, error: (e.message || "").slice(0, 300) });
+      }
+    },
+  });
+
+  // 5. git_clone — 克隆仓库 (GitHub 镜像兜底)
+  catalog.register({
+    name: "git_clone",
+    capability: { readOnly: false, riskLevel: "medium", sideEffect: "workspace" },
+    description: "克隆 git 仓库到工作区。repo 支持 URL 或 owner/repo (默认 github.com)。直连失败时自动改用 GitHub 镜像 (ghproxy/ghfast/gh-proxy) 重试。",
+    parameters: {
+      type: "object",
+      properties: {
+        repo: { type: "string", description: "仓库 URL 或 owner/repo" },
+        dest: { type: "string", description: "目标目录 (默认取仓库名)" },
+        depth: { type: "number", description: "浅克隆深度 (默认 1)" },
+      },
+      required: ["repo"],
+    },
+    category: "vcs",
+    power: "agent",
+    execute: async (args) => {
+      const repoRaw = String(args.repo || "").trim();
+      if (!repoRaw) return JSON.stringify({ error: "git_clone: 需要 repo" });
+      // 无协议前缀且非 scp-like (git@host:path) → 视为 github owner/repo
+      const repo = /^[a-z]+:\/\//i.test(repoRaw) || /^[^@\s]+@[^:\s]+:/.test(repoRaw)
+        ? repoRaw
+        : "https://github.com/" + repoRaw.replace(/^\/+/, "");
+      const base = repo.split("/").pop().replace(/\.git$/, "") || "repo";
+      const dest = String(args.dest || base).trim();
+      try {
+        const r = cloneWithMirror(rootDir, repo, dest, { depth: Number(args.depth) || 1 });
+        return JSON.stringify(r);
+      } catch (e) {
+        return JSON.stringify({ ok: false, error: "git clone 失败 (直连+镜像均失败): " + String(e.message || e).slice(0, 300) });
+      }
+    },
+  });
+
+  // 6. git_pull — 拉取合并 (镜像兜底)
+  catalog.register({
+    name: "git_pull",
+    capability: { readOnly: false, riskLevel: "medium", sideEffect: "workspace" },
+    description: "拉取并合并远程最新提交 (git pull --no-rebase)。GitHub 远程直连失败时自动改走镜像重试。",
+    parameters: { type: "object", properties: {}, required: [] },
+    category: "vcs",
+    power: "agent",
+    execute: async () => {
+      try {
+        const r = gitWithMirrorFallback(rootDir, ["pull", "--no-rebase"]);
+        return JSON.stringify({ ok: true, viaMirror: r.viaMirror, mirror: r.mirror || "", output: cap(r.out) });
+      } catch (e) {
+        return JSON.stringify({ ok: false, error: String(e.message || e).slice(0, 300) });
+      }
+    },
+  });
+
+  // 7. git_fetch — 拉取远程 (镜像兜底)
+  catalog.register({
+    name: "git_fetch",
+    capability: { readOnly: true, riskLevel: "low", sideEffect: "none" },
+    description: "拉取远程更新到本地 (git fetch --all --prune)。GitHub 远程直连失败时自动改走镜像重试。",
+    parameters: { type: "object", properties: {}, required: [] },
+    category: "vcs",
+    power: "agent",
+    idempotent: true,
+    execute: async () => {
+      try {
+        const r = gitWithMirrorFallback(rootDir, ["fetch", "--all", "--prune"]);
+        return JSON.stringify({ ok: true, viaMirror: r.viaMirror, mirror: r.mirror || "", output: cap(r.out) });
+      } catch (e) {
+        return JSON.stringify({ ok: false, error: String(e.message || e).slice(0, 300) });
       }
     },
   });
