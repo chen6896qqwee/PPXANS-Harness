@@ -331,6 +331,20 @@ input, textarea, select { font: inherit; color: inherit; }
 .issue .ifix { color: var(--ok); font-size: 12px; margin-top: 3px; }
 .report-md { font-size: 12.5px; }
 
+/* 验收记录 + 自我进化 (可观测面板, 2026-10-11 补) */
+.evol-head { margin: 14px 0 8px; font-size: 10.5px; font-weight: 700; letter-spacing: .06em; color: var(--text3); text-transform: uppercase; }
+.vsum { font-size: 11.5px; color: var(--text3); margin-bottom: 8px; }
+.vexec { border: 1px solid var(--border); border-radius: 8px; background: var(--surface); padding: 7px 10px; margin-bottom: 6px; font-size: 12px; }
+.vexec .vtool { font-family: var(--mono); color: var(--accent); font-size: 11.5px; margin-right: 8px; }
+.vexec .vmeta { color: var(--text3); font-size: 10.5px; margin-left: 8px; }
+.vexec .vargs { color: var(--text3); font-size: 10.5px; font-family: var(--mono); margin-top: 3px; white-space: pre-wrap; word-break: break-all; }
+.vexec .vdetail { color: var(--err); font-size: 10.5px; margin-top: 3px; }
+.badge.ok { background: var(--ok); }
+.bullet { border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 7px; background: var(--surface); padding: 6px 9px; margin-bottom: 5px; font-size: 11.5px; }
+.bullet .bkind { display: inline-block; font-size: 9.5px; font-weight: 700; color: var(--accent); border: 1px solid var(--accent); border-radius: 4px; padding: 0 5px; margin-right: 6px; }
+.bullet .bcontent { color: var(--text); }
+.bullet .bcount { float: right; font-family: var(--mono); font-size: 10px; color: var(--text3); }
+
 /* 设置 */
 .settings { flex: 1; overflow-y: auto; padding: 8px 14px; }
 .setrow { display: flex; flex-direction: column; gap: 5px; font-size: 12.5px; color: var(--text2); margin-bottom: 14px; }

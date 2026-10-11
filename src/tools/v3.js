@@ -256,6 +256,9 @@ export function registerV3Tools(catalog, { rootDir, agent = null }) {
         title: { type: "string", description: "目标标题 (add 时必填)" },
         priority: { type: "string", description: "优先级 p0/p1/p2, 大小写均可 (未知值会被拒绝, 不静默降档)" },
         status: { type: "string", enum: [...GOAL_STATUSES], description: "新状态 (update 时必填)" },
+        budget: { type: "number", description: "预算 (可选, 长期目标资源上限)" },
+        spent: { type: "number", description: "已花费 (可选)" },
+        next_review_at: { type: "string", description: "下次复盘时间 ISO 字符串 (可选)" },
       },
       required: ["action"],
     },
@@ -267,7 +270,7 @@ export function registerV3Tools(catalog, { rootDir, agent = null }) {
         if (!args.title) return JSON.stringify({ ok: false, error: "add 需要 title" });
         try {
           const before = board.count();
-          const g = board.addGoal({ title: args.title, priority: args.priority });
+          const g = board.addGoal({ title: args.title, priority: args.priority, budget: args.budget, spent: args.spent, nextReviewAt: args.next_review_at });
           // 同标题会被认成既有目标 (不新增) —— 明说给模型, 免得它以为计划已扩展
           const already = board.count() === before;
           return JSON.stringify(already ? { ok: true, goal: g, already_present: true } : { ok: true, goal: g });
@@ -278,7 +281,7 @@ export function registerV3Tools(catalog, { rootDir, agent = null }) {
       if (a === "update") {
         if (!args.id || !args.status) return JSON.stringify({ ok: false, error: "update 需要 id + status" });
         try {
-          const g = board.updateGoal(args.id, { status: args.status });
+          const g = board.updateGoal(args.id, { status: args.status, budget: args.budget, spent: args.spent, nextReviewAt: args.next_review_at });
           if (!g) return JSON.stringify({ ok: false, error: `未知目标 id: ${args.id}` });
           return JSON.stringify({ ok: true, goal: g });
         } catch (e) {

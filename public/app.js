@@ -954,18 +954,69 @@
     get("/api/review/latest").then(function (j) {
       var el = $("reviewBody");
       var issues = (j && j.issues) || [];
-      if (!issues.length && !(j && j.report)) { el.innerHTML = '<div class="empty">尚无报告 · 发送 /review 触发</div>'; return; }
-      el.innerHTML = issues.map(function (it) {
-        var p = it.severity === "high" ? "p0" : it.severity === "medium" ? "p1" : "p2";
-        return '<div class="issue"><div class="ihead"><span class="badge ' + p + '">' + p.toUpperCase() + '</span>'
-          + '<span class="ititle">' + esc(it.title || "") + '</span></div>'
-          + '<div class="ifile">' + esc((it.file || "") + (it.line ? ":" + it.line : "")) + "</div>"
-          + (it.detail ? '<div class="idetail">' + esc(it.detail) + "</div>" : "")
-          + (it.suggestion ? '<div class="ifix">→ ' + esc(it.suggestion) + "</div>" : "") + "</div>";
-      }).join("") + (j.report ? '<div class="report-md md">' + renderMd(j.report) + "</div>" : "");
+      var html = "";
+      if (!issues.length && !(j && j.report)) { html = '<div class="empty">尚无报告 · 发送 /review 触发</div>'; }
+      else {
+        html = issues.map(function (it) {
+          var p = it.severity === "high" ? "p0" : it.severity === "medium" ? "p1" : "p2";
+          return '<div class="issue"><div class="ihead"><span class="badge ' + p + '">' + p.toUpperCase() + '</span>'
+            + '<span class="ititle">' + esc(it.title || "") + '</span></div>'
+            + '<div class="ifile">' + esc((it.file || "") + (it.line ? ":" + it.line : "")) + "</div>"
+            + (it.detail ? '<div class="idetail">' + esc(it.detail) + "</div>" : "")
+            + (it.suggestion ? '<div class="ifix">→ ' + esc(it.suggestion) + "</div>" : "") + "</div>";
+        }).join("") + (j.report ? '<div class="report-md md">' + renderMd(j.report) + "</div>" : "");
+      }
+      html += '<div class="evol-head">验收记录</div><div id="verifyBody"><div class="empty">加载中…</div></div>';
+      html += '<div class="evol-head">自我进化</div><div id="evolveBody"><div class="empty">加载中…</div></div>';
+      el.innerHTML = html;
+      loadVerifyRecords();
+      loadEvolve();
     }).catch(function () {
       $("reviewBody").innerHTML = '<div class="empty">审查服务未启动</div>';
     });
+  }
+  // 验收记录: 已验证账本 + 最近任务执行证据 (命令/退出码/耗时) —— 兑现「执行/验证分离」可观测
+  function loadVerifyRecords() {
+    get("/api/verify/records").then(function (j) {
+      var box = $("verifyBody");
+      if (!box) return;
+      var exec = (j && j.executions) || [];
+      var v = (j && j.verification) || {};
+      if (!exec.length && !v.total) { box.innerHTML = '<div class="empty">暂无验收记录 (任务执行后自动积累)</div>'; return; }
+      box.innerHTML = '<div class="vsum">已验证 ' + (v.total || 0) + ' 条 · 最近执行 ' + exec.length + ' 次</div>'
+        + exec.slice(-15).map(function (e) {
+          var ok = e.ok ? '<span class="badge ok">通过</span>' : '<span class="badge p0">失败</span>';
+          return '<div class="vexec"><span class="vtool">' + esc(e.tool || "") + '</span>' + ok
+            + '<span class="vmeta">' + (e.durationMs ? e.durationMs + "ms" : "") + '</span>'
+            + (e.error ? '<div class="vdetail">' + esc(e.error) + "</div>" : "")
+            + '<div class="vargs">' + esc(e.args || "") + "</div></div>";
+        }).join("");
+    }).catch(function () {});
+  }
+  // 自我进化: 进化引擎状态 + 已验证写回 + playbook bullets —— 让进化过程不再黑盒
+  function loadEvolve() {
+    get("/api/evolve/status").then(function (j) {
+      var box = $("evolveBody");
+      if (!box) return;
+      var ev = j && j.evolve;
+      var pb = j && j.playbook;
+      var vd = j && j.verified;
+      var sum = [];
+      if (ev) sum.push("进化引擎 " + (ev.enabled ? "启用 · 每 " + ev.everyCalls + " 次提炼" : "关闭") + " · 累计 " + ev.calls + " 次");
+      if (vd) sum.push("已验证写回 " + (vd.total || 0) + " 条");
+      if (pb) sum.push("Playbook " + (pb.total || 0) + " 条");
+      var html = sum.length ? '<div class="vsum">' + sum.map(esc).join(" · ") + "</div>" : "";
+      if (pb && pb.bullets && pb.bullets.length) {
+        html += pb.bullets.map(function (b) {
+          return '<div class="bullet"><span class="bkind">' + esc(b.kind || "") + "</span>"
+            + '<span class="bcontent">' + esc(b.content || "") + "</span>"
+            + '<span class="bcount">' + ((b.counters && b.counters.helpful) || 0) + "↑ / " + ((b.counters && b.counters.harmful) || 0) + "↓</span></div>";
+        }).join("");
+      } else if (!html) {
+        html = '<div class="empty">暂无进化记录 (用久后自动积累)</div>';
+      }
+      box.innerHTML = html;
+    }).catch(function () {});
   }
   $("btnReviewRun").onclick = function () {
     $("inp").value = "/review";
@@ -1315,6 +1366,13 @@
   }
 
   /* ================= 生命周期角标 + hero 状态条 ================= */
+  var H = null; // 运行健康聚合快照 (/api/health/summary)
+  function loadHealth() {
+    get("/api/health/summary").then(function (j) {
+      H = j && j.ok !== false ? j : null;
+      updHeroStats();
+    }).catch(function () { H = null; });
+  }
   function loadLifecycle() {
     get("/api/lifecycle").then(function (j) {
       var st = j && (j.stage || j.status) || null;
@@ -1332,6 +1390,14 @@
     bits.push(S.providers.length ? "模型 " + providerLabel(S.providers[0]) : "模型未配置");
     if (S.life) bits.push("生命周期 " + S.life);
     bits.push("会话 " + S.sessions.length);
+    if (H && H.traces && H.traces.count) {
+      var sr = H.traces.failRate ? (100 - parseFloat(H.traces.failRate)) : 100;
+      bits.push("轨迹 " + H.traces.count + " · 成功率 " + (sr === 100 ? "100%" : sr.toFixed(1) + "%"));
+    }
+    if (H && H.usage && (H.usage.calls || H.usage.cost)) {
+      bits.push("调用 " + H.usage.calls + " · 累计 $" + Number(H.usage.cost || 0).toFixed(4));
+    }
+    if (H && H.pending_approvals) bits.push("待审批 " + H.pending_approvals);
     $("heroStats").innerHTML = bits.map(function (b, i) {
       return (i ? '<span class="hs-sep"></span>' : "") + "<span>" + esc(b) + "</span>";
     }).join("");
@@ -1683,11 +1749,12 @@
 
     loadCommands();
     loadLifecycle();
+    loadHealth();
     loadTasks();
     renderSpaces();
     loadLlm();
     pollApprovals();
-    S.lifeTimer = setInterval(loadLifecycle, 30000);
+    S.lifeTimer = setInterval(function () { loadLifecycle(); loadHealth(); }, 30000);
     S.apprTimer = setInterval(function () { pollApprovals(); loadTasks(); }, 8000);
     $("inp").focus();
   }

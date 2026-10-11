@@ -151,6 +151,12 @@ function lenientStatus(v) {
 const normTitle = (t) => String(t ?? "").trim();
 // 标题去重键: 空白/大小写差异算同一条 (计划台账里同一句话出现两次只会让模型再决策一遍)
 const titleKey = (t) => normTitle(t).toLowerCase().replace(/\s+/g, " ");
+// 数值归一 (预算/已花): 缺省/空/非有限数 → undefined (静默不写, 而非写入坏值)
+function normNum(v) {
+  if (v === undefined || v === null || v === "") return undefined;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : undefined;
+}
 
 /**
  * 内容哈希补号: g_h + 7 位十六进制。
@@ -307,17 +313,25 @@ export function createGoalBoard({ dataDir = null, maxGoals = GOAL_MAX_GOALS } = 
   }
 
   // 在内存 rows 上落一条 (落盘模式下调用方必须已持锁)
-  function upsert({ explicitId, title, priority, status }) {
+  // budget/spent/nextReviewAt 为可选扩展字段 (对照 TheOne 长期目标预算/复盘节奏), 缺省不写。
+  function upsert({ explicitId, title, priority, status, budget, spent, nextReviewAt }) {
+    const applyMeta = (g) => {
+      if (budget !== undefined) g.budget = budget;
+      if (spent !== undefined) g.spent = spent;
+      if (nextReviewAt !== undefined && nextReviewAt !== null) g.nextReviewAt = nextReviewAt;
+    };
     if (explicitId) {
       const hit = rows.find((g) => g.id === explicitId);
       if (hit) {
         if (title) hit.title = title;
         hit.priority = priority;
         hit.status = status;
+        applyMeta(hit);
         writeRows(rows);
         return hit;
       }
       const g = { id: explicitId, title: title || explicitId, priority, status, created: new Date().toISOString() };
+      applyMeta(g);
       rows.push(g);
       writeRows(rows);
       return g;
@@ -331,6 +345,7 @@ export function createGoalBoard({ dataDir = null, maxGoals = GOAL_MAX_GOALS } = 
       throw new Error(`目标看板已满 (上限 ${maxGoals} 条), 请先完成或清理既有目标`);
     }
     const g = { id: shortId("g_"), title, priority, status, created: new Date().toISOString() };
+    applyMeta(g);
     rows.push(g);
     writeRows(rows);
     return g;
@@ -345,15 +360,19 @@ export function createGoalBoard({ dataDir = null, maxGoals = GOAL_MAX_GOALS } = 
       // 严格校验先行 —— 抛错必须在任何写盘动作之前 (被拒的 add 不留半成品)
       const priority = normalizePriority(input.priority);
       const status = normalizeStatus(input.status);
+      const budget = normNum(input.budget);
+      const spent = normNum(input.spent);
+      const nextReviewAt = input.nextReviewAt ? String(input.nextReviewAt) : undefined;
 
-      if (!file) return upsert({ explicitId, title, priority, status });
+      const meta = { explicitId, title, priority, status, budget, spent, nextReviewAt };
+      if (!file) return upsert(meta);
 
       ensureDir(path.dirname(file));
       return withFileLock(file, () => {
         // 锁内重新对表: 陈旧内存整体写盘会抹掉别的进程刚落的 goal (丢更新)
         const { rows: disk } = readDisk();
         rows = mergeGoals(disk, rows);
-        return upsert({ explicitId, title, priority, status });
+        return upsert(meta);
       });
     },
 
@@ -372,6 +391,9 @@ export function createGoalBoard({ dataDir = null, maxGoals = GOAL_MAX_GOALS } = 
       if (patch.priority !== undefined) g.priority = normalizePriority(patch.priority);
       if (patch.status !== undefined) g.status = normalizeStatus(patch.status);
       if (patch.title !== undefined) g.title = normTitle(patch.title);
+      if (patch.budget !== undefined) g.budget = normNum(patch.budget);
+      if (patch.spent !== undefined) g.spent = normNum(patch.spent);
+      if (patch.nextReviewAt !== undefined) g.nextReviewAt = patch.nextReviewAt == null ? null : String(patch.nextReviewAt);
       writeRows(rows);
       return g;
     },
@@ -399,7 +421,16 @@ export function createGoalBoard({ dataDir = null, maxGoals = GOAL_MAX_GOALS } = 
         const items = list.filter((g) => g.priority === p);
         if (items.length === 0) continue;
         lines.push(`## ${p}`);
-        for (const g of items) lines.push(`- [${icon[g.status] || "?"}] ${g.title} \`${g.id}\` (${g.status})`);
+        for (const g of items) {
+          let meta = `(${g.status})`;
+          if (g.budget !== undefined || g.spent !== undefined) {
+            const b = g.budget !== undefined ? `预算 ${g.budget}` : "";
+            const s = g.spent !== undefined ? `已花 ${g.spent}` : "";
+            meta += ` · ${[b, s].filter(Boolean).join(" / ")}`;
+          }
+          if (g.nextReviewAt) meta += ` · 复盘 ${g.nextReviewAt}`;
+          lines.push(`- [${icon[g.status] || "?"}] ${g.title} \`${g.id}\` ${meta}`);
+        }
         lines.push("");
       }
       return lines.join("\n").trim() + "\n";

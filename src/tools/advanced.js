@@ -141,6 +141,13 @@ async function assertPublicUrl(url, opts = {}) {
   }
 }
 
+// body 序列化: null/undefined → 无 body; 字符串原样; 其余 JSON 序列化。
+// 曾用 `body !== undefined` 判定, 漏掉 null → GET 请求被塞 body:"null" 而报
+// "Request with GET/HEAD method cannot have body"。抽出纯函数便于回归测试钉死。
+export function serializeRequestBody(body) {
+  return body == null ? undefined : (typeof body === "string" ? body : JSON.stringify(body));
+}
+
 // 带 SSRF 校验的安全 fetch: 手动跟随重定向, 并对每一跳(含首发)都做 assertPublicUrl 校验。
 // fetch 默认 redirect:"follow" 会在每次跳转时重新解析 DNS —— 攻击者用一个公网 URL 302→内网
 // (如 http://127.0.0.1:x 或 http://169.254.169.254/)即可绕过单次 assertPublicUrl。
@@ -152,7 +159,7 @@ async function _fetchWithSsrSafe(url, { method = "GET", headers = {}, body, sign
     const resp = await proxiedFetch(current, {
       method,
       headers,
-      body: body !== undefined ? (typeof body === "string" ? body : JSON.stringify(body)) : undefined,
+      body: serializeRequestBody(body),
       redirect: "manual",
       timeoutMs: 20000,
     }, proxy);

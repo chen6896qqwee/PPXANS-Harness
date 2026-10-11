@@ -215,6 +215,7 @@ export class SkillLoader {
       tags: String(fm.tags || "").split(",").map((s) => s.trim()).filter(Boolean),
       risk: String(fm.risk || "low"),
       requiresHuman: String(fm.requires_human || "") === "true",
+      version: String(fm.version || ""),
       upstream: String(fm.source || ""),
       source: hit.root.kind,
       frontmatter: fm,
@@ -236,7 +237,7 @@ export class SkillLoader {
       const m = this._load(id, index);
       if (m) out.push({
         id: m.id, name: m.name, description: m.description,
-        domain: m.domain, tags: m.tags, source: m.source,
+        domain: m.domain, tags: m.tags, source: m.source, version: m.version,
       });
     }
     return out;
@@ -252,7 +253,7 @@ export class SkillLoader {
     return {
       id: m.id, name: m.name, description: m.description,
       domain: m.domain, tags: m.tags, risk: m.risk, requiresHuman: m.requiresHuman,
-      source: m.source, frontmatter: m.frontmatter, file: m.file,
+      source: m.source, version: m.version, frontmatter: m.frontmatter, file: m.file,
     };
   }
 

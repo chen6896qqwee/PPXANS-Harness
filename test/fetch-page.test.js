@@ -4,6 +4,7 @@
 import test from "node:test";
 import assert from "node:assert";
 import { ToolCatalog, registerAdvancedTools, Scheduler } from "../src/tools/index.js";
+import { serializeRequestBody } from "../src/tools/advanced.js";
 import path from "node:path";
 import os from "node:os";
 import fs from "node:fs";
@@ -29,4 +30,14 @@ test("fetch_page: 抓取公开网页正文", { skip: !NET, timeout: 20000 }, asy
 test("fetch_page: SSRF 拒绝内网地址", async () => {
   const r = await cat.call("fetch_page", { url: "http://127.0.0.1:8899/" });
   assert.ok(/拒绝|失败|error/i.test(r + ""), "拒绝内网: " + r.slice(0, 80));
+});
+
+test("serializeRequestBody: null/undefined 不产生 body (防 GET body 回归)", () => {
+  // 原 bug: `body !== undefined` 漏掉 null → GET 被塞 body:"null" 而报
+  // "Request with GET/HEAD method cannot have body"。钉死 null → undefined。
+  assert.equal(serializeRequestBody(undefined), undefined);
+  assert.equal(serializeRequestBody(null), undefined);
+  assert.equal(serializeRequestBody("hi"), "hi");
+  assert.equal(serializeRequestBody({ a: 1 }), '{"a":1}');
+  assert.equal(serializeRequestBody(0), "0");
 });

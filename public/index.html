@@ -4,6 +4,21 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
+<script>
+// 主题首屏防闪烁 (FOUC): 在首次绘制前按 localStorage/系统偏好设 data-theme,
+// 与 app.js 的 themePref() 同一套判定口径 (ppx_theme_pref ∈ system/light/dark, 旧 key ppx_theme 兼容)。
+(function () {
+  var p = null;
+  try { p = localStorage.getItem("ppx_theme_pref"); } catch (e) {}
+  if (p !== "system" && p !== "light" && p !== "dark") {
+    var old = null;
+    try { old = localStorage.getItem("ppx_theme"); } catch (e) {}
+    p = old === "light" ? "light" : "dark";
+  }
+  var dark = p === "system" ? (window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches) : p === "dark";
+  document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+})();
+</script>
 <title>皮皮虾 · PPX Agent</title>
 <link rel="icon" href="/favicon.svg">
 <link rel="stylesheet" href="/app.css">

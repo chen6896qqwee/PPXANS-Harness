@@ -978,8 +978,8 @@ export class HttpChannel extends Channel {
       try {
         const p = JSON.parse(body || "{}");
         let goal = null;
-        if (p.op === "add") goal = board.addGoal({ id: p.id, title: p.title, priority: p.priority, status: p.status });
-        else if (p.op === "update") goal = board.updateGoal(p.id, { title: p.title, priority: p.priority, status: p.status });
+        if (p.op === "add") goal = board.addGoal({ id: p.id, title: p.title, priority: p.priority, status: p.status, budget: p.budget, spent: p.spent, nextReviewAt: p.next_review_at ?? p.nextReviewAt });
+        else if (p.op === "update") goal = board.updateGoal(p.id, { title: p.title, priority: p.priority, status: p.status, budget: p.budget, spent: p.spent, nextReviewAt: p.next_review_at ?? p.nextReviewAt });
         else { this._json(res, 400, { ok: false, error: `未知 op: ${p.op}` }); return true; }
         if (!goal) { this._json(res, 404, { ok: false, error: "目标不存在" }); return true; }
         this._json(res, 200, { ok: true, goal, goals: board.list() });
@@ -1084,6 +1084,62 @@ export class HttpChannel extends Channel {
         sandbox: agent.permissions.sandbox,
         planEnabled: agent.permissions.planEnabled,
         planSessions: agent.planModeSessions(),
+      });
+      return true;
+    }
+    // GET /api/health/summary — 运行健康聚合 (轨迹成功率/失败/心跳/工具可用性/待审批/用量)
+    // 数据源均为现成 (traces.stats + usageStats + lifecycle + tools), 供 Web hero 状态条直读。
+    if (get && reqPath === "/api/health/summary") {
+      const t = agent.traces && typeof agent.traces.stats === "function" ? agent.traces.stats() : {};
+      const u = agent.usageStats || {};
+      const tools = agent.tools && typeof agent.tools.listDetailed === "function" ? agent.tools.listDetailed() : [];
+      const lc = agent.lifecycleStatus ? agent.lifecycleStatus() : {};
+      this._json(res, 200, {
+        ok: true,
+        uptime_ms: Math.round(process.uptime() * 1000),
+        heartbeat_at: new Date().toISOString(),
+        traces: { count: t.count || 0, failed: t.failed || 0, failRate: t.failRate || "0%", slowTools: t.slowTools || [] },
+        usage: { calls: u.calls || 0, tokens: u.tokens || 0, cost: u.cost || 0 },
+        tools: { total: tools.length, enabled: tools.filter((x) => x.enabled).length },
+        pending_approvals: agent.pendingApprovals ? agent.pendingApprovals().length : 0,
+        lifecycle: lc,
+        policy_guard: agent.tools && typeof agent.tools.policyStatus === "function"
+          ? agent.tools.policyStatus().filter((s) => s.state && s.state !== "closed") : [],
+      });
+      return true;
+    }
+    // GET /api/verify/records — 验收记录: 已验证账本 (Auditor) + 最近任务执行证据 (命令/退出码/耗时)
+    // 兑现「执行/验证分离」的可观测: 用户能翻到"测试到底跑没跑、退出码多少、耗时多少"。
+    if (get && reqPath === "/api/verify/records") {
+      const auditor = agent.auditor;
+      const aStats = auditor && typeof auditor.stats === "function" ? auditor.stats() : { total: 0, byKind: {} };
+      const ledger = auditor && Array.isArray(auditor.ledger) ? auditor.ledger.slice(-20) : [];
+      const traces = agent.traces && typeof agent.traces.read === "function" ? agent.traces.read(undefined, 200) : [];
+      const executions = (Array.isArray(traces) ? traces : [])
+        .filter((t) => t && /run_command|test|apply_patch|write_file|code_act|review_code/.test(String(t.tool || "")))
+        .slice(-40)
+        .map((t) => ({
+          tool: t.tool, ok: !!t.ok, durationMs: t.durationMs || 0, ts: t.ts || null,
+          args: String(t.args || "").slice(0, 160), error: t.error ? String(t.error).slice(0, 160) : null,
+        }));
+      this._json(res, 200, { ok: true, verification: { total: aStats.total, byKind: aStats.byKind, ledger }, executions });
+      return true;
+    }
+    // GET /api/evolve/status — 自我进化可观测: 进化引擎状态 + 已验证账本 + playbook 现状 (只读)
+    // 让「证据不够不出提案」的进化过程不再黑盒 (对照 TheOne 自我进化入口)。
+    if (get && reqPath === "/api/evolve/status") {
+      const ev = agent.evolve;
+      const pb = agent.playbook ? agent.playbook.playbook : null;
+      const bullets = pb && Array.isArray(pb.bullets) ? pb.bullets.slice(0, 30).map((b) => ({
+        id: b.id, kind: b.kind, content: b.content, counters: b.counters || {}, createdAt: b.createdAt,
+      })) : [];
+      const auditor = agent.auditor;
+      this._json(res, 200, {
+        ok: true,
+        evolve: ev ? { enabled: ev.enabled, everyCalls: ev.everyCalls, calls: ev._calls, lastAt: ev._lastAt, minIntervalMs: ev.minIntervalMs } : null,
+        verified: auditor && typeof auditor.stats === "function" ? auditor.stats() : { total: 0, byKind: {} },
+        playbook: { version: pb ? pb.version : null, total: pb && Array.isArray(pb.bullets) ? pb.bullets.length : 0, bullets },
+        experience: agent.experience ? { lessons: (agent.experience.lessons || []).length } : {},
       });
       return true;
     }
