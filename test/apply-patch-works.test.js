@@ -96,8 +96,9 @@ test("e) 权限与工具同源: args.path 兜底 allow / 块路径越界 ask / �
     // 块无路径 + args.path 在根内 → allow (与 execute 的兜底一致)
     const d1 = await e.check("apply_patch", { path: "src/a.js", content: SR("x", "y") });
     assert.equal(d1.decision, "allow", `args.path 兜底应免审批: ${d1.reason}`);
-    // 块自带路径越界 → ask
-    const d2 = await e.check("apply_patch", { content: "D:/evil.js\n" + SR("x", "y") });
+    // 块自带路径越界 → ask (用 OS 无关的绝对路径: "D:/evil.js" 这种盘符写法在 Linux 上
+    // 只是个根内相对名 (目录名 "D:"), 引擎按相对路径放行是对的 —— 断言不能写死 Windows 视角)
+    const d2 = await e.check("apply_patch", { content: "/etc/evil.js\n" + SR("x", "y") });
     assert.equal(d2.decision, "ask", "块路径越界必须升级审批");
     // aider 相对穿越路径 → ask
     const d3 = await e.check("apply_patch", { content: "../evil.js\n" + SR("x", "y") });

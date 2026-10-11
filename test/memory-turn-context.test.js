@@ -17,12 +17,20 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+import { createRequire } from "node:module";
 import { MemoryTicker } from "../src/memory/memory-ticker.js";
 import { FactStore } from "../src/memory/fact-store.js";
 import { SqliteFactStore } from "../src/memory/sqlite-store.js";
 import { PPXAgent } from "../src/agent/index.js";
 import { runWithTrace } from "../src/core/trace.js";
 import { EVENTS } from "../src/memory/session.js";
+
+// node:sqlite 是 Node 22.5+ 才有的内置模块 (无 flag 全量可用更晚), 而 CI 矩阵把 node 20 当
+// "最低支持版本" 跑 —— 探测不到就只跑 json 后端, 别让整个文件在 import 后炸 ERR_UNKNOWN_BUILTIN_MODULE
+const req = createRequire(import.meta.url);
+const SQLITE_OK = (() => { try { req("node:sqlite"); return true; } catch { return false; } })();
+const BACKENDS = Object.freeze(SQLITE_OK ? ["json", "sqlite"] : ["json"]);
+if (!SQLITE_OK) console.log(`[skip] node ${process.versions.node} 无 node:sqlite, sqlite 后端用例跳过`);
 
 const execFileAsync = promisify(execFile);
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -49,7 +57,7 @@ const DRAFTS = [
 ];
 
 // ---- (a) 往返: 两个记忆后端都要能写下去再读回来 ----
-for (const backend of ["json", "sqlite"]) {
+for (const backend of BACKENDS) {
   test(`轮次上下文往返 (${backend} 后端): 新实例只靠磁盘读回证据与草稿`, async () => {
     const dir = tmp(`mtc-${backend}`);
     try {
@@ -362,7 +370,7 @@ test("保留期: 超龄的 turns 档按天清理, 当天与近期内的一律不
   const dir = tmp("mtc-retention");
   const quiet = { add() {}, addMemory() {}, query() { return []; } };
   try {
-    const t0 = new MemoryTicker(dir, quiet);
+    new MemoryTicker(dir, quiet);
     const dayPath = (offsetDays) => {
       const d = new Date(Date.now() - offsetDays * 86400000);
       return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
