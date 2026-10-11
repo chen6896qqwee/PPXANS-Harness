@@ -46,11 +46,10 @@ jobs:
       #   首次运行即抓出 3 个依赖环 (core→tools→core 等), 已通过常量下沉与模块归位清零。
       #   存量越层冻结在脚本内的 ARCH_BASELINE (写了清理理由), 闸门只拦**新增** ——
       #   "第一次跑就全红"的闸门等于没有闸门 (会立刻被 || true 废掉), 要的是棘轮不是断头台。
-      # 2026-10-11: 存量红 —— src/utils 1332 行 / 预算 1100 (121%)。这是 CI 被 873cfdb 那次
-      #   「sync desktop source」连目录误删之后没人看、代码越涨越界造成的回归, 非本次改动引入。
-      #   先跑报不阻塞, 待拆分 src/utils 或显式上调预算(附理由)后再转回阻塞。
-      - name: Architecture guard (report-only)
-        continue-on-error: true
+      # 2026-10-11: 存量红 (src/utils 1332/1100) 曾降级 report-only; 同日已校准预算并冻结
+      #   (8e76203: utils 1100→1400、ctx 5800→13900, 均附增长归因), 本闸门转回**阻塞** ——
+      #   天花板只能随显式调预算上移, 代码再越界直接红。真减债 (拆 src/utils) 仍是独立待办。
+      - name: Architecture guard
         run: node scripts/arch-guard.js --check
         timeout-minutes: 3
       # 协作层长任务压测 (2026-10-07 评估报告 P1-1): 班组/房间的全部证据原本只是单元测试,
@@ -64,12 +63,11 @@ jobs:
       - name: Skill lint
         run: node scripts/skill-lint.js
         timeout-minutes: 3
-      # 上下文预算闸门: 固定开销每请求都付费, 一段工具描述就能悄悄涨几百 tok (超 5800 直接红)
-      # 预算沿革与每次涨价的逐项明细写在 scripts/ctx-profile.js 顶部 (2026-10-07 由 4500 提到 5800:
-      # 多 Agent 协作进核心 schema + 能力边界护栏 + 全量技能名册; 同时瘦掉 spawn_agent 与技能描述)
-      # 2026-10-11: 存量红 —— 当前固定开销已超 ctx-profile 预算 (--check 退 1)。先跑报不阻塞。
-      - name: Context budget check (report-only)
-        continue-on-error: true
+      # 上下文预算闸门: 固定开销每请求都付费, 一段工具描述就能悄悄涨几百 tok (超预算直接红)
+      # 预算沿革与每次涨价的逐项明细写在 scripts/ctx-profile.js 顶部 (2026-10-07 由 4500 提到 5800;
+      # 2026-10-11 校准到 13900 并冻结, 增长归因: 89 个工具 schema + 能力边界护栏 + 全量技能名册)
+      # 2026-10-11: 存量红曾降级 report-only, 预算校准后转回**阻塞** —— 再涨价必须走显式调预算。
+      - name: Context budget check
         run: node scripts/ctx-profile.js --check
         timeout-minutes: 5
       # 前缀缓存完整性闸门: prompts.js 把 system prompt 重排成「静态块在前 / 检索段在后」, 收益
