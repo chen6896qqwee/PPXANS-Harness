@@ -216,13 +216,18 @@ if (FIX) {
 }
 
 console.log("=== README 实测数字同步检查 ===");
+// ctx_tokens 容差: 路径已归一化, 但 Windows runner 上仍有 ~6 tok 的机器残差 (hostname/用户名等
+//   归一化覆盖不到的注入), ubuntu 实测与本地分毫不差。闸门要抓的是"一段注释涨几百 tok"级别的
+//   膨胀, ±24 tok (残差的 4 倍) 不会放过真增长, 也不该为机器噪声红脸。
+const TOL = { ctx_tokens: 24 };
 let bad = 0;
 for (const [k, want] of Object.entries(measured)) {
   if (want == null) { console.log(`  - ${k.padEnd(12)} 实测失败, 跳过`); continue; }
   if (!(k in declared)) { console.log(`  - ${k.padEnd(12)} 锚点未声明, 跳过 (跑 --fix 补上)`); continue; }
   const got = declared[k];
-  const ok = Number(got) === Number(want);
-  console.log(`  ${ok ? "✓" : "✗"} ${k.padEnd(12)} README=${String(got).padStart(6)}   实测=${String(want).padStart(6)}`);
+  const ok = Math.abs(Number(got) - Number(want)) <= (TOL[k] || 0);
+  const tol = TOL[k] ? ` (±${TOL[k]})` : "";
+  console.log(`  ${ok ? "✓" : "✗"} ${k.padEnd(12)} README=${String(got).padStart(6)}   实测=${String(want).padStart(6)}${ok ? tol : ""}`);
   if (!ok) bad++;
 }
 // 反向: 锚点里声明了但本脚本测不了的键 (说明闸门漏了, 不是数字错了)

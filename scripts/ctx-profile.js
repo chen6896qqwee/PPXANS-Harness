@@ -81,7 +81,10 @@ console.log('  对照实测: 基线平均 17836 tok/任务 (含多轮工具循�
 //       固定开销 5395 → 13893 (+157%)。TOP 开销: 工具 schema 合计约 1.1 万 tok
 //       (spawn_agent 1105 / skill_import 382 / plan_files 312 …) + 【能力边界】1129 + 【可用技能】423。
 //       不玩“涨了就改数字”: 显式上调并在此冻结; 后续若要压回, 优先瘦身上述最贵工具描述与技能名册。
-const CONTEXT_BUDGET_TOKENS = 13900;
+//     → 14000 (2026-10-11 下午): 路径归一化后实测 13879 (ubuntu 与本地一致), 但 Windows runner
+//       仍有 ~6 tok 机器残差 (hostname/用户名类注入, 归一化覆盖不到)。+100 为跨机器噪声余量,
+//       闸门语义不变 —— 真增长(一段工具描述数百 tok)依然直接红; 真减债时把余量撤掉。
+const CONTEXT_BUDGET_TOKENS = 14000;
 const checkIdx = process.argv.indexOf('--check');
 if (checkIdx >= 0) {
   const mIdx = process.argv.indexOf('--max-tokens');
