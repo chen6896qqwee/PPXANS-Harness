@@ -92,8 +92,9 @@ function measureSkills() {
 }
 
 // 实测: 核心 schema 数 + 固定开销 tok (装配一次 agent 拿真值)
-// 2026-10-11: ctx 注入含【工作目录】真实绝对路径, 测量值随 checkout 路径长度漂移
-//   (README=13893 vs CI windows 13884)。与 ctx-profile.js 同修: 测量前把 root 归一化成定长占位符。
+// 2026-10-11: ctx 注入含【工作目录】等真实绝对路径, 测量值随 checkout 路径长度漂移
+//   (README=13893 vs CI windows 13884)。与 ctx-profile.js 同修: 测量前做路径归一化
+//   (root → <ROOT>, 其余绝对路径 → <PATH>), 占位符定长, 任何机器数字一致。
 async function measureContext() {
   const { PPXAgent } = await import("../src/agent/index.js");
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "ppx-rsc-"));
@@ -101,7 +102,10 @@ async function measureContext() {
   const tools = a.tools.toOpenAI();
   let ctx = "";
   try { ctx = a._context("随便问个问题"); } catch { ctx = ""; }
-  const norm = (s) => (root ? String(s || "").split(root).join("<ROOT>") : String(s || ""));
+  const norm = (s) => String(s || "")
+    .split(root).join("<ROOT>")
+    .replace(/([A-Za-z]:[/\\]|\\\\)[^\s"'\n]+/g, "<PATH>")
+    .replace(/(^|[\s"'=(])\/(?:home|Users|root|tmp|var)\/[^\s"'\n]+/g, "$1<PATH>");
   return { coreSchema: tools.length, ctxTokens: est(norm(JSON.stringify(tools))) + est(norm(ctx)) };
 }
 

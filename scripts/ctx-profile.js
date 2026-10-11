@@ -23,8 +23,13 @@ console.log('=== 单次请求的上下文构成 (空会话, 无历史) ===\n');
 
 // 2026-10-11: 【工作目录】注入的是真实绝对路径, 测量值随 checkout 路径长度漂移
 //   (本地 13893 vs CI windows 13884, 差 9 tok)。闸门量的是"固定开销", 不是本机路径 ——
-//   测量前把 root 归一化成定长占位符, 保证任何机器/任何路径下数字一致。
-const norm = (s) => (root ? String(s || '').split(root).join('<ROOT>') : String(s || ''));
+//   测量前做路径归一化: root → <ROOT>, 其余绝对路径 (Windows 盘符/UNC 与 POSIX 家目录/tmp)
+//   → <PATH> 占位符。占位符定长, 任何机器/任何 checkout 路径下数字一致。
+//   (第一版只归一 root, CI windows 实测仍差 6 tok —— tmpdir 等非 root 路径也会漏进来, 故用通用规则)
+const norm = (s) => String(s || '')
+  .split(root).join('<ROOT>')
+  .replace(/([A-Za-z]:[/\\]|\\\\)[^\s"'\n]+/g, '<PATH>')
+  .replace(/(^|[\s"'=(])\/(?:home|Users|root|tmp|var)\/[^\s"'\n]+/g, '$1<PATH>');
 
 // 1. 工具 schema (每次请求都要带)
 const tools = a.tools.toOpenAI();
