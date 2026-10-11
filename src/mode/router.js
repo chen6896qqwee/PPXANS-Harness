@@ -3,10 +3,14 @@
 // 适合: 多领域任务, 快速定位专门能力; 按需加载技能, 省 token。
 import path from "node:path";
 import { SkillLoader } from "../skills/loader.js";
+import { matchSkill } from "../skills/search.js";
 
 // 技能匹配移至 src/skills/search.js (2026-10-01): name 加权 + 高置信阈值 + 歧义不押注,
 // 并供 skill_search 工具复用同一打分器。此处保持转出口兼容既有 import。
-export { matchSkill } from "../skills/search.js";
+// 2026-10-11 修复: 原写法 `export { matchSkill } from "..."` 只是重导出, 并不在本模块绑定
+// 该符号, 导致下方 routerExecutor 里调用 matchSkill 直接 ReferenceError。
+// (eslint no-undef 首次接入即抓到; 该路由此前无测试覆盖, 所以 1637 项全绿也没暴露。)
+export { matchSkill };
 
 export async function routerExecutor(agent, userMsg, { sessionKey = "default" } = {}) {
   if (!agent.llm) {

@@ -39,6 +39,8 @@
     "audit:verify": "node scripts/audit-verify.js",
     "bench": "node scripts/bench.js",
     "test": "node --test --test-force-exit test/*.test.js",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
     "depcheck": "node scripts/depcheck.js .",
     "prepublishOnly": "npm run depcheck && npm run selfheal && npm test",
     "package": "node scripts/package.js",
@@ -72,5 +74,9 @@
     "./server": "./src/server.js",
     "./cli": "./src/cli.js",
     "./audit": "./src/audit/audit-chain.js"
+  },
+  "devDependencies": {
+    "eslint": "^9.39.5",
+    "globals": "^17.13.0"
   }
 }

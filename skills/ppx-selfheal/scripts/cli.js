@@ -38,6 +38,7 @@ switch (cmd) {
     const crashed = healer.checkCrash();
     out(crashed ? "⚠ 上次为崩溃退出 (integrity.clean === false), 建议跑 heal" : "上次为正常退出 ✓");
     process.exit(crashed ? 1 : 0);
+    break; // process.exit 后不可达, 仅为满足 no-fallthrough
   }
 
   case "status": {

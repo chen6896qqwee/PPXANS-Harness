@@ -22,3 +22,6 @@ build/
 # 本地配置备份(含明文 key)与本地测试产物 — 绝不入库 (2026-10-11)
 config/ppx.json.bak-*
 .ppxtest/
+
+# 验收原始 trial 数据 (可再生成、体积大) — 不入库, 只保留 README/metrics 摘要 (2026-10-11)
+reports/**/trials.json
