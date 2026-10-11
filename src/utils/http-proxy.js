@@ -67,9 +67,6 @@ export function getProxy(config = {}) {
   return _cached;
 }
 
-// 供测试重置缓存
-export function _resetProxyCache() { _cached = null; }
-
 let _curlOk;
 function curlAvailable() {
   if (_curlOk !== undefined) return _curlOk;

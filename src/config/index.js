@@ -64,6 +64,7 @@ export const DEFAULT_CONFIG = {
     context_window_ratio: 0.6,      // 历史+工具结果占用上下文窗口的安全比例上限
     max_facts: 1000,                // L1 原子记忆总量上限 (防膨胀, 超限裁剪最弱)
     session_max_age_days: 30,       // 会话日志保留天数 (启动时清理过期会话, 0=不清理)
+    session_archive_days: 7,        // 会话自动归档天数 (超过 N 天未活跃自动归档, 数据不删可恢复; 0=不归档)
   },
   experience: { enabled: true },
   // selfheal.max_restart_attempts 已在 v1.1.0 移除: 代码无任何消费 (死配置)

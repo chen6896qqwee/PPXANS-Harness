@@ -44,6 +44,10 @@ export class SessionStore {
     this._logs = new Map();    // key -> event[] (不可变, append-only)
     this._nextSeq = new Map(); // key -> 下一个 seq
     this._flushedSeq = new Map(); // key -> 已落盘的最大 seq (增量追加用)
+    // 会话归档标记 (2026-10-11): { key: archivedAt }, 独立于事件日志
+    this._archived = this._loadArchive();
+    // 会话标题覆盖 (2026-10-11): { key: title }, 独立于事件日志内容 (改名不改内容/归属/排序)
+    this._titles = this._loadTitles();
     this._loadAll();
     // --- 派生缓存 (v1.1.1 性能优化) ---
     // eventsByDay / deriveCompacted 在每一轮/每一工具轮都被调用, 旧实现每次全量扫描 O(T)。
@@ -162,6 +166,15 @@ export class SessionStore {
     const ev = { seq, ts: Number.isFinite(ts) ? ts : Date.now(), type, data };
     this._log(k).push(ev);
     this._nextSeq.set(k, seq);
+    // 新会话自动命名 (2026-10-11): 该 key 第一条用户消息、无自定义标题、且非 default 主会话时,
+    //   按 "MMDD|类型|主题" 自动生成标题 (纯规则, 不改内容/归属)。default 豁免 (主会话兜底, 不自动改名)。
+    if (type === EVENTS.USER && k !== "default" && !this._titles[k]) {
+      const hasPriorUser = this._log(k).some((e) => e !== ev && e.type === EVENTS.USER);
+      if (!hasPriorUser) {
+        const auto = this._autoTitleRule(data && data.content, ev.ts);
+        if (auto) { this._titles[k] = auto; this._saveTitles(); }
+      }
+    }
     if (!skipFlush) this._flush(k);
     this._bump(); // 使派生缓存失效
     return ev;
@@ -355,12 +368,15 @@ export class SessionStore {
     for (const [key, events] of this._logs) {
       if (!events.length) continue;
       const firstUser = events.find((e) => e.type === EVENTS.USER);
-      const title = firstUser?.data?.content ? String(firstUser.data.content).slice(0, 20) : key;
+      const derived = firstUser?.data?.content ? String(firstUser.data.content).slice(0, 20) : key;
+      // 2026-10-11: 自定义标题覆盖优先 (改名不改内容), 否则回退派生标题
+      const title = this._titles[key] || derived;
       out.push({
         key,
         count: events.length,
         lastTs: events[events.length - 1].ts,
         title,
+        archived: !!this._archived[key], // 2026-10-11: 归档标记随列表下发 (前端分组收起)
       });
     }
     out.sort((a, b) => (b.lastTs || 0) - (a.lastTs || 0));
@@ -436,6 +452,120 @@ export class SessionStore {
       }
     }
     return removed;
+  }
+
+  // ---- 会话自动归档 (2026-10-11): 不删数据只打标记, 归档会话在列表收起、可随时恢复 ----
+  //   误归档零成本恢复; 事件日志/派生消息不受任何影响, 归档会话点开仍能看完整历史。
+  _archivePath() { return path.join(this.dir, "_archive.json"); }
+  _loadArchive() {
+    try {
+      const raw = JSON.parse(fs.readFileSync(this._archivePath(), "utf8"));
+      return (raw && typeof raw === "object" && !Array.isArray(raw)) ? raw : {};
+    } catch { return {}; }
+  }
+  _saveArchive() {
+    try {
+      const tmp = this._archivePath() + ".tmp";
+      fs.writeFileSync(tmp, JSON.stringify(this._archived, null, 2));
+      fs.renameSync(tmp, this._archivePath()); // 原子替换, 避免写一半的损坏状态
+    } catch { /* 标记落盘失败不阻塞主流程 (下次启动重新计算) */ }
+  }
+  archive(key) {
+    const k = this._safe(key);
+    const evs = this._logs.get(k);
+    if (!evs || !evs.length) return false;
+    this._archived[k] = Date.now();
+    this._saveArchive();
+    return true;
+  }
+  unarchive(key) {
+    const k = this._safe(key);
+    if (!(k in this._archived)) return false;
+    delete this._archived[k];
+    this._saveArchive();
+    return true;
+  }
+  // 自动归档: lastTs 超过 days 天未活跃的会话打归档标记 (default 主会话与 keep 名单豁免)。
+  // 返回本次新归档的 key 列表。0/负 days = 关闭自动归档。
+  autoArchive({ days = 7, keep = [] } = {}) {
+    if (!(days > 0)) return [];
+    const cutoff = Date.now() - days * 86400000;
+    const keepSet = new Set([...keep, "default"].map((k) => this._safe(k)));
+    const done = [];
+    for (const [key, events] of this._logs) {
+      if (keepSet.has(key) || this._archived[key]) continue;
+      const lastTs = events.length ? events[events.length - 1].ts : 0;
+      if (lastTs && lastTs < cutoff) { this._archived[key] = Date.now(); done.push(key); }
+    }
+    if (done.length) this._saveArchive();
+    return done;
+  }
+
+  // ---- 会话标题覆盖 (2026-10-11): 改名不改内容/归属/排序/归档 ----
+  // 标题默认从第一条用户消息派生 (list 里 slice(0,20)); 本机制提供独立覆盖字段,
+  // 存 data/sessions/_titles.json ({ key: title }), 与事件日志 append-only 完全解耦。
+  _titlesPath() { return path.join(this.dir, "_titles.json"); }
+  _loadTitles() {
+    try {
+      const raw = JSON.parse(fs.readFileSync(this._titlesPath(), "utf8"));
+      return (raw && typeof raw === "object" && !Array.isArray(raw)) ? raw : {};
+    } catch { return {}; }
+  }
+  _saveTitles() {
+    try {
+      const tmp = this._titlesPath() + ".tmp";
+      fs.writeFileSync(tmp, JSON.stringify(this._titles, null, 2));
+      fs.renameSync(tmp, this._titlesPath());
+    } catch { /* 落盘失败不阻塞主流程 */ }
+  }
+  // 设置自定义标题; title 为空串则清除覆盖、回退到派生标题。返回是否变更。
+  setTitle(key, title) {
+    const k = this._safe(key);
+    if (!this._logs.has(k)) return false;
+    const t = String(title || "").trim();
+    if (t) { this._titles[k] = t; this._saveTitles(); return true; }
+    if (k in this._titles) { delete this._titles[k]; this._saveTitles(); }
+    return true;
+  }
+  getTitle(key) {
+    const k = this._safe(key);
+    return this._titles[k] || "";
+  }
+
+  // ---- 新会话自动命名 (2026-10-11): 首条用户消息落盘且无自定义标题时生成 "MMDD|类型|主题" ----
+  // 纯规则、确定性、零 LLM 开销。日期取首条消息 ts 转 Asia/Shanghai (UTC+8)。
+  _guessType(text) {
+    const t = text.toLowerCase();
+    const rules = [
+      ["修复", /修复|bug|报错|错误|异常|坏了|闪退|崩溃|出问题|不好使|错乱/],
+      ["发布", /发布|上线|部署|打包|release|deploy/],
+      ["优化", /优化|改进|提速|加速|性能|变慢|卡顿|精简/],
+      ["设计", /设计|界面|ui|样式|配色|布局|交互|美化|好看/],
+      ["文档", /文档|readme|说明|注释|教程/],
+      ["研究", /研究|调研|分析|对比|评估|测评|比较/],
+      ["功能", /功能|实现|开发|新增|添加|做一个|写一个|写个|支持|接入|集成|安装/],
+    ];
+    for (const [name, re] of rules) if (re.test(t)) return name;
+    return "探索";
+  }
+  _autoTitleRule(content, ts) {
+    const raw = String(content || "").trim();
+    if (!raw) return "";
+    // MMDD: 首条消息时间 + 8h → UTC 字段即上海本地月/日
+    const sh = new Date((Number.isFinite(ts) ? ts : Date.now()) + 8 * 3600000);
+    const mmdd = String(sh.getUTCMonth() + 1).padStart(2, "0") + String(sh.getUTCDate()).padStart(2, "0");
+    const type = this._guessType(raw);
+    // 主题: 去 URL / 图片路径 / 附件路径, 折叠空白, 去礼貌前缀, 截断到 14 字
+    let topic = raw
+      .replace(/https?:\/\/\S+/g, "")
+      .replace(/uploads?\/\S+/g, "")
+      .replace(/\b[\w./-]+\.(png|jpe?g|gif|webp|svg|pdf|docx?|xlsx?|zip)\b/gi, "")
+      .replace(/\s+/g, " ")
+      .replace(/^(请|帮我|帮忙)[，,。:：\s]+/, "")
+      .trim();
+    if (!topic) topic = "新会话";
+    if (topic.length > 14) topic = topic.slice(0, 14);
+    return `${mmdd}|${type}|${topic}`;
   }
 
   // 增量落盘: 只追加 flushedSeq 之后的新事件 (P1#5, 消除大会话全量重写)

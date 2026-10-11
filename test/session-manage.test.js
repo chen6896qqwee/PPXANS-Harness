@@ -17,7 +17,8 @@ test("P1#6: SessionStore.list 列出多会话含标题", async () => {
   assert.equal(list.length, 2);
   const a = list.find((x) => x.key === "a");
   assert.equal(a.count, 2);
-  assert.equal(a.title, "第一句话很长很长要截断".slice(0, 20));
+  // 2026-10-11: 新会话首条消息后自动命名 "MMDD|类型|主题" (原断言派生标题, 已随功能更新)
+  assert.match(a.title, /^\d{4}\|探索\|第一句话很长很长要截断$/);
   // 默认按 lastTs 倒序, b 更新, 应在 a 前
   assert.equal(list[0].key, "b");
 });

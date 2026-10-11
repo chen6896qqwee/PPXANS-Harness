@@ -37,7 +37,3 @@ export function setOverlap(A, B) {
 export function overlapCoefficient(a, b) {
   return setOverlap(charBigrams(a), charBigrams(b));
 }
-
-export function jaccardCoefficient(a, b) {
-  return setJaccard(charBigrams(a), charBigrams(b));
-}

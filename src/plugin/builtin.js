@@ -106,6 +106,20 @@ export const sessionPlugin = (ctx) => {
     const removed = sessions.pruneOld({ maxAgeDays: maxAge });
     if (removed.length) info(`[sessions] 清理过期会话 ${removed.length} 个: ${removed.join(", ")}`);
   }
+  // 自动归档 (2026-10-11): config.memory.session_archive_days, 默认 7; 0/负=不归档。
+  //   启动跑一次 + 每 6 小时跑一次 (interval unref: 不阻止进程优雅退出)。
+  const archDays = Number(config.memory?.session_archive_days ?? 7);
+  const runAutoArchive = () => {
+    try {
+      const done = sessions.autoArchive({ days: archDays });
+      if (done.length) info(`[sessions] 自动归档 ${done.length} 个不活跃会话 (> ${archDays} 天): ${done.join(", ")}`);
+    } catch (e) { info(`[sessions] 自动归档失败 (不阻塞): ${e?.message || e}`); }
+  };
+  if (archDays > 0) {
+    runAutoArchive();
+    const timer = setInterval(runAutoArchive, 6 * 3600 * 1000);
+    if (typeof timer.unref === "function") timer.unref();
+  }
   ctx.provide("sessions", sessions);
 };
 

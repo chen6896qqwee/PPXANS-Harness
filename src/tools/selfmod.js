@@ -109,13 +109,13 @@ export function registerSelfmodTools(catalog, { skillsDir }) {
   catalog.register({
     name: "create_skill",
     capability: { readOnly: false, riskLevel: "medium", sideEffect: "workspace" },
-    description: "把一次成功的方法/流程沉淀为可复用的 Agent Skill。name=技能名(字母数字横线), description=一句话说明, content=SKILL.md 正文。正文推荐含三个段落(参考 addyosmani/agent-skills): ①「## 流程」逐步工作流+检查点 ②「## 反合理化」常见偷懒借口+反驳 ③「## 验证」完成后必须提供的证据。写进 skills/ 目录后自动被 loader 发现。",
+    description: "把一次成功的方法/流程沉淀为可复用的 Agent Skill。name=技能名(字母数字横线), description=一句话说明, content=SKILL.md 正文 (建议含 流程/反合理化/验证 三段)。写进 skills/ 目录后自动被 loader 发现。",
     parameters: {
       type: "object",
       properties: {
         name: { type: "string", description: "技能名, 仅字母/数字/横线" },
         description: { type: "string", description: "技能一句话说明" },
-        content: { type: "string", description: "SKILL.md 正文 (建议含: 流程/反合理化/验证 三段)" },
+        content: { type: "string", description: "SKILL.md 正文" },
       },
       required: ["name", "description", "content"],
     },

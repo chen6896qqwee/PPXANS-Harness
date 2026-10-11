@@ -128,7 +128,15 @@
   function req(path, opts) {
     opts = opts || {};
     opts.headers = Object.assign(headers(opts.body != null), opts.headers || {});
-    return fetch(S.base + path, opts).then(function (r) {
+    // 死连接保险丝 (2026-10-11 补): 服务重启窗口期, 浏览器握着已断开的 TCP 连接发请求,
+    // fetch 会 pending 到 TCP 超时(数分钟), 界面永远停在"加载中…"。加超时主动中止。
+    var killTimer = null;
+    if (opts.timeout && typeof AbortController !== "undefined") {
+      var ctrl = new AbortController();
+      opts.signal = ctrl.signal;
+      killTimer = setTimeout(function () { ctrl.abort(); }, opts.timeout);
+    }
+    return fetch(S.base + path, opts).finally(function () { if (killTimer) clearTimeout(killTimer); }).then(function (r) {
       if (r.status === 401) {
         handleUnauthorized();
         throw new Error("鉴权失败 (401): 访问令牌无效或已过期, 请重新提供");
@@ -141,7 +149,7 @@
       return r.json().catch(function () { return null; });
     });
   }
-  function get(path) { return req(path); }
+  function get(path) { return req(path, { timeout: 30000 }); }
   function post(path, body) { return req(path, { method: "POST", body: JSON.stringify(body || {}) }); }
 
   function mcpCall(method, params) {
@@ -259,13 +267,37 @@
     var el = $("sessList");
     el.innerHTML = "";
     if (!S.sessions.length) { el.innerHTML = '<div class="empty">暂无会话</div>'; return; }
-    S.sessions.forEach(function (s) {
+    // 2026-10-11: 归档分组 — 活跃在上, "已归档 (N)" 默认收起可展开, 数据不删可恢复
+    var active = S.sessions.filter(function (s) { return !s.archived; });
+    var archived = S.sessions.filter(function (s) { return s.archived; });
+    renderSessionGroup(el, active, false);
+    if (archived.length) {
+      var head = document.createElement("button");
+      head.className = "sess-arch-head";
+      head.innerHTML = ico("folder", 12) + '<span>已归档 (' + archived.length + ")</span>" + ico(S.sessShowArchived ? "chev-d" : "chev-r", 12);
+      head.title = "自动归档: 超过 7 天未活跃的会话 (数据保留, 可恢复)";
+      head.onclick = function () { S.sessShowArchived = !S.sessShowArchived; renderSessions(); };
+      el.appendChild(head);
+      if (S.sessShowArchived) renderSessionGroup(el, archived, true);
+    }
+  }
+  function renderSessionGroup(el, list, isArchived) {
+    list.forEach(function (s) {
       var b = document.createElement("button");
-      b.className = "sess" + (s.key === S.session ? " on" : "");
+      b.className = "sess" + (s.key === S.session ? " on" : "") + (isArchived ? " archived" : "");
       var title = s.title || s.name || s.key || "(未命名)";
-      b.innerHTML = ico("file", 13) + '<span class="t">' + esc(title) + '</span><span class="del">' + ico("trash", 13) + "</span>";
-      b.title = title + (s.ts ? " · " + fmtTs(s.ts) : "");
+      var archBtn = isArchived
+        ? '<span class="del act-arch" title="恢复到活跃列表">' + ico("plus", 13) + "</span>"
+        : '<span class="del act-arch" title="归档 (不删除, 可恢复)">' + ico("folder-open", 13) + "</span>";
+      b.innerHTML = ico("file", 13) + '<span class="t">' + esc(title) + "</span>" + archBtn + '<span class="del">' + ico("trash", 13) + "</span>";
+      b.title = title + (s.ts ? " · " + fmtTs(s.ts) : "") + (isArchived ? " · 已归档" : "");
       b.onclick = function (e) {
+        if (e.target.closest(".act-arch")) {
+          post("/sessions/archive", { key: s.key, archived: !isArchived })
+            .then(function () { if (S.session === s.key && isArchived) { /* 当前会话被恢复无需特殊处理 */ } loadSessions(); })
+            .catch(function (er) { toast(er.message, true); });
+          return;
+        }
         if (e.target.closest(".del")) { delSession(s.key); return; }
         switchSession(s.key, title);
       };
@@ -749,7 +781,7 @@
                 full = j.content || full;
                 clearStep();
                 body.innerHTML = renderMd(full);
-                if (j.tokens) { S.lastTokens = j.tokens; updTokPill(); }
+                if (j.tokens) { S.lastTokens = j.tokens; updTokPill(); updCtxBar(j.tokens); }
                 if (j.diff) evDiff(j.diff);
               }
               else if (j.type === "tool") { if (j.status === "start") addTool(j); else finishTool(j); }
@@ -794,6 +826,27 @@
     var txt = t.total != null ? t.total : ((t.input != null || t.output != null) ? ((t.input || 0) + "/" + (t.output || 0)) : "—");
     $("tokPill").hidden = false;
     $("tokTxt").textContent = typeof txt === "number" ? txt + " tok" : txt;
+  }
+
+  /* ---- 底部状态条: 当前会话上下文长度 / 缓存命中 (2026-10-11, 对齐 DSH Harness) ---- */
+  function fmtTok(n) {
+    if (n == null) return "—";
+    if (n >= 1048576) return (n / 1048576).toFixed(2) + "M";
+    if (n >= 1024) return Math.round(n / 1024) + "K";
+    return String(n);
+  }
+  function updCtxBar(t) {
+    if (!t) return;
+    var bits = [];
+    if (t.prompt != null) bits.push("上下文 " + fmtTok(t.prompt) + " tok");
+    var pct = (t.cacheHitPct != null) ? t.cacheHitPct
+      : (t.cacheHit != null && t.prompt > 0 ? Math.round((t.cacheHit / t.prompt) * 100) : null);
+    if (pct != null) bits.push("缓存命中 " + pct + "%");
+    if (t.completion != null) bits.push("输出 " + fmtTok(t.completion));
+    if (!bits.length) return;
+    var el = $("ctxBar");
+    el.hidden = false;
+    $("ctxTxt").textContent = bits.join(" · ");
   }
 
   /* ================= 命令面板 ================= */
@@ -1332,6 +1385,15 @@
       if (pc && pc.enabled != null) bits.push("主动提醒 " + (pc.enabled ? "开" : "关"));
       if (s.user && s.user.name) bits.push("用户 " + s.user.name);
       if (bits.length) $("setInfo").textContent += " · " + bits.join(" · ");
+      // 语音配置回填 (2026-10-11): api_key 不回传明文, 已配置时占位提示
+      var asr = (s.voice && s.voice.asr) || {};
+      $("setAsrUrl").value = asr.base_url || "";
+      $("setAsrKey").value = "";
+      $("setAsrKey").placeholder = asr.api_key_set ? "已配置 (输入新值可覆盖, 留空保留)" : "sk-... (留空 = 保留已存密钥)";
+      $("setAsrModel").value = (asr.model && asr.model !== "whisper-1") ? asr.model : "";
+      $("asrState").textContent = asr.api_key_set && asr.base_url
+        ? "● 云端 ASR 已配置 (" + (asr.model || "whisper-1") + ")"
+        : "○ 未配置 — 未配置时语音输入回退浏览器识别";
     }).catch(function () { /* 设置读取失败不影响主流程 */ });
   }
   $("setApproval").onchange = function () {
@@ -1341,12 +1403,39 @@
       .catch(function () { toast("已切换本地显示 (服务端模式未变)", false); });
   };
   $("setSandbox").onchange = function () {
-    post("/api/permissions", { sandbox: $("setSandbox").value }).then(function () { toast("沙箱已生效"); }).catch(function () {});
+    var v = $("setSandbox").value;
+    // 2026-10-11 补: 此前失败时 catch 空吞, 切换失败无任何提示; 成功文案也不带模式名
+    post("/api/permissions", { sandbox: v })
+      .then(function () { toast("沙箱已切换: " + v); })
+      .catch(function (e) { toast("沙箱切换失败: " + (e && e.message || "未知错误"), true); });
   };
   $("setTheme").onchange = function () {
     localStorage.setItem("ppx_theme_pref", $("setTheme").value);
     try { localStorage.removeItem("ppx_theme"); } catch (e) {}
     applyTheme();
+  };
+  // 语音配置保存 (2026-10-11): PUT /api/settings → 写 config.voice.asr 并热生效 (reloadSettings)
+  $("setAsrSave").onclick = function () {
+    var asr = {};
+    var url = ($("setAsrUrl").value || "").trim();
+    var key = ($("setAsrKey").value || "").trim();
+    var model = ($("setAsrModel").value || "").trim();
+    if (url) asr.base_url = url;
+    if (key) asr.api_key = key; // 留空 = 不覆盖已存密钥
+    if (model) asr.model = model;
+    var b = $("setAsrSave");
+    b.disabled = true;
+    req("/api/settings", { method: "PUT", body: JSON.stringify({ patch: { asr: asr } }) }).then(function (j) {
+      var a = j && j.settings && j.settings.voice && j.settings.voice.asr || {};
+      $("asrState").textContent = a.api_key_set && a.base_url
+        ? "● 云端 ASR 已配置 (" + (a.model || "whisper-1") + ")"
+        : "○ 未配置 — 语音输入将回退浏览器识别";
+      toast(a.api_key_set && a.base_url ? "语音配置已保存并生效" : "语音配置已清除", a.api_key_set && a.base_url ? false : true);
+      $("setAsrKey").value = "";
+      $("setAsrKey").placeholder = a.api_key_set ? "已配置 (输入新值可覆盖, 留空保留)" : "sk-...";
+    }).catch(function (e) {
+      toast("语音配置保存失败: " + (e && e.message || "未知错误"), true);
+    }).finally(function () { b.disabled = false; });
   };
 
   /* ================= 侧栏能力入口 ================= */

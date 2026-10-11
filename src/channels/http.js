@@ -412,6 +412,13 @@ export class HttpChannel extends Channel {
     this._ensureToken(); // 启动时确保有 token
     this.server = http.createServer((req, res) => this._dispatch(req, res));
 
+    // keep-alive 加固 (2026-10-11 补): Node 默认 keepAliveTimeout 仅 5s, 而浏览器
+    // 复用连接的窗口更长。服务端 5s 掐掉空闲连接后, 浏览器复用这条"僵尸连接"发请求
+    // 会静默挂死 (表现为界面弹窗/列表永远"加载中…")。调大到 65s 并同步抬高
+    // headersTimeout (必须 > keepAliveTimeout, 官方要求)。
+    this.server.keepAliveTimeout = 65_000;
+    this.server.headersTimeout = 66_000;
+
     await new Promise((resolve, reject) => {
       this.server.once("error", reject);
       this.server.listen(this.port, this.host, resolve);
@@ -558,6 +565,28 @@ export class HttpChannel extends Channel {
   }
 
   // ---- 路由域 2: 对话 (POST /message 与 SSE 流式) ----
+
+  // 2026-10-11: 最近一次 LLM usage 快照 → 前端底部状态条 (上下文长度/缓存命中)。
+  //   兼容 DeepSeek 专属字段 (prompt_cache_hit_tokens/prompt_cache_miss_tokens) 与
+  //   OpenAI 形态 (prompt_tokens_details.cached_tokens); 无缓存字段时 cacheHitPct 为 null。
+  _usageSnapshot() {
+    const u = this.agent?.lastUsage;
+    if (!u) return null;
+    const prompt = Number(u.prompt_tokens) || 0;
+    const completion = Number(u.completion_tokens) || 0;
+    const cacheHit = u.prompt_cache_hit_tokens ?? u.prompt_tokens_details?.cached_tokens ?? null;
+    const cacheMiss = u.prompt_cache_miss_tokens ?? null;
+    const cacheHitPct = (cacheHit != null && prompt > 0) ? Math.round((cacheHit / prompt) * 100) : null;
+    return {
+      prompt,
+      completion,
+      total: Number(u.total_tokens) || prompt + completion,
+      cacheHit,
+      cacheMiss,
+      cacheHitPct,
+    };
+  }
+
   async _routeChat(req, res, post, reqPath) {
     if (!post) return false;
 
@@ -569,7 +598,7 @@ export class HttpChannel extends Channel {
       if (!this._acquire(res)) return true;
       try {
         const reply = await this.agent.chat(String(text), { sessionKey });
-        this._json(res, 200, { reply, sessionId: sessionKey, agent: this.agent.config.agent?.name || "ppx" });
+        this._json(res, 200, { reply, sessionId: sessionKey, agent: this.agent.config.agent?.name || "ppx", tokens: this._usageSnapshot() });
       } catch (e) {
         this._fail(res, e, 500);
       } finally { this._release(); }
@@ -601,7 +630,7 @@ export class HttpChannel extends Channel {
           onStep: (ev) => { try { send({ type: "step", round: ev.round, maxRounds: ev.maxRounds }); } catch {} }, // turn/step 推理轮次进度
         });
         const finalContent = full || reply;
-        send({ type: "done", content: finalContent, sessionId: sessionKey });
+        send({ type: "done", content: finalContent, sessionId: sessionKey, tokens: this._usageSnapshot() });
         if (!res.writableEnded) res.end();
       } catch (e) {
         // 不外泄内部实现细节 (如 ERR_HTTP_HEADERS_SENT 之类)
@@ -629,6 +658,32 @@ export class HttpChannel extends Channel {
         ? this.agent.sessionStore.deriveMessages(key)
         : [];
       this._json(res, 200, { sessionId: key, messages: msgs });
+      return true;
+    }
+    // 2026-10-11: 会话标题覆盖 { key, title } — 改名不改内容/归属/排序 (list 已优先读覆盖标题)
+    if (post && reqPath === "/sessions/title") {
+      if (!this._requireAuth(req, res)) return true;
+      const data = await this._readJson(req, res);
+      if (data === null) return true;
+      const store = this.agent.sessionStore;
+      if (!store || typeof store.setTitle !== "function") { this._json(res, 501, { ok: false, error: "会话存储不支持标题" }); return true; }
+      const key = String(data?.key || "");
+      if (!key) { this._json(res, 400, { ok: false, error: "缺少 key" }); return true; }
+      const ok = store.setTitle(key, data?.title);
+      this._json(res, ok ? 200 : 404, { ok });
+      return true;
+    }
+    // 2026-10-11: 会话归档/恢复 { key, archived: true|false } — 不删数据, 仅打标记 (自动归档的手动对偶)
+    if (post && reqPath === "/sessions/archive") {
+      if (!this._requireAuth(req, res)) return true;
+      const data = await this._readJson(req, res);
+      if (data === null) return true;
+      const store = this.agent.sessionStore;
+      if (!store || typeof store.archive !== "function") { this._json(res, 501, { ok: false, error: "会话存储不支持归档" }); return true; }
+      const key = String(data?.key || "");
+      if (!key) { this._json(res, 400, { ok: false, error: "缺少 key" }); return true; }
+      const ok = data?.archived === false ? store.unarchive(key) : store.archive(key);
+      this._json(res, ok ? 200 : 404, { ok });
       return true;
     }
     if (post && reqPath === "/sessions/rename") {

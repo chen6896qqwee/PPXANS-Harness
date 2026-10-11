@@ -5,12 +5,3 @@
 export function estimateTokens(s) {
   return Math.ceil(String(s || "").length / 1.6);
 }
-
-// 按 token 预算截断字符串: 保留头部信息 (供 persona/角色设定等需保留 key 信息的场景),
-// 超预算时在尾部标注截断来源与总量。与 estimateTokens 同口径 (字符/1.6)。
-export function truncateByTokens(s, budget) {
-  const str = String(s || "");
-  const maxLen = Math.floor(budget * 1.6);
-  if (str.length <= maxLen) return str;
-  return str.slice(0, maxLen) + `\n...[persona 已按预算截断, 共 ${str.length} 字符]...`;
-}

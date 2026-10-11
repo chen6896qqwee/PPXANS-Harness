@@ -9,8 +9,11 @@ data/
 #   曾被上面的 data/ 规则误吞导致干净 clone 少 3 个技能、README 数字闸门红 (2026-10-11)
 !skills/data/
 !skills/data/**
+# 技能使用计数 (运行期累加, 每用一次就 +1, 进库会让工作区永远脏) (2026-10-11)
+.usage.json
 *.log
 logs/
+*.bak
 
 # 依赖与构建产物
 node_modules/
@@ -29,3 +32,8 @@ config/ppx.json.bak-*
 
 # 验收原始 trial 数据 (可再生成、体积大) — 不入库, 只保留 README/metrics 摘要 (2026-10-11)
 reports/**/trials.json
+
+# 运行期目录: 上传附件与 .ppx 暂存/计划 (本地状态, 易含大图与临时文件) — 不入库 (2026-10-11)
+uploads/
+.ppx/
+

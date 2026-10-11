@@ -214,7 +214,13 @@
           </div>
         </div>
       </div>
-      <div class="footNote" id="footNote">Enter 发送 · Shift+Enter 换行 · Esc 停止生成</div>
+      <div class="footNote" id="footNote">
+        <span>Enter 发送 · Shift+Enter 换行 · Esc 停止生成</span>
+        <span class="ctxbar" id="ctxBar" hidden title="当前会话最近一次模型调用的用量 (来源: usage 统计)">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-activity"/></svg>
+          <em id="ctxTxt"></em>
+        </span>
+      </div>
     </div>
   </main>
 
@@ -330,6 +336,19 @@
             <option value="dark">深色</option>
           </select>
         </label>
+        <div class="setgroup">语音识别 (云端 ASR · OpenAI 兼容 /audio/transcriptions)
+          <label class="setrow">服务地址
+            <input type="text" id="setAsrUrl" placeholder="如 https://api.siliconflow.cn/v1" autocomplete="off">
+          </label>
+          <label class="setrow">API 密钥
+            <input type="password" id="setAsrKey" placeholder="sk-... (留空 = 保留已存密钥)" autocomplete="new-password">
+          </label>
+          <label class="setrow">模型
+            <input type="text" id="setAsrModel" placeholder="whisper-1 / SenseVoiceSmall 等 (默认 whisper-1)" autocomplete="off">
+          </label>
+          <button class="setbtn" id="setAsrSave">保存语音配置</button>
+          <div class="asr-state" id="asrState"></div>
+        </div>
         <div class="setinfo" id="setInfo"></div>
       </div>
     </div>

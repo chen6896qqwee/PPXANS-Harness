@@ -26,6 +26,8 @@ export const SETTINGS_FIELDS = {
   mcp: ["servers", "auto_connect"],
   tools: ["disabled"],
   llm: ["provider", "reasoning"],
+  // 语音识别 (2026-10-11): config.voice.asr 云端 ASR (OpenAI 兼容 /audio/transcriptions)
+  asr: ["backend", "base_url", "api_key", "model"],
 };
 
 // 思考强度合法值 (与前端滑杆档位一致)
@@ -65,6 +67,15 @@ function sanitizeSettings(cfg) {
     llm: {
       provider: cfg.llm?.provider || "",
       reasoning: REASONING_LEVELS.includes(cfg.llm?.reasoning) ? cfg.llm.reasoning : "auto",
+    },
+    voice: {
+      // ASR 安全视图: api_key 不回传明文, 只暴露 set 标志 (2026-10-11)
+      asr: {
+        backend: cfg.voice?.asr?.backend || "cloud",
+        base_url: cfg.voice?.asr?.base_url || "",
+        api_key_set: !!(cfg.voice?.asr?.api_key),
+        model: cfg.voice?.asr?.model || "whisper-1",
+      },
     },
   };
   return out;
@@ -118,6 +129,11 @@ export function updateSettings(root, patch) {
     cfg.mcp = { ...(cfg.mcp || {}), ...pick(patch.mcp, SETTINGS_FIELDS.mcp) };
     cfg.tools = { ...(cfg.tools || {}), ...pick(patch.tools, SETTINGS_FIELDS.tools) };
     cfg.llm = { ...(cfg.llm || {}), ...pick(patch.llm, SETTINGS_FIELDS.llm) };
+    // 语音识别 (2026-10-11): config.voice.asr — api_key 为空时不覆盖 (保留已存密钥)
+    if (patch.asr && typeof patch.asr === "object") {
+      cfg.voice = cfg.voice || {};
+      cfg.voice.asr = { ...(cfg.voice.asr || {}), ...pick(patch.asr, SETTINGS_FIELDS.asr) };
+    }
 
     // 校验
     const port = cfg.channels.http.port;
@@ -153,6 +169,17 @@ export function updateSettings(root, patch) {
     }
     if (cfg.llm.reasoning != null && !REASONING_LEVELS.includes(cfg.llm.reasoning)) {
       throw new Error(`llm.reasoning 必须是 ${REASONING_LEVELS.join(" / ")}`);
+    }
+    // voice.asr 校验 (2026-10-11): base_url 必须是 http(s) URL; 空对象 = 清除配置
+    if (cfg.voice?.asr) {
+      const a = cfg.voice.asr;
+      if (a.base_url != null && a.base_url !== "" && !/^https?:\/\//i.test(String(a.base_url))) {
+        throw new Error("voice.asr.base_url 必须是 http(s) 开头的 URL");
+      }
+      if (a.api_key === "") delete a.api_key; // 空密钥 = 未设置 (不覆盖已存值)
+      // base_url 与 api_key 都为空 → 视为清除整个 asr 配置
+      if (!a.base_url && !a.api_key && !a.model) delete cfg.voice.asr;
+      if (cfg.voice && Object.keys(cfg.voice).length === 0) delete cfg.voice;
     }
 
     writeConfigAtomic(root, cfg);

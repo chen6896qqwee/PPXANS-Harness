@@ -1408,6 +1408,9 @@ export class PPXAgent {
           try {
             const u = r?.usage;
             const tk = (u?.total_tokens ?? (u?.prompt_tokens || 0) + (u?.completion_tokens || 0)) || 0;
+            // 2026-10-11: 记录最近一次 LLM usage 原样 (含 DeepSeek 的 prompt_cache_hit_tokens /
+            //   prompt_cache_miss_tokens), 供 Web 状态条展示 "上下文长度 · 缓存命中" (HTTP done 事件透传)
+            if (u) this.lastUsage = u;
             this.usageStats.calls++;
             this.usageStats.tokens += tk;
             const m = c.model || "unknown";

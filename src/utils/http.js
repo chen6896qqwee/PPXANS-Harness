@@ -24,14 +24,6 @@ export async function readBody(req, { maxBytes = 0 } = {}) {
   return overflow ? null : Buffer.concat(chunks).toString("utf8");
 }
 
-// 读满请求体并解析 JSON。
-//   空体 → {} (与 channels/http 既有语义一致); 超限 → null; JSON 非法 → 抛错 (调用方转 400)。
-export async function readJsonBody(req, { maxBytes = 0 } = {}) {
-  const body = await readBody(req, { maxBytes });
-  if (body === null) return null;
-  return JSON.parse(body || "{}");
-}
-
 // SSE 响应头 (channels/http 与 mcp/http 的流式响应共用, 原先各写一份字面量)
 // 冻结以防调用方误改共享对象; flushHeaders 的时机仍由调用方决定 (发头后应立即 flush)。
 export const SSE_HEADERS = Object.freeze({

@@ -61,6 +61,7 @@ const CONSUMED = {
   "memory.context_window": "src/agent/index.js _histTokenCap 上下文窗口兜底 (溢出防护)",
   "memory.context_window_ratio": "src/agent/index.js _histTokenCap 历史占用窗口安全比例",
   "memory.session_max_age_days": "src/plugin/builtin.js pruneOld 会话保留天数",
+  "memory.session_archive_days": "src/plugin/builtin.js autoArchive 会话自动归档天数 (0=不归档)",
   // tools
   "tools.enabled": "src/plugin/builtin.js toolsEnabled",
   "tools.custom_dir": "src/plugin/builtin.js 自定义工具目录",

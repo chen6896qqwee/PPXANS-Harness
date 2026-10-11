@@ -176,7 +176,20 @@ export function withFileLock(file, fn, { timeoutMs = 3000, pollMs = 20, staleMs 
       // v3.0.1 (P1#5): 活跃进程持锁 → 抛错而非抢锁 (宁可失败不可双写损坏)
       if (!canSteal()) throw new Error(`文件锁被活跃进程持有, 等待 ${timeoutMs}ms 后放弃: ` + lock);
       try { fs.rmSync(lock, { force: true }); } catch {} // 陈旧锁强取 (此处无 myToken, 不涉误删)
-      if (!acquire()) throw new Error("文件锁获取超时: " + lock);
+      if (!acquire()) {
+        // 2026-10-11 加固: 强取瞬间可能被并发方 (同样在走超时强取路径) 抢先建锁 —— 原实现
+        //   直接抛"文件锁获取超时"。高发场景: 旧服务被 taskkill /F 强杀留下僵尸锁 + Windows
+        //   上 process.kill(pid,0) 对死进程误判存活 (实测复现), 多路写入同时挤到强取分支。
+        //   此处有限重试几轮, 每轮重新判 canSteal (对方是活跃进程且锁未陈旧 → 放权让路)。
+        let won = false;
+        for (let i = 0; i < 5 && !won; i++) {
+          _syncSleep(pollMs * 5);
+          if (acquire()) { won = true; break; }
+          if (!canSteal()) break;
+          try { fs.rmSync(lock, { force: true }); } catch {}
+        }
+        if (!won) throw new Error("文件锁获取超时: " + lock);
+      }
       break;
     }
     _syncSleep(pollMs);
@@ -301,11 +314,6 @@ export function writeText(file, text) {
 export function appendText(file, text) {
   ensureDir(path.dirname(file));
   fs.appendFileSync(file, text, "utf8");
-}
-
-export function appendLine(file, line) {
-  ensureDir(path.dirname(file));
-  fs.appendFileSync(file, line + "\n", "utf8");
 }
 
 export function nowISO() {
