@@ -46,6 +46,7 @@ npm run chat
 | `tool_result_budget` | 4000 | 工具结果裁剪预算（超长结果保留头尾，防撑爆上下文） |
 | `max_tool_error_retry` | 2 | 工具错误喂回模型修正的重试次数 |
 | `tool_timeout_ms` | 30000 | **全局默认工具超时**（工具未声明 `timeoutMs` 时兑底，防单个慢工具卡死对话；工具级 `timeoutMs` 优先；0=不限时）。超时触发 `tool/timeout` trace 事件（含 elapsedMs/budgetMs/retried），是熔断/自适应预算的数据基础 |
+| `workspace_prompt_mode` | absolute | 工作目录段模式：`absolute` 写入绝对路径（默认，模型少问路径）；`neutral` 不写绝对路径，用稳定占位符，换取跨机器/跨工作目录 provider 前缀缓存可共享（模型可用 `pwd` / `list_dir` 自行确认） |
 
 ## user
 

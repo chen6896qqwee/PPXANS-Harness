@@ -3,6 +3,15 @@
 > 由一次「全量测试（主套件 1633 项 + 7 轮定向探针）」驱动。基线 1628 通过 / 1 失败 / 4 跳过，
 > 修复已知 P1/P2/P3 后 **1629 通过 / 1 偶发（另经压测确认已消除）/ 4 跳过**。
 
+### 新增 - 工程化优化 (一键质量闸门 + 覆盖率入口)
+- **`scripts/verify.js`**: 把 11 项离线快速闸门 (depcheck / arch-guard / readme-sync / web:check / audit-verify / selfheal / skill-lint / cache-audit / ctx-profile / eval / silent-catch-guard) 收敛为 `npm run verify`, 一条命令即可完成本地体检; `npm run verify:full` 再叠加全量测试。
+- **`npm run test:coverage`**: 接入 Node 内置测试覆盖率, 当前全量实测 **1637 项通过 / 0 失败 / 4 网络跳过, 行覆盖 90.02%**, 为后续加覆盖率门禁提供基线。
+- README 测试/CI 章节补充新命令, 并同步当前真实测试结果 (1633 通过 / 0 失败)。
+- **`npm run coverage:gate` / `scripts/coverage-gate.js`**: 覆盖率门禁, 默认行覆盖 >= 85%, 已接入 CI; 当前全量实测行覆盖 **89.99%**。
+- **`memory_search` 工具切到 `querySemantic`**: 直接工具路径也走 dense+BM25 混合检索, 与记忆服务检索口径一致。
+- **缓存中立工作目录模式**: 新增 `agent.workspace_prompt_mode` / `PPX_PROMPT_WORKSPACE_MODE=neutral`, 保留默认绝对路径行为, 同时提供跨机器/跨工作目录前缀缓存共享选项; 新增 `test/prompt-workspace-neutral.test.js`。
+- **CI 新增 `verify` 与 `coverage` 两个 job**: `npm run verify` 一键质量闸门和覆盖率门禁进入 GitHub Actions。
+
 ### 修复 - P1 HTTP 错误语义降级 (客户端错误被报成 500)
 - **`src/channels/http.js` `_readJson` 未收口 JSON 解析异常**: 注释自称"解析失败向上抛错,
   由调用方 try/catch 转 400", 但 5 处调用方 (`_readChatRequest` / `/sessions/rename` /

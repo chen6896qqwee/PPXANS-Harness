@@ -77,8 +77,20 @@ export const promptMethods = {
   //   一次 read_file 都没发就凭猜写了报告。本段补上绝对路径 + 三条硬纪律。
   //   root 每进程恒定 ⇒ 段落逐字稳定, 属静态前缀区 (root 在磁盘布局不变, 前缀缓存不退化)。
   _workspacePrompt() {
+    const neutral = String(process.env.PPX_PROMPT_WORKSPACE_MODE || "").toLowerCase() === "neutral"
+      || String(this.config?.agent?.workspace_prompt_mode || "").toLowerCase() === "neutral";
     let root;
     try { root = path.resolve(String(this.root || ".")); } catch { root = String(this.root || "."); }
+    if (neutral) {
+      return [
+        "【工作目录】",
+        "所有相对路径都相对当前工作目录 (具体路径用 pwd / list_dir 自行确认, 不要向用户反问)。",
+        "任务点名的文件就在这个目录里 —— 先用 read_file / search_files / list_dir 自己找, 不要向用户反问路径。",
+        "改文件前先 read_file 读原文; 改完用 write_file 或 apply_patch 落盘后再作答, 只在回复里贴代码不算完成, 并确认落盘结果 (读回或看 diff)。",
+        "修缺陷遵循「先复现再修」: 先写一条能复现该 bug 的回归测试并跑出失败 (红), 再动手修, 最后重跑测试确认转绿 (绿)。不凭猜测直接改, 也不在没复现前就宣称修好。",
+        "clarify 不是第一步: 信息不足时先自己动手查证, 确实无法推进再向用户提问。",
+      ].join("\n");
+    }
     return [
       "【工作目录】",
       `所有相对路径都相对工作目录: ${root}`,

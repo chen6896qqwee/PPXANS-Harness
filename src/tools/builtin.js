@@ -442,7 +442,7 @@ export function registerBuiltinTools(catalog, { rootDir, facts, memory }) {
     },
     execute: async (args) => {
       if (!facts) return JSON.stringify({ error: "记忆未初始化" });
-      const results = facts.query(args.query, { limit: args.limit || 5 });
+      const results = await facts.querySemantic(args.query, { limit: args.limit || 5 });
       if (!results.length) return "(无匹配记忆)";
       // 来源分级渲染 (2026-10-10 接线): 存储层早已给每条记忆打了 tier (user-stated /
       //   model-inferred / tool-fetched / unknown, 见 memory/provenance.js), 但这条**直接进模型

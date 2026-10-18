@@ -5,6 +5,7 @@
     "max_tool_rounds": 8,
     "tool_result_budget": 4000,
     "max_tool_error_retry": 2,
+    "workspace_prompt_mode": "absolute",
     "proactive": {
       "enabled": true,
       "interval_ms": 3600000

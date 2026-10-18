@@ -38,6 +38,7 @@ const CONSUMED = {
   "agent.max_tool_error_retry": "src/core/policy.js ToolLoopPolicy 工具错误重试次数",
   "agent.tool_timeout_ms": "src/tools/seam.js runWithPolicy 全局默认超时 (工具级 timeoutMs 优先) + src/agent/index.js _runTool 传参",
   "agent.model_preference": "src/llm/router.js orderProviders 本地/云端优先级(local 默认)",
+  "agent.workspace_prompt_mode": "src/agent/prompts.js _workspacePrompt 工作目录段模式 (absolute=写绝对路径, neutral=跨机器缓存中立)",
   "agent.legion.max_concurrent_agents": "src/orchestrator/governor.js governorOptsFromConfig 军团全局并发上限",
   "agent.legion.max_concurrent_per_call": "src/orchestrator/governor.js 单次派发宽度上限 + src/tools/orchestration.js legion_set_concurrency 运行时热调",
   // user

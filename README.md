@@ -118,12 +118,23 @@ npm test              # 全量测试 (1633 项)
 
 **回退机制**：路由层选主模型，运行时负责失败切换 —— 选中 provider 连不上自动切下一个直到成功。默认本地优先，配了云端 key 自动云端优先。
 
+### 前缀缓存优化（可选）
+
+默认 system prompt 会写入工作目录的绝对路径（模型少问路径，进程内前缀缓存不退化）。
+如需跨机器/跨工作目录共享 provider 前缀缓存，可把 `agent.workspace_prompt_mode` 设为 `"neutral"`
+或设置环境变量 `PPX_PROMPT_WORKSPACE_MODE=neutral` —— 此时工作目录段使用稳定占位符，不写绝对路径；
+模型可通过 `pwd` / `list_dir` 自行确认实际路径。
+
 ---
 
 ## 🧪 测试 / 评测 / CI
 
 ```bash
-npm test                # 全量 1633 项 (1628 通过 / 1 失败 / 4 网络跳过)
+npm test                # 全量 1633 项 (1633 通过 / 0 失败 / 4 网络跳过)
+npm run verify          # 一键本地快检 (11 项, 离线, 无需 LLM)
+npm run verify:full     # 一键快检 + 全量测试
+npm run test:coverage   # 全量测试 + Node 内置覆盖率 (行覆盖 90%+)
+npm run coverage:gate   # 覆盖率门禁 (行覆盖 >= 85%, CI 用)
 npm run eval            # 本地能力评测 (7 项, 无需 LLM)
 npm run eval -- --llm   # LLM 端到端评测 (需 provider)
 npm run bench           # 并发/长会话吞吐压测

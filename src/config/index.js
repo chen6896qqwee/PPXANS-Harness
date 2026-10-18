@@ -40,6 +40,9 @@ export const DEFAULT_CONFIG = {
     tool_timeout_ms: 30000,
     // 模型优先级(local 本地优先/cloud 云端优先): 本地测试默认 local, 直接走本地模型; 配云端 key 也先本地
     model_preference: "local",
+    // system prompt 工作目录段模式: "absolute"=写入绝对路径(默认, 模型少问路径);
+    //   "neutral"=不写绝对路径, 用稳定占位符, 换取跨机器/跨工作目录 provider 前缀缓存可共享。
+    workspace_prompt_mode: "absolute",
   },
   user: { name: "兄弟" },
   providers: [],
