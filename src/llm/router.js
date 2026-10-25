@@ -1,0 +1,116 @@
+// src/llm/router.js - 模型路由 (provider 选择中枢, 唯一真相源, 自研底座)
+// 目标: "本地默认优先, 云端可自由接入"
+//   - 占位死配置过滤: model 含 REPLACE_WITH_YOUR_ENDPOINT 等占位符的 provider 视为不可用(省得误选+报噪音警告)
+//   - 本地优先(默认): 本地测试直接用本地模型 (lmstudio/ollama, 127.0.0.1 即零配置可用), 配真实云端 key 也先走本地
+//   - 云端优先(可选): 设 agent.model_preference=cloud → 配真 key 的云端排前 (DeepSeek/智谱/通义千问/OpenAI), 本地兜底
+//   - 健康排序: 启动时异步探测各 provider /models, 能连的排前, 连不上自动降级
+// 全部 provider 均为自研 http 底座 (OpenAI 兼容 API 直连), 无外部引擎依赖。
+// 用法 (与旧 builtin.resolveLLM 同签名, 向后兼容):
+//   const llm = resolveLLM(config);            // 同步选择主 LLM
+//   const all = resolveAllLLMs(config);        // 全量可用 provider
+//   const ok  = isUsableProvider(prov);         // 是否可用(过滤占位符)
+//   const candid = await orderByHealth(all);    // 异步健康排序(可选, 给启动探测用)
+import { LLMClient } from "./client.js";
+// 占位符判定收敛到 config/placeholder.js (唯一真相源) —— v1.0.8 修复 P2-3:
+// 原先此处自带一份正则且漏了 `YOUR_*_MODEL` 形态, 导致模板里的 lmstudio
+// (model=YOUR_LOCAL_MODEL_NAME, base_url=127.0.0.1) 被判为"零配置可用"并选为主模型。
+import { isPlaceholder } from "../config/placeholder.js";
+
+// 本地推理服务地址特征
+const LOCAL_HOST_RE = /127\.0\.0\.1|localhost|lm-studio|ollama/i;
+
+function hasRealKey(p) {
+  // 显式 api_key 且非占位 -> 真 key
+  if (p.api_key && !isPlaceholder(String(p.api_key))) return true;
+  // env 引用且 env 里设了非空值 -> 真 key
+  if (p.api_key_env && process.env[p.api_key_env]) {
+    const v = String(process.env[p.api_key_env]);
+    return !!v && !isPlaceholder(v);
+  }
+  return false;
+}
+
+function isLocal(p) {
+  return LOCAL_HOST_RE.test(String(p.base_url || ""));
+}
+
+// 占位符过滤 + 可用判定 (与旧 isUsableProvider 同语义, 增加占位符排除)
+export function isUsableProvider(prov) {
+  if (!prov) return false;
+  // 2026-10-24 (R16): 显式禁用的 provider 退出候选 —— 临时停用不必删配置 (key/模型全保留)。
+  if (prov.enabled === false) return false;
+  // 占位 model/base_url 的死配置直接判不可用
+  // (如 REPLACE_WITH_YOUR_ENDPOINT, 以及模板里 lmstudio 的 YOUR_LOCAL_MODEL_NAME)
+  if (isPlaceholder(prov.model) || isPlaceholder(prov.base_url)) return false;
+  if (hasRealKey(prov)) return true;          // 云端真 key
+  if (isLocal(prov)) return true;              // 本地推理零配置可用
+  return false;
+}
+
+// 排序: 按 agent.model_preference 决定本地/云端谁优先 (默认 local)
+//   - local:  本地优先(lmstudio/ollama) > 云端真key   [本地测试默认]
+//   - cloud:  云端真key优先 > 本地兜底              [正式发布可配]
+// 健康状态排序由 orderByHealth 异步完成; 这里是"无探测时代理"的基础排序
+function orderProviders(provs, preference) {
+  const cloud = provs.filter((p) => hasRealKey(p) && !isLocal(p));
+  const local = provs.filter((p) => isLocal(p)); // 本地服务都收 (lmstudio 常带字面 api_key, 仍零配置)
+  return preference === "cloud" ? [...cloud, ...local] : [...local, ...cloud];
+}
+
+export function resolvePreference(config) {
+  return (config?.agent?.model_preference === "cloud") ? "cloud" : "local";
+}
+
+// 思考强度 / 自定义注入参数 (config.llm) 透传给每个 LLMClient
+function reasoningOpts(config) {
+  const l = config?.llm || {};
+  const out = { reasoning: l.reasoning || "auto" };
+  if (l.reasoning_params && typeof l.reasoning_params === "object") out.reasoning_params = l.reasoning_params;
+  return out;
+}
+
+// 用户在 Web UI 显式选定的 provider (config.llm.provider) —— 优先级最高, 但仍要求可用
+function explicitProvider(config) {
+  const id = config?.llm?.provider;
+  if (!id) return null;
+  const p = ((config && config.providers) || []).find((x) => x.id === id);
+  return p && isUsableProvider(p) ? p : null;
+}
+
+export function resolveAllLLMs(config) {
+  const provs = (config && config.providers) || [];
+  const pref = resolvePreference(config);
+  const ro = reasoningOpts(config);
+  return orderProviders(provs.filter(isUsableProvider), pref).map((p) => new LLMClient({ ...p, ...ro }));
+}
+
+export function resolveLLM(config) {
+  const provs = (config && config.providers) || [];
+  const ro = reasoningOpts(config);
+  // 显式选择 (Web UI 模型切换): config.llm.provider 优先, 可用才生效
+  const explicit = explicitProvider(config);
+  if (explicit) return new LLMClient({ ...explicit, ...ro });
+  // 强制指定: PPX_PROVIDER=<id> (测试/用户显式选择)
+  const forced = process.env.PPX_PROVIDER;
+  if (forced) {
+    const t = provs.find((x) => x.id === forced || x.id === String(forced).toLowerCase());
+    if (t && isUsableProvider(t)) return new LLMClient({ ...t, ...ro });
+  }
+  const pref = resolvePreference(config);
+  const ordered = orderProviders(provs.filter(isUsableProvider), pref);
+  return ordered.length ? new LLMClient({ ...ordered[0], ...ro }) : null;
+}
+
+// 异步健康排序: 启动时探测各候选 /models, 能连的排前 (只读, 不改配置)
+// returns: [{ client, health }] 按健康排序; 全部失败则保持原顺序 (兜底不报死)
+export async function orderByHealth(clients, { probeMs = 4000 } = {}) {
+  if (!clients || !clients.length) return [];
+  const states = await Promise.all(clients.map(async (c) => {
+    try { return { client: c, ok: typeof c.health === "function" ? await c.health() : true }; }
+    catch { return { client: c, ok: false }; }
+  }));
+  const healthy = states.filter((s) => s.ok).map((s) => s.client);
+  const unwell = states.filter((s) => !s.ok).map((s) => s.client);
+  // 健康的保持原云/本地顺序, 不健康排最后 (不丢弃, 让运行时 fallback 继续尝试)
+  return [...healthy, ...unwell];
+}

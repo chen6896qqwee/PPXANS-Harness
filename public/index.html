@@ -1,0 +1,413 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<script>
+// 主题首屏防闪烁 (FOUC): 在首次绘制前按 localStorage/系统偏好设 data-theme,
+// 与 app.js 的 themePref() 同一套判定口径 (ppx_theme_pref ∈ system/light/dark, 旧 key ppx_theme 兼容)。
+(function () {
+  var p = null;
+  try { p = localStorage.getItem("ppx_theme_pref"); } catch (e) {}
+  if (p !== "system" && p !== "light" && p !== "dark") {
+    var old = null;
+    try { old = localStorage.getItem("ppx_theme"); } catch (e) {}
+    p = old === "light" ? "light" : "dark";
+  }
+  var dark = p === "system" ? (window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches) : p === "dark";
+  document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+})();
+</script>
+<title>皮皮虾 · PPX Agent</title>
+<link rel="icon" href="/favicon.svg">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+
+<!-- ===== 图标集 (内联 sprite, 零外部请求) ===== -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+<g id="i-mark"><path d="M12 3.2 4.6 12 12 20.8 19.4 12z"/><circle cx="12" cy="12" r="2.3"/></g>
+<g id="i-plus"><path d="M12 5v14M5 12h14"/></g>
+<g id="i-search"><circle cx="11" cy="11" r="6.2"/><path d="m20 20-3.6-3.6"/></g>
+<g id="i-refresh"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 5v6h-6"/></g>
+<g id="i-collapse"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M10 4v16"/></g>
+<g id="i-panel"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M15 4v16"/></g>
+<g id="i-settings"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-2.7 1.1v.2a2 2 0 1 1-4 0v-.1a1.6 1.6 0 0 0-2.8-1.1l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.6 1.6 0 0 0 3.6 15H3.4a2 2 0 1 1 0-4h.2A1.6 1.6 0 0 0 4.7 8.3l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3h.1a1.6 1.6 0 0 0 1-1.5v-.2a2 2 0 1 1 4 0v.2a1.6 1.6 0 0 0 2.7 1.1l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8v.1a1.6 1.6 0 0 0 1.5 1h.2a2 2 0 1 1 0 4h-.2a1.6 1.6 0 0 0-1.5 1z"/></g>
+<g id="i-send"><path d="M12 19V5"/><path d="m5.5 11.5 6.5-6.5 6.5 6.5"/></g>
+<g id="i-stop"><rect x="7" y="7" width="10" height="10" rx="1.6" fill="currentColor" stroke="none"/></g>
+<g id="i-folder"><path d="M3.5 7.5A2 2 0 0 1 5.5 5.5h3.4l2 2.2h7.6a2 2 0 0 1 2 2v7.8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></g>
+<g id="i-file"><path d="M6 3.5h7l5 5v12H6z"/><path d="M13 3.5v5h5"/></g>
+<g id="i-chev-d"><path d="m6 9 6 6 6-6"/></g>
+<g id="i-chev-r"><path d="m9 6 6 6-6 6"/></g>
+<g id="i-close"><path d="M6 6l12 12M18 6L6 18"/></g>
+<g id="i-edit"><path d="M4 20h4L19 9a2.1 2.1 0 0 0-3-3L5 17z"/><path d="M14.5 6.5 17.5 9.5"/></g>
+<g id="i-trash"><path d="M4 7h16"/><path d="M9 7V5h6v2"/><path d="M6 7l1 13h10l1-13"/></g>
+<g id="i-check"><path d="m5 13 4.5 4.5L19 7"/></g>
+<g id="i-sliders"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></g>
+<g id="i-cube"><path d="M12 3.2 20 7.6v8.8L12 20.8 4 16.4V7.6z"/><path d="M4 7.6 12 12l8-4.4M12 12v8.8"/></g>
+<g id="i-plug"><path d="M9 3v5M15 3v5"/><path d="M6.5 8h11v3.5a5.5 5.5 0 0 1-11 0z"/><path d="M12 17v4"/></g>
+<g id="i-key"><circle cx="8" cy="12" r="3.4"/><path d="M11.2 12H20"/><path d="M17 12v3.2M14 12v2.4"/></g>
+<g id="i-star"><path d="m12 4.5 2.4 4.9 5.4.8-3.9 3.8.9 5.4-4.8-2.5-4.8 2.5.9-5.4L4.2 10.2l5.4-.8z"/></g><g id="i-pause"><path d="M8.5 5.5v13M15.5 5.5v13"/></g><g id="i-play"><path d="M8 5.5v13l10-6.5z" fill="currentColor" stroke="none"/></g>
+<g id="i-copy"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M15 5.5A2 2 0 0 0 13 3.5H6A2 2 0 0 0 4 5.5v7a2 2 0 0 0 2 2"/></g>
+<g id="i-bot"><rect x="4" y="7" width="16" height="12" rx="3"/><path d="M12 3v4"/><circle cx="9.2" cy="13" r="1.2" fill="currentColor" stroke="none"/><circle cx="14.8" cy="13" r="1.2" fill="currentColor" stroke="none"/></g>
+<g id="i-info"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5.5"/><circle cx="12" cy="8" r="1" fill="currentColor" stroke="none"/></g>
+<g id="i-sun"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4"/></g>
+<g id="i-moon"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/></g>
+<g id="i-monitor"><rect x="3" y="4.5" width="18" height="12.5" rx="2"/><path d="M9 21h6M12 17v4"/></g>
+<g id="i-brain"><path d="M12 5.5a3 3 0 0 0-3 3v.4A2.8 2.8 0 0 0 7 11.5c0 .9.4 1.6 1 2.1v.4a3 3 0 0 0 4 2.8V5.5z"/><path d="M12 5.5a3 3 0 0 1 3 3v.4a2.8 2.8 0 0 1 2 2.6c0 .9-.4 1.6-1 2.1v.4a3 3 0 0 1-4 2.8"/></g>
+<g id="i-activity"><path d="M3 12h4l2.5-6 4 12L16 12h5"/></g>
+<g id="i-bars"><path d="M5 20V11M12 20V5M19 20v-6"/></g>
+<g id="i-list"><path d="M8 6.5h12M8 12h12M8 17.5h12"/><circle cx="4.4" cy="6.5" r="1.1" fill="currentColor" stroke="none"/><circle cx="4.4" cy="12" r="1.1" fill="currentColor" stroke="none"/><circle cx="4.4" cy="17.5" r="1.1" fill="currentColor" stroke="none"/></g>
+<g id="i-folder-open"><path d="M3.5 8.5h17l-2 10h-13z"/><path d="M3.5 8.5V6a1.5 1.5 0 0 1 1.5-1.5h3.6l1.8 2h5.1A1.5 1.5 0 0 1 17 8"/></g>
+<g id="i-stop-dot"><circle cx="12" cy="12" r="8.5"/><rect x="9.4" y="9.4" width="5.2" height="5.2" rx="1" fill="currentColor" stroke="none"/></g>
+<g id="i-shield"><path d="M12 3.5 5 6.2v5.3c0 4.4 3 7.6 7 9 4-1.4 7-4.6 7-9V6.2z"/><path d="m9 11.6 2.2 2.2L15.4 9.4"/></g>
+<g id="i-gate"><path d="M5 20V9l7-5 7 5v11"/><path d="M9 20v-6h6v6"/></g>
+<g id="i-target"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4.5"/><circle cx="12" cy="12" r="1.2" fill="currentColor" stroke="none"/></g>
+<g id="i-scan"><path d="M4 8V5.5A1.5 1.5 0 0 1 5.5 4H8M16 4h2.5A1.5 1.5 0 0 1 20 5.5V8M20 16v2.5a1.5 1.5 0 0 1-1.5 1.5H16M8 20H5.5A1.5 1.5 0 0 1 4 18.5V16"/><path d="M4 12h16"/></g>
+<g id="i-diff"><path d="M12 4v16"/><path d="M7 9h10" /><path d="M7 15h10"/></g>
+<g id="i-term"><rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="m7 9.5 3 3-3 3"/><path d="M12.5 15.5H17"/></g>
+<g id="i-hook"><path d="M12 3v6a4 4 0 1 0 4 4"/><path d="M9.5 3h5"/></g>
+<g id="i-spark"><path d="M12 3v4M12 17v4M3 12h4M17 12h4"/><path d="m6 6 2.4 2.4M15.6 15.6 18 18M18 6l-2.4 2.4M8.4 15.6 6 18"/></g>
+<g id="i-image"><rect x="3.5" y="5" width="17" height="14" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="m5 18 5-5 3 3 3.5-3.5L20 16"/></g>
+<g id="i-clip"><path d="M20.2 11.6l-7.9 7.9a5.1 5.1 0 0 1-7.2-7.2l7.9-7.9a3.4 3.4 0 0 1 4.8 4.8l-7.9 7.9a1.7 1.7 0 0 1-2.4-2.4l7.3-7.3"/></g>
+<g id="i-space"><path d="M4 8.5 12 4l8 4.5v7L12 20l-8-4.5z"/><path d="M4 8.5 12 13l8-4.5M12 13v7"/></g>
+<g id="i-mic"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0"/><path d="M12 18v3"/></g>
+<g id="i-zap"><path d="M13 2 4.5 13.5H11L9.6 22 19.5 9.5H13z" fill="currentColor" stroke="none"/></g>
+</defs></svg>
+
+<div class="app">
+  <!-- ================= 左栏: 会话侧栏 (codex 式) ================= -->
+  <aside class="side" id="side">
+    <div class="brand">
+      <span class="mark"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><use href="#i-mark"/></svg></span>
+      <span class="bname">皮皮虾</span>
+      <span class="btag" id="brandTag">v3</span>
+      <button class="icobtn" id="btnCollapse" title="收起侧栏" aria-label="收起侧栏" aria-controls="side" aria-expanded="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-collapse"/></svg></button>
+    </div>
+
+    <button class="newchat" id="btnNew">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-plus"/></svg>
+      新会话
+    </button>
+
+    <div class="side-scroll">
+      <div class="group">
+        <div class="ghead">
+          <span class="lab">任务</span>
+          <span class="gacts"><span class="gcount" id="taskCount"></span></span>
+        </div>
+        <div class="gbody" id="taskList"><div class="empty">加载中…</div></div>
+      </div>
+
+      <div class="group">
+        <div class="ghead">
+          <span class="lab">空间</span>
+          <span class="gacts">
+            <button class="icobtn sm" id="btnSpaceAdd" title="新建空间 (项目)" aria-label="新建空间"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-plus"/></svg></button>
+          </span>
+        </div>
+        <div class="gbody" id="spaceList"><div class="empty">暂无空间<br><button class="btn xs" id="spaceEmptyAdd">＋ 新建空间</button></div></div>
+      </div>
+
+      <div class="group">
+        <div class="ghead">
+          <span class="lab">会话</span>
+          <span class="gacts">
+            <button class="icobtn sm" id="btnSessSearch" title="搜索会话" aria-label="搜索会话"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-search"/></svg></button>
+            <button class="icobtn sm" id="btnSessRefresh" title="刷新" aria-label="刷新"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-refresh"/></svg></button>
+          </span>
+        </div>
+        <div class="gbody" id="sessList"></div>
+      </div>
+
+      <div class="group">
+        <div class="ghead">
+          <span class="lab">能力</span>
+        </div>
+        <div class="gbody" id="capList">
+          <button class="cap" id="capFiles"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><use href="#i-folder"/></svg>工作区</button>
+          <button class="cap" id="capGoal"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-target"/></svg>目标看板</button>
+          <button class="cap" id="capReview"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-scan"/></svg>审查报告</button>
+          <button class="cap" id="capMemory"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-brain"/></svg>记忆</button>
+          <button class="cap" id="capModels"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><use href="#i-cube"/></svg>模型配置</button>
+          <button class="cap" id="capSettings"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-settings"/></svg>设置</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="sidefoot" id="sideFoot">
+      <div class="agentline">
+        <span class="dot on" id="lifeDot"></span>
+        <span class="lifetxt" id="lifeTxt">生命周期 —</span>
+      </div>
+    </div>
+  </aside>
+  <!-- ================= 左栏 (R19): 工作区抽屉 —— 应用户要求从右移到左 (codex 式 Tab) ================= -->
+  <div class="drawer-mask" id="drawerMask" hidden></div>
+  <aside class="drawer" id="drawer" aria-label="工作区面板" hidden>
+    <div class="dhead">
+      <div class="tabs">
+        <button class="tab on" data-tab="files"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><use href="#i-folder"/></svg>文件</button>
+        <button class="tab" data-tab="models"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><use href="#i-cube"/></svg>模型</button>
+        <button class="tab" data-tab="goal"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-target"/></svg>目标</button>
+        <button class="tab" data-tab="review"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-scan"/></svg>审查</button>
+        <button class="tab" data-tab="settings"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-settings"/></svg>设置</button>
+      </div>
+      <button class="icobtn sm" id="btnDrawerClose" title="关闭" aria-label="关闭"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-close"/></svg></button>
+    </div>
+
+    <div class="dpane on" id="pane-files">
+      <div class="pane-tools">
+        <span class="wslab" id="wsRoot" title="工作区根目录">工作区</span>
+        <span class="flex1"></span>
+        <button class="icobtn sm" id="btnWsRoot" title="切换工作区目录" aria-label="切换工作区目录"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-folder-open"/></svg></button>
+        <button class="icobtn sm" id="btnWsRefresh" title="刷新" aria-label="刷新"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-refresh"/></svg></button>
+        <input id="treeSearch" placeholder="过滤文件…" spellcheck="false" style="order:9;width:100%;margin-top:5px;border:1px solid var(--border2);background:var(--surface);color:var(--text);border-radius:8px;padding:5px 9px;font:12px var(--mono);outline:none">
+      </div>
+      <div class="tree" id="wsTree"><div class="empty">加载中…</div></div>
+      <div class="fileview" id="fileView" hidden>
+        <div class="fv-head"><span class="fv-path" id="fvPath"></span><span class="flex1"></span><button class="icobtn sm" id="fvClose" title="关闭" aria-label="关闭"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-close"/></svg></button></div>
+        <pre class="fv-body" id="fvBody"></pre>
+      </div>
+    </div>
+
+    <!-- ===== 模型配置 (v3.3 新增) ===== -->
+    <div class="dpane" id="pane-models">
+      <div class="pane-tools">
+        <span class="wslab" id="modelHead">模型服务</span>
+        <span class="flex1"></span>
+        <button class="icobtn sm" id="btnModelRefresh" title="刷新" aria-label="刷新"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-refresh"/></svg></button>
+        <button class="btn xs primary" id="btnModelAdd"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><use href="#i-plus"/></svg>新增</button>
+      </div>
+
+      <!-- 内联表单: 新增 / 编辑共用 -->
+      <div class="setgroup" id="routingBox" hidden>
+        <div class="mform-head">分层路由</div>
+        <label class="frow">辅助模型 — 记忆提炼/摘要/压缩等非主对话调用
+          <select id="rtAux"></select>
+        </label>
+        <label class="frow">主模型优先序
+          <select id="rtPref">
+            <option value="local">本地优先 (本地模型 &gt; 云端)</option>
+            <option value="cloud">云端优先 (云端真 Key &gt; 本地)</option>
+          </select>
+        </label>
+        <div class="fhint">辅助任务分流到便宜模型可显著省额度, 主对话质量不受影响; 未配置 = 全部跟随主模型。</div>
+        <button type="button" class="setbtn" id="rtSave">保存路由</button>
+      </div>
+      <form class="mform" id="modelForm" hidden autocomplete="off">
+        <div class="mform-head"><span id="mfTitle">新增模型服务</span></div>
+        <label class="frow">厂商预设
+          <select id="mfPreset"></select>
+        </label>
+        <label class="frow">标识 id
+          <input id="mfId" placeholder="如 deepseek / lmstudio" spellcheck="false">
+        </label>
+        <label class="frow">接口地址 base_url
+          <input id="mfBase" placeholder="https://api.deepseek.com/v1" spellcheck="false">
+        </label>
+        <label class="frow">模型名
+          <input id="mfModel" list="mfModelList" placeholder="如 deepseek-chat" spellcheck="false">
+        </label>
+        <datalist id="mfModelList"></datalist>
+        <label class="frow">API Key
+          <input id="mfKey" type="password" placeholder="粘贴厂商控制台的 Key" spellcheck="false">
+        </label>
+        <div class="fhint" id="mfKeyHint"></div>
+        <details class="fadv">
+          <summary>高级选项</summary>
+          <label class="frow">上下文窗口 (tokens)
+            <input id="mfCtx" type="number" min="1024" step="1024" placeholder="131072">
+          </label>
+          <label class="frow">超时 (ms)
+            <input id="mfTimeout" type="number" min="1000" step="1000" placeholder="60000">
+          </label>
+          <label class="fcheck"><input type="checkbox" id="mfVision"> 支持视觉输入 (图片)</label>
+          <label class="fcheck"><input type="checkbox" id="mfEnabled" checked> 启用 (停用后退出路由候选, 配置与 Key 保留)</label>
+        </details>
+        <div class="fmsg" id="mfMsg" hidden></div>
+        <div class="facts">
+          <button type="button" class="btn" id="mfCancel">取消</button>
+          <button type="submit" class="btn primary" id="mfSave">保存</button>
+        </div>
+      </form>
+
+      <div class="settings" id="modelList"><div class="empty">加载中…</div></div>
+    </div>
+
+    <div class="dpane" id="pane-goal">
+      <div class="pane-tools"><span class="wslab">目标看板</span><span class="flex1"></span><button class="icobtn sm" id="btnGoalRefresh" title="刷新" aria-label="刷新"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-refresh"/></svg></button></div>
+      <div class="board" id="goalBoard"><div class="empty">暂无目标</div></div>
+    </div>
+
+    <div class="dpane" id="pane-review">
+      <div class="pane-tools"><span class="wslab">审查报告</span><span class="flex1"></span><button class="icobtn sm" id="btnReviewRun" title="触发审查" aria-label="触发审查"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-spark"/></svg></button></div>
+      <div class="review" id="reviewBody"><div class="empty">尚无报告 · 发送 /review 触发</div></div>
+    </div>
+
+    <div class="dpane" id="pane-settings">
+      <div class="pane-tools"><span class="wslab">设置</span></div>
+      <div class="settings" id="settingsBody">
+        <label class="setrow">审批模式
+          <select id="setApproval">
+            <option value="unless-trusted">unless-trusted（默认审查）</option>
+            <option value="on-request">on-request（按需审批）</option>
+            <option value="on-failure">on-failure（失败后审批）</option>
+            <option value="never">never（全自动）</option>
+          </select>
+        </label>
+        <label class="setrow">沙箱
+          <select id="setSandbox">
+            <option value="read-only">read-only（只读）</option>
+            <option value="workspace-write">workspace-write（工作区可写）</option>
+            <option value="danger-full-access">danger-full-access（完全访问）</option>
+          </select>
+        </label>
+        <label class="setrow">外观
+          <select id="setTheme">
+            <option value="system">跟随系统</option>
+            <option value="light">浅色</option>
+            <option value="dark">深色</option>
+          </select>
+        </label>
+        <div class="setgroup">语音识别 (云端 ASR · OpenAI 兼容 /audio/transcriptions)
+          <label class="setrow">服务地址
+            <input type="text" id="setAsrUrl" placeholder="如 https://api.siliconflow.cn/v1" autocomplete="off">
+          </label>
+          <label class="setrow">API 密钥
+            <input type="password" id="setAsrKey" placeholder="sk-... (留空 = 保留已存密钥)" autocomplete="new-password">
+          </label>
+          <label class="setrow">模型
+            <input type="text" id="setAsrModel" placeholder="whisper-1 / SenseVoiceSmall 等 (默认 whisper-1)" autocomplete="off">
+          </label>
+          <button class="setbtn" id="setAsrSave">保存语音配置</button>
+          <div class="asr-state" id="asrState"></div>
+        </div>
+        <div class="setinfo" id="setInfo"></div>
+      </div>
+    </div>
+  </aside>
+  <button class="side-reveal" id="btnSide" hidden title="展开侧栏" aria-label="展开侧栏"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-panel"/></svg></button>
+
+  <!-- ================= 中栏: 时间线 ================= -->
+  <main class="main">
+    <header class="topbar">
+      <span class="title" id="sessTitle">新会话</span>
+      <span class="pill" id="modePill" title="审批模式">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-shield"/></svg><em id="modeTxt">on-request</em>
+      </span>
+      <button class="pill clickable" id="modelPill" title="当前模型 · 点击配置">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-cube"/></svg><em id="modelTxt">—</em>
+      </button>
+      <span class="pill" id="tokPill" hidden>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-bars"/></svg><em id="tokTxt">—</em>
+      </span>
+      <span class="flex1"></span>
+      <button class="icobtn" id="btnRewind" title="回退上一轮对话 (/rewind)" aria-label="回退上一轮对话"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><use href="#i-refresh"/></svg></button>
+      <button class="icobtn" id="btnTheme" title="切换主题 (亮 / 暗 / 跟随系统)" aria-label="切换主题"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-moon"/></svg></button>
+      <button class="icobtn" id="btnDrawer" title="工作区面板" aria-label="工作区面板"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-panel"/></svg></button>
+    </header>
+
+    <!-- 空态 hero -->
+    <section class="hero" id="hero">
+      <div class="hero-mark"><svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><use href="#i-mark"/></svg></div>
+      <h1 id="heroTitle">今天想推进什么？</h1>
+      <p class="hero-sub">对话 · 计划 · 审查 · 编排 —— 输入 <b>/</b> 唤起命令面板</p>
+      <div class="hero-feats">
+        <span class="hf"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><use href="#i-cube"/></svg><span id="heroTools">89 工具</span></span>
+        <span class="hf"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-brain"/></svg>五层记忆</span>
+        <span class="hf"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><use href="#i-shield"/></svg>审计哈希链</span>
+        <span class="hf"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><use href="#i-bot"/></svg>多 Agent 军团</span>
+        <span class="hf"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-spark"/></svg>流式工具循环</span>
+      </div>
+      <div class="chips" id="chips">
+        <button class="chip" data-q="/plan ">制定计划</button>
+        <button class="chip" data-q="/review ">代码审查</button>
+        <button class="chip" data-q="/goal ">查看目标</button>
+        <button class="chip" data-q="/status">运行状态</button>
+        <button class="chip" data-q="/help">命令帮助</button>
+      </div>
+      <div class="hero-cta" id="heroCta" hidden>
+        <button class="btn primary" id="btnSetupModel"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-zap"/></svg>配置模型 · 约 1 分钟</button>
+        <span class="hcta-hint">选厂商 → 粘贴 Key → 自动探活</span>
+      </div>
+      <div class="hero-stats" id="heroStats" hidden></div>
+    </section>
+
+    <!-- 事件时间线 -->
+    <div class="stream" id="stream" role="log" aria-live="polite" aria-label="对话消息" hidden></div>
+
+    <!-- 输入区 -->
+    <div class="composer-wrap">
+      <div class="palette" id="palette" role="dialog" aria-modal="true" aria-label="命令面板" hidden></div>
+      <div class="composer" id="composer">
+        <div class="attchips" id="attChips" hidden></div>
+        <textarea id="inp" rows="1" placeholder="给皮皮虾发消息…  (/ 唤起命令)"></textarea>
+        <div class="crow">
+          <div class="tleft">
+            <button class="icobtn att" id="btnAttach" title="上传文件 (图片 / 文档 / 代码 / 压缩包等)" aria-label="上传文件"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><use href="#i-clip"/></svg></button>
+            <input type="file" id="fileInput" multiple hidden>
+          </div>
+          <div class="tright">
+            <div class="tpillwrap">
+              <button class="tpill" id="pillModel" aria-haspopup="menu" aria-expanded="false" title="切换模型">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-cube"/></svg>
+                <em id="pillModelTxt">—</em>
+                <svg class="chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><use href="#i-chev-d"/></svg>
+              </button>
+              <div class="popmenu popModel" id="popModel" hidden></div>
+            </div>
+            <div class="tpillwrap">
+              <button class="tpill tpill-zap" id="pillReason" aria-haspopup="menu" aria-expanded="false" title="思考强度">
+                <svg width="13" height="13" viewBox="0 0 24 24" class="zap"><use href="#i-zap"/></svg>
+                <em id="pillReasonTxt">自动</em>
+                <svg class="chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><use href="#i-chev-d"/></svg>
+              </button>
+              <div class="popmenu popReason" id="popReason" hidden></div>
+            </div>
+            <button class="icobtn mic" id="btnMic" title="语音输入 (轻点开始/结束)" aria-label="语音输入"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-mic"/></svg></button>
+            <button class="send" id="btnSend" disabled title="发送 (Enter)" aria-label="发送 (Enter)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><use href="#i-send"/></svg></button>
+          </div>
+        </div>
+      </div>
+      <div class="footNote" id="footNote">
+        <span id="footHint">Enter 发送 · Shift+Enter 换行 · Esc 停止生成</span>
+        <span class="ctxbar" id="ctxBar" hidden title="当前会话最近一次模型调用的用量 (来源: usage 统计)">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-activity"/></svg>
+          <em id="ctxTxt"></em>
+        </span>
+      </div>
+    </div>
+  </main>
+
+
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+<!-- ===== 空间 / 目录选择弹层 (替代原生 prompt) ===== -->
+<div class="mmask" id="dirMask" hidden></div>
+<div class="mdlg" id="dirModal" role="dialog" aria-modal="true" aria-labelledby="dirTitle" hidden>
+  <div class="mhead">
+    <span id="dirTitle">新建空间</span>
+    <button class="icobtn sm" id="dirClose" title="关闭" aria-label="关闭"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-close"/></svg></button>
+  </div>
+  <label class="mrow" id="dirNameRow">名称
+    <input id="dirName" placeholder="如 PPX-Harness" spellcheck="false" autocomplete="off">
+  </label>
+  <div class="mrow col">
+    <div class="mlab">目录 <em id="dirPickTxt">—</em></div>
+    <div class="mcrumb" id="dirCrumb"></div>
+    <div class="mdirs" id="dirList"><div class="empty">加载中…</div></div>
+    <div class="mhint">目录限定在皮皮虾工作区内（相对路径）。默认 = 皮皮虾根目录；选子目录会让「工作区」面板聚焦到该文件夹。</div>
+  </div>
+  <div class="mfoot">
+    <button class="btn" id="dirCancel">取消</button>
+    <button class="btn primary" id="dirOk">创建</button>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

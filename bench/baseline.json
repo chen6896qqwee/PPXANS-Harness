@@ -1,0 +1,166 @@
+{
+  "date": "2026-10-02T07:38:45.039Z",
+  "coverage": "20/20",
+  "results": [
+    {
+      "id": "version-report",
+      "category": "检索",
+      "pass": true,
+      "detail": "应含 7.7.7",
+      "tokens": 13442,
+      "ms": 4119
+    },
+    {
+      "id": "count-files",
+      "category": "检索",
+      "pass": true,
+      "detail": "应含 6",
+      "tokens": 13476,
+      "ms": 3602
+    },
+    {
+      "id": "find-symbol",
+      "category": "检索",
+      "pass": false,
+      "detail": "应指认 pricing.js",
+      "tokens": 13737,
+      "ms": 90001
+    },
+    {
+      "id": "sum-numbers",
+      "category": "检索",
+      "pass": true,
+      "detail": "应含 50",
+      "tokens": 13468,
+      "ms": 4069
+    },
+    {
+      "id": "read-secret",
+      "category": "检索",
+      "pass": true,
+      "detail": "应含 token 值",
+      "tokens": 13493,
+      "ms": 4218
+    },
+    {
+      "id": "create-file",
+      "category": "文件",
+      "pass": true,
+      "detail": "文件应存在且含内容",
+      "tokens": 13481,
+      "ms": 3136
+    },
+    {
+      "id": "append-file",
+      "category": "文件",
+      "pass": true,
+      "detail": "应保留原内容且含 DONE",
+      "tokens": 13776,
+      "ms": 3811
+    },
+    {
+      "id": "json-edit",
+      "category": "文件",
+      "pass": true,
+      "detail": "timeout=5000 且其他字段不动",
+      "tokens": 27243,
+      "ms": 6307
+    },
+    {
+      "id": "delete-file",
+      "category": "文件",
+      "pass": false,
+      "detail": "文件应已删除",
+      "tokens": 13506,
+      "ms": 90002
+    },
+    {
+      "id": "json-create",
+      "category": "文件",
+      "pass": true,
+      "detail": "可解析且字段正确",
+      "tokens": 13537,
+      "ms": 4352
+    },
+    {
+      "id": "fix-syntax",
+      "category": "代码",
+      "pass": true,
+      "detail": "node --check 应通过",
+      "tokens": 21085,
+      "ms": 12675
+    },
+    {
+      "id": "fix-logic",
+      "category": "代码",
+      "pass": true,
+      "detail": "add(2,3) 应为 5, 实际 5",
+      "tokens": 20388,
+      "ms": 5601
+    },
+    {
+      "id": "write-function",
+      "category": "代码",
+      "pass": true,
+      "detail": "sum(20,22) 应为 42, 实际 42",
+      "tokens": 35605,
+      "ms": 17767
+    },
+    {
+      "id": "rename-symbol",
+      "category": "代码",
+      "pass": true,
+      "detail": "旧名清零/新名在/语法过",
+      "tokens": 20496,
+      "ms": 90000
+    },
+    {
+      "id": "memory-roundtrip",
+      "category": "协作",
+      "pass": true,
+      "detail": "回复应复述口令",
+      "tokens": 377,
+      "ms": 2007
+    },
+    {
+      "id": "board-roundtrip",
+      "category": "协作",
+      "pass": true,
+      "detail": "应查回暗号",
+      "tokens": 21016,
+      "ms": 9433
+    },
+    {
+      "id": "analyze-and-report",
+      "category": "综合",
+      "pass": true,
+      "detail": "report.txt 应含 4",
+      "tokens": 27440,
+      "ms": 9134
+    },
+    {
+      "id": "conditional-write",
+      "category": "综合",
+      "pass": true,
+      "detail": "on 应触发创建",
+      "tokens": 20376,
+      "ms": 5040
+    },
+    {
+      "id": "src-listing",
+      "category": "综合",
+      "pass": true,
+      "detail": "应列 2 个 js 不含 md",
+      "tokens": 20399,
+      "ms": 5776
+    },
+    {
+      "id": "extract-field",
+      "category": "综合",
+      "pass": false,
+      "detail": "应答 2",
+      "tokens": 20381,
+      "ms": 90050
+    }
+  ]
+}

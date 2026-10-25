@@ -1,0 +1,122 @@
+[
+ {
+  "claim": "五层记忆 L0–L4",
+  "test": "test/memory.layers.test.js",
+  "expect": "decayPerDay",
+  "target": "src/memory/fact-store.js"
+ },
+ {
+  "claim": "软删可回滚",
+  "test": "test/memory-governance.test.js",
+  "expect": "restore",
+  "target": "src/memory/fact-store.js"
+ },
+ {
+  "claim": "SHA-256 链式防篡改",
+  "test": "test/audit-chain.test.js",
+  "expect": "prevHash",
+  "target": "src/audit/audit-chain.js"
+ },
+ {
+  "claim": "AskForApproval 四档审批",
+  "test": "test/permissions.test.js",
+  "expect": "ON_REQUEST",
+  "target": "src/permissions/index.js"
+ },
+ {
+  "claim": "SandboxPolicy 沙箱",
+  "test": "test/permissions.test.js",
+  "expect": "WORKSPACE_WRITE",
+  "target": "src/permissions/index.js"
+ },
+ {
+  "claim": "命令守卫三层防线",
+  "test": "test/command-guard.test.js",
+  "expect": "HARD_BLOCK",
+  "target": "src/tools/command-guard.js"
+ },
+ {
+  "claim": "多 Agent 军团",
+  "test": "test/legion.test.js",
+  "expect": "spawnAgent",
+  "target": "src/orchestrator/legion.js"
+ },
+ {
+  "claim": "DAG 编排",
+  "test": "test/dag.test.js",
+  "expect": "runDag",
+  "target": "src/orchestrator/legion.js"
+ },
+ {
+  "claim": "MCP 客户端 + 服务端",
+  "test": "test/mcp-server.test.js",
+  "expect": "tools/call",
+  "target": "src/mcp/server.js"
+ },
+ {
+  "claim": "encrypt_key 事件解密",
+  "test": "test/channels.test.js",
+  "expect": "feishuDecrypt",
+  "target": "src/channels/feishu.js"
+ },
+ {
+  "claim": "六事件钩子链",
+  "test": "test/hooks.test.js",
+  "expect": "SubagentStop",
+  "target": "src/tools/delegate.js"
+ },
+ {
+  "claim": "SEARCH/REPLACE 编辑块",
+  "test": "test/edit-editblock.test.js",
+  "expect": "parseEditBlocks",
+  "target": "src/edit/editblock.js"
+ },
+ {
+  "claim": "PageRank",
+  "test": "test/repomap.test.js",
+  "expect": "PageRank",
+  "target": "src/repomap/index.js"
+ },
+ {
+  "claim": "分级审查流水线",
+  "test": "test/review.test.js",
+  "expect": "P0",
+  "target": "src/review/index.js"
+ },
+ {
+  "claim": "斜杠命令统一模型",
+  "test": "test/commands.test.js",
+  "expect": "register",
+  "target": "src/commands/index.js"
+ },
+ {
+  "claim": "SSE 逐字流式",
+  "test": "test/budget-cost.test.js",
+  "expect": "chatStream",
+  "target": "src/agent/index.js"
+ },
+ {
+  "claim": "增量 tool_call 累积",
+  "test": "test/hardening-r4-2026-10-24.test.js",
+  "expect": "apiChatStream",
+  "target": "src/llm/client.js"
+ },
+ {
+  "claim": "/rewind 会话回卷",
+  "test": "test/hardening-r5-2026-10-24.test.js",
+  "expect": "rewindSession",
+  "target": "src/agent/index.js"
+ },
+ {
+  "claim": "read_document",
+  "test": "test/document.test.js",
+  "expect": "read_document",
+  "target": "src/tools/document.js"
+ },
+ {
+  "claim": "SQ·EQ 双队列事件流",
+  "test": "test/protocol-turn-r12-2026-10-24.test.js",
+  "expect": "TURN_STARTED",
+  "target": "src/agent/index.js"
+ }
+]

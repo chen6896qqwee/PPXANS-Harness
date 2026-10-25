@@ -1,0 +1,6 @@
+{
+  "name": "amem-memory",
+  "entry": "amem-backend.cjs",
+  "access": "full-access",
+  "description": "A-Mem 式记忆后端 (NeurIPS 2025, arXiv 2502.12110) — 记忆插槽首个示范消费方。config.memory.backend=\"amem\" 启用"
+}

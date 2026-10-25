@@ -1,0 +1,166 @@
+// src/commands/index.js - 斜杠命令统一模型 (吸收 claude-code types/command 思路, 纯 JS, 零依赖)
+// Command = { name, description, argumentHint, isEnabled(ctx), run(ctx, args) -> 结构化意图 }
+// run 只返回结构化意图对象 (如 {type:'intent', action:'new_session'}), 不直接操作 agent;
+// 真正的落地由集成层(agent/通道)负责。保证内核与"命令做什么"解耦。
+
+import fs from "node:fs";
+import path from "node:path";
+
+// ---- 命令注册表 ----
+export function createCommandRegistry({ commands = [] } = {}) {
+  const map = new Map();
+  const register = (cmd) => {
+    if (!cmd || !cmd.name) throw new Error("命令缺少 name");
+    map.set(cmd.name, cmd);
+    return registry;
+  };
+  const get = (name) => map.get(name) || null;
+  const list = (enabledOnly = true) => {
+    const all = [...map.values()].filter((c) => !c.hidden); // hidden 别名可执行但不进名册
+    const filtered = enabledOnly
+      ? all.filter((c) => (typeof c.isEnabled === "function" ? c.isEnabled(undefined) !== false : true))
+      : all;
+    return filtered.map((c) => ({ name: c.name, description: c.description || "", argumentHint: c.argumentHint || "" }));
+  };
+  // 解析 "/name args..." -> { cmd, args } 或 null
+  const parse = (input) => {
+    if (typeof input !== "string") return null;
+    const s = input.trim();
+    if (!s.startsWith("/")) return null;
+    const sp = s.indexOf(" ");
+    const name = (sp === -1 ? s.slice(1) : s.slice(1, sp)).trim();
+    const args = sp === -1 ? "" : s.slice(sp + 1).trim();
+    if (!name) return null;
+    return { cmd: name, args };
+  };
+  const execute = (input, ctx = {}) => {
+    const parsed = parse(input);
+    if (!parsed) return { type: "error", message: "无法解析命令, 应以 '/' 开头" };
+    const cmd = get(parsed.cmd);
+    if (!cmd) return { type: "error", message: `未知命令: /${parsed.cmd}` };
+    if (typeof cmd.isEnabled === "function" && cmd.isEnabled(ctx) === false) {
+      return { type: "message", content: `命令 /${cmd.name} 当前不可用` };
+    }
+    try {
+      return cmd.run(ctx, parsed.args, registry);
+    } catch (e) {
+      return { type: "error", message: `命令执行失败: ${e.message}` };
+    }
+  };
+
+  const registry = { register, get, list, parse, execute, _map: map };
+  for (const c of commands) register(c);
+  return registry;
+}
+
+// ---- 内置命令 ----
+// 每个命令 run 返回结构化意图, 集成层据此行动
+export const BUILTIN_COMMANDS = [
+  { name: "new", description: "开启全新会话(清空当前上下文)", argumentHint: "", isEnabled: () => true,
+    run: () => ({ type: "intent", action: "new_session" }) },
+  { name: "rewind", description: "把当前会话回退 N 轮对话 (fork 到新分支, 原会话保留)", argumentHint: "[轮数=1]", isEnabled: () => true,
+    run: (_ctx, args) => ({ type: "intent", action: "rewind", turns: Number(args) || 1 }) },
+  { name: "resume", description: "恢复最近的会话", argumentHint: "[sessionId]", isEnabled: () => true,
+    run: (_ctx, args) => ({ type: "intent", action: "resume_session", sessionId: args || null }) },
+  { name: "compact", description: "压缩当前会话历史以节省上下文", argumentHint: "", isEnabled: () => true,
+    run: () => ({ type: "intent", action: "compact" }) },
+  { name: "plan", description: "进入计划模式(先出计划再执行)", argumentHint: "", isEnabled: () => true,
+    run: () => ({ type: "intent", action: "enter_plan_mode" }) },
+  { name: "review", description: "对当前变更执行分级代码审查", argumentHint: "[path|diff]", isEnabled: () => true,
+    run: (_ctx, args) => ({ type: "intent", action: "review", target: args || "." }) },
+  { name: "init", description: "初始化项目上下文/记忆(PPX.md)", argumentHint: "", isEnabled: () => true,
+    run: () => ({ type: "intent", action: "init_project" }) },
+  { name: "model", description: "查看或切换当前使用的模型", argumentHint: "[modelName]", isEnabled: () => true,
+    run: (_ctx, args) => ({ type: "intent", action: "set_model", model: args || null }) },
+  { name: "status", description: "显示当前会话/agent 状态", argumentHint: "", isEnabled: () => true,
+    run: () => ({ type: "intent", action: "show_status" }) },
+  { name: "memory", description: "查看/管理记忆层级", argumentHint: "[clear]", isEnabled: () => true,
+    run: (_ctx, args) => ({ type: "intent", action: "memory", sub: args || null }) },
+  { name: "skills", description: "列出可用技能", argumentHint: "", isEnabled: () => true,
+    run: () => ({ type: "intent", action: "list_skills" }) },
+  { name: "agents", description: "列出/派生子 agent(军团)", argumentHint: "[spawn|list]", isEnabled: () => true,
+    run: (_ctx, args) => ({ type: "intent", action: "agents", sub: args || "list" }) },
+  { name: "goal", description: "打开/更新目标看板(Goal Board)", argumentHint: "[add|update|list]", isEnabled: () => true,
+    run: (_ctx, args) => ({ type: "intent", action: "goal_board", sub: args || "list" }) },
+  // 2026-10-24 (R17): 侧栏任务面板一直提示"发送 /task 创建", 但 /task 此前不存在 ——
+  // 空提示实锤。add/done/del 子命令; 无前缀整串视为 add (宽容: "/task 买菜" = 创建买菜)。
+  { name: "task", description: "任务面板: 查看/创建/完结任务", argumentHint: "[add 标题|done id|del id]", isEnabled: () => true,
+    run: (_ctx, args) => {
+      const a = String(args || "").trim();
+      if (!a) return { type: "intent", action: "task_board", sub: "list" };
+      const m = a.match(/^(add|done|complete|del|delete)\s+(.+)$/i);
+      if (m) {
+        const sub = /^del/i.test(m[1]) ? "del" : (/^done|^complete/i.test(m[1]) ? "done" : "add");
+        return { type: "intent", action: "task_board", sub, arg: m[2].trim() };
+      }
+      return { type: "intent", action: "task_board", sub: "add", arg: a };
+    } },
+  { name: "help", description: "显示命令帮助", argumentHint: "", isEnabled: () => true,
+    run: (_ctx, _args, registry) => ({
+      type: "message",
+      content: "可用命令: " + (registry ? registry.list().map((c) => "/" + c.name).join("  ") : "/new /review /help ..."),
+    }) },
+];
+
+// /do 是 /plan 的配对开关。它不进 BUILTIN_COMMANDS (内置名册契约恒 15 条), 而是作为
+// **隐藏别名**注册: 可解析、可执行 (reg.execute("/do") → exit_plan_mode), 但不出现在
+// list() 里 (故 /help 与 /api/commands 不会把配对开关当独立能力列出)。
+// 注: 真正的产品路径上 /do 由 agent._consumePlanCommand 直接消费, 名册只影响展示。
+export const PLAN_EXIT_ALIAS = {
+  name: "do", hidden: true, description: "退出计划模式(开始执行)", argumentHint: "", isEnabled: () => true,
+  run: () => ({ type: "intent", action: "exit_plan_mode" }),
+};
+
+// 便捷: 创建带全部内置命令的注册表
+export function createBuiltinRegistry() {
+  return createCommandRegistry({ commands: [...BUILTIN_COMMANDS, PLAN_EXIT_ALIAS] });
+}
+
+// 解析 .md 命令文件的 frontmatter (复用 skills 的轻量解析思路, 这里内联避免跨模块依赖)
+function parseCommandMd(md) {
+  const m = md.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  const meta = {};
+  if (m) {
+    for (const line of m[1].split(/\r?\n/)) {
+      const mm = line.match(/^([A-Za-z0-9_]+):\s*(.*)$/);
+      if (mm) meta[mm[1].toLowerCase()] = mm[2].trim();
+    }
+  }
+  const body = m ? md.slice(m[0].length) : md;
+  return { meta, body: body.trim() };
+}
+
+// 从 .ppx/commands/*.md 加载用户命令 (frontmatter: name/description, 正文作为 prompt 模板)
+export function loadUserCommands(dir) {
+  const cmdsDir = path.join(dir, ".ppx", "commands");
+  const out = [];
+  if (!fs.existsSync(cmdsDir)) return out;
+  let entries;
+  try {
+    entries = fs.readdirSync(cmdsDir, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const e of entries) {
+    if (!e.isFile() || !e.name.endsWith(".md")) continue;
+    const raw = fs.readFileSync(path.join(cmdsDir, e.name), "utf8");
+    const { meta, body } = parseCommandMd(raw);
+    const name = meta.name || e.name.replace(/\.md$/, "");
+    if (!name) continue;
+    out.push({
+      name,
+      description: meta.description || body.slice(0, 60),
+      argumentHint: meta.argumenthint || "",
+      isEnabled: () => true,
+      // 用户命令: 返回 prompt 模板意图, 由集成层注入 system/user
+      run: (_ctx, args) => ({ type: "prompt", command: name, template: body, args }),
+    });
+  }
+  return out;
+}
+
+// 合并内置 + 用户命令, 返回完整注册表
+export function createRegistryWithUserCommands(dir, { extra = [] } = {}) {
+  const user = loadUserCommands(dir);
+  return createCommandRegistry({ commands: [...BUILTIN_COMMANDS, PLAN_EXIT_ALIAS, ...user, ...extra] });
+}

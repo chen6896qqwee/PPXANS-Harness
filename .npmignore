@@ -1,0 +1,17 @@
+# .npmignore (2026-10-10 止血): 发布包绝不携带含明文密钥的本地配置与运行时数据。
+# 说明: package.json 的 files[] 已是白名单, 本文件是第二道防线 (files[] 被误改时的兜底)。
+config/ppx.json
+config/ppx.yaml
+config/ppx.yml
+data/
+*.log
+logs/
+test/
+bench/
+fixtures/
+references/
+docs/
+node_modules/
+.env
+.env.*
+!.env.example
