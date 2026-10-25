@@ -1,3 +1,45 @@
+## 未发布 (2026-10-25·第二十一轮) - 全面评估修复 + 自主迭代进化引擎
+
+> 外部完整评估报告 (安全/架构/测试/宣称对账) 驱动的修复轮: P1×2 + P2×2 + P3×2 全部
+> 闭环, 并在自愈内核之上交付「自主迭代进化引擎」—— 可验证的自改进闭环。
+
+### 自主迭代进化引擎 (核心新增, evolve/selfiterate.js)
+- **闭环**: 失败测试发现 (node --test TAP 解析) → LLM 诊断 (失败用例+关联源码)
+  → SEARCH/REPLACE 补丁 → 快照落盘 → 重跑验证 → 绿保留+审计 ok / 红 Snapshot.rollback;
+- **双模式安全门**: `propose` 默认 (只出补丁不动盘); `apply` 需 config
+  `agent.self_iteration.mode="apply"` + 调用方显式 mode=apply **双重确认**;
+- **边界**: 只改 root 内 .js / 默认不碰测试文件 (修代码不修考卷) / LLM 预算上限 /
+  子进程超时强杀 + 嵌套环境清洗 (NODE_TEST_CONTEXT) / 审计链全程留痕;
+- **接入面**: `self_improve` 工具 (riskLevel=high, 权限引擎按高风险处理) +
+  `npm run selfiterate` (CLI, `--list-failing` 列失败文件);
+- **回归**: test/selfiterate.test.js 8 项 (修复成功/无效回滚/propose 不动盘/
+  TAP 解析/路径安全/双重确认门/riskLevel)。
+
+### 评估修复 (P1 → P3)
+- **P1 安全响应头**: 统一下发 CSP(严格 sha256 固定内联脚本, 无 unsafe-inline) +
+  X-Frame-Options: DENY + nosniff + Referrer-Policy; CSP 哈希与 index.html 内联
+  脚本一致性有测试钉住 (改脚本不同步哈希即红);
+- **P1 SQ 真实化**: op 带时间戳; INTERRUPT 控制 op 经队列流转 (interrupt 入队 →
+  生效 → 轮收口 consumeType 清扫); TTL 清扫防死轮占队; atHead/pending 语义原语;
+  /health 暴露 protocol.sqPending/eqSeq 可观测;
+- **P2 EQ 事件面**: 补 TOOL_CALLED/TOOL_OUTPUT 生产者 (callId 配对, 覆盖成功/
+  失败/钩子否决/权限拒绝全部出口), /events SSE 外部消费者可见工具轨迹;
+- **P2 supervisor 半残修复**: spawn_agent schema 补 supervisor/supervisor_rounds
+  声明 (此前 execute 读了但 schema 没声明 = 半隐藏); 超轮不再丢弃各方原始结论
+  (旧 body 变量算了不用, 返回文案承诺"输出各方结论"实为占位语);
+- **P3 命令守卫**: DEFAULT_DENY 补 `\bdel\s` (Windows del 漏网); INLINE_INTERPRETERS
+  补 cmd (支持 /c /k /r 斜杠选项形态); 头注释与代码不符处以代码为准更正;
+- **P3 微信 CDATA**: 回复含 `]]>` 不再破损回包 XML (标准两段 CDATA 拆分);
+- **流式空闲超时**: apiChatStream/streamChat 超时从总时长制改空闲制 (活跃长流
+  不再被中途误杀, 静默超时照掐)。
+
+### 文档对账
+- ARCHITECTURE-V3.md: 删除不存在的 `/api/submissions`、`/api/events` 宣称,
+  改为据实的 `/events`+`/events-ticket`; 新增 §三·六 SQ/EQ 真实语义、§三·七
+  自主迭代说明; session/ 集成现状更新 (projection 已接, rollout/parts standalone)。
+
+---
+
 ## 未发布 (2026-10-24·第二十轮) - v4.0 NEON 科幻风重设计 + 文件树精装
 
 > 用户: "前端不够科幻请重新设计, 工作文件像毛坯"。参考 Linear (精密克制/1px 描边/

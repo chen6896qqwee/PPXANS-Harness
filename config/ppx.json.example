@@ -14,6 +14,14 @@
       "enabled": true,
       "every_calls": 20,
       "min_interval_ms": 30000
+    },
+    "self_iteration": {
+      "mode": "propose",
+      "max_files": 3,
+      "max_attempts": 2,
+      "max_llm_calls": 6,
+      "test_timeout_ms": 60000,
+      "allow_test_edit": false
     }
   },
   "user": {

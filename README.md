@@ -1,15 +1,15 @@
 # 🦐 PPXANS-Harness
 
-<!-- readme-sync: {"tools":91,"skills":67,"core_schema":91,"ctx_tokens":13681,"mcp_tools":113,"tests":1727} -->
+<!-- readme-sync: {"tools":92,"skills":67,"core_schema":92,"ctx_tokens":13949,"mcp_tools":114,"tests":1759} -->
 
 **皮皮虾神经系（ANS）+ Harness 一体化智能体内核** —— 纯 Node.js、**零运行时依赖**的可审计自主智能体。
 
-一个会自我修复、自我学习、可审计验证的超级 Agent：**86 个内置工具 · 能力边界护栏 · L0–L4 五层记忆 · SHA-256 审计哈希链 · 标准 MCP 服务端+客户端 · 多模型路由 · 自愈 7/7 · 全量测试 **1727 项 (1628 通过 / 1 失败 / 4 网络跳过)** · Web UI**。
+一个会自我修复、自我学习、自主迭代、可审计验证的超级 Agent：**92 个内置工具 · 能力边界护栏 · L0–L4 五层记忆 · SHA-256 审计哈希链 · 标准 MCP 服务端+客户端 · 多模型路由 · 自愈 7/7 · 可验证自改进闭环（self_improve） · 全量测试 **1759 项 (1755 通过 / 4 网络跳过)** · Web UI**。
 
-> ⚠️ 本节数字为 **2026-10-10 实测**（`node --test test/*.test.js`），请勿手改臆测值 —— 改完请重跑并同步本行。
+> ⚠️ 本节数字为 **2026-10-25 实测**（`node --test test/*.test.js`），请勿手改臆测值 —— 改完请重跑并同步本行。
 > 机读锚点由 `node scripts/readme-sync-check.js --fix` 维护，手改会被闸门拦下。
-> 剩余 1 项失败为**测试断言过期**（`skill-eval.test.js` 的技能数硬编码阈值），非功能缺陷；
-> 主干链路（启动 / 对话 / 记忆 / 审计 / 权限 / HTTP / MCP）全量通过。详见 `.ppxtest/测试报告-2026-10-10.md`。
+> 2026-10-25 评估修复轮后全量 0 失败（此前 1 项失败为测试断言过期，已随工具数 113→114 一并修正）；
+> 主干链路（启动 / 对话 / 记忆 / 审计 / 权限 / HTTP / MCP）全量通过。
 
 自带标准 MCP 服务（`POST /mcp`），Claude Desktop / Cursor / 任何 MCP 客户端**开箱即用**；支持各大模型 API + 本地模型，自由回退。
 
@@ -27,6 +27,7 @@
 | 🔗 **审计哈希链** | 工具调用 append-only 账本 + SHA-256 链式防篡改 + HMAC 链外密钥锚点（防"整链重算"伪造，密钥不落数据目录），篡改/删除定位到行，可隔离重放 |
 | 🛡️ **权限安全** | AskForApproval 四档审批 + SandboxPolicy 沙箱（工作区写含 realpath 符号链接复核）+ 命令守卫三层防线（shell 结构化解析：命令替换硬拦 / 逐段 argv0 白名单）+ SSRF 防护 + fail-open 钩子栅栏 |
 | 🩺 **自我修复** | 启动体检、损坏 JSON 修复、崩溃恢复、残留清理（自愈 7/7） |
+| 🔄 **自主迭代** | 可验证自改进闭环：失败测试 → LLM 诊断 → SEARCH/REPLACE 补丁 → 快照落盘 → 重跑验证 → 绿保留/红回滚（`self_improve` 工具 + `npm run selfiterate`，默认 propose 只出补丁，apply 需双重确认，全程审计链留痕） |
 | 📚 **自我学习** | 经验库 + 画像/人格提炼 + refine 失败轨迹闭环 + refineSkill 成功沉淀技能；经验自动沉淀语境 Playbook（进化闭环），失败自动写故障病历并反哺提炼 |
 | 🤖 **多 Agent 军团** | 多进程并行 + DAG 编排 + legion 模式 + spawn_agent 自主协作（并行/差异化视角/仲裁聚合/SDD 审查循环），编排超时可配（`agent.legion.timeoutMs`） |
 | 🔌 **多渠道接入** | HTTP + 飞书（官方 encrypt_key 事件解密 + 签名校验 + 防重放）+ 微信（加解密 + 主动推送 + 加密回包） |
@@ -39,19 +40,19 @@
 | ✅ **流式输出** | SSE 逐字流式（含工具轮次：增量 tool_call 累积，文本实时可见）+ Web UI 实时渲染；同会话并发互斥、/rewind 会话回卷（fork 分支） |
 | 🔐 **HTTP 认证** | Bearer Token，未配置自动生成随机 token 持久化 |
 
-**86 内置工具**（运行时实测）：
-- **47 内置**：文件/命令/搜索/HTTP/定时/记忆（读图/检索/入库）/文档（加载/OCR/入库）/场景/技能（加载/创建/提炼）/重构 refine /子 agent spawn + 治理运维（repo_map/apply_patch/review_code/goal_board/audit_verify/persona/selfheal_run 等）
+**92 内置工具**（运行时实测，含 MCP 动态注册）：
+- **48 内置**：文件/命令/搜索/HTTP/定时/记忆（读图/检索/入库）/文档（加载/OCR/入库）/场景/技能（加载/创建/提炼）/重构 refine /子 agent spawn + 治理运维（repo_map/apply_patch/review_code/goal_board/audit_verify/persona/selfheal_run/self_improve 等）
 - **22 × ppx.**\***：** chat.send/stream、sessions.\*、providers.(list/add/update/delete/test/reorder)、settings.get/update、task.(templates/create/list/update/step/delete/run)、session.reset
 
 ---
 
 ## v3.0 架构（codex 对齐）
 
-v3.0 引入 codex 的 **SQ/EQ 双队列 + Turn 模型** 作为交互主轴，把权限、钩子、编辑、审查、证据能力**分层独立为可替换模块**，并重制零依赖 Web UI：
+v3.0 引入 codex 的 **EQ 事件流 + SQ 在轮账本 + Turn 模型**（详见 docs/ARCHITECTURE-V3.md §三·六），把权限、钩子、编辑、审查、证据能力**分层独立为可替换模块**，并重制零依赖 Web UI：
 
 | 模块 | 出处 | 能力 |
 |------|------|------|
-| `protocol/` | codex | **SQ·EQ 双队列事件流**：SubmissionQueue 入队 + EventQueue(WAL) 结构化事件，通道层与内核解耦总线。**已接入对话主链路**（R12）：chat/chatStream 每轮提交/消费 USER_TURN op，EQ 推 TURN_STARTED/CLOSED/ABORTED 供 Web UI 时间线渲染；Turn 投影层（Session→Task→Turn 状态机）随轮更新，重启后 WAL seq 续读不撞号 |
+| `protocol/` | codex | **EQ 事件流为主出口 + SQ 在轮账本**：EQ(WAL) 落盘结构化事件经 `/events` SSE 桥外发（TURN_\*/APPROVAL_\*/TOOL_CALLED/TOOL_OUTPUT 经 callId 配对）；SQ 承载在轮 USER_TURN op 与 INTERRUPT 控制 op（TTL 防腐烂，`/health` 可观测）。Turn 投影层（Session→Task→Turn 状态机）随轮更新，重启后 WAL seq 续读不撞号 |
 | `permissions/` | codex + opencode + CASDK | **三合一权限引擎**：AskForApproval 四档 + SandboxPolicy 三档 + 通配符规则链(last-match-wins) + canUseTool 回调 + Bash/Edit/Plan 审批模板 |
 | `hooks/` | claude-code | **六事件钩子链**：PreToolUse(可否决/改参) / PostToolUse / PreCompact / SessionStart/Stop / SubagentStop，超时熔断，纯 JS |
 | `edit/` | aider | **SEARCH/REPLACE 编辑块**（多候选/空白容错/失败回灌修复）+ 编辑前快照逐文件回滚 |
@@ -146,6 +147,8 @@ npm run eval -- --llm   # LLM 端到端评测 (需 provider)
 npm run bench           # 并发/长会话吞吐压测
 npm run nightly         # 四基准一键跑分 → docs/bench/nightly-<date>.{json,md} (公开可复现报告)
 npm run audit:verify    # 审计哈希链完整性校验 (含 HMAC 签名重放)
+npm run selfiterate -- --list-failing   # 全量测试列出失败文件 (自主迭代入口)
+npm run selfiterate -- test/x.test.js   # 对失败测试跑 诊断→补丁→验证→回滚 闭环 (默认只出补丁)
 ```
 
 **GitHub Actions CI**：push/PR 自动跑全量测试 + Web 静态自检 + 本地评测。要启用 LLM 回归，在 Settings → Secrets 配置 `PPX_E2E_BASE_URL` / `PPX_E2E_API_KEY` / `PPX_E2E_MODEL`。
@@ -178,7 +181,7 @@ PPXANS-Harness/
 ├── config/         配置 (ppx.json + 人格)
 ├── src/
 │   ├── agent/      Agent 引擎 (工具循环 + 多模型回退 + v3 插件装配)
-│   ├── protocol/   [v3] SQ·EQ 双队列事件流 (WAL)
+│   ├── protocol/   [v3] EQ 事件流(WAL) + SQ 在轮账本/控制 op
 │   ├── session/    [v3] Turn 状态机 + rollout + parts (standalone, 待 v3.1)
 │   ├── permissions/[v3] 审批 + 沙箱 + 规则链 + canUseTool
 │   ├── hooks/      [v3] 六事件钩子链

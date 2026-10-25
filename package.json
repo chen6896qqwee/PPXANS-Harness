@@ -35,6 +35,7 @@
     "release": "node scripts/release.js",
     "eval": "node scripts/eval.js",
     "selfheal": "node scripts/selfheal-bench.js",
+    "selfiterate": "node scripts/selfiterate.js",
     "selfheal:run": "node src/selfheal/run.js",
     "audit:verify": "node scripts/audit-verify.js",
     "bench": "node scripts/bench.js",

@@ -16,6 +16,8 @@ import { embedderFromConfig } from "../llm/embedder.js";
 import { hashEmbed, HASH_EMBEDDER_ID } from "../memory/hash-embedder.js";
 import { LocalShellProvider } from "../seam/shell.js";
 import { registerDelegateTools } from "../tools/delegate.js";
+// 自主迭代进化 (2026-10-25): 测试→诊断→补丁→验证→沉淀/回滚 的自改进闭环工具
+import { registerSelfIterateTools } from "../tools/selfiterate.js";
 import { Traces } from "../utils/trace.js";
 import { AuditLog, loadOrCreateHmacKey } from "../audit/audit-chain.js";
 import { RuntimeBus } from "../bus/runtime-bus.js";
@@ -285,6 +287,8 @@ export const toolsPlugin = (ctx) => {
   });
   // v3.0 (codex 对齐): repo_map / apply_patch / review_code / goal_board
   registerV3Tools(tools, { rootDir: root, agent: ctx.consume("agent") });
+  // 自主迭代进化 (2026-10-25): self_improve 工具 (测试驱动的自改进闭环)
+  registerSelfIterateTools(tools, { agent: ctx.consume("agent") });
   // git 集成 (2026-10-01): status/diff/log/commit, 仅 add+commit, 禁 push/reset
   registerGitTools(tools, { rootDir: root });
   // ---- 2026-10-09 补齐装配: 团队房间 / 编排观测 / 技能中枢 / 专家中枢 / 沙箱 / VAD ----

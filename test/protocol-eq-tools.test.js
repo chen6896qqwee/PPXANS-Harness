@@ -50,7 +50,7 @@ test("工具失败也产出 TOOL_OUTPUT (ok=false)", { timeout: 20000 }, async (
   try {
     const eq = agent.protocolBus.eq;
     const before = eq.history().length;
-    const out = await agent._runTool("read_file", { path: "Z:\no\such\file-xyz.txt" });
+    const out = await agent._runTool("read_file", { path: "Z:/no/such/file-xyz.txt" });
     assert.ok(String(out).startsWith("[工具错误]"), "应失败");
     const output = eq.history().slice(before).find((e) => e.type === EventType.TOOL_OUTPUT);
     assert.ok(output, "失败也应有 TOOL_OUTPUT");

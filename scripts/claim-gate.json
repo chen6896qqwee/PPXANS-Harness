@@ -114,9 +114,33 @@
   "target": "src/tools/document.js"
  },
  {
-  "claim": "SQ·EQ 双队列事件流",
+  "claim": "EQ 事件流为主出口 + SQ 在轮账本",
   "test": "test/protocol-turn-r12-2026-10-24.test.js",
   "expect": "TURN_STARTED",
+  "target": "src/agent/index.js"
+ },
+ {
+  "claim": "可验证自改进闭环（self_improve）",
+  "test": "test/selfiterate.test.js",
+  "expect": "SelfIterationEngine",
+  "target": "src/evolve/selfiterate.js"
+ },
+ {
+  "claim": "绿保留/红回滚",
+  "test": "test/selfiterate.test.js",
+  "expect": "Snapshot.rollback",
+  "target": "src/evolve/selfiterate.js"
+ },
+ {
+  "claim": "TOOL_CALLED/TOOL_OUTPUT",
+  "test": "test/protocol-eq-tools.test.js",
+  "expect": "TOOL_CALLED",
+  "target": "src/agent/index.js"
+ },
+ {
+  "claim": "INTERRUPT 控制 op",
+  "test": "test/protocol-sq-real.test.js",
+  "expect": "OpType.INTERRUPT",
   "target": "src/agent/index.js"
  }
 ]

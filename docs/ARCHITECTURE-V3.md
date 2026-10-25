@@ -13,7 +13,7 @@ v3.0 在 v2.x「一切皆插件 + 会话即事实源」之上，引入 codex 的
 └──────────────────┬─────────────────────────┘
                    │ 提交(Submission) ↓  事件(Event) ↑
 ┌──────────────────▼─────────────────────────┐
-│        protocol/  SQ·EQ 双队列事件流        │
+│        protocol/  EQ 事件流 + SQ 在轮账本        │
 │  submissionQueue  →  eventQueue(WAL)       │
 └──────────────────┬─────────────────────────┘
 ┌──────────────────▼─────────────────────────┐
@@ -60,7 +60,7 @@ v3.0 在 v2.x「一切皆插件 + 会话即事实源」之上，引入 codex 的
 3. `core/policy.js`：`AskForApproval=Never` 时跳过审批；`OnRequest` 时工具自带 `requires_approval` 语义。
 4. tools 新增：`repo_map`（repomap 渲染）、`apply_patch`（SR 编辑块）、`review_code`（分级审查）、`session_rewind`（rollout 回退）、`goal_board`（evidence 看板）。`command-guard` 升级接 SandboxPolicy（工作区写白名单 + 网络开关）。
 5. `mode/plan-exec` 接 ExitPlanMode 工具（claude-code）：计划模式先出计划 → 审批 → 转 react 执行。
-6. `channels/http.js` 新端点：`GET /api/events`（EQ 轮询/SSE）、`POST /api/approvals/:id`（approve/deny）、`GET/POST /api/commands`、`POST /api/submissions`（SQ 统一提交）。
+6. `channels/http.js` 端点（2026-10-25 据实修订）：`GET /events`（EQ→SSE 桥，一次性 ticket 鉴权）、`POST /events-ticket`（换 60s 单次 ticket）、`POST /message`（对话）。~~`POST /api/submissions`~~ 与 ~~`GET /api/events`~~ 为早期设计稿口径，未实现（SQ 真实语义见 §三·六）。
 7. `memory/project-md.js`（新）：**PPX.md 四级记忆**（managed→user→project→local），启动时合并注入 system prompt（claude-code CLAUDE.md 模式）。
 8. `skills/` 升级：YAML frontmatter 解析（name/description/when_to_use）、三级来源（builtin/user/project）、注入时 token 估算。
 
@@ -71,7 +71,31 @@ v3.0 的 9 个新模块中 **8 个已真实装配进运行时**：
 - `tools/v3.js` 装配 repo_map / apply_patch(SR+快照) / review_code / goal_board（经 `plugin/builtin.js` 工具注册）
 - 均经 MCP/REST 实测可调，非纸面接线
 
-**`src/session/`（Turn/Rollout/Parts）除外**：全库仅实现文件与测试引用，无生产代码 import；本次不作为运行时能力交付，作为 standalone 模块随包保留，据实标注，待 v3.1 集成。
+**`src/session/` 的 rollout/parts 除外**（standalone 保留，无生产引用）；`session/projection.js` + `turn.js` 已于 R12 接入主链路（chat/chatStream 逐轮 begin/end）。
+
+## 三·六、SQ/EQ 真实语义（2026-10-25 修订，替代早期"双队列总线"设计稿口径）
+
+- **EQ（事件流）是主出口**：TURN_STARTED/CLOSED/ABORTED + APPROVAL_* + TOOL_CALLED/TOOL_OUTPUT（callId 配对，2026-10-25 补齐工具事件对）经 WAL 落盘 + `/events` SSE 桥外发；16 种事件类型中 7 种有生产者（其余为预留）。
+- **SQ（提交队列）是"在轮账本 + 控制通道"**，不是异步任务总线：
+  - USER_TURN op 在轮开始提交、轮收口消费 —— 队列内容 = 当前在轮的回合（`/health` 的 `protocol.sqPending` 可观测，持续上涨 = 死轮泄漏信号）；
+  - INTERRUPT 控制 op 经队列流转：`interrupt()` 入队 → 置位/掐流生效 → 轮收口 `consumeType` 清扫；
+  - TTL 清扫（10 分钟）：崩溃轮遗留 op 不会永久占队；
+  - `atHead`/`pending`/`sweep`/`consumeType` 为队列语义原语，供未来调度器演进。
+
+## 三·七、自主迭代进化（2026-10-25 新增，evolve/selfiterate.js）
+
+自愈内核之上的**可验证自改进闭环**（自主迭代/自主优化自身代码的最小可审计实现）：
+
+```
+发现(node --test TAP 解析) → 诊断(LLM+失败用例+关联源码)
+  → 补丁(SEARCH/REPLACE 块) → 快照落盘 → 重跑验证
+  → 绿: 保留 + 审计链 ok + EQ 事件   红: Snapshot.rollback + 故障留痕
+```
+
+- 双模式：`propose`（默认，只出补丁不动盘）/ `apply`（config `agent.self_iteration.mode="apply"` 显式开启）
+- 边界：只改 root 内 `.js`、默认不碰测试文件、LLM 调用预算上限、子进程超时强杀、审计链全程留痕
+- 接入面：`self_improve` 工具（riskLevel=high，权限引擎按高风险处理）/ `npm run selfiterate`（CLI）/ `--list-failing` 全量失败清单
+- 回归：`test/selfiterate.test.js`（修复成功/无效回滚/propose 不动盘/TAP 解析/双重确认门）
 
 ## 四、Web UI（codex 风格，public/ 零依赖重制）
 

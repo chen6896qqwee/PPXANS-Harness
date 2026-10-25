@@ -110,11 +110,11 @@ test("P3: 自宿主回环 —— 皮皮虾 MCP 客户端 (HTTP 传输) 连自己
   try {
     await client.connect();
     const tools = await client.listTools();
-    // 113 = 91 内置 + 2 (裸 McpServer 自带) + 20 admin 管理虚拟工具 (v2.6.0 产品壳,
+    // 114 = 92 内置 (2026-10-25 +self_improve) + 2 (裸 McpServer 自带) + 20 admin 管理虚拟工具 (v2.6.0 产品壳,
     // ppx.sessions/providers/settings/task.*) —— 外部客户端在 /mcp 上真实可见的面。
     // 2026-10-24 (R14 发现): README 锚点 mcp_tools=93 量的是裸 McpServer.handle,
     // 少了外部客户端真实可见的 20 个 admin 工具 —— 闸门量错面, 已随本轮修正。
-    assert.equal(tools.length, 113, `外部 MCP 客户端应看到全部 113 个工具, 实际 ${tools.length}`);
+    assert.equal(tools.length, 114, `外部 MCP 客户端应看到全部 114 个工具, 实际 ${tools.length}`);
     const names = new Set(tools.map((t) => t.name));
     assert.ok(names.has("get_time"), "内置工具应在 /mcp 暴露");
     assert.ok([...names].some((n) => n.startsWith("ppx.")), "admin 管理工具应在 /mcp 暴露");
