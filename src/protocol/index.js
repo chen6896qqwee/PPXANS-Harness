@@ -35,6 +35,11 @@ export const EventType = {
 };
 
 // SubmissionQueue: 用户操作入队, 内部数组队列, 先提交先处理
+// 2026-10-25 (SQ 真实化): 此前队列是"提交即消费"的装饰性结构 (评估报告 P1) ——
+//   无时间戳、无队头语义、无腐烂清理。现在 op 带提交时刻, 并补三件真实能力:
+//   atHead: FIFO 闸口语义 (谁先提交谁先被处理, 供调度/诊断判定)
+//   pending: 快照 (不清空), 供 /health 可观测
+//   sweep: TTL 清扫 —— 崩溃轮次遗留的 op 不再永久占队头 (防队列腐烂堵死后续判定)
 export function createSubmissionQueue() {
   let _seq = 0;
   const queue = [];
@@ -48,7 +53,7 @@ export function createSubmissionQueue() {
   // 提交一个操作, 返回分配/给定的 id
   function submit(op = {}) {
     const id = op.id || _newId();
-    queue.push({ id, type: op.type, payload: op.payload });
+    queue.push({ id, type: op.type, payload: op.payload, submittedAt: op.submittedAt || Date.now() });
     return id;
   }
 
@@ -75,7 +80,46 @@ export function createSubmissionQueue() {
     return out;
   }
 
-  return { submit, nextIdle, consume, size, drain };
+  // 该 id 的 op 是否在队头 (空队/false = 不在)。FIFO 闸口语义的判定原语。
+  function atHead(id) {
+    return queue.length > 0 && queue[0].id === id;
+  }
+
+  // 按类型取走全部 op (不动其他类型 —— 多会话并发时各轮的 USER_TURN op 互不干扰)。
+  // 返回被取走的 op 数组 (无则空数组)。供控制 op (如 INTERRUPT) 的生命周期收口。
+  function consumeType(type) {
+    const out = queue.filter((op) => op.type === type);
+    if (out.length) {
+      const rest = queue.filter((op) => op.type !== type);
+      queue.splice(0, queue.length, ...rest);
+    }
+    return out;
+  }
+
+  // 队列快照 (不消费): [{id, type, payload, submittedAt, ageMs}]
+  function pending() {
+    const now = Date.now();
+    return queue.map((op) => ({ ...op, ageMs: now - (op.submittedAt || now) }));
+  }
+
+  // TTL 清扫: 提交超过 ttlMs 仍未被消费的 op 视为"死轮遗留"(崩溃/断连轮次的残留),
+  // 移出队列并原样返回 (调用方负责留痕)。不扫 INTERRUPT (控制 op 生命周期跟随轮次,
+  // 由轮收口统一消费); 不设默认 TTL —— 由调用方显式传 (语义上这是策略不是机制)。
+  function sweep(ttlMs, { keepTypes = ["interrupt"] } = {}) {
+    if (!(ttlMs > 0)) return [];
+    const now = Date.now();
+    const stale = [];
+    const rest = [];
+    for (const op of queue) {
+      const age = now - (op.submittedAt || now);
+      if (age > ttlMs && !keepTypes.includes(op.type)) stale.push(op);
+      else rest.push(op);
+    }
+    if (stale.length) queue.splice(0, queue.length, ...rest);
+    return stale;
+  }
+
+  return { submit, nextIdle, consume, size, drain, atHead, consumeType, pending, sweep };
 }
 
 // EventQueue: 结构化事件出队 + 订阅回调 + WAL 回放

@@ -32,8 +32,12 @@ export const HARD_BLOCK = [
 ];
 
 // ---- 常规高危黑名单 (继承皮皮虾 P0: 删除/格式化/关机/强杀/强制推送等) ----
+// 注意 (2026-10-25 评估修复): 本清单在 checkCommand 中无条件生效 (allow_all 也不放行),
+// 头部旧注释"allow_all 放行"与代码不符 —— 保留更严格的代码行为, 以注释为准更正。
+// 2026-10-25 补 \bdel\s: Windows 删除命令 del (此前只匹配 delete/erase, del file 可漏)。
+//   用 \bdel\s 而非 \bdel\b: "del " = 命令带参形态, 不误伤 node del.js 这类文件名。
 export const DEFAULT_DENY = [
-  /delete|erase|rmdir|rd \/s|deltree/i,
+  /\bdelete|\berase\b|rmdir|rd \/s|deltree|\bdel\s/i,
   /format\s/i, /mkfs/i, /fdisk/i, /diskpart/i, /shutdown/i,
   /restart/i, /reboot/i, /halt/i, /poweroff/i,
   /reg\s+delete/i, /taskkill/i, /pkill/i, /kill\s+-9/i,
@@ -74,6 +78,9 @@ const INLINE_INTERPRETERS = [
   { names: ["php"], flags: ["-r"] },
   { names: ["bash", "sh", "zsh", "ksh", "dash"], flags: ["-c"] },
   { names: ["powershell", "pwsh"], flags: ["-c", "-command", "-enc", "-encodedcommand", "-e"] },
+  // 2026-10-25 评估修复补: cmd.exe /c 任意命令 —— 此前清单漏 cmd, `cmd /c <any>`
+  //   可携带任意载荷 (flagPrefix "/" 因 Windows cmd 用 / 前缀选项, 非 - 前缀)。
+  { names: ["cmd"], flags: ["/c", "/k", "/r"], flagPrefix: "/" },
 ];
 export const INLINE_EXEC_OPT_IN = "security.allow_inline_exec";
 
@@ -96,8 +103,10 @@ export function findInlineExec(cmd) {
       if (interp) {
         for (let j = i + 1; j < toks.length; j++) {
           const t = toks[j].toLowerCase();
-          if (t.startsWith("-") && interp.flags.includes(t)) return `${raw} ${t} 内联执行`;
-          if (!t.startsWith("-")) break; // 遇到第一个非选项 token (脚本文件/模块名) 即停, 避免误伤 node app.js / python -m venv
+          // flagPrefix: Windows cmd 用 /c 形态选项 (其余解释器一律 - 前缀)
+          const isFlag = t.startsWith("-") || (interp.flagPrefix && t.startsWith(interp.flagPrefix));
+          if (isFlag && interp.flags.includes(t)) return `${raw} ${t} 内联执行`;
+          if (!t.startsWith("-") && !(interp.flagPrefix && t.startsWith(interp.flagPrefix))) break; // 遇到第一个非选项 token (脚本文件/模块名) 即停, 避免误伤 node app.js / python -m venv
         }
       }
     }

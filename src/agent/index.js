@@ -274,9 +274,12 @@ export class PPXAgent {
   }
 
   // ---- 2026-10-24 (R12): 轮观测 begin/end —— Turn 投影 + SQ op + EQ 事件三件套 ----
-  // begin: 投影开 turn + SQ 提交 USER_TURN op + EQ 推 TURN_STARTED。
-  // end:   消费本 op (队列不留残留) + 投影收口 + EQ 推 TURN_CLOSED/TURN_ABORTED。
+  // begin: (清扫死轮遗留 op) → 投影开 turn + SQ 提交 USER_TURN op + EQ 推 TURN_STARTED。
+  // end:   消费本 op (队列不留残留) + 消费已生效的 INTERRUPT op + 投影收口 + EQ 推 TURN_CLOSED/TURN_ABORTED。
   // 全程 try 包裹, 投影层永不影响主链路 (projection.js 既有约定)。
+  // 2026-10-25 (SQ 真实化): begin 前先 TTL 清扫 —— 崩溃/断连轮次遗留的 op 不再永久
+  //   占住队列 (队列只增不减 = 装饰性的根因之一); end 把中断轮积累的 INTERRUPT op
+  //   一并消费掉 (控制 op 生命周期 = 提交 → 中断生效 → 轮收口消费, 全程在队可观测)。
   _turnObsBegin(sessionKey, userMsg, channel) {
     if (!this.turnProjection?.enabled) return null;
     let turnId = null;
@@ -289,6 +292,11 @@ export class PPXAgent {
     try {
       const bus = this.protocolBus;
       if (bus?.sq) {
+        // 死轮遗留清扫: 超过 10 分钟仍未消费的非中断 op = 崩溃轮残留, 记事件后移除
+        const stale = (typeof bus.sq.sweep === "function" && bus.sq.sweep(10 * 60 * 1000)) || [];
+        for (const op of stale) {
+          try { this.tracer?.event?.("protocol/stale_op_swept", { id: op.id, type: op.type, ageMs: op.ageMs }); } catch {}
+        }
         opId = bus.sq.submit({
           type: OpType.USER_TURN,
           payload: { sessionKey, text: String(userMsg ?? "").slice(0, 2000) },
@@ -305,6 +313,15 @@ export class PPXAgent {
     try {
       const bus = this.protocolBus;
       if (obs.opId && bus?.sq) bus.sq.consume(obs.opId); // 收口: 只消费本轮自己的 op
+      // 已生效的中断 op 一并收口: INTERRUPT 提交即生效 (interrupt() 内置位+掐流),
+      // 轮结束后把队列里积压的中断 op 清走, 队列回到"只剩各在轮 USER_TURN op"的真态。
+      // consumeType 只动 INTERRUPT —— 并发会话的 USER_TURN op 不受影响 (各轮自己收口)。
+      if (bus?.sq && typeof bus.sq.consumeType === "function") {
+        const consumed = bus.sq.consumeType(OpType.INTERRUPT);
+        if (consumed.length) {
+          try { this.tracer?.event?.("protocol/interrupt_ops_consumed", { count: consumed.length }); } catch {}
+        }
+      }
       if (status === "aborted") this.turnProjection.abort?.(sessionKey);
       else this.turnProjection.complete?.(sessionKey);
       bus?.eq?.push?.({
@@ -313,6 +330,33 @@ export class PPXAgent {
       });
     } catch { /* 观测收口异常不阻断 */ }
     try { this.bus?.emit?.("chat/turn/end", { sessionKey, turnId: obs.turnId, status }, { source: "agent.turn" }); } catch { /* 观测事件不阻断 */ }
+  }
+
+  // 协议总线可观测快照 (供 /health 与诊断): SQ 积压 op 数 + EQ 序号水位。
+  protocolStats() {
+    const bus = this.protocolBus;
+    if (!bus) return { sqPending: 0, eqSeq: 0 };
+    let sqPending = 0;
+    let eqSeq = 0;
+    try { sqPending = Number(bus.sq?.size?.()) || 0; } catch {}
+    try {
+      const hist = bus.eq?.history?.() || [];
+      eqSeq = hist.length ? hist[hist.length - 1].seq : 0;
+    } catch {}
+    return { sqPending, eqSeq };
+  }
+
+  // EQ 推事件的安全包装 (2026-10-25): 事件流永不阻断主链路; WAL 落盘等异常静默。
+  _eqPush(type, payload) {
+    try { this.protocolBus?.eq?.push?.({ type, payload }); } catch { /* 事件流异常不阻断 */ }
+  }
+
+  // EQ payload 紧凑预览: 事件会进 WAL 长期落盘, 大参数/大结果必须截断 (默认 200 字符)。
+  _eqPreview(v) {
+    try {
+      const s = typeof v === "string" ? v : JSON.stringify(v);
+      return (s || "").slice(0, 200);
+    } catch { return String(v).slice(0, 200); }
   }
 
   // ---- 装配阶段 5: 长期状态引擎 (生命周期 / 进化 / 审计 / 技能) ----
@@ -409,8 +453,18 @@ export class PPXAgent {
   notify(message) { if (this._notifyCb) { try { this._notifyCb(String(message)); } catch (e) {} } }
   // 中断: 置位中断标记 + 立即掐断在途流式请求 (否则上游继续吐字, 用户白等/白计费)。
   //   无参 = 掐断全部会话在途流; 带 sessionKey = 只掐断该会话 (多路复用 Web 端用)。
+  // 2026-10-25 (SQ 真实化): 中断作为控制 op 走 SQ 队列 —— 此前 SQ 只有 USER_TURN
+  //   提交-同轮消费一种形状 (装饰性队列)。现在 INTERRUPT op 入队 + EQ 推事件,
+  //   由轮收口 (_turnObsEnd) 统一消费, 控制指令与用户回合共用同一条 FIFO 总线。
   interrupt(sessionKey) {
     this._interrupted = true;
+    try {
+      const bus = this.protocolBus;
+      if (bus?.sq) {
+        bus.sq.submit({ type: OpType.INTERRUPT, payload: { sessionKey: sessionKey || null } });
+        bus.eq?.push?.({ type: EventType.TURN_ABORTED, payload: { sessionKey: sessionKey || null, cause: "interrupt" } });
+      }
+    } catch { /* 队列不可用不影响既有中断语义 */ }
     if (!this._streamAborts) return;
     if (sessionKey) {
       const ac = this._streamAborts.get(sessionKey);
@@ -1431,6 +1485,10 @@ export class PPXAgent {
 
     this.bus?.emit("tool/call", { name, args, callId }, { source: "agent._runTool" });
     if (this._onToolEvent) { try { this._onToolEvent({ type: "start", id: callId, tool: name, args, ts: Date.now() }); } catch {} }
+    // 2026-10-25 (EQ 事件面): TOOL_CALLED 进事件流 —— 此前 16 种事件类型只有 4 种有
+    //   生产者, 工具事件只走 _onToolEvent 回调旁路, /events SSE 消费者看不到工具轨迹。
+    //   现在 EQ 与回调双发 (回调供 UI 精确配对, EQ 供外部时间线消费), payload 控制在紧凑尺寸。
+    this._eqPush(EventType.TOOL_CALLED, { tool: name, callId, sessionKey: currentTrace()?.sessionKey || null, argsPreview: this._eqPreview(args) });
     // let 而非 const: PostToolUse 钩子的 additionalContext 会追加到结果尾部
     // (2026-09-18 修复: 原为 const, 钩子追加时抛 "Assignment to constant variable" 被 catch {} 静默吞掉,
     //  additionalContext 特性从未生效)
@@ -1492,6 +1550,9 @@ export class PPXAgent {
   // v3.0: 统一 done 事件发射 (原内联三处, 收敛为一个私有方法)
   _emitToolDone(callId, name, args, ok, durationMs, result) {
     if (this._onToolEvent) { try { this._onToolEvent({ type: "done", id: callId, tool: name, args, ok, durationMs, result: String(result == null ? "" : result).slice(0, 300), ts: Date.now() }); } catch {} }
+    // 2026-10-25 (EQ 事件面): TOOL_OUTPUT 统一在此收口 —— 覆盖全部出口
+    //   (成功/失败/钩子否决/权限拒绝/回放缓存), 与 TOOL_CALLED 经 callId 配对。
+    this._eqPush(EventType.TOOL_OUTPUT, { tool: name, callId, ok, durationMs, resultPreview: this._eqPreview(result) });
   }
 
   // v3.0 (codex approval flow): 产生审批请求并等待 Web UI/通道裁决

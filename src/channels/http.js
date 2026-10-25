@@ -35,6 +35,24 @@ const MAX_BODY = 1024 * 1024;          // 请求体上限 1MB
 const RATE_PER_MIN = 60;               // 每 IP 每分钟最大请求数 (令牌桶)
 const MAX_INFLIGHT = 4;                // 同时处理的最大对话请求数 (超出立即 429, 防单 agent 被并发压垮)
 
+// 统一安全响应头 (2026-10-25 安全加固): 此前仅有 CORS 头, 无任何浏览器安全基线。
+// Web UI 有 70+ innerHTML 拼接点, 编码纪律需要一道服务器侧护栏兜底 ——
+// 注入的外域脚本/样式/资源一律被 CSP 拒绝, 页面也禁止被 iframe (frame-ancestors)。
+// script-src 只放行 'self' + 首屏主题脚本 (index.html 唯一内联脚本) 的 sha256 固定哈希;
+// style-src 需 'unsafe-inline': SVG sprite/输入框既有内联 style 属性是既有 UI 结构。
+// connect-src 'self': app.js 仅同源 fetch (实测无外域调用)。
+// 哈希与 index.html 内联脚本强耦合 —— 改动该脚本必须同步此哈希 (有回归测试钉住)。
+export const SECURITY_CSP = [
+  "default-src 'self'",
+  "script-src 'self' 'sha256-g2kWGsySSV1dtOmX84eDtXJdYTwKPo7I7xK5O4r8TFk='",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob:",
+  "connect-src 'self'",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "frame-ancestors 'none'",
+].join("; ");
+
 // REST 端点退役开关覆盖的路径 (channels.http.mcp.legacy_rest = false 时统一 410)
 const LEGACY_REST_PATHS = ["/message", "/message/stream", "/chat", "/sessions", "/reset", "/interrupt"];
 
@@ -445,9 +463,10 @@ export class HttpChannel extends Channel {
     return this;
   }
 
-  // 单入口分发: CORS/OPTIONS → MCP 端点 → webhook → 限流 → 业务路由, 最后兜底 404/500
+  // 单入口分发: 安全响应头 → CORS/OPTIONS → MCP 端点 → webhook → 限流 → 业务路由, 最后兜底 404/500
   async _dispatch(req, res) {
     try {
+      this._applySecurityHeaders(res);
       if (!this._applyCors(req, res)) return;
       const reqPath = (req.url || "/").split("?")[0];
 
@@ -488,6 +507,18 @@ export class HttpChannel extends Channel {
         if (!res.writableEnded) this._json(res, 500, { error: e.message });
       } catch {}
     }
+  }
+
+  // 统一安全响应头 (2026-10-25): 在任何 writeHead 之前 set, 对静态页/API/SSE/MCP 全部生效。
+  //   nosniff 防 MIME 嗅探; DENY 防点击劫持; no-referrer 防 token 进 Referer;
+  //   CSP 见 SECURITY_CSP 常量注释。API/JSON 响应带 CSP 无副作用。
+  _applySecurityHeaders(res) {
+    try {
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("X-Frame-Options", "DENY");
+      res.setHeader("Referrer-Policy", "no-referrer");
+      res.setHeader("Content-Security-Policy", SECURITY_CSP);
+    } catch { /* 头已发送等场景: 不因安全头炸主链路 */ }
   }
 
   // 统一 CORS 响应头 (所有路由含 /mcp 共用)。返回 false 表示本次请求无需继续 (已响应或来源被拒)。
@@ -633,6 +664,9 @@ export class HttpChannel extends Channel {
       web: "/",
       mcp: this.mcpEnabled ? this.mcpPath : null,
       uptime_ms: Math.round(process.uptime() * 1000),
+      // 协议总线条观测 (2026-10-25 SQ 真实化): SQ 积压 op 数 + EQ 事件序号水位。
+      //   sqPending 持续上涨 = 有轮次只提交不收口 (死轮泄漏), 是队列健康度的直接信号。
+      protocol: typeof this.agent?.protocolStats === "function" ? this.agent.protocolStats() : undefined,
     });
     return true;
   }

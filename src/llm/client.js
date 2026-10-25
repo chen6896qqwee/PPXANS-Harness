@@ -256,7 +256,16 @@ export class LLMClient {
     const body = { model: this.model, messages, temperature, max_tokens: maxTokens, stream: true, ...this._thinkParams() };
     if (tools.length) body.tools = tools;
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), timeoutMs || this.timeoutMs);
+    // 2026-10-25 评估修复: 超时从"总时长制"改"空闲制" —— 原实现一次 setTimeout 定死,
+    //   慢速长流 (逐字活跃但总时长 > timeoutMs) 会在中途被硬掐; 现在每收到一个 chunk
+    //   重置计时器, 只有"静默超过 timeoutMs"才判死。中断语义不变 (abort 同一 ctrl)。
+    const idleMs = timeoutMs || this.timeoutMs;
+    let idleTimer = null;
+    const armIdle = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => ctrl.abort(), idleMs);
+    };
+    armIdle();
     if (signal) signal.addEventListener("abort", () => ctrl.abort(), { once: true });
     let content = "";
     let streamedAny = false;
@@ -283,6 +292,7 @@ export class LLMClient {
       while (!streamDone) {
         const { done, value } = await reader.read();
         if (done) break;
+        armIdle(); // 收到数据 = 流仍活跃, 重置空闲计时
         buf += decoder.decode(value, { stream: true });
         let idx;
         while (!streamDone && (idx = buf.indexOf("\n")) !== -1) {
@@ -332,7 +342,7 @@ export class LLMClient {
         streamed: streamedAny,
       };
     } finally {
-      clearTimeout(timer);
+      if (idleTimer) clearTimeout(idleTimer);
     }
   }
 
@@ -349,7 +359,13 @@ export class LLMClient {
     }
     const url = `${this.baseUrl}/chat/completions`;
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), this.timeoutMs);
+    // 空闲制超时 (同 apiChatStream, 2026-10-25): 每 chunk 重置, 静默超时才掐
+    let idleTimer = null;
+    const armIdle = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => ctrl.abort(), this.timeoutMs);
+    };
+    armIdle();
     const extSig = signal || null;
     // { once: true } (2026-09-18 修复): 复用同一 signal 的多次流式对话不再累积监听器
     if (extSig) extSig.addEventListener("abort", () => ctrl.abort(), { once: true });
@@ -373,6 +389,7 @@ export class LLMClient {
       while (!streamDone) {
         const { done, value } = await reader.read();
         if (done) break;
+        armIdle(); // 收到数据 = 流仍活跃, 重置空闲计时
         buf += decoder.decode(value, { stream: true });
         // 按行解析 SSE
         let idx;
@@ -392,7 +409,7 @@ export class LLMClient {
       }
       return full;
     } finally {
-      clearTimeout(timer);
+      if (idleTimer) clearTimeout(idleTimer);
     }
   }
 }

@@ -326,11 +326,13 @@ export async function runSupervisorLoop({ agent, L, task, judge = null, expertKe
 
   let feedback = null;
   let final = "";
+  let lastReplies = [];
   for (let round = 1; round <= maxRounds; round++) {
     const parts = [`【任务】${task}`];
     if (feedback) parts.push(`【上一轮监督者反馈】\n${feedback}\n\n请据此修正你的结论。`);
     if (experts) parts.push("请独立给出你的结论与依据。");
     const replies = await Promise.all(experts.map((_, i) => send(i, parts.join("\n\n"))));
+    lastReplies = replies;
 
     // 监督者评审 (LLM): 返回 {accept, feedback[]}
     const verdict = await supervise(agent, task, experts.map((e) => e.name), replies, judge);
@@ -344,8 +346,14 @@ export async function runSupervisorLoop({ agent, L, task, judge = null, expertKe
   }
 
   const head = ["✅ 监督者编排", `专家: ${experts.map((e) => e.name).join(" · ")}`];
-  const body = experts.map((e, i) => `【${e.name}】\n${final ? "" : ""}`);
-  return [head.join("\n"), "", final || `(监督者未在 ${maxRounds} 轮内接受, 输出各方原始结论)`, ""].join("\n");
+  // 2026-10-25 修复 (评估报告 P2): 超轮时原实现只回一句占位语 —— 各专家的原始结论
+  //   被整轮丢弃 (line 旧 `body` 变量算了不用), 与返回文案"输出各方原始结论"的承诺相悖。
+  //   现在超轮时把最后一轮各方结论如实带回 (各截 2000 字), 交主 agent/用户裁定。
+  if (final) return [head.join("\n"), "", final].join("\n");
+  const body = experts
+    .map((e, i) => `【${e.name}】\n${String(lastReplies[i] ?? "(无回复)").slice(0, 2000)}`)
+    .join("\n\n");
+  return [head.join("\n"), "", `⚠️ 监督者未在 ${maxRounds} 轮内接受, 各方最后一轮原始结论如下 (供裁定):`, "", body].join("\n");
 }
 
 // 监督者评审: 用主 agent LLM 评估各专家产出, 返回 {accept, feedback[]}
@@ -518,6 +526,10 @@ export function registerDelegateTools(catalog, opts = {}) {
         arbitrate: { type: "boolean", description: "是否由主 agent 仲裁聚合所有子结果 (并行/多任务 review 时推荐), 默认 false 直接返回拼接结果" },
         judge: { type: "string", description: "仲裁评审指令 (arbitrate=true 时生效, 如 找出最可靠结论/合并去重); review=true 时为审查准则, 可缺省" },
         review: { type: "boolean", description: "SDD 审查循环: 实施者 -> 只读审查者 -> 发现问题自动修复复审, 达上限熔断, 默认 false。单 task 与多 tasks 均支持" },
+        // 2026-10-25 补 (评估报告 P2): supervisor 参数此前在 execute 里被读取却未声明进
+        //   schema —— 模型按 tools 清单无法稳定发现/触发监督者编排, 等于半隐藏功能。
+        supervisor: { type: "boolean", description: "监督者编排: N 个专家并行产出 → 监督者 LLM 评审 → 打回带反馈再派一轮 → 接受则定稿; 未接受输出各方原始结论供裁定, 默认 false" },
+        supervisor_rounds: { type: "number", description: "监督者编排最大评审轮数 (supervisor=true 时生效, 默认 3, 上限 5)" },
         fix_rounds: { type: "number", description: "审查循环最大修复轮数 (review=true 时生效, 默认 3, 上限 5)" },
         share_board: { type: "boolean", description: "子任务结论自动发布到军团共享记忆板 (board_query 可查), 仲裁前主 agent 自动读板。默认 true" },
         expert: { type: "string", description: "固化专家角色 (单任务)。用 expert_list 工具查全部专家 id; 专家自带角色名+专属视角 (只读专家自动禁修改工具)" },
@@ -643,9 +655,11 @@ export function registerDelegateTools(catalog, opts = {}) {
         // ---- supervisor: 监督者编排循环 (2026-10-10 补齐) ----
         // 监督者 LLM 评审各专家产出 → 打回则带着反馈再派发一轮 → 接受则定稿。
         if (args.supervisor) {
+          const sr = Number(args.supervisor_rounds);
+          const maxRounds = Number.isFinite(sr) ? Math.min(Math.max(Math.trunc(sr), 1), 5) : 3;
           const out = await runSupervisorLoop({
             agent, L, task: tasks.join("\n\n"), judge: args.judge,
-            expertKeys, role,
+            expertKeys, role, maxRounds,
           });
           return out;
         }

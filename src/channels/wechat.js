@@ -166,13 +166,16 @@ export class WechatWebhookChannel extends Channel {
     const toUser = g("FromUserName");
     if (toUser) this.lastUser = toUser; // 记录最近联系人, 供主动提醒回发
     const fromUser = g("ToUserName");
+    // 2026-10-25 评估修复: agent 回复含 "]]>" 时 CDATA 提前闭合 → 回包 XML 破损,
+    //   微信解析失败/静默丢回复。标准解法: 把 ]]> 拆成两段 CDATA ("]] ]]>" → "]]]]><![CDATA[>").
+    const cdata = (s) => String(s ?? "").replace(/\]\]>/g, "]]]]><![CDATA[>");
     return {
       xml: `<xml>
-  <ToUserName><![CDATA[${toUser}]]></ToUserName>
-  <FromUserName><![CDATA[${fromUser}]]></FromUserName>
+  <ToUserName><![CDATA[${cdata(toUser)}]]></ToUserName>
+  <FromUserName><![CDATA[${cdata(fromUser)}]]></FromUserName>
   <CreateTime>${Math.floor(Date.now() / 1000)}</CreateTime>
   <MsgType><![CDATA[text]]></MsgType>
-  <Content><![CDATA[${reply}]]></Content>
+  <Content><![CDATA[${cdata(reply)}]]></Content>
 </xml>`,
     };
   }
