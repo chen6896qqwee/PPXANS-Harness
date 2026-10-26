@@ -1,6 +1,6 @@
 # 🦐 PPXANS-Harness
 
-<!-- readme-sync: {"tools":92,"skills":67,"core_schema":92,"ctx_tokens":13949,"mcp_tools":114,"tests":1759} -->
+<!-- readme-sync: {"tools":93,"skills":67,"core_schema":93,"ctx_tokens":13993,"mcp_tools":115,"tests":1759} -->
 
 **皮皮虾神经系（ANS）+ Harness 一体化智能体内核** —— 纯 Node.js、**零运行时依赖**的可审计自主智能体。
 
@@ -28,6 +28,7 @@
 | 🛡️ **权限安全** | AskForApproval 四档审批 + SandboxPolicy 沙箱（工作区写含 realpath 符号链接复核）+ 命令守卫三层防线（shell 结构化解析：命令替换硬拦 / 逐段 argv0 白名单）+ SSRF 防护 + fail-open 钩子栅栏 |
 | 🩺 **自我修复** | 启动体检、损坏 JSON 修复、崩溃恢复、残留清理（自愈 7/7） |
 | 🔄 **自主迭代** | 可验证自改进闭环：失败测试 → LLM 诊断 → SEARCH/REPLACE 补丁 → 快照落盘 → 重跑验证 → 绿保留/红回滚（`self_improve` 工具 + `npm run selfiterate`，默认 propose 只出补丁，apply 需双重确认，全程审计链留痕） |
+| 🧬 **持续进化循环** | 每日自主进化编排：弱点聚类定向学习（同类故障病历 ≥N 先治）→ 失败沉淀经验/成功沉淀技能 → 代码自改进 → 进化度量落账 journal（`evolution_loop` 配置 + `npm run evolve:loop` + `evolution_status` 工具随时查看能力快照/弱点/进化曲线，「变强」有账可查） |
 | 📚 **自我学习** | 经验库 + 画像/人格提炼 + refine 失败轨迹闭环 + refineSkill 成功沉淀技能；经验自动沉淀语境 Playbook（进化闭环），失败自动写故障病历并反哺提炼 |
 | 🤖 **多 Agent 军团** | 多进程并行 + DAG 编排 + legion 模式 + spawn_agent 自主协作（并行/差异化视角/仲裁聚合/SDD 审查循环），编排超时可配（`agent.legion.timeoutMs`） |
 | 🔌 **多渠道接入** | HTTP + 飞书（官方 encrypt_key 事件解密 + 签名校验 + 防重放）+ 微信（加解密 + 主动推送 + 加密回包） |
@@ -149,6 +150,7 @@ npm run nightly         # 四基准一键跑分 → docs/bench/nightly-<date>.{j
 npm run audit:verify    # 审计哈希链完整性校验 (含 HMAC 签名重放)
 npm run selfiterate -- --list-failing   # 全量测试列出失败文件 (自主迭代入口)
 npm run selfiterate -- test/x.test.js   # 对失败测试跑 诊断→补丁→验证→回滚 闭环 (默认只出补丁)
+npm run evolve:loop                     # 手动一轮持续进化: 弱点学习→代码迭代→度量落账 (--status 看报告)
 ```
 
 **GitHub Actions CI**：push/PR 自动跑全量测试 + Web 静态自检 + 本地评测。要启用 LLM 回归，在 Settings → Secrets 配置 `PPX_E2E_BASE_URL` / `PPX_E2E_API_KEY` / `PPX_E2E_MODEL`。

@@ -184,6 +184,8 @@ const READ_ONLY_SURFACE = [
   // 2026-10-07 吸收 Octop: 专家库/人格/房间只读面 (纯读)
   "expert_pack_list", "expert_pack_show", "persona_list", "persona_preview",
   "team_room_status", "team_room_history",
+  // 2026-10-25 自主进化报告 (readOnly:true, 只读 journal+能力快照)
+  "evolution_status",
 ];
 
 function engine({ root, catalog, sandbox, plan }) {

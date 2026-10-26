@@ -47,6 +47,8 @@ import { record as rewardRecord, status as rewardStatus } from "../ans/reward.js
 import { scan as evictionScan, status as evictionStatus } from "../ans/eviction.js";
 import { installGuard, guardStatus, installGuardOnCatalog } from "../ans/guard.js";
 import { categorizeFailure } from "../evolve/delta-producer.js";
+// 持续进化循环 (2026-10-25): learn→iterate→journal 每日编排 (config.agent.evolution_loop)
+import { installEvolutionLoop } from "../evolve/loop.js";
 import { estimateTokens } from "../utils/text.js";
 import { scanInjection, wrapUntrusted, reportSuspicious, stripProtoKeys } from "../security/injection.js";
 import { SkillLoader } from "../skills/loader.js";
@@ -422,7 +424,7 @@ export class PPXAgent {
     this.memory.setExtractor((u, a, related) => this.memorySvc.extractMemory(u, a, related));
   }
 
-  // ---- 装配阶段 7: 启动动作 (禁用工具 / MCP 自动连接 / 首次画像) ----
+  // ---- 装配阶段 7: 启动动作 (禁用工具 / MCP 自动连接 / 首次画像 / 进化循环) ----
   _initStartup() {
     // 应用 tools.disabled: 从 config/ppx.json 读取需禁用的工具, 启动时禁用 (设置 UI 写盘生效)
     this._applyDisabledTools();
@@ -436,6 +438,10 @@ export class PPXAgent {
 
     // 首次启动生成 L3 画像 (零依赖高频词统计, 同步快, 不调 LLM)
     this._maybeRefreshPersona();
+
+    // 持续进化循环 (2026-10-25): learn→iterate→journal 每日编排。
+    //   默认不开定时 (evolution_loop.enabled); agent._evolutionLoop 始终可用 (工具/CLI 复用)。
+    try { installEvolutionLoop(this); } catch { /* 进化循环装配失败不阻断启动 */ }
   }
 
   // 默认数据目录: 包装在 node_modules 里(全局/本地安装)时外置到 ~/.ppx, 否则 root/data

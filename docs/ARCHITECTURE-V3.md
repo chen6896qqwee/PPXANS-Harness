@@ -97,6 +97,21 @@ v3.0 的 9 个新模块中 **8 个已真实装配进运行时**：
 - 接入面：`self_improve` 工具（riskLevel=high，权限引擎按高风险处理）/ `npm run selfiterate`（CLI）/ `--list-failing` 全量失败清单
 - 回归：`test/selfiterate.test.js`（修复成功/无效回滚/propose 不动盘/TAP 解析/双重确认门）
 
+## 三·八、持续进化循环（2026-10-25 第二层，evolve/loop.js）
+
+把行为学习（EvolutionEngine）、代码自改进（SelfIterationEngine）、故障病历/Playbook 三个孤立能力编排成**每日自主进化闭环**：
+
+```
+Phase 1 learn    弱点聚类 (故障病历按 tool+category 聚类, 同类 ≥N 先治)
+                 → 定向 refine + 常规 refine (失败→经验) + refineSkill (成功→技能)
+Phase 2 iterate  代码自改进 (SelfIterationEngine, 需 LLM + target_files, 沿用 propose/apply 安全门)
+Phase 3 journal  进化度量落账 (data/evolve/journal.jsonl: 能力快照 + 各段结果, 曲线可画)
+```
+
+- 编排护栏：单飞锁（上轮未完不叠加）/ 最小间隔 / 各段独立 try 隔离（一段崩不拖垮整轮）/ 无 LLM 段级跳过
+- 接入面：`config.agent.evolution_loop { enabled, cron, weakness_threshold }` 每日定时（Scheduler 幂等注册，防 JSON 序列化丢 action 的恢复陷阱）+ `npm run evolve:loop`（手动一轮 / `--status` 报告）+ `evolution_status` 工具（只读，能力快照/弱点头部/最近 N 轮进化）
+- 回归：`test/evolution-loop.test.js`（三段编排/弱点驱动/单飞锁/定时装配/工具输出）
+
 ## 四、Web UI（codex 风格，public/ 零依赖重制）
 
 - **布局**：左栏会话列表（codex 侧栏），中栏**事件时间线**（EQ 流：用户消息/思考/工具调用卡片/审批卡片/turn diff/计划/最终答案，各类型独立渲染），底部输入框 + `/` 命令补全面板。

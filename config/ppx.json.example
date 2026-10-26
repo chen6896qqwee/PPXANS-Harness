@@ -22,6 +22,12 @@
       "max_llm_calls": 6,
       "test_timeout_ms": 60000,
       "allow_test_edit": false
+    },
+    "evolution_loop": {
+      "enabled": false,
+      "cron": "03:30",
+      "weakness_threshold": 3,
+      "min_interval_ms": 60000
     }
   },
   "user": {

@@ -142,5 +142,17 @@
   "test": "test/protocol-sq-real.test.js",
   "expect": "OpType.INTERRUPT",
   "target": "src/agent/index.js"
+ },
+ {
+  "claim": "弱点聚类定向学习",
+  "test": "test/evolution-loop.test.js",
+  "expect": "weaknessTargeted",
+  "target": "src/evolve/loop.js"
+ },
+ {
+  "claim": "进化度量落账 journal",
+  "test": "test/evolution-loop.test.js",
+  "expect": "journalTail",
+  "target": "src/evolve/loop.js"
  }
 ]

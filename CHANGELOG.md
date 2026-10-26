@@ -1,3 +1,28 @@
+## 未发布 (2026-10-25·第二十二轮) - 持续进化循环 (自主进化第二层)
+
+> 在第二十一轮「按需的代码自改进」之上, 交付**每日自主进化编排** —— 学习/迭代/度量
+> 三段闭环, "变强"有账可查。
+
+### 持续进化循环 (evolve/loop.js)
+- **三段编排** (每段独立 try 隔离, 一段崩不拖垮整轮):
+  - Phase 1 learn: **弱点聚类定向学习** —— 故障病历按 tool+category 聚类, 同类 ≥
+    `weakness_threshold` (默认 3) 先针对头部弱点提炼 (不再只看"最近 50 条轨迹");
+    常规 refine (失败→经验) + refineSkill (成功→技能) 照常;
+  - Phase 2 iterate: 代码自改进 (复用 SelfIterationEngine, 沿用 propose/apply
+    双重门 + 全部安全边界);
+  - Phase 3 journal: 进化度量落账 `data/evolve/journal.jsonl` (能力快照:
+    经验数/技能数/病历数/playbook 条数 + 各段结果) —— 进化曲线可画。
+- **编排护栏**: 单飞锁 (上轮未完不叠加) / 最小间隔保护 / 无 LLM 段级安全跳过。
+- **接入面**: `config.agent.evolution_loop { enabled, cron: "03:30", weakness_threshold }`
+  每日定时 (Scheduler 幂等注册, 防恢复任务丢 action 陷阱, 与 eviction-daily 同手法);
+  `npm run evolve:loop` 手动一轮 (`--status` 只看报告); `evolution_status` 只读工具
+  (能力快照 + 弱点头部 5 + 最近 N 轮进化曲线)。
+- **回归**: test/evolution-loop.test.js 5 项 (三段编排+journal 落账 / 弱点驱动
+  定向 refine / 单飞锁+最小间隔 / enabled 定时装配 vs 默认不装配 / 工具输出三段)。
+- **端到端实测**: 真实 agent 跑通一轮 (学习段执行/迭代段按配置跳过/journal 落账)。
+
+---
+
 ## 未发布 (2026-10-25·第二十一轮) - 全面评估修复 + 自主迭代进化引擎
 
 > 外部完整评估报告 (安全/架构/测试/宣称对账) 驱动的修复轮: P1×2 + P2×2 + P3×2 全部
