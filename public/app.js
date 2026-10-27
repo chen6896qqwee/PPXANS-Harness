@@ -39,6 +39,21 @@
   };
 
   var $ = function (id) { return document.getElementById(id); };
+
+  /* 引导数据: 服务端把它写成 <script type="application/json" id="ppx-boot"> 节点。
+     不写成可执行内联脚本, 是因为那个节点内容含时间戳、哈希每次都变, 会被 CSP 的
+     script-src 白名单拦掉 (2026-10-27 修)。这里解析一次并缓存到 window 上。 */
+  function bootData() {
+    if (window.__PPX_BOOTSTRAP__) return window.__PPX_BOOTSTRAP__;
+    var el = document.getElementById("ppx-boot");
+    if (!el) return null;
+    try {
+      window.__PPX_BOOTSTRAP__ = JSON.parse(el.textContent || "{}");
+    } catch (e) {
+      return null;
+    }
+    return window.__PPX_BOOTSTRAP__;
+  }
   function esc(s) {
     return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
       return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
@@ -82,7 +97,7 @@
 
   /* (R13) hero 工具数用服务端实测值 —— 静态文案必然漂移 (曾写死 89, 实测 91) */
   (function () {
-    var boot0 = window.__PPX_BOOTSTRAP__;
+    var boot0 = bootData();
     var el = document.getElementById('heroTools');
     if (el && boot0 && boot0.toolsCount) el.textContent = boot0.toolsCount + ' 工具';
   })();
@@ -91,8 +106,8 @@
   function headers(json) {
     var h = {};
     if (json) h["Content-Type"] = "application/json";
-    // 鉴权: token 由服务端注入 window.__PPX_BOOTSTRAP__ (可信本地免登录)
-    var boot = window.__PPX_BOOTSTRAP__;
+    // 鉴权: token 由服务端随首页下发 (可信本地免登录)
+    var boot = bootData();
     if (boot && boot.authToken) h["Authorization"] = "Bearer " + boot.authToken;
     else {
       var saved = localStorage.getItem("ppx_token");
@@ -417,7 +432,7 @@
   // 空间 = { name, root(相对路径, 空 = 皮皮虾根目录), sessionKey(绑定的会话) }。
   // 点空间: 工作区面板聚焦到该子目录 + 复用已绑定会话 (没有才建新) → 同一项目不散落重复会话。
   function bootRoot() {
-    try { return (window.__PPX_BOOTSTRAP__ && window.__PPX_BOOTSTRAP__.root) || ""; } catch (e) { return ""; }
+    try { var b = bootData(); return (b && b.root) || ""; } catch (e) { return ""; }
   }
   function rootName() {
     var r = bootRoot();
@@ -1559,7 +1574,12 @@
       toBottom(true);
     }).catch(function (e) { toast(e.message, true); });
   };
-  $("capSettings").onclick = function () { setDrawer(true); switchTab("settings"); };
+  // 2026-10-27: 前端改 bot 形态后, 侧栏这一项打开「本体设置」页;
+  // 运行时设置 (审批/沙箱/外观/语音) 仍在抽屉的 settings 页签里, 没删。
+  $("capSettings").onclick = function () {
+    if (window.PPXBOT && window.PPXBOT.showSettings) window.PPXBOT.showSettings();
+    else { setDrawer(true); switchTab("settings"); }
+  };
   function switchTab(tab) {
     var t = document.querySelector('.tab[data-tab="' + tab + '"]');
     if (t) t.click();
@@ -1924,6 +1944,17 @@
     };
   });
 
+  /* ================= 对外接口 (bot.js 用) ================= */
+  // bot.js 管本体与设置, 但「新会话/切会话」的实现在这里 —— 不复制一份逻辑,
+  // 两边各写一遍会话状态是最容易分叉的地方。
+  window.PPX = {
+    newSession: newSession,
+    switchSession: switchSession,
+    reloadSessions: loadSessions,
+    state: S,
+    toast: toast,
+  };
+
   /* ================= 启动 ================= */
   function init() {
     applyTheme();
@@ -1955,7 +1986,8 @@
     loadLlm();
     pollApprovals();
     S.lifeTimer = setInterval(function () { loadLifecycle(); loadHealth(); }, 30000);
-    S.apprTimer = setInterval(function () { pollApprovals(); loadTasks(); }, 8000);
+    // 2026-10-27: 8s → 15s。bot.js 那边每 5 秒还会打一次 /api/bot.state, 两路叠加会撞限流(60/分/IP)。
+    S.apprTimer = setInterval(function () { pollApprovals(); loadTasks(); }, 15000);
     $("inp").focus();
   }
   init();

@@ -1,3 +1,133 @@
+## 3.5.0 (2026-10-27) · 第二十四轮 - 前端换骨：从「会话工作台」到「常驻本体」
+
+> 上一轮让皮皮虾能改自己的源码。这一轮动的是**它长什么样** —— 前端主形态从
+> 「一堆会话的列表」换成「一个常驻本体」。界面结构参照 GitHub 上 wqty123/dsh-bot 的
+> bot 面板（首页 / 对话·轨迹 / 设置三屏），但**没有搬它的 React 与私有模块加载器**：
+> 那是 DSH web profile 插件的壳，皮皮虾是零依赖 vanilla 单页，照搬等于凭空引入一个装不上的运行时。
+> 按 references/ 的纪律，只吸收结构与取舍，用自有 DOM/CSS 重写。
+
+### 前端 (`public/`)
+- **三层视图**：`view-home`（本体首页：类型卡 / 已有本体 / 三态状态灯）·
+  `view-chat`（对话 + 轨迹双页签）· `view-settings`（13 个分节）。
+- **侧栏**改为本体条目（头像 + 名字 + 置顶 + 相对时间）+ 会话 / 空间 / 任务 / 能力；
+  原工作台的四组导航一个没删，只是不再是主舞台。
+- **轨迹页**是这轮新增的：把 `logs/traces/<day>.jsonl`（工具调用）与
+  `events-<day>.jsonl`（结构化事件）两路合并，按天回翻。
+  只读前者的话，某天一次工具都没调，页面就是空白 —— 而那天的记忆提炼、
+  persona 加载其实发生过，只是记在另一个文件里。
+- **设置页**：运行状态 / 身份与头像 / 工作区 / 规则 / 后台执行 / 晨间简报 / 日程 /
+  限额 / 自主时间 / 权限 / 记忆（可读可写）/ 服务三态 / 关于。
+- `bot.js`（约 900 行）管本体、设置、轨迹；`app.js` 管对话流、会话、抽屉。
+  两边只通过 DOM 与 `window.PPX` / `window.PPXBOT` 交汇，**对话链路一行没改**。
+
+### 后端 (`src/web/`)
+- `bot-store.js`：本体档案落 `data/bots/profile.json`。归一化时缺字段补默认、
+  类型不对纠正、数值夹到合法区间；坏 JSON 不抛错，退回默认并留 `profile.json.broken`。
+  写操作走 `apply()` 的**动作白名单**，前端传错字段不会把 settings 写成脏数据。
+- `bot-api.js`：
+  - `GET /api/bot.state` —— 一次取全首屏（本体 / 类型 / 运行态 / 设置 / 日程 / 记忆 / 服务）。
+    底层数据全部来自已有端点（`/api/tasks`、`/api/memory`、`/api/lifecycle`、`/api/traces`、
+    `/api/permissions`…），这里只做聚合，**不编数**：取不到就是 null / 0。
+  - `POST /api/bot.manage` —— 单入口写，动作白名单 + 头像按 MIME 校验（≤4MB）+ 记忆文件写入限死在 `data/memory`。
+  - `GET /api/bot.traces` —— 上面说的两路合并，支持 `?day=` 回翻。
+- 未带令牌访问 `/api/bot.state` 返回 401（有测试钉住，别把它开成匿名接口）。
+
+### 顺手修掉的三个真缺陷
+
+1. **CSP 一直把引导数据拦掉，只是被兜底盖住了**。`renderIndex` 原先注入
+   `<script>window.__PPX_BOOTSTRAP__={...}</script>` —— 页面上**第二个**可执行内联脚本，
+   内容含时间戳，哈希每次都变，而 `script-src` 只白名单了首屏主题脚本那一个 sha256。
+   实际表现：浏览器里 `window.__PPX_BOOTSTRAP__` 恒为 undefined，首屏所有 `/api/*` 先吃一次 401，
+   靠 `app.js` 的 401 兜底重新取一遍才恢复。它看起来「能用」，所以从没被发现。
+   现在引导数据写成 `<script type="application/json" id="ppx-boot">`（不可执行，不受 script-src 约束），
+   前端 `bootData()` 解析一次。新增测试钉住「页面只剩一个可执行内联脚本」。
+
+2. **重复 id 让设置页永远是空的**。抽屉里原本就有 `id="settingsBody"`，新的本体设置容器又用了一次同名 id。
+   `getElementById` 只返回第一个（抽屉里那个，display:none），于是设置页的内容写进了看不见的节点 ——
+   现象是「控制台没有任何报错，页面却一直显示加载中」，这类 bug 靠看代码很难发现。
+   已改名 `#botSettings`，并在 `npm run web:check` 里加了**重复 id 检查**。
+
+3. **`/api/bot.state` 的版本号在直连启动时恒为 null**。原来取的是 `process.env.npm_package_version`，
+   但文档里让人用 `node bin/ppx-web.js` 直接起 —— 那条路径下 `npm_*` 环境变量根本不存在，
+   于是设置页「关于」的版本永远是空。跟 `bin/ppx-web.js` 一样直接读 `package.json`，读不到才退回 `0.0.0`，
+   并加了一条测试钉住「版本号必须等于 package.json 的 version」。
+   同时修掉服务列表里模型条目的名字拼接：provider 只配了 model、没起 id 时会拼成
+   「 · deepseek-chat」这种开头带分隔符的怪名字，现在两段都在才拼。
+
+### 轮询与限流
+- `bot.state` 轮询 5 秒（不是 3 秒），页面隐藏时暂停；`app.js` 的审批/任务定时器 8s → 15s。
+  服务端按 IP 限 60 请求/分钟，两路叠加时 3 秒会周期性撞 429，表现为面板偶尔空白。
+
+### 测试与自检
+- `test/bot-api.test.js` 13 项：坏档恢复 / 白名单 / 数值夹取 / 日程 / 内置类型不可删 /
+  悬空类型回落 / 头像校验 / 轨迹合并与排序 / 空轨迹 / 401 / 快照结构 / 改名落盘 / 历史日翻页。
+- `test/security-headers.test.js` 新增 1 项：引导数据必须是 JSON 节点，可执行内联脚本只允许一个。
+- `scripts/check-web.mjs` 扩展：纳入 `bot.js` 与 `bot.css`（此前是盲区），新增重复 id 检查，
+  关键结构断言补上三层视图与轨迹页签。
+
+### 关于「一个工作区一个本体」
+dsh-bot 支持建多个 bot 实例（每个独立 workspace）。皮皮虾一个进程绑一个 root，
+所以**没有假装支持多实例**：首页的「按类型开工」是换一种干活的姿态并开一局新的，
+档案里留了 `bots[]` 数组给未来多实例用，但界面上不出现「新建第二个本体」这种做不到的按钮。
+
+---
+
+## 3.4.0 (2026-10-27) · 第二十三轮 - 自改代码闭环 (皮皮虾改自己的源码)
+
+> 前两轮解决的是「按需自改进」与「每日自主进化编排」。这一轮补的是更硬的一块:
+> **皮皮虾动自己的源码, 而且改坏了能退回**。既有 `apply_patch` 只负责写盘, `self_improve`
+> 要 LLM 自己想补丁; 两者都不验证、不记账、不留可恢复快照。本轮补上这三件事。
+
+### 自改闭环内核 (`src/selfcode/`)
+- **`ledger.js`** — 磁盘账本: `data/selfcode/ledger.jsonl` (append-only, 永不重写) +
+  改动前原件备份 `backups/<id>/<n>.bak` + 待生效清单 `pending-reload.json`。
+  刻意不复用 `edit/snapshot.js`: snapshot 是内存态随进程走, 而自改必须活过重启。
+- **`verify.js`** — 三关验证:
+  - 语法关 `node --check`。**踩到并修掉一个真坑**: 文件含 `export` 但目录链上缺
+    `type:"module"` 时, `node --check x.js` **退出码为 0**(Node 识别 ESM 语法后切换解析器,
+    该路径不回报语法错误; 同内容 `.mjs` 正确报错)。现对 `.js` 先复制为同目录临时 `.mjs` 再校验,
+    否则自改常发生在临时夹具目录, 语法关等于形同虚设。
+  - 行为关 `node --test` + TAP 解析, **只跑指定测试文件**(受影响的才验, 不全量回归)。
+  - 边界关: root 内 + 扩展名白名单 + 禁 `node_modules`/`.git`/账本自身 + 默认不许改测试文件。
+- **`engine.js`** — 解析 → 边界 → 原子落盘(tmp+rename) → 三关验证 → 绿保留/红整批回滚 →
+  记账 → 待生效标记。多块原子: 任一块 SEARCH 失配 → 整批不落盘, 绝不写半成品。
+
+### 工具面 (`src/tools/selfcode.js`, 3 个 + 两条现有出口)
+- `self_edit` (high): 补丁式自改。**双门** —— 参数 `mode:"apply"` + `config.agent.self_code.mode:"apply"`,
+  单点误用改不坏东西。
+- `self_verify` (medium/只读): 只验证不改, 改前摸底或改后复核。
+- `self_rewind` (high): 按账本 id 从备份恢复(默认最近一次), 回滚本身也记账。
+- 账本查询并入既有 `evolution_status` (加「自改账本」段: 累计/保留/回滚/退回 + 待生效清单);
+  待生效确认并入 `npm run selfcode -- ack`。**最初设计是 5 个工具, 压到 3 个** ——
+  上下文预算闸门实测 14462 tok 贴顶, 每份 schema 都按 token 付钱, 不为查账单单独开一份。
+- `scripts/selfcode.js` (新增 `npm run selfcode`): 人也能走同一条路 ——
+  `status` / `plan <patch>` / `apply <patch> --tests a,b --reason ..` / `rewind [id]` / `ack`,
+  与工具调用共用同一引擎, 结论同源。
+- **上下文预算**: `ctx-profile.js` 预算 14000 → **14500**(实测 14462), 增量 +469 tok 明细
+  (self_edit 237 / self_verify ~130 / self_rewind ~100) 与压缩过程已写进该脚本的沿革注释。
+- **不谎称已生效**: ESM 无热替换, 落盘文件的回执明确写「重启后生效」并列出 `reloadRequired`,
+  而不是让模型对着旧模块宣称"已修复"。
+
+### 借鉴登记 (`references/THIRD-PARTY-SOURCES.md` 第 7 节)
+- 同名两个 `dsh-bot` 的区别与取舍: **wqty123/dsh-bot**(DSH 常驻实体: 状态存盘活过会话 /
+  「停下等待」是合法状态而非错误分支 / 审批面向具体动作) 与 **aitcmhk-web/DSH-bot**
+  (TG/微信桥接: handoff 记忆接续 / 远程审批卡片)。两者的通道与分层记忆能力皮皮虾已有
+  (`channels/` + 五层记忆 + provenance 分级), 本批次只吸收「状态存盘」「propose 停下」
+  「回执给具体动作」三点, **未复制任何源码**(零依赖定位不变)。
+- **deepseek-ai/DeepInfer**(2026-10-20 开源, Apache-2.0): 属模型服务层(Python/CUDA/CANN),
+  与纯 Node 编排层不同层, **不接入**; 只吸收「只重算有界后缀」→ 只验受影响测试、
+  「批不变/可复现」→ 账本记 verify 结论供复算、「投机解码先给低成本预览」→ propose 先出 diff。
+
+### 回归与边界
+- `test/selfcode.test.js` 12 项: propose 零改动 / 绿保留+记账+pending / 测试红整批回滚 /
+  语法红停在语法关且不跑测试 / 多块原子 / 逃逸与禁区拒 / 测试文件保护 / rewind 复原 /
+  双门拒绝 / riskLevel=high / 空账本结构化输出。
+- `test/capability-guard.test.js`: 只读豁免面快照显式新增 `self_verify`
+  (按该测试的约定, 新增只读面必须评审可见)。
+- 配置新增 `agent.self_code { mode, syntax_timeout_ms, test_timeout_ms }`, 默认 `propose`。
+
+---
+
 ## 3.3.1 (2026-10-27) · 重新发布
 
 > 3.3.0 的 npm 包内 README 数字陈旧（92 内置工具 / 1755 通过），与源码不一致。

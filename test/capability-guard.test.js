@@ -186,6 +186,10 @@ const READ_ONLY_SURFACE = [
   "team_room_status", "team_room_history",
   // 2026-10-25 自主进化报告 (readOnly:true, 只读 journal+能力快照)
   "evolution_status",
+  // 2026-10-27 自改代码批次 (显式评审: 两个都纯读磁盘, 不改一个字节)
+  //   self_verify 读源码+跑测试子进程, 只出结论; self_ledger 只读账本与 pending 清单。
+  //   注意 self_edit / self_rewind 是 readOnly:false + riskLevel:high, 刻意不进这张表。
+  "self_verify",
 ];
 
 function engine({ root, catalog, sandbox, plan }) {

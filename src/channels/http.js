@@ -30,6 +30,7 @@ import { createAdminTools } from "../mcp/admin.js";
 import { buildTree, readWorkspaceFile, writeWorkspaceFile, searchWorkspace } from "./workspace.js";
 import { runReview } from "../review/index.js";
 import { createTaskBoard } from "../mcp/tasks.js";
+import { handleBotApi } from "../web/bot-api.js";
 
 const MAX_BODY = 1024 * 1024;          // 请求体上限 1MB
 const RATE_PER_MIN = 60;               // 每 IP 每分钟最大请求数 (令牌桶)
@@ -38,7 +39,8 @@ const MAX_INFLIGHT = 4;                // 同时处理的最大对话请求数 (
 // 统一安全响应头 (2026-10-25 安全加固): 此前仅有 CORS 头, 无任何浏览器安全基线。
 // Web UI 有 70+ innerHTML 拼接点, 编码纪律需要一道服务器侧护栏兜底 ——
 // 注入的外域脚本/样式/资源一律被 CSP 拒绝, 页面也禁止被 iframe (frame-ancestors)。
-// script-src 只放行 'self' + 首屏主题脚本 (index.html 唯一内联脚本) 的 sha256 固定哈希;
+// script-src 只放行 'self' + 首屏主题脚本 (index.html 唯一可执行内联脚本) 的 sha256 固定哈希;
+// 引导数据走 <script type="application/json" id="ppx-boot">, 不是可执行脚本, 不受 script-src 约束;
 // style-src 需 'unsafe-inline': SVG sprite/输入框既有内联 style 属性是既有 UI 结构。
 // connect-src 'self': app.js 仅同源 fetch (实测无外域调用)。
 // 哈希与 index.html 内联脚本强耦合 —— 改动该脚本必须同步此哈希 (有回归测试钉住)。
@@ -372,13 +374,20 @@ export class HttpChannel extends Channel {
     };
   }
 
-  // 读取首页 HTML 并注入 window.__PPX_BOOTSTRAP__ (找不到文件返回 null)
+  // 读取首页 HTML 并注入引导数据 (找不到文件返回 null)
+  //
+  // 2026-10-27 修: 此前注入的是 <script>window.__PPX_BOOTSTRAP__={...}</script> ——
+  // 那是页面上第二个可执行内联脚本, 内容含时间戳, 哈希每次都变, 必然被 CSP 拦掉
+  // (script-src 只白名单了首屏主题脚本那一个 sha256)。表现是浏览器里
+  // window.__PPX_BOOTSTRAP__ 恒为 undefined, 所有 /api/* 先吃一次 401, 靠 app.js 的
+  // 401 兜底再取一遍才恢复 —— 这条路一直是瘸的, 只是被兜底盖住了。
+  // 改成 type="application/json" 数据节点: 不可执行, 不受 script-src 约束, 前端 JSON.parse 读取。
   renderIndex(req) {
     const htmlPath = path.join(this.publicDir, "index.html");
     if (!fs.existsSync(htmlPath)) return null;
     let html = fs.readFileSync(htmlPath, "utf8");
     const cfg = JSON.stringify(this.bootstrapPayload(req)).replace(/</g, "\\u003c");
-    const tag = `<script>window.__PPX_BOOTSTRAP__=${cfg};</script>`;
+    const tag = `<script type="application/json" id="ppx-boot">${cfg}</script>`;
     // 优先插在 </head> 前; 模板没有 head 就退化为插到 </body> 前
     if (html.includes("</head>")) html = html.replace("</head>", `${tag}\n</head>`);
     else if (html.includes("</body>")) html = html.replace("</body>", `${tag}\n</body>`);
@@ -918,6 +927,9 @@ export class HttpChannel extends Channel {
   // API 路由表: 每个 handler 返回 true (已处理)
   async _apiRoute(req, res, reqPath) {
     const get = req.method === "GET";
+    // 2026-10-27: 本体 (bot) 形态接口 —— /api/bot.state 聚合首屏快照, /api/bot.manage 单入口写
+    // 必须排在 switch 之前: 这几个路径不在 case 表里, 落到 default 会 404
+    if (await handleBotApi(this, req, res, reqPath)) return true;
     // v3.0 (codex 对齐): 命令面板 / 审批流 / 目标看板 / 审查报告 / 权限热更新
     if (await this._apiV3(req, res, reqPath, get)) return true;
     switch (reqPath) {

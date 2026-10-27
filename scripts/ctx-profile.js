@@ -84,7 +84,15 @@ console.log('  对照实测: 基线平均 17836 tok/任务 (含多轮工具循�
 //     → 14000 (2026-10-11 下午): 路径归一化后实测 13879 (ubuntu 与本地一致), 但 Windows runner
 //       仍有 ~6 tok 机器残差 (hostname/用户名类注入, 归一化覆盖不到)。+100 为跨机器噪声余量,
 //       闸门语义不变 —— 真增长(一段工具描述数百 tok)依然直接红; 真减债时把余量撤掉。
-const CONTEXT_BUDGET_TOKENS = 14000;
+//     → 14500 (2026-10-27 自改代码批次): 实测 14462。增量明细 (+469):
+//         self_edit 237 / self_verify ~130 / self_rewind ~100 tok。
+//       已做的压缩: 原设计 5 个工具 (self_edit/self_verify/self_rewind/self_ledger/self_pending_ack)
+//         压到 3 个 —— self_ledger 并入 evolution_status (同属"变强有账可查", 复用一份 schema),
+//         self_pending_ack 并入 `npm run selfcode -- ack`; self_edit 描述 189 字 → 132 字。
+//       付得起的理由: 没有这三个工具, agent 对自身代码只能"建议改哪里"而不能真改 ——
+//         自主性的最后一段路就在这里; 每次落盘前留备份的代价换来的是"改坏了能一键退回"。
+//       后续若要压回, 优先把 SEARCH/REPLACE 格式说明移出 schema, 改由 SKILL 按需加载。
+const CONTEXT_BUDGET_TOKENS = 14500;
 const checkIdx = process.argv.indexOf('--check');
 if (checkIdx >= 0) {
   const mIdx = process.argv.indexOf('--max-tokens');

@@ -98,3 +98,98 @@ npm run dsh -- web    # 直接跑 dsh CLI
 | ACE (ICLR 2026, agentic-context-engineering) | delta 生产者闭环：经验教训 → 增量 ADD → 门禁 → 注入 | `src/evolve/delta-producer.js`（recordLesson / categorizeFailure），接入 LearningService.refine 与 agent 失败总线（Playbook 首次有了写入端） |
 | HMAC 审计链通行实践（git commit 签名同思想） | 链外密钥 HMAC 锚定每行 hash，防"能写文件者整链重算" | `src/audit/audit-chain.js`（sig 字段 + loadOrCreateHmacKey，密钥 env PPX_AUDIT_HMAC_KEY > <root>/.ppx/audit-hmac-key） |
 | 特征哈希（feature hashing, Weinberger et al.） | 零模型文本向量：字符 n-gram FNV-1a 双哈希定桶定符号 + 亚线性词频 + L2 | `src/memory/hash-embedder.js`（语义检索默认兜底通道）；向量落盘缓存 `src/memory/vector-disk.js`（内容哈希失效键 + embedder 指纹换代作废） |
+
+---
+
+## 7. 2026-10-27 自改代码批次借鉴登记（零依赖吸收, 源码未复制）
+
+本批次目标只有一个：**让皮皮虾能自己改自己的代码，且改得可验证、可回滚、有账可查**。
+下列项目均未复制任何源码，只吸收设计与思想，用皮皮虾自有结构重写。
+
+### 7.1 GitHub 上重名的两个 `dsh-bot`
+
+| 项 | wqty123/dsh-bot | aitcmhk-web/DSH-bot |
+|---|---|---|
+| 定位 | DSH 的**常驻智能体实体**（不属于任何会话） | DSH 的 **Telegram/微信桥接插件** |
+| 关键设计 | 实体状态存 `$DSH_HOME/bot/`；记忆是 `.md` 文件树而非向量库；根文件常驻上下文、子目录只贡献「名字 + 一行描述」；每条记忆带 origin 标签（user/agent/tool）；记忆有年龄，过期标 stale；任务队列 + 可选执行器，空闲默认不动；**越界操作进 `awaiting`，是一等状态而非错误分支**，停下时给出工具名与完整参数 | 一个 bot 绑定一个工作区；handoff 记忆接续（重启/新会话续上进度）；远程审批卡片（允许一次/拒绝）；语音转文字；命令集 `/whoami /status /model /new /restart /help` |
+| 皮皮虾对应的既有能力 | 五层记忆 + `provenance.js` 的来源分级（tier）已覆盖「带来源标签」；`src/memory/*` 的分层已覆盖「结构分层」 | `src/channels/`（feishu / wechat / http / workspace）已覆盖通道入口；`src/permissions/` 已覆盖审批 |
+| 本批次实际吸收的点 | ① **「停下等待」是合法状态**，不是异常 —— 落地为自改的 `propose` 模式（只出 diff 不动盘，等人放行）② **动作前留可恢复快照**，账本必须活过进程重启 —— 落地为 `src/selfcode/ledger.js` 的磁盘账本 + 备份目录 ③ **记忆有年龄/不确定就记 `-1`** 的诚实语义 —— 落地为自改账本里 `durationMs`/`verify.summary` 缺失时留空而不猜 | ① **改动必须能续上**：`pending-reload.json` 让「已落盘未生效」跨进程可见 ② **远程审批面向具体动作**（工具名 + 完整参数），而非面向类别 —— 落地为 `self_edit` 回执里直接给文件、增删行数与失败测试名 |
+
+> **为什么不把这两个仓库拷进源码树**：PPXANS-Harness 的硬定位是零运行时依赖的自包含内核。
+> 拷进来等于同时引入两套外部约定、两份许可证义务和数倍体积，而它们能提供的东西已经用
+> 150 行自有代码覆盖了。这也是本文件第 1、2 节的同一条纪律。
+
+### 7.2 DeepSeek 开源推理框架 DeepInfer（serving 层，不同层，未接入）
+
+| 项 | 值 |
+|---|---|
+| 仓库 | https://github.com/deepseek-ai/DeepInfer （Apache-2.0，2026-10-20 开源） |
+| 配套 | https://github.com/deepseek-ai/deepseek-recipe （生产级 token 编解码，与官方 API 对齐） |
+| 性质 | V4.1-Flash 线上推理框架：优化算子（FlashMLA/DeepGEMM/DeepEP/TileKernels）、Prefill/Decode 分离、DSpark 投机解码 + 置信度调度验证、SWA Bounded Replay（只回放有界后缀）、批不变推理、确定性采样、结构化输出 |
+| 硬件 | NVIDIA SM100 / 华为昇腾 950；未开源的部分：KVCache 管理与负载均衡 |
+| 为何**不接入** | 它是 **模型服务层**（Python/CUDA/CANN，跑在 GPU/NPU 上），皮皮虾是 **agent 编排层**（纯 Node）。两者不在同一层，硬接只会得到一个装不上的依赖。官方线上数据（单集群 155 万亿 token/天、平均 96% 输入命中缓存）也属于其自身基础设施口径，与本项目无因果关系 |
+| 吸收的思想 | ① **只重算有界后缀**（SWA Bounded Replay）→ 自改验证只重跑**受影响的测试文件**，不全量回归 ② **批不变 / 结果可复现** → 自改在同一补丁同一测试下结论必须是确定的，账本记 `verify.summary` 供复算 ③ **投机解码 + 置信度调度** → `propose` 模式先给低成本预览（diff），人对高风险改动再决定是否进 `apply` |
+
+### 7.3 本批次新增文件与对应思想
+
+| 新增文件 | 职责 | 对应思想来源 |
+|---|---|---|
+| `src/selfcode/ledger.js` | 磁盘账本（append-only jsonl）+ 改动前备份 + 待生效清单 | wqty123/dsh-bot「实体状态存盘、活过会话」 |
+| `src/selfcode/verify.js` | 三关验证：语法 / 行为 / 边界；路径禁区与测试文件保护 | DeepInfer「只验受影响范围」+ 本仓库既有的「修代码不修考卷」纪律 |
+| `src/selfcode/engine.js` | 解析 → 边界 → 原子落盘 → 验证 → 绿留红滚 → 记账 → 待生效标记 | aitcmhk-web/DSH-bot「改动要能续上」+ wqty123「停下是合法状态」（propose） |
+| `src/tools/selfcode.js` | `self_edit` / `self_verify` / `self_rewind` (+ 账本并入 `evolution_status`, CLI `npm run selfcode`) | wqty123「审批面向具体动作」：回执给文件、增删行数、失败测试名 |
+| `test/selfcode.test.js` | 12 项不变量：propose 不动盘 / 绿保留 / 双红回滚 / 多块原子 / 逃逸拒 / 记考试卷拒 / rewind / 双门 | — |
+
+**顺带修掉的一个真实缺陷**：`node --check some.js` 在文件含 `export` 但目录链上缺 `type:"module"` 时**退出码为 0**（Node 识别 ESM 语法后切换解析器，该路径不回报语法错误）。手工验证：同样内容 `.mjs` 正确报错，`.js` 静默放行。自改常发生在临时夹具目录，若沿用原写法语法关等于形同虚设 —— `verify.js` 现对 `.js` 先复制为同目录临时 `.mjs` 再校验。
+
+---
+
+## 8. 2026-10-27 前端换骨批次借鉴登记（零依赖吸收, 源码未复制）
+
+本批次目标：**把 Web 前端从「会话工作台」改成以「常驻本体」为中心的 bot 面板形态**。
+参照 [wqty123/dsh-bot](https://github.com/wqty123/dsh-bot) 的界面结构，但它的 `client.js`
+依赖 React + `window.__ModuleLoader__.load()` + DSH 私有包（那是 DSH web profile 插件的壳）。
+皮皮虾是零依赖 vanilla 单页，照搬等于凭空引入一个装不上的运行时，因此**源码一行未取**，
+只吸收信息架构与三处设计取舍，用自有 DOM/CSS 重写。
+
+### 8.1 吸收的取舍（这是本批次真正的收获）
+
+| dsh-bot 的做法 | 背后的判断 | 皮皮虾落地 |
+|---|---|---|
+| 头像**不戴**状态环 | 状态环是「仪表盘思维」：一屏十几个环，人眼分不清哪个在动。状态属于**文字**，不属于装饰 | `.avavt` 只画头像；状态点走 `.bsub::before`，由 `[data-tone]` 驱动，且只出现在名字下面一行 |
+| 说明文字**不加框** | 每段话都套一个 card，边界一多，读者会先看见框再看字 | 首页类型卡只给「类型选择」加框（那里框有语义：可选）；已有本体的说明是裸文本 |
+| 服务健康**三态** ok / warn / unknown | 「没人看过」≠「没问题」。二态设计会把未探测说成健康，这是撒谎 | `src/web/bot-api.js` 的 `toneOf()` 返回 error/waiting/quiet/warn/ok；取不到的字段一律 `null`，前端渲染 `—` 而不是 `0` |
+
+### 8.2 结构映射（dsh-bot 栏目 → 皮皮虾视图）
+
+| dsh-bot | 皮皮虾 | 说明 |
+|---|---|---|
+| 本体首页（头像 / 名字 / 一句话 / 今日日程） | `#view-home` | 上半是「按类型开工」，下半是已有本体列表；**不提供「再建一个」**，因为一个进程只绑一个 root，多开是 `ppx-web --port` 的事 |
+| 对话 + 轨迹双页签 | `#view-chat` 的 `#pane-talk` / `#pane-trace` | 轨迹不是「日志尾巴」，是双源合并：`logs/traces/<day>.jsonl`（工具调用）+ `events-<day>.jsonl`（结构化事件），可按天回翻 |
+| 设置页（身份 / 主动 / 记忆 / 权限） | `#view-settings`，13 个分节 | 全部走 `/api/bot.manage` 单入口 + `BotStore.apply()` 动作白名单；白名单外的 action 直接 400，不靠前端自觉 |
+| 服务状态条 | 侧栏底部 `#svcRows` | 三态点 + 文字，数据来自 `/api/health/summary` 与 provider 探测，不编 |
+
+### 8.3 本批次新增/重写文件
+
+| 文件 | 职责 | 对应取舍 |
+|---|---|---|
+| `src/web/bot-store.js`（353 行） | 本体档案持久化 `data/bots/profile.json`；坏 JSON → `.broken` 备份 + 退回默认；`normalize()` 补字段/纠类型/夹数值 | 档案是「活过进程重启的东西」，读坏不能连带把好数据一起毁掉 |
+| `src/web/bot-api.js`（391 行） | `buildBotState` / `buildTraces` / `applyBotAction` / `handleBotApi`；只读聚合，取不到就 `null` | 8.1 的「unknown 是一等状态」 |
+| `public/bot.js`（922 行） | 三层视图渲染 + 5 秒轮询 + `window.PPXBOT` 对外接口 | 三态状态点；`—` 而非 `0` |
+| `public/bot.css`（238 行） | 只新增类，不改老类；`.view/.view.on` 切屏 | 8.1 的「少加框」 |
+| `public/index.html`（511 行，重写） | sprite **字节保持不变**（CSP sha256 强耦合）+ 三层视图骨架 | — |
+| `test/bot-api.test.js` | 13 项：默认派生 / 坏 JSON 恢复 / settings 夹取 / 内置类型保护 / 悬空类型回落 / 头像校验 / 双源合并 / 401 / 改名落盘 / 翻历史 | — |
+
+### 8.4 顺带修掉的两个真实缺陷
+
+1. **CSP 拦掉引导数据**（潜伏已久）。`renderIndex()` 注入的
+   `<script>window.__PPX_BOOTSTRAP__={...时间戳...}</script>` 是页面里第二个可执行内联脚本，
+   哈希每次都变，必被 `script-src sha256-...` 拦掉。此前一直被 `app.js` 的 401 兜底掩盖。
+   → 改为 `<script type="application/json" id="ppx-boot">`（不可执行的 JSON 节点）+ 前端 `bootData()` 解析，
+   页面只剩主题脚本一个可执行内联脚本。`test/security-headers.test.js` 新增一项钉死。
+2. **重复 id 导致设置页永久空白**。抽屉里已有 `id="settingsBody"`，新容器用了同名 id，
+   `getElementById` 只返回第一个（`display:none`），`clientHeight` 恒为 0，**控制台无任何报错**。
+   → 改名 `#botSettings`；`scripts/check-web.mjs` 增加重复 id 检查（218 个 id 全查）。
+
+> 同 7.1 的纪律：**不拷源码**。这里能省的是一整套 React 构建链与 DSH 私有模块加载器，
+> 换来的界面复杂度由 4 个 vanilla 文件（约 1600 行）承担，且不需要任何 `npm install` 前置。

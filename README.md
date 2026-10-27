@@ -1,10 +1,10 @@
 # 🦐 PPXANS-Harness
 
-<!-- readme-sync: {"tools":93,"skills":67,"core_schema":93,"ctx_tokens":13993,"mcp_tools":115,"tests":1764} -->
+<!-- readme-sync: {"tools":96,"skills":67,"core_schema":96,"ctx_tokens":14462,"mcp_tools":118,"tests":1764} -->
 
 **皮皮虾神经系（ANS）+ Harness 一体化智能体内核** —— 纯 Node.js、**零运行时依赖**的可审计自主智能体。
 
-一个会自我修复、自我学习、自主迭代、可审计验证的超级 Agent：**93 个内置工具 · 能力边界护栏 · L0–L4 五层记忆 · SHA-256 审计哈希链 · 标准 MCP 服务端+客户端 · 多模型路由 · 自愈 7/7 · 可验证自改进闭环（self_improve） · 全量测试 **1764 项 (1760 通过 / 4 网络跳过)** · Web UI**。
+一个会自我修复、自我学习、自主迭代、可审计验证的超级 Agent：**96 个内置工具 · 能力边界护栏 · L0–L4 五层记忆 · SHA-256 审计哈希链 · 标准 MCP 服务端+客户端 · 多模型路由 · 自愈 7/7 · 可验证自改进闭环（self_improve） · 全量测试 **1764 项 (1760 通过 / 4 网络跳过)** · Web UI**。
 
 > ⚠️ 本节数字为 **2026-10-27 实测**（`node --test test/*.test.js`），请勿手改臆测值 —— 改完请重跑并同步本行。
 > 机读锚点由 `node scripts/readme-sync-check.js --fix` 维护，手改会被闸门拦下。
@@ -28,6 +28,8 @@
 | 🛡️ **权限安全** | AskForApproval 四档审批 + SandboxPolicy 沙箱（工作区写含 realpath 符号链接复核）+ 命令守卫三层防线（shell 结构化解析：命令替换硬拦 / 逐段 argv0 白名单）+ SSRF 防护 + fail-open 钩子栅栏 |
 | 🩺 **自我修复** | 启动体检、损坏 JSON 修复、崩溃恢复、残留清理（自愈 7/7） |
 | 🔄 **自主迭代** | 可验证自改进闭环：失败测试 → LLM 诊断 → SEARCH/REPLACE 补丁 → 快照落盘 → 重跑验证 → 绿保留/红回滚（`self_improve` 工具 + `npm run selfiterate`，默认 propose 只出补丁，apply 需双重确认，全程审计链留痕） |
+| 🖥️ **本体形态 Web UI（2026-10-27）** | 前端以「常驻本体」为中心，不再以「会话列表」为中心：**本体首页**（类型卡 / 已有本体 / 三态状态灯）· **对话页**（对话·轨迹双页签，轨迹可按天回翻，合并工具调用与结构化事件两路来源）· **设置页**（运行状态 / 身份与头像 / 工作区 / 规则 / 后台执行 / 晨间简报 / 日程 / 限额 / 自主时间 / 权限 / 记忆 / 服务）。档案落 `data/bots/profile.json` —— 人肉可编辑；写坏自动退回默认并留 `.broken` 副本。接口 `/api/bot.state` 一次取全首屏，`/api/bot.manage` 单入口写、动作白名单 |
+| 🪄 **自改代码（2026-10-27）** | 皮皮虾改自己的源码：SEARCH/REPLACE 补丁 → 边界校验 → 原子落盘 → 三关验证（语法/行为/边界）→ 绿保留/红整体回滚 → 记账 → 待生效清单。`self_edit` / `self_verify` / `self_rewind` / `self_ledger` 四个工具，账本 `data/selfcode/ledger.jsonl` append-only、改动前备份可回滚，默认 propose 只出 diff，apply 需 config 双开。ESM 无热替换，改完需重启才生效 —— 这段边界写在回执里，不谎称已生效 |
 | 🧬 **持续进化循环** | 每日自主进化编排：弱点聚类定向学习（同类故障病历 ≥N 先治）→ 失败沉淀经验/成功沉淀技能 → 代码自改进 → 进化度量落账 journal（`evolution_loop` 配置 + `npm run evolve:loop` + `evolution_status` 工具随时查看能力快照/弱点/进化曲线，「变强」有账可查） |
 | 📚 **自我学习** | 经验库 + 画像/人格提炼 + refine 失败轨迹闭环 + refineSkill 成功沉淀技能；经验自动沉淀语境 Playbook（进化闭环），失败自动写故障病历并反哺提炼 |
 | 🤖 **多 Agent 军团** | 多进程并行 + DAG 编排 + legion 模式 + spawn_agent 自主协作（并行/差异化视角/仲裁聚合/SDD 审查循环），编排超时可配（`agent.legion.timeoutMs`） |
@@ -64,7 +66,7 @@ v3.0 引入 codex 的 **EQ 事件流 + SQ 在轮账本 + Turn 模型**（详见 
 
 > **集成现状**：上述 9 模块中 8 个已装配进运行时（`plugin/v3.js` + `tools/v3.js`，MCP 实测可调）；`session/`（Turn/Rollout/Parts）为 standalone 模块随包保留、有完整单测，但尚未接入主链路，待 v3.1 集成。钩子链 7 个事件（PreToolUse/PostToolUse/PreCompact/PostCompact/SessionStart/SessionStop/SubagentStop）已全部接入 emit 点；语境 Playbook 已形成"经验 → delta → 门禁 → 注入"完整闭环（`evolve/delta-producer.js`）。
 
-**Web UI（codex 风格, `public/` 零依赖重制）**：三栏事件时间线（用户/agent/工具卡/审批卡/计划卡/diff卡）+ 斜杠命令面板 + 审批卡三类模板 + 工作区 Tab（文件树/目标看板/审查报告/设置）+ 子 agent 彩色徽标 + `@` 引用文件 + Esc 中断 + 亮暗主题。
+**Web UI（本体形态, `public/` 零依赖重制，2026-10-27 换骨）**：主区域三层视图（本体首页 / 对话·轨迹 / 设置），侧栏是本体条目 + 会话·空间·任务·能力，抽屉保留文件树、模型配置、目标看板、审查报告与运行时设置；对话页仍是三栏事件时间线（用户/agent/工具卡/审批卡/计划卡/diff卡）+ 斜杠命令面板 + 审批卡三类模板 + 工作区 Tab（文件树/目标看板/审查报告/设置）+ 子 agent 彩色徽标 + `@` 引用文件 + Esc 中断 + 亮暗主题。
 
 ---
 
@@ -135,6 +137,58 @@ npm test              # 全量测试
 
 ---
 
+## 🪄 自改代码（皮皮虾改自己的源码）
+
+让 agent 能改自己的源码，同时保证**改得可验证、可回滚、有账可查**。
+
+### 三个工具 + 两条现有出口
+
+| 能力 | 权限 | 作用 |
+|---|---|---|
+| `self_edit` | high | 提交 SEARCH/REPLACE 补丁 → 边界校验 → 原子落盘 → 三关验证 → 绿保留/红整体回滚 → 记账 |
+| `self_verify` | medium（只读） | 只验证不改：`node --check` 语法关 + `node --test` 行为关，改前摸底或改后复核 |
+| `self_rewind` | high | 按账本 id 从备份恢复原文件（不传 id 则回滚最近一次），回滚本身也记账 |
+| `evolution_status` | low（只读） | 已有的进化报告里多了「自改账本」段：累计/保留/回滚/退回 + 待生效清单 —— 不为查账单开一份 schema |
+| `npm run selfcode` | — | 人也能用同一条路：`status` / `plan <patch>` / `apply <patch> --tests a,b` / `rewind [id]` / `ack` |
+
+> 工具 schema 每个都要按 token 付钱，所以原本设计的 5 个工具压到了 3 个：账本并入 `evolution_status`，
+> 待生效确认并进 CLI。**同源** —— CLI 和工具调用跑的是同一个引擎，人跑通的结论模型直接可用。
+
+```jsonc
+// 调用示例 (走模型工具调用, 也可在 API/CLI 里直接调)
+{
+  "patch": "src/utils/text.js\n<<<<<<< SEARCH\nreturn s.trim();\n=======\nreturn s.trim().replace(/\\r\\n/g, \"\\n\");\n>>>>>>> REPLACE",
+  "tests": ["test/text.test.js"],
+  "mode": "apply",
+  "reason": "统一换行, 修 CRLF 断言失败"
+}
+```
+
+### 三关验证 + 红滚
+
+1. **语法关** — `node --check`。`.js` 会先复制成同目录临时 `.mjs` 再检查：实测 `node --check x.js` 在含 `export` 但目录链缺 `type:"module"` 时**退出码为 0**（静默放行），不绕这一下语法关等于没有。
+2. **行为关** — 只跑**指定的**测试文件并解析 TAP，不全量回归（受影响的才验，与 DeepInfer「只重算有界后缀」同一取舍）。
+3. **边界关** — 目标必须在 root 内、扩展名白名单、禁 `node_modules`/`.git`、默认**不许改测试文件**（修代码不修考卷）。
+
+任何一关红 → 从备份**整批**恢复（多块原子，不留半成品），账本记 `rolled_back`。
+
+### 安全边界
+
+- **双门**：`self_edit` 想真正落盘要同时满足「调用参数 `mode:"apply"`」+「`config.agent.self_code.mode:"apply"`」。单点误用改不坏东西。
+- **账本活过重启**：`data/selfcode/ledger.jsonl` append-only，改动前原件存 `data/selfcode/backups/<id>/`。
+- **不谎称已生效**：改完的源码写进 `data/selfcode/pending-reload.json`，回执明确说「重启后生效」（ESM 无热替换）。重启后跑 `npm run selfcode -- ack` 清账。
+
+```jsonc
+// config/ppx.json
+"agent": {
+  "self_code": { "mode": "propose", "syntax_timeout_ms": 5000, "test_timeout_ms": 120000 }
+}
+```
+
+默认 `propose`：只出 diff 不动盘。要真改就把 `mode` 改成 `apply`，并接受「每次落盘前都留可回滚快照」这个代价。
+
+---
+
 ## 🧪 测试 / 评测 / CI
 
 ```bash
@@ -188,6 +242,8 @@ PPXANS-Harness/
 │   ├── permissions/[v3] 审批 + 沙箱 + 规则链 + canUseTool
 │   ├── hooks/      [v3] 六事件钩子链
 │   ├── edit/       [v3] SR 编辑块 + 快照回滚
+│   ├── selfcode/   自改代码闭环 (账本 + 三关验证 + 绿留红滚, 2026-10-27)
+│   ├── web/        本体 (bot) 形态 Web 接口 (状态聚合 / 档案 / 轨迹, 2026-10-27)
 │   ├── repomap/    [v3] 仓库地图 (PageRank)
 │   ├── review/     [v3] 分级审查流水线
 │   ├── evidence/   [v3] 证据边界 + 目标看板 + manifest
@@ -195,7 +251,7 @@ PPXANS-Harness/
 │   ├── plugin/     v3.js 五插件装配 (permissions/hooks/commands/evidence/protocol)
 │   ├── tools/      工具系统 (86 个 + v3 工具注册)
 │   ├── core/  services/  memory/  audit/  ans/  selfheal/  channels/  orchestrator/  llm/  utils/
-├── public/         零依赖 Web UI (index.html/app.js/app.css, codex 风格)
+├── public/         零依赖 Web UI (index.html + app.js 对话/工作台 + bot.js 本体/设置/轨迹 + app.css/bot.css)
 ├── bin/            ppx / ppxans / ppx-web / ppx-serve / ppx-channels 入口
 ├── data/           运行时数据 (不进 git)
 ├── references/     第三方项目来源登记

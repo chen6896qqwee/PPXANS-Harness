@@ -83,3 +83,31 @@ test("CSP 哈希与 index.html 内联脚本一致 (改脚本必须同步 SECURIT
   const pinned = /'sha256-([A-Za-z0-9+/=]+)'/.exec(SECURITY_CSP)?.[1];
   assert.equal(actual, pinned, "SECURITY_CSP 里的 sha256 与实际内联脚本不符 —— 首屏主题脚本会被 CSP 拦截");
 });
+
+// 2026-10-27: 首页原先由服务端注入 `<script>window.__PPX_BOOTSTRAP__={...}</script>`。
+// 那是页面上第二个可执行内联脚本, 内容含时间戳 → 哈希每次都变 → 必然被 script-src 白名单拦掉。
+// 症状极隐蔽: window.__PPX_BOOTSTRAP__ 恒为 undefined, 首屏所有 /api/* 先吃一次 401,
+// 靠 app.js 的 401 兜底再取一遍才恢复 —— 看起来「能用」, 实际上每次都多绕一圈。
+// 现在改成 type="application/json" 的数据节点 (不可执行, 不受 script-src 约束)。这条钉住它。
+test("首页引导数据是不可执行的 JSON 节点, 页面只剩一个内联脚本", { timeout: 20000 }, async () => {
+  // 临时 root 里没有 public/, 这里把 publicDir 指回仓库真实的 public —— 与部署时一致
+  const projectPublic = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "public");
+  const root = tmpRoot();
+  const agent = new PPXAgent({ root, dataDir: path.join(root, "data") });
+  const ch = new HttpChannel(agent, { port: 0, host: "127.0.0.1" });
+  ch.authToken = "tok";
+  ch.publicDir = projectPublic;
+  await ch.connect();
+  const port = ch.server.address().port;
+  try {
+    const html = await (await fetch(`http://127.0.0.1:${port}/`)).text();
+    assert.ok(html.includes('id="ppx-boot"'), "首页应注入 #ppx-boot 引导数据节点");
+    assert.ok(/<script type="application\/json" id="ppx-boot">/.test(html), "引导数据节点必须是 application/json");
+    assert.ok(!/window\.__PPX_BOOTSTRAP__\s*=/.test(html), "不应再注入赋值式内联脚本");
+    const inline = html.match(/<script>/g) || [];
+    assert.equal(inline.length, 1, `可执行内联脚本只应有首屏主题脚本一个, 实际 ${inline.length} 个`);
+  } finally {
+    await ch.disconnect();
+    agent.shutdown();
+  }
+});

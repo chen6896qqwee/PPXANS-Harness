@@ -18,6 +18,8 @@ import { LocalShellProvider } from "../seam/shell.js";
 import { registerDelegateTools } from "../tools/delegate.js";
 // 自主迭代进化 (2026-10-25): 测试→诊断→补丁→验证→沉淀/回滚 的自改进闭环工具
 import { registerSelfIterateTools, registerEvolutionStatusTool } from "../tools/selfiterate.js";
+// 自改代码 (2026-10-27): 补丁→边界→落盘→三关验证→绿留红滚→账本, 让皮皮虾能安全改自己的源码
+import { registerSelfCodeTools } from "../tools/selfcode.js";
 import { Traces } from "../utils/trace.js";
 import { AuditLog, loadOrCreateHmacKey } from "../audit/audit-chain.js";
 import { RuntimeBus } from "../bus/runtime-bus.js";
@@ -291,6 +293,9 @@ export const toolsPlugin = (ctx) => {
   registerSelfIterateTools(tools, { agent: ctx.consume("agent") });
   // 进化状态报告 (2026-10-25 第二层): 只读, journal 曲线 + 能力快照
   registerEvolutionStatusTool(tools, { agent: ctx.consume("agent") });
+  // 自改代码 (2026-10-27): self_edit / self_verify / self_rewind / self_ledger
+  // 与 self_improve 的分工: self_improve 让 LLM 自己想补丁; selfcode 由调用方给补丁, 引擎只管验证/回滚/记账
+  registerSelfCodeTools(tools, { getAgent: () => ctx.consume("agent") });
   // git 集成 (2026-10-01): status/diff/log/commit, 仅 add+commit, 禁 push/reset
   registerGitTools(tools, { rootDir: root });
   // ---- 2026-10-09 补齐装配: 团队房间 / 编排观测 / 技能中枢 / 专家中枢 / 沙箱 / VAD ----

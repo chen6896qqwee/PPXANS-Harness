@@ -23,6 +23,11 @@
       "test_timeout_ms": 60000,
       "allow_test_edit": false
     },
+    "self_code": {
+      "mode": "propose",
+      "syntax_timeout_ms": 5000,
+      "test_timeout_ms": 120000
+    },
     "evolution_loop": {
       "enabled": false,
       "cron": "03:30",

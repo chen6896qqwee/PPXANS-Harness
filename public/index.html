@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN" data-theme="dark">
 <head>
 <meta charset="UTF-8">
@@ -22,6 +22,7 @@
 <title>皮皮虾 · PPX Agent</title>
 <link rel="icon" href="/favicon.svg">
 <link rel="stylesheet" href="/app.css">
+<link rel="stylesheet" href="/bot.css">
 </head>
 <body>
 
@@ -74,10 +75,14 @@
 <g id="i-space"><path d="M4 8.5 12 4l8 4.5v7L12 20l-8-4.5z"/><path d="M4 8.5 12 13l8-4.5M12 13v7"/></g>
 <g id="i-mic"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0"/><path d="M12 18v3"/></g>
 <g id="i-zap"><path d="M13 2 4.5 13.5H11L9.6 22 19.5 9.5H13z" fill="currentColor" stroke="none"/></g>
+<g id="i-more"><circle cx="6" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="18" cy="12" r="1.4" fill="currentColor" stroke="none"/></g>
+<g id="i-back"><path d="M15 5l-7 7 7 7"/></g>
+<g id="i-pin"><path d="M9 4h6l-1.2 5 3.2 3H7l3.2-3z"/><path d="M12 12v8"/></g>
+<g id="i-clock"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></g>
+<g id="i-book"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H11v16H5.5A1.5 1.5 0 0 1 4 18.5z"/><path d="M20 5.5A1.5 1.5 0 0 0 18.5 4H13v16h5.5A1.5 1.5 0 0 0 20 18.5z"/></g>
 </defs></svg>
-
 <div class="app">
-  <!-- ================= 左栏: 会话侧栏 (codex 式) ================= -->
+  <!-- ================= 左栏: 本体侧栏 ================= -->
   <aside class="side" id="side">
     <div class="brand">
       <span class="mark"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><use href="#i-mark"/></svg></span>
@@ -86,12 +91,20 @@
       <button class="icobtn" id="btnCollapse" title="收起侧栏" aria-label="收起侧栏" aria-controls="side" aria-expanded="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-collapse"/></svg></button>
     </div>
 
-    <button class="newchat" id="btnNew">
+    <button class="newchat" id="btnNewBot">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-plus"/></svg>
-      新会话
+      新开一局
     </button>
 
     <div class="side-scroll">
+      <div class="group">
+        <div class="ghead">
+          <span class="lab">本体</span>
+          <span class="gacts"><span class="gcount" id="botCount"></span></span>
+        </div>
+        <div class="gbody" id="botList"><div class="empty">加载中…</div></div>
+      </div>
+
       <div class="group">
         <div class="ghead">
           <span class="lab">任务</span>
@@ -112,10 +125,11 @@
 
       <div class="group">
         <div class="ghead">
-          <span class="lab">会话</span>
+          <span class="lab">对话</span>
           <span class="gacts">
             <button class="icobtn sm" id="btnSessSearch" title="搜索会话" aria-label="搜索会话"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-search"/></svg></button>
             <button class="icobtn sm" id="btnSessRefresh" title="刷新" aria-label="刷新"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-refresh"/></svg></button>
+            <button class="icobtn sm" id="btnNew" title="新会话" aria-label="新会话"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-plus"/></svg></button>
           </span>
         </div>
         <div class="gbody" id="sessList"></div>
@@ -131,7 +145,7 @@
           <button class="cap" id="capReview"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-scan"/></svg>审查报告</button>
           <button class="cap" id="capMemory"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-brain"/></svg>记忆</button>
           <button class="cap" id="capModels"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><use href="#i-cube"/></svg>模型配置</button>
-          <button class="cap" id="capSettings"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-settings"/></svg>设置</button>
+          <button class="cap" id="capSettings"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-settings"/></svg>本体设置</button>
         </div>
       </div>
     </div>
@@ -143,7 +157,8 @@
       </div>
     </div>
   </aside>
-  <!-- ================= 左栏 (R19): 工作区抽屉 —— 应用户要求从右移到左 (codex 式 Tab) ================= -->
+
+<!-- ================= 左栏 (R19): 工作区抽屉 —— 应用户要求从右移到左 (codex 式 Tab) ================= -->
   <div class="drawer-mask" id="drawerMask" hidden></div>
   <aside class="drawer" id="drawer" aria-label="工作区面板" hidden>
     <div class="dhead">
@@ -288,27 +303,82 @@
       </div>
     </div>
   </aside>
-  <button class="side-reveal" id="btnSide" hidden title="展开侧栏" aria-label="展开侧栏"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-panel"/></svg></button>
+    <button class="side-reveal" id="btnSide" hidden title="展开侧栏" aria-label="展开侧栏"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-panel"/></svg></button>
 
-  <!-- ================= 中栏: 时间线 ================= -->
+  <!-- ================= 中栏: 本体 ================= -->
   <main class="main">
-    <header class="topbar">
-      <span class="title" id="sessTitle">新会话</span>
-      <span class="pill" id="modePill" title="审批模式">
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-shield"/></svg><em id="modeTxt">on-request</em>
-      </span>
-      <button class="pill clickable" id="modelPill" title="当前模型 · 点击配置">
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-cube"/></svg><em id="modelTxt">—</em>
-      </button>
-      <span class="pill" id="tokPill" hidden>
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-bars"/></svg><em id="tokTxt">—</em>
-      </span>
-      <span class="flex1"></span>
-      <button class="icobtn" id="btnRewind" title="回退上一轮对话 (/rewind)" aria-label="回退上一轮对话"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><use href="#i-refresh"/></svg></button>
-      <button class="icobtn" id="btnTheme" title="切换主题 (亮 / 暗 / 跟随系统)" aria-label="切换主题"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-moon"/></svg></button>
-      <button class="icobtn" id="btnDrawer" title="工作区面板" aria-label="工作区面板"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-panel"/></svg></button>
-    </header>
 
+    <!-- ---------- 首页: 谁是本体 ---------- -->
+    <section class="view on" id="view-home">
+      <header class="botbar">
+        <div class="avavt" id="homeAvatar" data-tone="ok">皮</div>
+        <div class="bmeta">
+          <div class="bname2" id="homeName">皮皮虾</div>
+          <div class="bsub" id="homeSub">正在读取本体状态…</div>
+        </div>
+        <span class="flex1"></span>
+        <button class="icobtn" id="homeGear" title="本体设置" aria-label="本体设置"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-settings"/></svg></button>
+      </header>
+
+      <div class="bwrap">
+        <div class="bfield">
+          <div class="fhead">按类型开工</div>
+          <div class="bcards" id="typeCards"></div>
+          <div class="shint">一个工作区只能跑一个常驻本体 —— 选类型 = 换一种干活的姿态，并开一局新的。</div>
+          <button class="bdashed" id="btnNewType">＋ 新建类型</button>
+          <div class="bform" id="typeForm" hidden>
+            <input id="typeName" placeholder="类型名，如 校对员" spellcheck="false" maxlength="20">
+            <input id="typeBlurb" placeholder="一句话说明它怎么干活" spellcheck="false" maxlength="80">
+            <div class="facts">
+              <button type="button" class="btn" id="typeCancel">取消</button>
+              <button type="button" class="btn primary" id="typeSave">保存类型</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="bfield">
+          <div class="fhead">已有的</div>
+          <div class="brows" id="botRows"><div class="empty">加载中…</div></div>
+        </div>
+
+        <div class="berr" id="homeErr" hidden></div>
+      </div>
+    </section>
+
+    <!-- ---------- 对话页: 对话 / 轨迹 ---------- -->
+    <section class="view" id="view-chat">
+      <header class="botbar">
+        <button class="icobtn" id="btnBack" title="返回本体首页" aria-label="返回"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-back"/></svg></button>
+        <div class="avavt sm" id="chatAvatar">皮</div>
+        <div class="bmeta">
+          <div class="bname2" id="chatName">皮皮虾</div>
+          <div class="bsub" id="chatSub">—</div>
+        </div>
+        <span class="flex1"></span>
+        <button class="icobtn" id="btnChatNew" title="新会话" aria-label="新会话"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-plus"/></svg></button>
+        <button class="icobtn" id="chatGear" title="本体设置" aria-label="本体设置"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-settings"/></svg></button>
+      </header>
+
+      <div class="panes" id="chatPanes">
+        <button class="ptab on" data-pane="talk">对话</button>
+        <button class="ptab" data-pane="trace">轨迹</button>
+        <span class="sess-title" id="sessTitle">新会话</span>
+        <span class="flex1"></span>
+        <span class="pill" id="modePill" title="审批模式">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-shield"/></svg><em id="modeTxt">on-request</em>
+        </span>
+        <button class="pill clickable" id="modelPill" title="当前模型 · 点击配置">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-cube"/></svg><em id="modelTxt">—</em>
+        </button>
+        <span class="pill" id="tokPill" hidden>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-bars"/></svg><em id="tokTxt">—</em>
+        </span>
+        <button class="icobtn" id="btnRewind" title="回退上一轮对话 (/rewind)" aria-label="回退上一轮对话"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><use href="#i-refresh"/></svg></button>
+        <button class="icobtn" id="btnTheme" title="切换主题 (亮 / 暗 / 跟随系统)" aria-label="切换主题"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-moon"/></svg></button>
+        <button class="icobtn" id="btnDrawer" title="工作区面板" aria-label="工作区面板"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-panel"/></svg></button>
+      </div>
+
+      <div class="pane on" id="pane-talk">
     <!-- 空态 hero -->
     <section class="hero" id="hero">
       <div class="hero-mark"><svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><use href="#i-mark"/></svg></div>
@@ -378,14 +448,40 @@
           <em id="ctxTxt"></em>
         </span>
       </div>
-    </div>
+    </div>      </div>
+
+      <div class="pane trace-pane" id="pane-trace" hidden>
+        <div class="ttools">
+          <span class="tstat" id="traceStats">—</span>
+          <select id="traceDay" title="轨迹按天归档，只有当天在内存里能被读到；这里可以翻以前的日子"></select>
+          <span class="flex1"></span>
+          <input id="traceSearch" placeholder="过滤工具 / 错误…" spellcheck="false">
+          <button class="icobtn sm" id="btnTraceRefresh" title="刷新轨迹" aria-label="刷新轨迹"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-refresh"/></svg></button>
+        </div>
+        <div class="tlist" id="traceList"><div class="empty">加载中…</div></div>
+      </div>
+    </section>
+
+    <!-- ---------- 设置页 ---------- -->
+    <section class="view" id="view-settings">
+      <header class="botbar">
+        <button class="icobtn" id="setBack" title="返回" aria-label="返回"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-back"/></svg></button>
+        <div class="bmeta">
+          <div class="bname2" id="setTitle">设置</div>
+          <div class="bsub" id="setSub">—</div>
+        </div>
+        <span class="flex1"></span>
+        <button class="icobtn" id="btnSetRefresh" title="刷新" aria-label="刷新"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><use href="#i-refresh"/></svg></button>
+      </header>
+      <div class="swrap" id="botSettings"><div class="empty">加载中…</div></div>
+    </section>
+
   </main>
-
-
 </div>
 
 <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 
+<!-- ===== 空间
 <!-- ===== 空间 / 目录选择弹层 (替代原生 prompt) ===== -->
 <div class="mmask" id="dirMask" hidden></div>
 <div class="mdlg" id="dirModal" role="dialog" aria-modal="true" aria-labelledby="dirTitle" hidden>
@@ -408,6 +504,8 @@
   </div>
 </div>
 
+
+<script src="/bot.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>
