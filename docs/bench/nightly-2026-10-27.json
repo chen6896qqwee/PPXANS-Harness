@@ -1,0 +1,106 @@
+{
+  "date": "2026-10-27",
+  "generated_at": "2026-10-27T22:27:55.879Z",
+  "reproducible": "node scripts/nightly-bench.js",
+  "env": {
+    "node": "v24.21.0",
+    "platform": "linux x64",
+    "cpus": 4,
+    "bench_rounds": "200",
+    "bench_concurrency": "20"
+  },
+  "all_ok": true,
+  "results": [
+    {
+      "key": "eval",
+      "name": "本地能力评测 (eval)",
+      "ok": true,
+      "exit": 0,
+      "duration_ms": 507,
+      "metrics": {
+        "passed": "7/0"
+      },
+      "tail": [
+        "  ✓ 问候识别  — 在的兄弟, 说。",
+        "[2026-10-27T22:27:52.955Z] [info] tool: get_time()",
+        "  ✓ 时间工具  — 现在是 2026/10/28 06:27:52",
+        "  ✓ 核心价值注入",
+        "  ✓ 生命周期推进  — chats=5 stage=growing",
+        "[2026-10-27T22:27:53.262Z] [info] tool: memory_add(content)",
+        "  ✓ 记忆写入检索  — 我记得:",
+        "- 测试用待办事项 E2E-2026 下周完成",
+        "  ✓ 记忆去重  — 命中 1 条 (归一化去重防冗余)",
+        "[2026-10-27T22:27:53.272Z] [info] tool: read_file(path)",
+        "  ✓ 文件工具  — ppx-agent E2E demo file",
+        "=== 结果: 7 过 / 0 挂 ==="
+      ]
+    },
+    {
+      "key": "bench",
+      "name": "内核吞吐压测 (bench)",
+      "ok": true,
+      "exit": 0,
+      "duration_ms": 2409,
+      "metrics": {
+        "p50_ms": "83",
+        "p95_ms": "104",
+        "p99_ms": "105",
+        "per_round_ms": "6.8"
+      },
+      "tail": [
+        "  ① 交互式向导:  npm run setup        (选厂商 → 粘贴 Key → 自动探活)",
+        "  ② 一条命令:    ppx-setup --provider deepseek --key sk-xxx   (--list 看全部厂商)",
+        "  ③ 本地模型:    启动 LM Studio / Ollama 后重启皮皮虾, 默认端口即自动识别",
+        "Web 界面首页也有「配置模型」按钮。配好重启即生效。",
+        "皮皮虾内核压测 | 并发 20 | 轮次 200 | stub LLM",
+        "── (1) 并发调用压测 ──",
+        "[2026-10-27T22:27:53.443Z] [info] [lifecycle] growing: 首次对话",
+        "[2026-10-27T22:27:53.491Z] [info] [lifecycle] mature: 完成 10 次对话",
+        "  调用 200 | 失败 0 | p50 83ms | p95 104ms | p99 105ms | 最慢 106ms",
+        "── (2) 长会话 200 轮 (同一 session) ──",
+        "  200 轮成功 200 | 耗时 1.4s | 6.8ms/轮 | 会话事件 800 条",
+        "=== bench 完成 (失败数 >0 时退出码 1) ==="
+      ]
+    },
+    {
+      "key": "selfheal",
+      "name": "自愈基准 (selfheal)",
+      "ok": true,
+      "exit": 0,
+      "duration_ms": 140,
+      "metrics": {
+        "score": "7/7"
+      },
+      "tail": [
+        "[2026-10-27T22:27:55.825Z] [info] selfheal: 清理旧手动备份目录 1 个: memory-backup-0",
+        "[2026-10-27T22:27:55.825Z] [info] selfheal: 修复 5 项: created dir: memory; created dir: memory/daily; created dir: experience; created dir: sessions; created dir: logs",
+        "  PASS  prune_stale_backup_dirs  - pruned=1, remain=2",
+        "[2026-10-27T22:27:55.827Z] [info] selfheal: 清理旧.bak-* 备份文件 2 个: facts.json.bak-1, facts.json.bak-0",
+        "[2026-10-27T22:27:55.827Z] [info] selfheal: 修复 4 项: created dir: memory/daily; created dir: experience; created dir: sessions; created dir: logs",
+        "  PASS  prune_stale_bak  - pruned=2, remain=2",
+        "[2026-10-27T22:27:55.828Z] [info] selfheal: 修复 5 项: created dir: memory; created dir: memory/daily; created dir: experience; created dir: sessions; created dir: logs",
+        "[2026-10-27T22:27:55.828Z] [info] selfheal: 无异常",
+        "  PASS  clean_run_no_fixes  - fixes=0",
+        "Self-heal score: 7/7 (100.0%)",
+        "All self-heal scenarios passed.",
+        "[utils/store] JSON 解析失败, 返回 fallback (文件保留): /tmp/ppx-shb-2-Q4MLu5/data/memory/facts.json (Expected property name or '}' in JSON at position 2 (line 1 column 3))"
+      ]
+    },
+    {
+      "key": "audit",
+      "name": "审计链校验 (audit:verify)",
+      "ok": true,
+      "exit": 0,
+      "duration_ms": 45,
+      "metrics": {
+        "integrity": "完整",
+        "signed": "启用"
+      },
+      "tail": [
+        "审计日志: /home/runner/work/PPXANS-Harness/PPXANS-Harness/data/logs/audit.ndjson",
+        "链完整性: 完整 | 条数: 0 | 断裂点: 无 | HMAC: 启用",
+        "详情: 空审计日志"
+      ]
+    }
+  ]
+}
