@@ -31,7 +31,7 @@
       <!-- output block -->
       <g opacity="0">
         <animate attributeName="opacity" from="0" to="1" begin="1.6s" dur="0.2s" fill="freeze"/>
-        <text x="40" y="128" fill="#f0883e" font-weight="bold">🦐 PPXANS-Harness v3.3.0</text>
+        <text x="40" y="128" fill="#f0883e" font-weight="bold">🦐 PPXANS-Harness v3.3.1</text>
       </g>
       <g opacity="0">
         <animate attributeName="opacity" from="0" to="1" begin="2.0s" dur="0.2s" fill="freeze"/>
