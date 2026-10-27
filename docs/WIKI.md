@@ -261,7 +261,7 @@
 ### `docs/ROADMAP-LIGHTKERNEL-2026-10-08.md`
 
 - `# 轻内核愿景差距评估与强化路线 (2026-10-08)` — docs/ROADMAP-LIGHTKERNEL-2026-10-08.md:1
-- `## 一、现状对照 (v3.2.3, 逐项核实)` — docs/ROADMAP-LIGHTKERNEL-2026-10-08.md:6
+- `## 一、现状对照 (v3.3.0, 逐项核实)` — docs/ROADMAP-LIGHTKERNEL-2026-10-08.md:6
 - `## 六、v3.3 候选清单 (2026-10-09 全面评价后固化, 按杠杆率排序)` — docs/ROADMAP-LIGHTKERNEL-2026-10-08.md:74
 - `## 七、研究前沿 → 落地映射 (2026-10-09 论文扫描, 供 v3.3/v3.4 取材)` — docs/ROADMAP-LIGHTKERNEL-2026-10-08.md:92
 - `## 八、评测体系 v2 (2026-10-09, GPA/AgentEval/T-SAIAS 对照落地)` — docs/ROADMAP-LIGHTKERNEL-2026-10-08.md:112

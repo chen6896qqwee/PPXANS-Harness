@@ -4,9 +4,9 @@
 
 **皮皮虾神经系（ANS）+ Harness 一体化智能体内核** —— 纯 Node.js、**零运行时依赖**的可审计自主智能体。
 
-一个会自我修复、自我学习、自主迭代、可审计验证的超级 Agent：**92 个内置工具 · 能力边界护栏 · L0–L4 五层记忆 · SHA-256 审计哈希链 · 标准 MCP 服务端+客户端 · 多模型路由 · 自愈 7/7 · 可验证自改进闭环（self_improve） · 全量测试 **1764 项 (1755 通过 / 4 网络跳过)** · Web UI**。
+一个会自我修复、自我学习、自主迭代、可审计验证的超级 Agent：**93 个内置工具 · 能力边界护栏 · L0–L4 五层记忆 · SHA-256 审计哈希链 · 标准 MCP 服务端+客户端 · 多模型路由 · 自愈 7/7 · 可验证自改进闭环（self_improve） · 全量测试 **1764 项 (1760 通过 / 4 网络跳过)** · Web UI**。
 
-> ⚠️ 本节数字为 **2026-10-25 实测**（`node --test test/*.test.js`），请勿手改臆测值 —— 改完请重跑并同步本行。
+> ⚠️ 本节数字为 **2026-10-27 实测**（`node --test test/*.test.js`），请勿手改臆测值 —— 改完请重跑并同步本行。
 > 机读锚点由 `node scripts/readme-sync-check.js --fix` 维护，手改会被闸门拦下。
 > 2026-10-25 评估修复轮后全量 0 失败（此前 1 项失败为测试断言过期，已随工具数 113→114 一并修正）；
 > 主干链路（启动 / 对话 / 记忆 / 审计 / 权限 / HTTP / MCP）全量通过。
@@ -41,7 +41,7 @@
 | ✅ **流式输出** | SSE 逐字流式（含工具轮次：增量 tool_call 累积，文本实时可见）+ Web UI 实时渲染；同会话并发互斥、/rewind 会话回卷（fork 分支） |
 | 🔐 **HTTP 认证** | Bearer Token，未配置自动生成随机 token 持久化 |
 
-**92 内置工具**（运行时实测，含 MCP 动态注册）：
+**93 内置工具**（运行时实测，含 MCP 动态注册）：
 - **48 内置**：文件/命令/搜索/HTTP/定时/记忆（读图/检索/入库）/文档（加载/OCR/入库）/场景/技能（加载/创建/提炼）/重构 refine /子 agent spawn + 治理运维（repo_map/apply_patch/review_code/goal_board/audit_verify/persona/selfheal_run/self_improve 等）
 - **22 × ppx.**\***：** chat.send/stream、sessions.\*、providers.(list/add/update/delete/test/reorder)、settings.get/update、task.(templates/create/list/update/step/delete/run)、session.reset
 
