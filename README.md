@@ -1,10 +1,10 @@
 # 🦐 PPXANS-Harness
 
-<!-- readme-sync: {"tools":93,"skills":67,"core_schema":93,"ctx_tokens":13993,"mcp_tools":115,"tests":1759} -->
+<!-- readme-sync: {"tools":93,"skills":67,"core_schema":93,"ctx_tokens":13993,"mcp_tools":115,"tests":1764} -->
 
 **皮皮虾神经系（ANS）+ Harness 一体化智能体内核** —— 纯 Node.js、**零运行时依赖**的可审计自主智能体。
 
-一个会自我修复、自我学习、自主迭代、可审计验证的超级 Agent：**92 个内置工具 · 能力边界护栏 · L0–L4 五层记忆 · SHA-256 审计哈希链 · 标准 MCP 服务端+客户端 · 多模型路由 · 自愈 7/7 · 可验证自改进闭环（self_improve） · 全量测试 **1759 项 (1755 通过 / 4 网络跳过)** · Web UI**。
+一个会自我修复、自我学习、自主迭代、可审计验证的超级 Agent：**92 个内置工具 · 能力边界护栏 · L0–L4 五层记忆 · SHA-256 审计哈希链 · 标准 MCP 服务端+客户端 · 多模型路由 · 自愈 7/7 · 可验证自改进闭环（self_improve） · 全量测试 **1764 项 (1755 通过 / 4 网络跳过)** · Web UI**。
 
 > ⚠️ 本节数字为 **2026-10-25 实测**（`node --test test/*.test.js`），请勿手改臆测值 —— 改完请重跑并同步本行。
 > 机读锚点由 `node scripts/readme-sync-check.js --fix` 维护，手改会被闸门拦下。
