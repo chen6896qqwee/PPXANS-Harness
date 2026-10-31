@@ -14,7 +14,8 @@
 
 ### 修复
 - **delivery 队列丢失唤醒** (`src/channels/delivery.js`): "一条重试即将到期 + 另一通道 send 在途"的窗口下, 本轮 drain 的定时器已被清、在途通道的 finally 又未返回, 到期重试将**永远无人唤醒** (channel-delivery WAL 测试偶发超时的根因 —— 全量直跑 5 连绿、门禁内偶发 1 红, 是真 bug 不是测试问题)。drain 现按"未被在途通道占用的最早到期时间"补唤醒定时器。
-- `scripts/readme-sync-check.js`: 全量测试失败时打印失败用例名 (此前只说"N 项失败"不说哪项, flaky 无从定位)。
+- `scripts/readme-sync-check.js`: 全量测试失败时打印失败用例名 (此前只说"N 项失败"不说哪项, flaky 无从定位); ctx_tokens 改在**干净临时 root** 上测量 —— 开发机的真实 config/ppx.json 会渲染进 context (CI 没有, 实测差 170 tok, 发布门禁在 CI 必红), 锚点从此跨机器可复现。
+- `sandbox-probe/calc.js` 入库: 它是 `test/zz-selfrepair-probe.test.js` 引用的探针夹具, 之前被误当本地残留 gitignore, CI checkout 缺文件导致 depcheck 红 (首次 release run 实测踩中)。
 
 ### 渠道投递队列 (失败重试 + TTL + WAL 续投)
 

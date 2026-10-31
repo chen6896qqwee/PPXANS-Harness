@@ -6,7 +6,7 @@
 
 > ⚠️ 本节数字为 **2026-10-31 实测**（`node --test test/*.test.js`），请勿手改臆测值 —— 改完请重跑并同步本行。  
 > 机读锚点由 `node scripts/readme-sync-check.js --fix` 维护，手改会被闸门拦下。  
-<!-- readme-sync: {"tools":98,"skills":67,"core_schema":98,"ctx_tokens":14962,"mcp_tools":120,"tests":2044} -->  
+<!-- readme-sync: {"tools":98,"skills":67,"core_schema":98,"ctx_tokens":14008,"mcp_tools":120,"tests":2044} -->  
 > 2026-10-25 评估修复轮后全量 0 失败（此前 1 项失败为测试断言过期，已随工具数 113→114 一并修正）；  
 > 主干链路（启动 / 对话 / 记忆 / 审计 / 权限 / HTTP / MCP）全量通过。
 

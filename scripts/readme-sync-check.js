@@ -109,15 +109,23 @@ function measureSkills() {
 // 2026-10-11: ctx 注入含【工作目录】等真实绝对路径, 测量值随 checkout 路径长度漂移
 //   (README=13893 vs CI windows 13884)。与 ctx-profile.js 同修: 测量前做路径归一化
 //   (root → <ROOT>, 其余绝对路径 → <PATH>), 占位符定长, 任何机器数字一致。
+// 2026-10-31 (发布轮): 光归一路径还不够 —— 开发机 root 里有真实 config/ppx.json
+//   (persona / self_iteration 白名单等都会渲染进 context), CI checkout 没有, 实测
+//   差了 170 tok, 门禁在 CI 必红。ctx_tokens 是"固定开销"锚点, 必须跨机器可复现:
+//   改在【干净临时 root】上装配 (无 config / 无 data / 无本地状态), 量的是内核
+//   装配出的裸 system prompt + 工具 schema。代价: 不再反映"本机满配"的开销 ——
+//   那个数字本来也不该进版本库。
 async function measureContext() {
   const { PPXAgent } = await import("../src/agent/index.js");
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "ppx-rsc-"));
-  const a = new PPXAgent({ root, dataDir });
+  const bareRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ppx-rsc-root-"));
+  const a = new PPXAgent({ root: bareRoot, dataDir });
   const tools = a.tools.toOpenAI();
   let ctx = "";
   try { ctx = a._context("随便问个问题"); } catch { ctx = ""; }
+  try { a.shutdown?.(); } catch { /* 量完即弃 */ }
   const norm = (s) => String(s || "")
-    .split(root).join("<ROOT>")
+    .split(bareRoot).join("<ROOT>")
     .replace(/([A-Za-z]:[/\\]|\\\\)[^\s"'\n]+/g, "<PATH>")
     .replace(/(^|[\s"'=(])\/(?:home|Users|root|tmp|var)\/[^\s"'\n]+/g, "$1<PATH>");
   return { coreSchema: tools.length, ctxTokens: est(norm(JSON.stringify(tools))) + est(norm(ctx)) };
