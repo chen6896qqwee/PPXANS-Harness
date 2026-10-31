@@ -34,7 +34,9 @@ test("安全: write_file 新写的脚本 node 执行被拦 (含链式命令)", a
     assert.ok(!r1.includes("pwned"), "不得有执行输出");
     const r2 = await c.call("run_command", { command: "echo hi && node evil.js" });
     assert.match(r2, /需人工审批/, "链式命令同样应被拦");
-    const r3 = await c.call("run_command", { command: 'node ".\\evil.js"' });
+    // 跨平台写法: 引号包裹的正斜杠相对路径 (".\\evil.js" 在 POSIX 上是另一个文件名,
+    // 守卫放行是正确行为 —— 那个文件在 POSIX 下不存在)
+    const r3 = await c.call("run_command", { command: 'node "./evil.js"' });
     assert.match(r3, /需人工审批/, "引号包裹的相对路径应被拦");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

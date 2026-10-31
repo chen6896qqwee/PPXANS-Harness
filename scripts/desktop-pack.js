@@ -47,8 +47,17 @@ if (!fs.existsSync(path.join(ROOT, "electron", "icon.png"))) {
 
 // 平台: 参数里显式给了 --win/--mac/--linux/--all 就原样透传; 否则默认 Windows x64
 const PLATFORM_FLAGS = new Set(["--win", "--mac", "--linux", "--all"]);
-const hasPlatformFlag = process.argv.slice(2).some((a) => PLATFORM_FLAGS.has(a));
-const builderArgs = hasPlatformFlag ? [...process.argv.slice(2)] : ["--win", "--x64", ...process.argv.slice(2)];
+const userArgs = process.argv.slice(2);
+const hasPlatformFlag = userArgs.some((a) => PLATFORM_FLAGS.has(a));
+// 2026-10-31 (首次 release run 实测): electron-builder 在 CI+tag 环境会自动探测 GitHub
+//   publish —— 没有 GH_TOKEN 直接炸 ("GitHub Personal Access Token is not set"), 有 token
+//   又会抢在 release workflow 的 gh release create 之前建 draft release。发布一律由
+//   workflow 负责, 打包只管打包: 默认追加 --publish never (调用方显式给了 --publish 则尊重)。
+const hasPublish = userArgs.some((a) => String(a).toLowerCase().startsWith("--publish"));
+const builderArgs = [
+  ...(hasPlatformFlag ? userArgs : ["--win", "--x64", ...userArgs]),
+  ...(hasPublish ? [] : ["--publish", "never"]),
+];
 
 console.log(`[desktop:pack] electron-builder ${builderArgs.join(" ") || "(nsis)"}`);
 const r = spawnSync(process.execPath, [cli, ...builderArgs], {
