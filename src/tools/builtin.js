@@ -23,6 +23,35 @@ const defaultShell = new LocalShellProvider();
 // 图片 MIME 表 (read_image + 多模态注入共用)
 const IMAGE_MIME = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp" };
 
+// ---- 受保护路径 (2026-10-31 安全收紧, 禁读) ----
+// read_file 在 TRUSTED_TOOLS 白名单里 (免审批直达)。不设防时, 被提示注入的 agent 可以
+//   免审批读到: 审计链 HMAC 密钥 (.ppx/audit-hmac-key → 重算重签整条审计链)、HTTP
+//   Bearer token (data/http-token → 伪装成人在 API 面)、provider 配置 (config/ppx.json,
+//   可能含明文 api_key)。比对统一小写 + 正斜杠 (Windows 大小写不敏感)。
+// 已知残留: grep/search 类工具与读文档工具不在此列 (本轮只收口 read_file 主通道)。
+const PROTECTED_READ = [
+  /\/\.ppx\/audit-hmac-key$/,   // 审计链 HMAC 锚点
+  /\/http-token$/,              // HTTP Bearer token
+  /\/config\/ppx\.json$/,       // provider 配置 (可能含明文 key)
+];
+function isProtectedRead(absPath) {
+  const cmp = String(absPath).toLowerCase().replace(/\\/g, "/");
+  return PROTECTED_READ.some((re) => re.test(cmp));
+}
+
+// ---- 会话内"写工具动过"的文件登记 (2026-10-31 安全收紧) ----
+// 动机: 命令守卫 argv0 白名单放行 `node app.js` (script 文件形态刻意放行, 属正常用法),
+//   但若 app.js 是本会话刚由 write_file/apply_patch 写出的, "写文件 + node 执行" 连招
+//   即构成绕过白名单的任意代码执行。因此登记会话内被写工具改过的路径, run_command 在
+//   执行 node 类脚本前比对, 命中即拒 (需人工审批)。生命周期 = 进程 (会话); 只存路径
+//   不存内容, 进程退出即失。
+export const sessionWrittenFiles = new Set();
+export function rememberSessionWrite(absPath) {
+  try {
+    sessionWrittenFiles.add(path.resolve(String(absPath)).toLowerCase());
+  } catch { /* 登记失败不阻断写路径 (拦截能力降级, 不添堵) */ }
+}
+
 // 读图片文件转 base64 data URL (供 read_image 工具与多模态 user 消息注入复用)
 export function imageFileToDataUrl(rootDir, p, { maxBytes = 8 * 1024 * 1024 } = {}) {
   const fp = safePath(rootDir, p);
@@ -162,6 +191,34 @@ export function registerBuiltinTools(catalog, { rootDir, facts, memory }) {
     } catch { /* 快照失败不阻断原操作 (回退能力降级, 不添堵) */ }
   };
 
+  // 会话内新写脚本命中检查 (2026-10-31 安全收紧): 命令行上出现 node/bun/deno 且目标是
+  //   本会话由写工具新建/修改过的 .js/.mjs/.cjs 时返回该脚本, 否则 null。
+  //   逐段拆 (&& || ; |) 逐词扫: 解释器词后的第一个非 flag 词若为 JS 脚本即比对登记表;
+  //   非 JS 词 (如 -e 的代码串) 直接断 —— -e 形态本就被命令守卫硬拦, 不归这里管。
+  const findSessionWrittenScript = (cmd) => {
+    if (!sessionWrittenFiles.size) return null;
+    const INTERP = /\b(?:node|node\.exe|bun|deno)\b/i;
+    for (const seg of String(cmd).split(/&&|\|\||;|\|/)) {
+      if (!INTERP.test(seg)) continue;
+      const words = seg.match(/"[^"]*"|\S+/g) || [];
+      for (let i = 0; i < words.length; i++) {
+        if (!INTERP.test(words[i])) continue;
+        for (let j = i + 1; j < words.length; j++) {
+          const t = words[j].replace(/^"|"$/g, "");
+          if (t.startsWith("-")) continue; // 解释器 flag, 继续找脚本
+          if (!/\.(mjs|cjs|js)$/i.test(t)) break; // 第一个非 flag 非 JS 词: 不是"node 脚本"形态
+          let cmp = "";
+          try { cmp = safePath(rootDir, t).toLowerCase(); } catch { break; } // root 外路径不在登记表
+          for (const w of sessionWrittenFiles) {
+            if (w === cmp) return t;
+          }
+          break;
+        }
+      }
+    }
+    return null;
+  };
+
   // 1. 读文件
   catalog.register({
     name: "read_file",
@@ -174,6 +231,9 @@ export function registerBuiltinTools(catalog, { rootDir, facts, memory }) {
     },
     execute: async (args) => {
       const p = safePath(rootDir, args.path);
+      if (isProtectedRead(p)) {
+        return JSON.stringify({ error: "受保护路径, 禁止读取 (审计锚点/凭证/含密钥配置)" });
+      }
       if (!fs.existsSync(p)) return JSON.stringify({ error: `文件不存在: ${args.path}` });
       const content = fs.readFileSync(p, "utf8");
       // v1.0.9: 输出 PII 脱敏 (与 run_command/code_act 一致, 文件可能含密钥/手机号)
@@ -206,6 +266,7 @@ export function registerBuiltinTools(catalog, { rootDir, facts, memory }) {
         fs.mkdirSync(path.dirname(p), { recursive: true });
         rememberUndo(p); // 2026-10-24 (R2): 覆盖前留撤销点
         fs.writeFileSync(p, content, "utf8");
+        rememberSessionWrite(p); // 2026-10-31: 会话内写过的脚本执行前需人工审批 (防 write+node 连招)
         const out = { ok: true, bytes: Buffer.byteLength(content) };
         // 写后自查 (2026-10-05, 与回合级后置校验**同源实现**): .js/.mjs/.cjs 且**无任何导出**时,
         //   回执带一行 selfcheck 提示 —— 否则模型写个没有 export 的 utils.js 也会宣称"已导出",
@@ -258,6 +319,7 @@ export function registerBuiltinTools(catalog, { rootDir, facts, memory }) {
         }
         rememberUndo(p); // 2026-10-24 (R2): 追加前留撤销点
         fs.appendFileSync(p, prefix + content, "utf8");
+        rememberSessionWrite(p); // 2026-10-31: 会话内写过的脚本执行前需人工审批
         return JSON.stringify({ ok: true, appended: Buffer.byteLength(content) });
       } catch (e) {
         return JSON.stringify({ error: `追加失败: ${e.message}` });
@@ -314,6 +376,7 @@ export function registerBuiltinTools(catalog, { rootDir, facts, memory }) {
         rememberUndo(dst);
         fs.mkdirSync(path.dirname(dst), { recursive: true });
         fs.renameSync(src, dst);
+        rememberSessionWrite(dst); // 2026-10-31: 移入/改名后的脚本同属"会话内写过"
         return JSON.stringify({ ok: true, moved: args.path, to: args.destination, undo_hint: "可用 undo_file 撤销 (分别指定源/目标路径)" });
       } catch (e) {
         // rename 跨盘符会失败 (EXDEV): 退回复制+删除
@@ -321,6 +384,7 @@ export function registerBuiltinTools(catalog, { rootDir, facts, memory }) {
           try {
             fs.copyFileSync(src, dst);
             fs.unlinkSync(src);
+            rememberSessionWrite(dst); // 2026-10-31: 跨盘复制同属写入
             return JSON.stringify({ ok: true, moved: args.path, to: args.destination, via: "copy+delete (跨盘)" });
           } catch (e2) {
             return JSON.stringify({ error: `移动失败: ${e2.message}` });
@@ -469,6 +533,12 @@ export function registerBuiltinTools(catalog, { rootDir, facts, memory }) {
       if (!guard.ok) {
         return JSON.stringify({ error: guard.reason + DENY_HINT });
       }
+      // 2026-10-31 安全收紧: 守卫放行 `node app.js`, 但 app.js 若是本会话刚写出的,
+      //   "write_file + node" 连招 = 绕过 argv0 白名单的任意代码执行。命中即拒 (需人工审批)。
+      const scriptHit = findSessionWrittenScript(cmd);
+      if (scriptHit) {
+        return JSON.stringify({ error: `本会话由写工具新建/修改的脚本不允许直接执行 (需人工审批): ${scriptHit}` + DENY_HINT });
+      }
       // 通过 shell seam 调用 (可替换 provider: 本地/沙箱/Docker), 换 provider 即换执行环境
       const shell = (ctx?.agent?.ctx && ctx.agent.ctx.consume("shell")) || defaultShell;
       const t0 = Date.now();
@@ -510,7 +580,14 @@ export function registerBuiltinTools(catalog, { rootDir, facts, memory }) {
       // code_act 是脚本体: 只做 deny 检查 (硬黑名单 + 用户 deny + 常规高危), 不做前缀白名单 (脚本无"命令前缀")
       const guard = checkCommand(code, { ...sec, allowAll: true });
       if (!guard.ok) return JSON.stringify({ error: guard.reason + DENY_HINT });
-      return runCodeAct(rootDir, lang, code, sec.command_timeout_ms);
+      const result = await runCodeAct(rootDir, lang, code, sec.command_timeout_ms);
+      // 2026-10-31: docker 沙箱只覆盖 run_command (shell seam); code_act 的解释器仍在本机跑 ——
+      //   边界如实告知, 不让模型/用户误以为脚本也在容器里 (它默认关闭, 需显式开启)。
+      const shellProv = (ctx?.agent?.ctx && ctx.agent.ctx.consume("shell")) || null;
+      if (shellProv && shellProv.kind === "docker") {
+        return "[边界提示] security.shell_provider=docker 沙箱仅覆盖 run_command; 本脚本由宿主机解释器直接执行。\n" + result;
+      }
+      return result;
     },
   });
 
@@ -548,20 +625,42 @@ export function registerBuiltinTools(catalog, { rootDir, facts, memory }) {
     },
   });
 
-  // 7. 记住新事实
+  // 7. 记住新事实 (layer=1) / 沉淀程序性记忆 (layer=4)
+  //
+  // 2026-10-30 (五层记忆闭环): 存储层与治理工具早已支持 L4 程序性记忆 (fact-store 的
+  //   layer 字段 + 0.005/天 慢衰减 + memory_clear_layer), 但生产写入路径一直只有 L1 ——
+  //   文档里写的"技能/流程长期留存"实际上没有入口, memory_add 只能记闲聊事实。
+  //   这里补上 layer 选项, 默认仍为 L1 (既有调用零变化)。
+  //   安全口径: 仍走 facts.add 的唯一持久化入口 (脱敏 + 来源分级 + 去重), source 保持
+  //   agent-self → provenance=model-inferred, 检索渲染会带来源标签, 不会被当成用户原话;
+  //   L4 只是"衰减更慢的模型推断记忆", 不提升信任等级、不绕过治理/删除/回滚。
   catalog.register({
     name: "memory_add",
     capability: { readOnly: false, riskLevel: "medium", sideEffect: "workspace" },
-    description: "把一条重要信息写进皮皮虾的长期记忆。",
+    description: "把一条重要信息写进皮皮虾的长期记忆。layer=1 (默认) 记事实/偏好; layer=4 记可复用的技能/流程/方法论 (程序性记忆, 衰减更慢, 适合跨会话反复使用的操作步骤)。",
     parameters: {
       type: "object",
-      properties: { content: { type: "string", description: "要记住的内容" } },
+      properties: {
+        content: { type: "string", description: "要记住的内容" },
+        layer: { type: "number", enum: [1, 4], description: "1=事实/偏好 (默认), 4=程序性记忆 (技能/流程/方法论)" },
+      },
       required: ["content"],
     },
     execute: async (args) => {
       if (!facts) return JSON.stringify({ error: "记忆未初始化" });
-      const f = facts.add(args.content, { source: "agent-self" });
-      return JSON.stringify({ ok: true, id: f.id });
+      const layer = Number(args.layer) === 4 ? 4 : 1;
+      const f = facts.add(args.content, { source: "agent-self", layer });
+      if (!f) return JSON.stringify({ error: "内容为空或无效, 未写入" });
+      // 去重命中已有记录时 add 只加分/不改层 (不重复落条)。此时如实回报实际层级,
+      // 而不是把"请求了 L4"说成"已写成 L4" —— 两个后端 (JSON/SQLite) 的 update 签名不同,
+      // 这里不做跨后端隐式升级, 用户/模型需要时可用 memory_clear_layer 或治理工具调整。
+      const actual = Number(f.layer) === 4 ? 4 : 1;
+      return JSON.stringify({
+        ok: true,
+        id: f.id,
+        layer: actual,
+        ...(layer === 4 && actual !== 4 ? { note: "已存在同内容记忆, 未重复写入 (保留原层级)" } : {}),
+      });
     },
   });
 

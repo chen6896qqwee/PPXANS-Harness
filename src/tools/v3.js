@@ -8,7 +8,7 @@ import { parseEditBlocks, applyAll, formatRetryFeedback, parseCodexPatch, PATCH_
 import { Snapshot } from "../edit/snapshot.js";
 import { runReview } from "../review/index.js";
 import { jsExportSelfCheck } from "../core/postcondition.js";
-import { safePath } from "./builtin.js";
+import { safePath, rememberSessionWrite } from "./builtin.js";
 import { GOAL_STATUSES } from "../evidence/index.js";
 import { generateWiki, checkStaleness } from "../wiki/index.js";
 import * as pwf from "../planning/pwf.js";
@@ -217,6 +217,11 @@ export function registerV3Tools(catalog, { rootDir, agent = null }) {
           results,
           retry_hint: "请根据 feedback 修正 SEARCH 块后重试",
         });
+      }
+      // 2026-10-31 安全收紧: 成功落盘的文件登记为"会话内写过" —— 之后 run_command 执行
+      //   这些脚本会被拦 (防 write/patch + node 连招绕过命令守卫 argv0 白名单)
+      for (const r of results) {
+        if (r.ok) rememberSessionWrite(path.resolve(rootDir, r.file));
       }
       return JSON.stringify({ ok: true, files: results.length, blocks: blocks.length, results });
     },

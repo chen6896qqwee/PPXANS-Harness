@@ -268,3 +268,69 @@ test("接口: buildBotState 直调也能出快照 (不依赖 HTTP 层)", { timeo
     assert.ok(j.live.tools.total > 0, "应取到工具数");
   });
 });
+
+// ---------- 权限收紧 (2026-10-31): bot.manage 不得成为 /api/permissions 双门的旁路 ----------
+
+test("权限: bot.manage 放宽类变更被拒 (必须走 /api/permissions 确认码流程)", { timeout: 20000 }, async () => {
+  await withChannel(async (base, { agent }) => {
+    // 默认引擎态: on-request(rank2) / workspace-write(rank1) / networkAccess=false
+    const r1 = await fetch(base + "/api/bot.manage", {
+      method: "POST", headers: auth,
+      body: JSON.stringify({ action: "permission", sandbox: "danger-full-access" }),
+    });
+    assert.equal(r1.status, 400);
+    const j1 = await r1.json();
+    assert.equal(j1.ok, false);
+    assert.match(j1.error, /需人工确认/);
+    assert.equal(agent.permissions.sandbox, "workspace-write", "沙箱不应被放宽");
+
+    const r2 = await fetch(base + "/api/bot.manage", {
+      method: "POST", headers: auth,
+      body: JSON.stringify({ action: "permission", approvalMode: "never" }),
+    });
+    assert.equal(r2.status, 400);
+    assert.equal(agent.permissions.approvalMode, "on-request", "审批模式不应被放宽");
+
+    // 引擎默认 networkAccess=true: 先收紧为 false (应生效), 再试图打开 (应被拦)
+    const tighten = await fetch(base + "/api/bot.manage", {
+      method: "POST", headers: auth,
+      body: JSON.stringify({ action: "permission", networkAccess: false }),
+    });
+    assert.equal(tighten.status, 200);
+    assert.equal(agent.permissions.networkAccess, false, "收紧类变更应即时生效");
+
+    const r3 = await fetch(base + "/api/bot.manage", {
+      method: "POST", headers: auth,
+      body: JSON.stringify({ action: "permission", networkAccess: true }),
+    });
+    assert.equal(r3.status, 400);
+    assert.equal(agent.permissions.networkAccess, false, "网络开关不应被打开");
+
+    // 拒绝理由应指向正确出口 (确认码流程在 /api/permissions)
+    assert.match(j1.error, /\/api\/permissions/);
+  });
+});
+
+test("权限: bot.manage 收紧类变更即时生效 + 非法值 fail-closed", { timeout: 20000 }, async () => {
+  await withChannel(async (base, { agent }) => {
+    const ok = await fetch(base + "/api/bot.manage", {
+      method: "POST", headers: auth,
+      body: JSON.stringify({ action: "permission", approvalMode: "unless-trusted", sandbox: "read-only" }),
+    });
+    assert.equal(ok.status, 200);
+    const oj = await ok.json();
+    assert.equal(oj.ok, true);
+    assert.equal(agent.permissions.approvalMode, "unless-trusted");
+    assert.equal(agent.permissions.sandbox, "read-only");
+
+    const bad = await fetch(base + "/api/bot.manage", {
+      method: "POST", headers: auth,
+      body: JSON.stringify({ action: "permission", sandbox: "yolo-mode" }),
+    });
+    assert.equal(bad.status, 400);
+    const bj = await bad.json();
+    assert.equal(bj.ok, false);
+    assert.match(bj.error, /sandbox 非法/);
+    assert.equal(agent.permissions.sandbox, "read-only", "非法值不应落盘");
+  });
+});

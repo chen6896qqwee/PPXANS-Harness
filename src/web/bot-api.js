@@ -13,6 +13,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { BotStore } from "./bot-store.js";
 import { logsDir, logicalDay } from "../utils/store.js";
+import { APPROVAL_RANK, SANDBOX_RANK, detectEscalations } from "../permissions/index.js";
 
 const MAX_MEMORY_FILES = 200;
 const MAX_AVATAR_B64 = 6 * 1024 * 1024; // base64 后约 4.5MB 原图, 与 store 的上限对齐
@@ -327,8 +328,22 @@ export async function applyBotAction(channel, body) {
       return done();
     }
     case "permission": {
+      // 2026-10-31 安全收紧: 此前这里直写引擎, 等于绕过 /api/permissions 的"控制台确认码"
+      //   双门 —— 拿到 bearer token 的一方可以静默切 danger-full-access。现在与该端点同规:
+      //   值合法性 fail-closed; 收紧类变更即时生效; 放宽类变更一律拒绝, 指回确认码流程
+      //   (确认码只打服务端控制台, 必须"人在场"才能完成提权闭环)。
       const p = agent.permissions;
       if (!p) throw new Error("权限引擎未装配");
+      if (body.approvalMode != null && APPROVAL_RANK[body.approvalMode] == null) {
+        throw new Error(`approvalMode 非法: ${body.approvalMode} (合法: ${Object.keys(APPROVAL_RANK).join("/")})`);
+      }
+      if (body.sandbox != null && SANDBOX_RANK[body.sandbox] == null) {
+        throw new Error(`sandbox 非法: ${body.sandbox} (合法: ${Object.keys(SANDBOX_RANK).join("/")})`);
+      }
+      const escalations = detectEscalations(p, body);
+      if (escalations.length) {
+        throw new Error(`权限放宽需人工确认, 请走 POST /api/permissions 确认码流程 (本次拦截: ${escalations.join("; ")})`);
+      }
       if (body.approvalMode) p.approvalMode = String(body.approvalMode);
       if (body.sandbox) p.sandbox = String(body.sandbox);
       if (body.networkAccess != null) p.networkAccess = !!body.networkAccess;
@@ -349,8 +364,188 @@ export async function applyBotAction(channel, body) {
 }
 
 // 路由入口: 由 HttpChannel._apiRoute 首行调用, 返回 true 表示已处理
+// ---- 身体状态 (2026-10-30, P3) ----
+// 控制面板此前只有"设置"和"轨迹", 没有一处回答「它现在什么状态、干得好不好」。
+// 这个聚合端点把四个体征摊开: 痛觉 (离线任务成功率) / 记忆 (召回质量) / 手头的事 (任务栈) / 负荷。
+// 数据全部来自真实产物 (data/bench/*.json + 运行时实例), 不编数: 没跑过就是 unknown。
+function latestReport(agent, prefix) {
+  const dirs = [path.join(agent.root || ".", "data", "bench"), path.join(agent.dataDir || ".", "bench")];
+  for (const dir of dirs) {
+    try {
+      const files = fs.readdirSync(dir)
+        .filter((f) => f.startsWith(prefix) && f.endsWith(".json"))
+        .sort();
+      if (!files.length) continue;
+      const file = files[files.length - 1];
+      const j = JSON.parse(fs.readFileSync(path.join(dir, file), "utf8"));
+      return { ...j, file };
+    } catch { /* 换下一个目录 */ }
+  }
+  return null;
+}
+
+// 三态评级: 有数据才评级, 没数据一律 unknown (不猜)。
+function toneOfRate(v) {
+  if (v == null || !Number.isFinite(v)) return "unknown";
+  if (v >= 0.999) return "ok";
+  if (v >= 0.8) return "warn";
+  return "bad";
+}
+
+// 读趋势 (2026-10-30): <kind>-history.jsonl 最近 n 条。文件由 scripts/lib/bench-history.js 写。
+//   读不到就返回空数组 —— 面板据此显示"只有一次记录, 看不出趋势", 不画假线。
+function readHistory(agent, kind, n = 6) {
+  const dirs = [path.join(agent.root || ".", "data", "bench"), path.join(agent.dataDir || ".", "bench")];
+  for (const dir of dirs) {
+    try {
+      const file = path.join(dir, `${kind}-history.jsonl`);
+      if (!fs.existsSync(file)) continue;
+      const lines = fs.readFileSync(file, "utf8").split("\n").filter(Boolean).slice(-n);
+      const out = lines.map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+      if (out.length) return out;
+    } catch { /* 换下一个目录 */ }
+  }
+  return [];
+}
+
+// 把百分比翻译成"体感" —— 这是面板存在的意义。
+//   "recall@3 93%" 没人有感觉; "15 句里 14 句一次就找对" 一眼就知道好坏。
+//   只做措辞, 不改判定: state 仍由 toneOfRate 决定, 这里不洗白任何数字。
+function feelingOf(kind, data) {
+  const pct = (v) => `${Math.round(v * 100)}%`;
+  if (kind === "pain") {
+    if (!data.total) return "还没试过 —— 不知道自己能不能把活干成";
+    const miss = data.total - data.passed;
+    if (!miss) return `${data.total} 件事全干成了, 一件没漏`;
+    if (miss <= Math.max(1, Math.floor(data.total * 0.1))) return `${data.total} 件里成了 ${data.passed} 件, 偶尔失手`;
+    return `${data.total} 件里只成了 ${data.passed} 件 —— 近 ${pct(1 - data.rate)} 的活干不成`;
+  }
+  if (kind === "memory") {
+    if (data.acceptance == null) return "没量过 —— 不知道换个说法还认不认得";
+    // 分母必须是**验收集**的查询数 (holdout), 不是 dev+holdout 的总数 ——
+    //   拿 30 当分母去配 100% 的 holdout 分数, 等于把样本量凭空放大一倍 (第一版就这么错)。
+    const q = data.queries || 15;
+    const hit = Math.round(data.acceptance * q);
+    if (data.acceptance >= 0.999) return `${q} 句换个说法全认得出, 一句没错`;
+    if (data.acceptance >= 0.8) return `${q} 句里 ${hit} 句换个说法也认得出, 偶有错意`;
+    return `${q} 句里只有 ${hit} 句换个说法还认得出 —— 你要的原话它才对得上`;
+  }
+  return "";
+}
+
+export function buildBodyState(channel) {
+  const agent = channel.agent || {};
+  const stack = agent.workStack && typeof agent.workStack.status === "function"
+    ? agent.workStack.status()
+    : { total: 0, active: 0, blocked: 0, done: 0, current: null, items: [] };
+
+  const bench = latestReport(agent, "taskbench-offline-");
+  const recall = latestReport(agent, "memory-recall-");
+
+  const pain = bench
+    ? { rate: bench.rate, passed: bench.passed, total: bench.total, ms: bench.ms, at: bench.ts, state: toneOfRate(bench.rate) }
+    : { rate: null, state: "unknown", hint: "还没跑过: node scripts/taskbench-offline.js" };
+  pain.feeling = feelingOf("pain", pain);
+
+  // 面板看的是 acceptance (= holdout 留出集), 不是混合的 recallK ——
+  //   recallK 里掺了 dev 难例, 用它当"健康值"会把"泛化能力"和"难例比例"搅在一起。
+  //   老报告没有 acceptance 字段时退回 recallK (不假装没数据)。
+  const acc = recall ? (recall.acceptance != null ? recall.acceptance : recall.recallK) : null;
+  // 验收集的查询数: acceptance 的分母必须是它, 不是 dev+holdout 的总数
+  const holdSet = recall && Array.isArray(recall.sets) ? recall.sets.find((x) => x && x.set === "holdout") : null;
+  const accQueries = holdSet ? holdSet.queries : null;
+  const memory = {
+    facts: typeof agent.facts?.countLive === "function" ? agent.facts.countLive() : null,
+    recall1: recall ? recall.recall1 : null,
+    recallK: acc,
+    recallMixed: recall ? recall.recallK : null,
+    topK: recall ? recall.topK : null,
+    queries: accQueries,          // 验收集查询数 (feeling 的分母)
+    queriesAll: recall ? recall.queries : null,
+    embedder: recall ? recall.embedder : null,
+    at: recall ? recall.ts : null,
+    state: recall ? toneOfRate(acc) : "unknown",
+    hint: recall ? null : "还没跑过: node scripts/memory-recall.js",
+  };
+  memory.feeling = feelingOf("memory", { ...memory, acceptance: acc });
+
+  const providers = (agent.allProviders || []).filter((p) => p && (p.apiKey || p.api_key || p.base_url || p.baseUrl)).length;
+  const load = {
+    tools: Array.isArray(agent.tools?.list?.()) ? agent.tools.list().length : null,
+    sessions: Array.isArray(agent.sessionStore?.list?.()) ? agent.sessionStore.list().length : null,
+    providers,
+    uptimeMs: Math.round(process.uptime() * 1000),
+    node: process.version,
+  };
+
+  // 手头的事: 排除已完成条目后还剩几件 / 有没有卡住的
+  const openItems = (stack.items || []).filter((x) => x && x.status !== "done");
+  const work = {
+    total: stack.total || 0,
+    open: openItems.length,
+    blocked: openItems.filter((x) => x.status === "blocked").length,
+    current: stack.current || null,
+    items: stack.items || [],
+    state: !openItems.length ? "unknown" : openItems.some((x) => x.status === "blocked") ? "warn" : "ok",
+  };
+  work.feeling = !openItems.length
+    ? "手上空着, 随叫随到"
+    : work.blocked
+      ? `${openItems.length} 件事挂着, 其中 ${work.blocked} 件卡住了`
+      : `${openItems.length} 件事挂着, 正在推「${String(work.current?.goal || openItems[0].goal || "").slice(0, 18)}」`;
+
+  load.state = "ok";
+  load.feeling = load.tools == null ? "" : `${load.tools} 个工具挂在手上, ${load.providers} 个模型可用`;
+
+  // 总体: 任何一个体征 bad 就是 bad; 全 ok 才 ok; 有 unknown 记 warn (数据不全不能自称健康)
+  const states = [pain.state, memory.state];
+  const overall = states.includes("bad") ? "bad" : states.includes("warn") ? "warn" : states.every((s) => s === "ok") ? "ok" : "unknown";
+
+  // 一句话判断 (2026-10-30): 面板顶部原来只写"需要注意", 那是标签不是信息。
+  //   计算规则: 先把坏的说清楚, 再说没测的, 最后才报平安 —— 和医生说话的顺序一致。
+  const bads = [];
+  if (pain.state === "bad") bads.push("很多活干不成");
+  if (memory.state === "bad") bads.push("换个说法就找不到记住的东西");
+  const warns = [];
+  if (pain.state === "warn") warns.push("偶尔有活干不成");
+  if (memory.state === "warn") warns.push("换个说法偶尔会找错");
+  const unknowns = [];
+  if (pain.state === "unknown") unknowns.push("没量过能干什么活");
+  if (memory.state === "unknown") unknowns.push("没量过记不记得住");
+  let verdict;
+  if (bads.length) verdict = `${bads.join("; ")} —— 这是要修的, 不是要等的。`;
+  else if (warns.length) verdict = `大体正常, 但${warns.join("; ")}。`;
+  else if (unknowns.length) verdict = `没测的项: ${unknowns.join("; ")}。灰的不是坏的, 是还没量。`;
+  else verdict = "各项都正常 —— 能干活, 也认得你。";
+
+  return {
+    ok: true,
+    ts: new Date().toISOString(),
+    overall,
+    verdict,
+    pain,
+    memory,
+    work,
+    load,
+    // 趋势: 各取最近 6 次 (面板画 sparkline)。少于 2 个点就不画线。
+    history: {
+      pain: readHistory(agent, "taskbench-offline").map((r) => r.rate).filter((v) => Number.isFinite(v)),
+      memory: readHistory(agent, "memory-recall").map((r) => (r.acceptance != null ? r.acceptance : r.recallK)).filter((v) => Number.isFinite(v)),
+    },
+  };
+}
+
 export async function handleBotApi(channel, req, res, reqPath) {
   const get = req.method === "GET";
+
+  if (get && reqPath === "/api/body.state") {
+    try {
+      channel._json(res, 200, buildBodyState(channel), { "Cache-Control": "no-store" });
+    } catch (e) {
+      channel._json(res, 500, { ok: false, error: String(e?.message || e) });
+    }
+    return true;
+  }
 
   if (get && reqPath === "/api/bot.state") {
     try {

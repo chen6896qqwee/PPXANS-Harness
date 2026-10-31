@@ -4,6 +4,7 @@
 
 import path from "node:path";
 import fs from "node:fs";
+import { tokenizeShell } from "../security/shell-parse.js";
 import {
   parseEditBlocks, parseCodexPatch,
   MISSING_TARGET_HELP, patchTargetPreview,
@@ -30,6 +31,31 @@ export const TRUSTED_TOOLS = [
   "get_time", "list_dir", "read_file", "read", "memory_search",
   "repo_map", "goal_board", "status", "list_files", "glob", "grep", "search_files",
 ];
+
+// ---- 档位 rank 表 (2026-10-31: /api/permissions 双门与 /api/bot.manage 收紧共用) ----
+//   数值越高 = 越放任。放宽类变更 = 新档位 rank 高于当前档位。
+export const APPROVAL_RANK = { "unless-trusted": 0, "on-failure": 1, "on-request": 2, "never": 3 };
+export const SANDBOX_RANK = { "read-only": 0, "workspace-write": 1, "danger-full-access": 2 };
+
+/**
+ * 识别放宽类权限变更 (提权检测)。收紧/持平返回 []。
+ *   cur  当前引擎态 ({ approvalMode, sandbox, networkAccess })
+ *   next 意图变更 ({ approvalMode?, sandbox?, networkAccess? })
+ * 返回人类可读的变更描述数组 (与 /api/permissions 双门的输出同形)。
+ */
+export function detectEscalations(cur, next = {}) {
+  const escalations = [];
+  if (next.approvalMode != null && APPROVAL_RANK[next.approvalMode] > (APPROVAL_RANK[cur.approvalMode] ?? 0)) {
+    escalations.push(`approvalMode: ${cur.approvalMode} → ${next.approvalMode}`);
+  }
+  if (next.sandbox != null && SANDBOX_RANK[next.sandbox] > (SANDBOX_RANK[cur.sandbox] ?? 0)) {
+    escalations.push(`sandbox: ${cur.sandbox} → ${next.sandbox}`);
+  }
+  if (next.networkAccess === true && cur.networkAccess === false) {
+    escalations.push("networkAccess: off → on");
+  }
+  return escalations;
+}
 
 // 写/执行类工具 (只读沙箱下需升级为 ask, 工作区沙箱下需校验路径)
 const WRITE_EXEC_TOOLS = new Set([
@@ -94,15 +120,104 @@ const URL_RE = /[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s"']+/g;
 function stripUrls(command) {
   return String(command).replace(URL_RE, " ");
 }
+
+// 2026-10-30 安全加固: 命令里的相对路径同样可能越界 (`cd ..` / `> ../x` / `cp a ../../b`)。
+//   旧实现只用裸正则抽绝对路径, 相对穿越完全看不见; 现在用 shell 分词逐段检查:
+//   - 所有看起来像路径的 token (含 . / .. / 分隔符 / 盘符 / ~)
+//   - 重定向目标 (> >> < << 后面的词)
+//   - cd/chdir/pushd 的参数
+//   - 写类命令 (cp/mv/tee/touch/mkdir/…) 的最后一个非选项参数
+//   含 $VAR / %VAR% / ~ 的动态路径无法静态证明落在根内 → 直接按越界处理 (fail closed)。
+const SEP_OPS = new Set(["&&", "||", ";;", ";", "|", "&", "\n"]);
+const REDIR_OPS = new Set([">", ">>", "<", "<<", "<<-", "<&", ">&"]);
+const WRITE_DEST_CMDS = new Set([
+  "cp", "copy", "mv", "move", "tee", "touch", "mkdir", "md", "install",
+  "ln", "rsync", "scp", "dd", "sed", "xcopy", "robocopy",
+]);
+const CD_CMDS = new Set(["cd", "chdir", "pushd", "set-location"]);
+
+function looksDynamicPath(t) {
+  const s = String(t || "");
+  if (!s) return false;
+  if (s.startsWith("~")) return true;
+  if (/\$[A-Za-z_{(]/.test(s)) return true;
+  if (/%[A-Za-z_][A-Za-z0-9_]*%/.test(s)) return true;
+  return false;
+}
+
+function looksLikePathToken(t) {
+  const s = String(t || "").trim();
+  if (!s) return false;
+  if (s === "." || s === ".." || s === "~") return true;
+  if (s.startsWith("~")) return true;
+  if (/^[A-Za-z]:[\\/]/.test(s)) return true;         // C:\ / C:/
+  if (/^\\\\/.test(s)) return true;                    // UNC \\server\share
+  if (/^[\\/]/.test(s)) return true;                   // /abs 或 \abs
+  if (/[\\/]/.test(s)) return true;                    // 任意含分隔符
+  if (/(^|[\\/])\.\.([\\/]|$)/.test(s)) return true;   // ../x
+  return false;
+}
+
+function inspectSegment(seg, out) {
+  const words = seg.filter((t) => t.kind === "word");
+  if (!words.length) return;
+  const argv0 = String(words[0].text || "").replace(/^.*[\\/]/, "").replace(/\.(exe|cmd|bat|ps1)$/i, "").toLowerCase();
+  const push = (t) => {
+    const s = String(t || "").trim();
+    if (s) out.push({ p: s, dynamic: looksDynamicPath(s) });
+  };
+
+  for (let i = 0; i < seg.length; i++) {
+    const tok = seg[i];
+    // 重定向目标: 无论长什么样都要检查 (可能写 /etc/passwd 或 ../x)
+    if (tok.kind === "op" && REDIR_OPS.has(tok.text)) {
+      const next = seg[i + 1];
+      if (next && next.kind === "word") push(next.text);
+      continue;
+    }
+    if (tok.kind !== "word") continue;
+    const t = String(tok.text || "").trim();
+    if (!t) continue;
+    // cd 的目标词 (允许 `cd -P ../x` 这类选项后跟目标)
+    if (CD_CMDS.has(argv0) && i > 0 && !t.startsWith("-")) { push(t); continue; }
+    // --flag=../value 形式: 检查等号右侧
+    const eq = t.match(/^--?[A-Za-z0-9-]+=(.+)$/);
+    if (eq) {
+      if (looksLikePathToken(eq[1]) || looksDynamicPath(eq[1])) push(eq[1]);
+      continue;
+    }
+    if (looksLikePathToken(t)) push(t);
+  }
+
+  // 写类命令: 最后一个非选项参数是落点 (cp/mv/tee/…)
+  if (WRITE_DEST_CMDS.has(argv0)) {
+    for (let i = words.length - 1; i >= 1; i--) {
+      const t = String(words[i].text || "").trim();
+      if (!t || t.startsWith("-")) continue;
+      push(t);
+      break;
+    }
+  }
+}
+
+function collectCommandPaths(command) {
+  const out = [];
+  let seg = [];
+  const flush = () => { if (seg.length) inspectSegment(seg, out); seg = []; };
+  for (const tok of tokenizeShell(stripUrls(command))) {
+    if (tok.kind === "op" && SEP_OPS.has(tok.text)) { flush(); continue; }
+    seg.push(tok);
+  }
+  flush();
+  return out;
+}
+
 function collectPaths(args) {
   const out = [];
   for (const key of ["path", "file_path", "filePath", "cwd", "dir", "destination", "dest"]) {
-    if (typeof args?.[key] === "string" && args[key]) out.push(args[key]);
+    if (typeof args?.[key] === "string" && args[key]) out.push({ p: args[key], dynamic: false });
   }
-  if (typeof args?.command === "string") {
-    const m = stripUrls(args.command).match(/(?:[A-Za-z]:[\\/][^\s"']+|\/[^\s"']+)/g);
-    if (m) out.push(...m);
-  }
+  if (typeof args?.command === "string") out.push(...collectCommandPaths(args.command));
   return out;
 }
 // 2026-10-24: realpath 尽力解析 —— 候选路径可能不存在 (新建文件), 沿祖先向上找到最近
@@ -129,8 +244,11 @@ function findEscape(args, root) {
   // root 的 realpath 每次 check 解析一次 (符号链接化的 workspaceRoot 也要按真实落点判定)
   let rootReal = null;
   try { rootReal = realPathBestEffort(root); } catch { rootReal = null; }
-  for (const p of collectPaths(args)) {
+  for (const item of collectPaths(args)) {
+    const p = typeof item === "string" ? item : item.p;
     if (!p) continue;
+    // 动态路径 ($HOME/…, %APPDATA%/…, ~/…) 无法静态证明落在工作区内 → fail closed。
+    if (typeof item === "object" && item.dynamic) return p;
     // 2026-10-09 修复: 原先只判 isAbsolute —— 相对穿越 (../evil.js) 完全漏判,
     // 于是"越界补丁"与"根内补丁"拿到同样的判定, fail-closed 出现缺口。
     // 现统一解析为绝对路径再判 isWithinRoot: 相对/绝对一视同仁。

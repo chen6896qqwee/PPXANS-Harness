@@ -24,13 +24,17 @@ import { resolveVoice, resolveLocalAsr, voiceStatus, cloudTranscribe } from "../
 import { getSettings, updateSettings, REASONING_LEVELS } from "../config/settings.js";
 import { suggestProactive } from "../ans/proactive.js";
 import { ensureDir, atomicWrite, readText } from "../utils/store.js";
+import { readPpxConfig } from "../utils/config-file.js";
 import { TokenBucket } from "../utils/rate-limit.js";
+import { APPROVAL_RANK, SANDBOX_RANK, detectEscalations } from "../permissions/index.js";
 import { createMcpEndpoint } from "../mcp/http.js";
 import { createAdminTools } from "../mcp/admin.js";
 import { buildTree, readWorkspaceFile, writeWorkspaceFile, searchWorkspace } from "./workspace.js";
 import { runReview } from "../review/index.js";
 import { createTaskBoard } from "../mcp/tasks.js";
 import { handleBotApi } from "../web/bot-api.js";
+import { handlePluginApi } from "../web/plugin-api.js";
+import { handleUsageStatsApi } from "../web/usage-stats.js";
 
 const MAX_BODY = 1024 * 1024;          // 请求体上限 1MB
 const RATE_PER_MIN = 60;               // 每 IP 每分钟最大请求数 (令牌桶)
@@ -39,14 +43,14 @@ const MAX_INFLIGHT = 4;                // 同时处理的最大对话请求数 (
 // 统一安全响应头 (2026-10-25 安全加固): 此前仅有 CORS 头, 无任何浏览器安全基线。
 // Web UI 有 70+ innerHTML 拼接点, 编码纪律需要一道服务器侧护栏兜底 ——
 // 注入的外域脚本/样式/资源一律被 CSP 拒绝, 页面也禁止被 iframe (frame-ancestors)。
-// script-src 只放行 'self' + 首屏主题脚本 (index.html 唯一可执行内联脚本) 的 sha256 固定哈希;
+// script-src 只放行 'self': 2026-10-30 起首屏主题脚本已外置为 public/theme.js,
+// 页面不再有任何可执行内联脚本, 因此不再需要维护内容 sha256 白名单。
 // 引导数据走 <script type="application/json" id="ppx-boot">, 不是可执行脚本, 不受 script-src 约束;
 // style-src 需 'unsafe-inline': SVG sprite/输入框既有内联 style 属性是既有 UI 结构。
 // connect-src 'self': app.js 仅同源 fetch (实测无外域调用)。
-// 哈希与 index.html 内联脚本强耦合 —— 改动该脚本必须同步此哈希 (有回归测试钉住)。
 export const SECURITY_CSP = [
   "default-src 'self'",
-  "script-src 'self' 'sha256-g2kWGsySSV1dtOmX84eDtXJdYTwKPo7I7xK5O4r8TFk='",
+  "script-src 'self'",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob:",
   "connect-src 'self'",
@@ -107,6 +111,8 @@ export function resolveAuthToken({ configured = "", persistedFile = null } = {})
     try {
       ensureDir(path.dirname(persistedFile));
       atomicWrite(persistedFile, token); // .tmp + rename: 原子替换, 并发/崩溃不损坏
+      // 2026-10-31: 落盘后收紧权限位 (POSIX 0600; Windows 用户目录 ACL 默认已受限, chmod 无效则忽略)
+      try { fs.chmodSync(persistedFile, 0o600); } catch { /* 非 POSIX 或已受限: 忽略 */ }
     } catch {
       // token 已生成但在内存可用; 落盘失败仅丢失"跨重启复用", 不阻断启动
     }
@@ -134,9 +140,12 @@ export class HttpChannel extends Channel {
     this._sseClients = new Set(); // res 对象 (断连时移除)
     // 2026-10-24: SSE 一次性 ticket (POST /events-ticket 换发, 60s 过期, 用后即焚)
     this._eventsTickets = new Map(); // ticket -> 过期时间戳
-    // CORS 来源白名单 (v1.0.7): channels.http.cors_origin 数组; 未配置默认 * (向后兼容)
-    // 配置后仅放行白名单 origin, 其余跨域请求 403 (token 泄露时降低任意跨站读取风险)
-    // 2026-10-24: 支持 cors_origin: "same-origin" 严格模式 —— 跨源带 Origin 的一律 403
+    // 2026-10-31: 权限放宽二次确认 (POST /api/permissions), 一次性确认码 + 60s TTL
+    this._permConfirm = null;
+    // CORS 来源策略 (v1.0.7): channels.http.cors_origin; v1.0.7 默认 * (兼容)
+    // 2026-10-31 安全默认收紧: 未配置 = "same-origin" 严格模式 (带跨源 Origin 的一律 403)。
+    //   显式放开: "*" / [] / 白名单数组 (旧配置写法全部保留)。
+    // 2026-10-24: "same-origin" 严格模式 —— 跨源带 Origin 的一律 403
     this.corsStrictSameOrigin = false;
     this.corsOrigins = this._corsFromConfig();
     this._inFlight = 0; // 当前处理中的对话请求数
@@ -262,12 +271,17 @@ export class HttpChannel extends Channel {
   _corsFromConfig() {
     try {
       const c = this.agent?.config?.channels?.http?.cors_origin;
+      // 2026-10-31 安全默认: 未配置 = same-origin 严格模式 (此前默认 *, 恶意网页可跨源读
+      //   本地 API 响应)。显式放开仍支持: "*" / [] / 白名单数组 —— 旧配置写法全兼容。
+      if (c === undefined || c === null) { this.corsStrictSameOrigin = true; return []; }
       // 2026-10-24: "same-origin" 严格模式开关 (不进白名单逻辑)
       if (c === "same-origin" || c === "strict") { this.corsStrictSameOrigin = true; return []; }
-      if (c === undefined || c === null || c === "*") return [];
+      if (c === "*" || (Array.isArray(c) && c.length === 0)) return []; // 显式选择放行任意来源
       if (Array.isArray(c)) return c.filter(Boolean);
       if (typeof c === "string") return [c];
     } catch { /* 配置异常回退默认 */ }
+    // 配置异常 → 按最保守处理 (fail-closed)
+    this.corsStrictSameOrigin = true;
     return [];
   }
 
@@ -397,16 +411,16 @@ export class HttpChannel extends Channel {
 
   _tokenFromConfig() {
     try {
-      const p = path.join(this.agent.root, "config", "ppx.json");
-      if (fs.existsSync(p)) {
-        const cfg = JSON.parse(fs.readFileSync(p, "utf8"));
-        return (cfg.channels && cfg.channels.http && cfg.channels.http.auth_token) || "";
-      }
+      const cfg = readPpxConfig(this.agent.root, {});
+      return (cfg.channels && cfg.channels.http && cfg.channels.http.auth_token) || "";
     } catch {}
     return "";
   }
 
   // 若未配置 token: 复用持久化文件(重启不变)或自动生成并原子落盘 (类似 Jupyter token)
+  // 2026-10-30: 非 TTY (Electron/服务重定向日志) 不再把完整 token 打进日志 ——
+  //   桌面壳会把子进程 stdout 落盘, 日志文件常被同步/上报, 长效凭据不该以明文扩散。
+  //   交互式终端仍打印完整值 (否则用户没法复制); 需要脚本取值请直接读持久化文件。
   _ensureToken() {
     if (this.authToken) return this.authToken;
     const r = resolveAuthToken({ configured: process.env.PPX_AUTH_TOKEN || "", persistedFile: this._persistedTokenFile });
@@ -414,12 +428,14 @@ export class HttpChannel extends Channel {
     if (r.source === "persisted") {
       console.log("  ℹ  HTTP 认证 token 复用自持久化文件 (重启不更换, 前端无需重贴)");
     } else {
+      const showFull = !!(process.stdout && process.stdout.isTTY) || process.env.PPX_SHOW_AUTH_TOKEN === "1";
+      const shown = showFull ? this.authToken : `*** (已隐藏, 长度 ${this.authToken.length}; 完整值见持久化文件)`;
       console.log("");
       console.log("  ⚠️  HTTP 认证 token 未配置, 已自动生成并持久化 (重启复用):");
-      console.log(`       PPX_AUTH_TOKEN=${this.authToken}`);
-      console.log(`     用法: Authorization: Bearer ${this.authToken}`);
+      console.log(`       PPX_AUTH_TOKEN=${shown}`);
+      console.log(`     用法: Authorization: Bearer ${shown}`);
       console.log(`     token 已保存到 ${this._persistedTokenFile}, 重启不再更换`);
-      console.log("      (或设置 config/ppx.json 的 channels.http.auth_token)");
+      console.log("      (或设置 config/ppx.json 的 channels.http.auth_token; 终端里需要直接查看可加 PPX_SHOW_AUTH_TOKEN=1)");
       console.log("");
     }
     return this.authToken;
@@ -488,11 +504,15 @@ export class HttpChannel extends Channel {
       if (wh) return this._runHandler(wh, req, res);
 
       // 静态页面与 /health 不设限, 其余 API 限流
+      // (注释一直写着「静态页面不设限」, 但实现一度只豁免了 / 与 /index.html:
+      //  单文件页面 (如 1.5MB 量级的展示页) 被限流一次就整块挂不上,
+      //  所以把所有静态资源的 GET 一并豁免; /api/* 仍走令牌桶。)
+      const isStaticGet = req.method === "GET" && !reqPath.startsWith("/api/") && /\.(html|js|mjs|css|json|png|jpe?g|webp|gif|svg|ico|woff2|map)$/i.test(reqPath);
       const isOpenGet = req.method === "GET" && (reqPath === "/" || reqPath === "/index.html" || reqPath === "/health");
-      if (!isOpenGet && !this._rateLimit(req, res)) return;
+      if (!isOpenGet && !isStaticGet && !this._rateLimit(req, res)) return;
 
       // v2.6.0 REST 退役开关: /message* /sessions* /reset 与 /api/* 同受 mcp.legacy_rest 控制
-      // (默认关闭: 全部走标准 MCP 端点 /mcp; 旧脚本可配置 legacy_rest: true 恢复)
+      // (默认开启以兼容旧脚本/前端; 退役请显式配置 legacy_rest: false → 统一 410 引导 /mcp)
       if (!this.mcpLegacyRest && LEGACY_REST_PATHS.some((p) => reqPath === p || reqPath.startsWith(p + "/"))) {
         return this._json(res, 410, { error: "REST 端点已退役, 请使用标准 MCP 端点 POST /mcp (channels.http.mcp.legacy_rest=true 可恢复)" });
       }
@@ -603,7 +623,7 @@ export class HttpChannel extends Channel {
         res.end(JSON.stringify({ error: "ticket 无效/过期/已使用" }));
         return true;
       }
-    } else if (qToken === this.authToken) {
+    } else if (qToken && safeEqual(qToken, this.authToken)) {
       authed = true;
     }
     if (!authed) {
@@ -665,6 +685,14 @@ export class HttpChannel extends Channel {
   // ---- 路由域 1: 健康检查 ----
   _routeHealth(req, res, get, reqPath) {
     if (!get || reqPath !== "/health") return false;
+    // 桌面壳握手: 只对携带挑战且进程内有 PPX_DESKTOP_SECRET 时回 HMAC 证明,
+    // 防止本机其他服务冒充 /health 被桌面端当成自己的内核接入 (2026-10-30)。
+    const headers = {};
+    const challenge = req.headers["x-ppx-desktop-challenge"];
+    const secret = process.env.PPX_DESKTOP_SECRET;
+    if (challenge && secret) {
+      headers["x-ppx-desktop-proof"] = crypto.createHmac("sha256", secret).update(String(challenge)).digest("hex");
+    }
     this._json(res, 200, {
       status: "ok",
       agent: this.agent.config.agent?.name || "ppx",
@@ -676,7 +704,7 @@ export class HttpChannel extends Channel {
       // 协议总线条观测 (2026-10-25 SQ 真实化): SQ 积压 op 数 + EQ 事件序号水位。
       //   sqPending 持续上涨 = 有轮次只提交不收口 (死轮泄漏), 是队列健康度的直接信号。
       protocol: typeof this.agent?.protocolStats === "function" ? this.agent.protocolStats() : undefined,
-    });
+    }, headers);
     return true;
   }
 
@@ -908,8 +936,8 @@ export class HttpChannel extends Channel {
   }
 
   // ---- API 门禁: REST 退役开关 + 鉴权。返回 true = 已写响应 (路由结束), false = 放行到具体 API 路由 ----
-  // channels.http.mcp.legacy_rest = true 时保留旧 /api/* REST 端点 (兼容旧脚本/客户端);
-  // 默认 false: /api/* 返回 410 Gone, 引导使用标准 MCP 端点 /mcp
+  // channels.http.mcp.legacy_rest = true (默认) 时保留旧 /api/* REST 端点 (兼容旧脚本/客户端);
+  // 显式设为 false 时 /api/* 返回 410 Gone, 引导使用标准 MCP 端点 /mcp
   _gateApi(req, res, reqPath) {
     if (!reqPath.startsWith("/api/")) return false;
     if (!this.mcpLegacyRest) {
@@ -930,6 +958,10 @@ export class HttpChannel extends Channel {
     // 2026-10-27: 本体 (bot) 形态接口 —— /api/bot.state 聚合首屏快照, /api/bot.manage 单入口写
     // 必须排在 switch 之前: 这几个路径不在 case 表里, 落到 default 会 404
     if (await handleBotApi(this, req, res, reqPath)) return true;
+    // 2026-10-30: 用户插件管理 (列表/详情/创建/更新/启停/删除)
+    if (await handlePluginApi(this, req, res, reqPath)) return true;
+    // 2026-10-31: 「使用统计」页 —— 按天 token 账本 + 会话时长 + 连续天数
+    if (await handleUsageStatsApi(this, req, res, reqPath)) return true;
     // v3.0 (codex 对齐): 命令面板 / 审批流 / 目标看板 / 审查报告 / 权限热更新
     if (await this._apiV3(req, res, reqPath, get)) return true;
     switch (reqPath) {
@@ -1012,6 +1044,11 @@ export class HttpChannel extends Channel {
       case "/api/providers/usage":
         if (!get) return false;
         return this._apiProviderUsage(req, res);
+      // 2026-10-30: 最近一次生成运行态 + 用量快照 + 累计用量 —— 供 Web 底部状态条常驻显示
+      //   (刷新后不丢, 不必等下一次生成才有数; 此前这套数只在内存算, 刷新即消失)。
+      case "/api/run.state":
+        if (!get) return false;
+        return this._apiRunState(req, res);
 
       // 通用设置 API: 用户名 / HTTP 端口 / 安全 / agent 预设
       case "/api/settings":
@@ -1259,13 +1296,90 @@ export class HttpChannel extends Channel {
       return true;
     }
 
-    // POST /api/permissions — 权限热更新 { approvalMode?, sandbox?, networkAccess?, planEnabled?, sessionKey? }
+    // POST /api/permissions — 权限热更新 { approvalMode?, sandbox?, networkAccess?, planEnabled?, sessionKey?, confirm_token? }
+    // 2026-10-31 安全收紧: 放宽类变更 (审批模式放宽 / 沙箱升档 / 打开网络) 需要**二次确认**。
+    //   第一次请求返回 { ok:false, need_confirm:true } 并把一次性确认码打到**服务端控制台**;
+    //   60 秒内携带 confirm_token 重新提交才生效。确认码只进控制台、不进 HTTP 响应 ——
+    //   即使 bearer token 被提示注入的 agent 偷到, 它也无法自行完成提权闭环 (必须有人在场)。
+    //   收紧类变更 (降档) 与 plan 会话态切换不受影响; 生效全部只动内存引擎, 不写配置文件 (重启还原)。
     if (req.method === "POST" && reqPath === "/api/permissions") {
       const body = await this._readBody(req, res);
       if (body === null) return true;
       if (!agent.permissions) { this._json(res, 200, { ok: false, reason: "权限引擎未装配" }); return true; }
       let cfg = {};
       try { cfg = JSON.parse(body || "{}"); } catch {}
+
+      // 值合法性先卡 (此前任意字符串直写引擎, 打错字=静默无效果): fail-closed
+      // 2026-10-31: rank 表与放宽识别抽到 permissions/index.js —— /api/bot.manage 的
+      //   permission 动作必须共用同一套判定, 否则它就是双门的旁路。
+      if (cfg.approvalMode != null && APPROVAL_RANK[cfg.approvalMode] == null) {
+        this._json(res, 400, { ok: false, error: `approvalMode 非法: ${cfg.approvalMode} (合法: ${Object.keys(APPROVAL_RANK).join("/")})` });
+        return true;
+      }
+      if (cfg.sandbox != null && SANDBOX_RANK[cfg.sandbox] == null) {
+        this._json(res, 400, { ok: false, error: `sandbox 非法: ${cfg.sandbox} (合法: ${Object.keys(SANDBOX_RANK).join("/")})` });
+        return true;
+      }
+
+      // 凭码路径优先: 确认请求携带的可能是**收紧值** (确认的是"最初发起的放宽", 而非本次字段),
+      //   因此必须先查确认码, 再谈放宽识别 —— 否则凭码请求被当成即时收紧绕过暂存变更。
+      const pending = this._permConfirm;
+      const supplied = String(cfg.confirm_token || "").trim();
+      if (supplied) {
+        if (pending && pending.expires > Date.now()
+          && pending.token.length === supplied.length
+          && crypto.timingSafeEqual(Buffer.from(pending.token), Buffer.from(supplied))) {
+          this._permConfirm = null;
+          try { agent.tracer?.event?.("security/permission-escalated", { changes: pending.escalations, via: "http" }); } catch { /* 可观测失败不阻断 */ }
+          // 落地用最初暂存的变更 (确认对象 = 发起时的请求, 防确认间隙偷换参数)
+          const apply = pending.cfg;
+          if (apply.approvalMode) agent.permissions.approvalMode = apply.approvalMode;
+          if (apply.sandbox) agent.permissions.sandbox = apply.sandbox;
+          if (apply.networkAccess != null) agent.permissions.networkAccess = !!apply.networkAccess;
+          if (apply.planEnabled != null && !apply.sessionKey) agent.permissions.planEnabled = !!apply.planEnabled;
+          this._json(res, 200, {
+            ok: true,
+            confirmed: true,
+            approvalMode: agent.permissions.approvalMode,
+            sandbox: agent.permissions.sandbox,
+            networkAccess: agent.permissions.networkAccess,
+            planEnabled: agent.permissions.planEnabled,
+            planSessions: agent.planModeSessions(),
+          });
+          return true;
+        }
+        // 带码但错误/过期/无暂存: 不提示具体原因 (防枚举), 让发起方重新走一遍
+        this._json(res, 403, { ok: false, error: "确认码无效或已过期, 请重新发起放宽请求" });
+        return true;
+      }
+
+      // 识别放宽类变更 (新档位 rank 高于当前 = 更放任)
+      const escalations = detectEscalations(agent.permissions, cfg);
+
+      if (escalations.length) {
+        // 首次请求: 出码 + 打控制台 (唯一可信信道), 不进 HTTP 响应
+        const token = crypto.randomBytes(3).toString("hex"); // 6 位, 24bit 熵, 60s 窗口足够
+        this._permConfirm = { token, cfg, escalations, expires: Date.now() + 60000 };
+        console.log([
+          "",
+          "⚠️  [权限放宽确认] 检测到提权请求:",
+          ...escalations.map((e) => "     " + e),
+          `     确认码: ${token}  (60 秒内有效, 一次性)`,
+          '     生效方式: POST /api/permissions 携带 { ...原字段, confirm_token: "<确认码>" }',
+          "     (收紧类变更无需确认; 放宽只动内存引擎不写配置文件, 重启还原)",
+          "",
+        ].join("\n"));
+        this._json(res, 200, {
+          ok: false,
+          need_confirm: true,
+          escalations,
+          expires_in: 60,
+          hint: "确认码已输出到服务端控制台, 凭码重新提交方可生效",
+        });
+        return true;
+      }
+
+      // 非放宽变更 (收紧/持平/plan 会话态): 立即生效, 行为与既有完全一致
       if (cfg.approvalMode) agent.permissions.approvalMode = cfg.approvalMode;
       if (cfg.sandbox) agent.permissions.sandbox = cfg.sandbox;
       if (cfg.networkAccess != null) agent.permissions.networkAccess = !!cfg.networkAccess;
@@ -1278,6 +1392,7 @@ export class HttpChannel extends Channel {
         ok: true,
         approvalMode: agent.permissions.approvalMode,
         sandbox: agent.permissions.sandbox,
+        networkAccess: agent.permissions.networkAccess,
         planEnabled: agent.permissions.planEnabled,
         planSessions: agent.planModeSessions(),
       });
@@ -1330,9 +1445,25 @@ export class HttpChannel extends Channel {
         id: b.id, kind: b.kind, content: b.content, counters: b.counters || {}, createdAt: b.createdAt,
       })) : [];
       const auditor = agent.auditor;
+      // 2026-10-30: 补 EvolutionLoop (每日编排/代码迭代) 视图 —— 此前只报行为层,
+      //   夜间循环跑了什么/闸门状态/适应度规模 全是黑盒
+      const loop = agent._evolutionLoop;
+      const loopCfg = agent.config?.agent?.evolution_loop || {};
+      const iterCfg = agent.config?.agent?.self_iteration || {};
       this._json(res, 200, {
         ok: true,
         evolve: ev ? { enabled: ev.enabled, everyCalls: ev.everyCalls, calls: ev._calls, lastAt: ev._lastAt, minIntervalMs: ev.minIntervalMs } : null,
+        evolution_loop: loop ? {
+          enabled: !!loopCfg.enabled,
+          cron: loopCfg.cron || "03:30",
+          running: !!loop.running,
+          lastRunAt: loop.lastRunAt || 0,
+          rotationCursor: loop._rot || 0,
+          fitnessFiles: Array.isArray(iterCfg.target_files) ? iterCfg.target_files.length : 0,
+          mode: iterCfg.mode === "apply" ? "apply" : "propose",
+          self_code_mode: agent.config?.agent?.self_code?.mode || "propose",
+          journal: typeof loop.journalTail === "function" ? loop.journalTail(5) : [],
+        } : null,
         verified: auditor && typeof auditor.stats === "function" ? auditor.stats() : { total: 0, byKind: {} },
         playbook: { version: pb ? pb.version : null, total: pb && Array.isArray(pb.bullets) ? pb.bullets.length : 0, bullets },
         experience: agent.experience ? { lessons: (agent.experience.lessons || []).length } : {},
@@ -1423,6 +1554,25 @@ export class HttpChannel extends Channel {
     return true;
   }
 
+  // 2026-10-30: 最近一次生成运行态 + 用量快照 + 累计用量 (Web 底部状态条常驻数据源)
+  //   run  = agent.lastRun { rounds, steps, tokps, at } (本轮生成统计, 见 agent._llmWithTools)
+  //   usage = _usageSnapshot() { prompt, completion, total, cacheHit, cacheHitPct } (最近一次 LLM 调用)
+  //   context_window = 当前模型上下文窗口 (前端算"上下文占用 %"用, 不依赖 /api/llm 先加载)
+  //   totals = 累计用量 { calls, tokens, cacheHitPct } (跑进程被 kill 前已落盘, 重启可恢复)
+  _apiRunState(req, res) {
+    if (!this._requireAuth(req, res)) return true;
+    const run = this.agent?.lastRun || null;
+    const usage = this._usageSnapshot();
+    const context_window = Number(this.agent?.llm?.context_window) || 0;
+    const us = this.agent?.usageStats || {};
+    const pt = us.promptTokens || 0;
+    const ch = us.cacheHitTokens || 0;
+    const cacheHitPct = pt > 0 ? Math.round((ch / pt) * 100) : null;
+    const totals = { calls: us.calls || 0, tokens: us.tokens || 0, cost: us.cost || 0, cacheHitPct };
+    this._json(res, 200, { run, usage, context_window, totals });
+    return true;
+  }
+
   // 提供方健康探测: 优先复用 agent 已有客户端 (含测试注入的 stub), 避免对磁盘配置的真实网络探测
   async _apiProviderTest(req, res) {
     if (!this._requireAuth(req, res)) return true;
@@ -1495,6 +1645,11 @@ export class HttpChannel extends Channel {
 
   // ---- LLM 运行时切换 (模型 / 思考强度) ----
   // 状态视图: 当前实际生效的 provider+model、显式选择、候选列表 (含可用性)、语音能力
+  // 当前 provider 的上下文窗口 (表单可配, 兜底 8192) — 供前端算上下文占用百分比
+  _llmCtx(provs, providerId) {
+    const p = provs.find((x) => x && x.id === providerId);
+    return Number(p && p.context_window) || 0;
+  }
   _llmState() {
     const cfg = this.agent.config || {};
     const cur = this.agent.llm || null;
@@ -1503,11 +1658,12 @@ export class HttpChannel extends Channel {
       provider: cfg.llm?.provider || "",
       reasoning: cfg.llm?.reasoning || "auto",
       reasoning_levels: REASONING_LEVELS,
-      current: cur ? { id: cur.providerId, model: cur.model, vision: !!cur.vision } : null,
+      current: cur ? { id: cur.providerId, model: cur.model, vision: !!cur.vision, context_window: this._llmCtx(provs, cur.providerId) } : null,
       providers: provs.map((p) => ({
         id: p.id,
         model: p.model || "",
         vision: !!p.vision,
+        context_window: Number(p.context_window) || 0,
         usable: isUsableProvider(p),
         current: !!(cur && cur.providerId === p.id),
       })),
