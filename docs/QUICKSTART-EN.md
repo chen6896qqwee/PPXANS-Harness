@@ -34,17 +34,20 @@ export ZHIPU_API_KEY=xxx    # or OPENAI_API_KEY / DEEPSEEK_API_KEY / DASHSCOPE_A
 ## 3. Run
 
 ```bash
-npm start                # interactive chat (CLI)
+npm run setup            # interactive model wizard (pick provider → paste key → live probe)
+ppx doctor               # health check: config / keys / data dir / skills
+ppx                      # interactive chat (CLI);  npm run chat is the same thing
 node bin/ppx.js --version
 ```
 
 Web UI + HTTP channel:
 
 ```bash
-node bin/ppx-serve.js    # http://127.0.0.1:8899  (/health, /message, Web UI)
+npm start                # Web UI + HTTP on http://127.0.0.1:8899 (one process, one port)
+node bin/ppx-serve.js    # headless HTTP only (/health, /message, /mcp)
 ```
 
-## 4. Skills (built-in: 77, across 12 domains)
+## 4. Skills (built-in: 67, across 12 domains)
 
 - `skill_search { query }` — find a skill by keyword
 - `load_skill { name }` — load full instructions on demand
@@ -53,7 +56,7 @@ node bin/ppx-serve.js    # http://127.0.0.1:8899  (/health, /message, Web UI)
 ## 5. Memory
 
 - 5-layer memory with automatic distillation, Gaussian decay, TTL soft-archive (restorable), WAL crash-safety, and a tamper-evident audit chain
-- Plug a different backend via `config.memory.backend` (`json` / `sqlite` / `auto`, or a plugin factory — see `plugins/amem-memory/` for an A-Mem style example)
+- Plug a different backend via `config.memory.backend` (`json` / `sqlite` / `auto`, or a plugin factory — see `plugins/amem-memory/` for an A-Mem style example). The `sqlite` backend uses Node's built-in `node:sqlite` and requires **Node >= 22.5**; the default `json` backend has no such requirement.
 
 ## 6. Benchmark
 
@@ -65,7 +68,12 @@ node bench/falsify.js                    # judge-falsifiability gate: reference 
 
 ## 7. MCP
 
-PPXANSS ships an MCP server (`ppx-serve` exposes `/mcp`) and can act as an MCP client. Point any MCP-compatible tool at it.
+PPXANS ships an MCP server (`ppx-serve` exposes `/mcp`) and can act as an MCP client. Point any MCP-compatible tool at it.
+
+Two ways to connect:
+
+- **HTTP (Streamable)**: `POST http://127.0.0.1:8899/mcp` (same Bearer token as the HTTP API) — Claude Desktop / Cursor / MCP Inspector work out of the box.
+- **stdio**: `ppx mcp serve` — plug PPXANS into MCP hosts like Claude Code / Cursor without opening a port (`claude mcp add ppx -- ppx mcp serve`). See [`docs/MCP-STDIO.md`](MCP-STDIO.md).
 
 ## Links
 

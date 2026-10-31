@@ -44,8 +44,20 @@ const PROSE_CHECKS = [
   // 2026-10-27: 原正则要求 `工具` 后紧跟 `**`, 而首段总结句写成 `**93 个内置工具 · 护栏 · ...**`
   //   (加粗横跨整句), 于是永远匹配不上 → 静默走"未找到对应句式"分支, 漂了 6 版没被拦。去掉尾部 `**` 即可。
   { key: "tools", re: /\*\*(\d+) 个内置工具/ },
-  { key: "mcp_tools", re: /MCP 共暴露 \*\*(\d+)\*\*/ },
+  // 2026-10-30 (本轮补漏): 上面那条只覆盖"**N 个内置工具**"。README 的工具清单小标题写的是
+  //   `**93 内置工具**（运行时实测…）`(没有"个") —— 同一事实的第二种写法, 闸门匹配不上就静默放行,
+  //   实测漂了 3 个版本(93 vs 96)。同键再加一条只认这种句式的正则, --fix 会一并同步。
+  { key: "tools", re: /\*\*(\d+) 内置工具\*\*/ },
+  // 2026-10-30 (本轮补漏): 历史上的 `MCP 共暴露 **N**` 句式在 README 里已经不存在(那条正则永远匹配不到,
+  //   只会打印"正则需维护")。README 现在写的是 "暴露 86 工具" / "86 工具全量暴露", 实测 /mcp 真实暴露
+  //   118 个、散文漂了 32 而闸门毫无反应 —— 所以按**现有写法**加两条正则; 旧句式若回到 README 再加回来。
+  { key: "mcp_tools", re: /暴露 (\d+) 工具/ },
+  { key: "mcp_tools", re: /(\d+) 工具全量暴露/ },
   { key: "tests", re: /全量测试 \*\*(\d+) 项/ },
+  // 2026-10-30 (本轮补漏): 同一句里还有"通过数" `全量测试 **1830 项 (1826 通过 / 4 网络跳过)**`。
+  //   只同步总数的话, 每加一批测试, 括号里的通过数就静默过期 (实测 1822 项还挂着 1803 通过)。
+  //   捕获组精确包住那个数字, 通用 replace 就能替换到位; 只在 --with-tests 下测量与校验。
+  { key: "tests_pass", re: /\((\d+) 通过/ },
   { key: "skills", re: /技能库 \*\*(\d+) 个/ },
   { key: "core_schema", re: /只把 \*\*(\d+) 个核心工具\*\*/ },
   { key: "ctx_tokens", re: /固定开销 ≈ \*\*(\d+) tok\/请求\*\*/ },
@@ -151,6 +163,10 @@ function measureTests() {
   } catch (e) {
     // 测试有失败时 node 非零退出, execFileSync 抛错, 结果在其 stdout 里
     out = String((e && (e.stdout || e.message)) || "");
+    // 2026-10-31: 此前失败用例名被整个吞掉 —— 门禁只说"1 项失败"却不说哪项,
+    //   flaky 测试无从定位 (实测踩过一次: 全量直跑 5 连绿, 门禁内偶发 1 红)。
+    const bad = out.split("\n").filter((l) => l.startsWith("not ok")).slice(0, 10);
+    if (bad.length) console.error("  [readme-sync] 失败用例 (前 10):\n    " + bad.join("\n    "));
   }
   const grab = (name) => {
     const m = out.match(new RegExp(`^(?:#|\u2139)\\s*${name}\\s+(\\d+)`, "m"));
@@ -182,6 +198,7 @@ try {
 if (WITH_TESTS) {
   const t = measureTests();
   measured.tests = t.tests;
+  measured.tests_pass = t.pass; // 散文括号里的"通过数"(不进锚点, 只用于同步散文)
   if (t.fail == null) {
     console.error("  ✗ 无法解析全量测试结果 (reporter 输出格式变了?)");
     process.exitCode = 1;
@@ -222,7 +239,9 @@ if (FIX) {
   }
   const declaredObj = JSON.parse((next.match(ANCHOR_RE) || [null, "{}"])[1]);
   const merged = { ...declaredObj };
-  for (const k of Object.keys(measured)) if (measured[k] != null) merged[k] = measured[k];
+  // tests_pass 只服务于散文里的括号, 不进机读锚点 (锚点声明的键会被反向检查, 而它仅在
+  //   --with-tests 下可测 —— 写进锚点会让默认闸门报"锚点声明但无实测项")。
+  for (const k of Object.keys(measured)) if (measured[k] != null && k !== "tests_pass") merged[k] = measured[k];
   next = next.replace(ANCHOR_RE, "<!-- readme-sync: " + JSON.stringify(merged) + " -->");
   fs.writeFileSync(README, next, "utf8");
   console.log("  ✓ 已把实测值写回 README (锚点 + 散文数字):");

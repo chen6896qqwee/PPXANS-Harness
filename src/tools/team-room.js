@@ -19,7 +19,7 @@ import fs from "node:fs";
 import { TeamRoom, INBOX_STATUS, SPEAKER } from "../orchestrator/room.js";
 import { resolveExpert, HIGH_RISK_DOMAINS } from "../orchestrator/experts.js";
 import { resolveTeam } from "../orchestrator/teams.js";
-import { roomKey } from "../orchestrator/session-key.js";
+import { roomKey } from "../utils/session-key.js";
 import { debug } from "../utils/logger.js";
 
 const DEFAULT_DISPATCH_TIMEOUT_MS = 180000;
@@ -126,7 +126,7 @@ export function registerTeamRoomTools(catalog, { getAgent = () => null } = {}) {
     capability: { riskLevel: "medium", readOnly: false, destructive: false, sideEffect: "subprocess" },
     category: "orchestration",
     power: "agent",
-    description: "开一个常驻团队房间: 一名主持人 + 至少 2 名成员。成员可写专家包 id / 内置专家 id / 班组名 (班组会展开成其成员)。开完房间后成员进程会被复用, 适合\"这批角色要反复派活\"的场景。房间落盘可跨进程恢复 (在途任务不恢复)。与 spawn_agent 的区别: 那个是一次性委派, 这个是常驻班组。",
+    description: "开一个常驻团队房间: 1 名主持人 + ≥2 名成员 (成员写专家包 id / 专家 id / 班组名, 班组自动展开)。开完成员进程复用, 适合\"这批角色反复派活\"。房间可跨进程恢复 (在途任务不恢复)。与 spawn_agent 的区别: 那个一次性, 这个常驻。",
     parameters: {
       type: "object",
       properties: {

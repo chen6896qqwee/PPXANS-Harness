@@ -11,7 +11,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { TeamRoom, TeamJobTracker, INBOX_STATUS, SPEAKER, composeFollowup } from "../src/orchestrator/room.js";
-import { sessionKeyFor, parseSessionKey, isSessionKey, normalizeSessionKey, withScope, roomKey, parseRoomKey } from "../src/orchestrator/session-key.js";
+import { sessionKeyFor, parseSessionKey, isSessionKey, normalizeSessionKey, withScope, roomKey, parseRoomKey } from "../src/utils/session-key.js";
 import { PPXAgent } from "../src/agent/index.js";
 import { setLevel } from "../src/utils/logger.js";
 

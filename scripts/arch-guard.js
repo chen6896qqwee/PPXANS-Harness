@@ -45,7 +45,9 @@ const LAYERS = {
   review: 2, repomap: 2, selfheal: 2, wiki: 2, hooks: 2, commands: 2, persona: 2,
   // channels 标 L3: 它既提供 HTTP/WebSocket 接入, 也承载 MCP over HTTP (依赖 mcp), 是与
   //   mcp 同层的"对外接入层", 不是被工具层调用的内部设施。
-  tools: 3, orchestrator: 3, services: 3, agent: 3, mode: 3, mcp: 3, channels: 3,
+  // web 标 L3 (2026-10-31 登记): 本体形态 Web API (bot-api/plugin-api/usage-stats), 与 channels
+  //   同为对外接入层; 目前只依赖 utils, 提前登记防止未来盲区 (新模块先登记再谈约束)。
+  tools: 3, orchestrator: 3, services: 3, agent: 3, mode: 3, mcp: 3, channels: 3, web: 3,
   plugin: 4,
 };
 
@@ -182,10 +184,13 @@ if (CHECK && fresh.length) { console.error(`\n  ✗ 新增 ${fresh.length} 条�
 // 2026-10-11 上调 src/utils 1100 → 1400: 实测 1332。增长来自通用基础设施的自然补齐
 //   (代理转发 / 轨迹 / 限流 / 脱敏 / 预写日志), 非业务逻辑塞入; 且 arch-guard 按目录计,
 //   目录内再拆也不减总量, 故显式上调并冻结 —— 再涨须再次决策。
+// 2026-10-31 上调 src/utils 1400 → 1750: 实测 1707。本次是**搬移不是增长** —— 收编
+//   orchestrator/session-key.js (94 行纯函数, 零依赖) 以消除 ans(L2)→orchestrator(L3) 的
+//   新增越层依赖; 全仓总行数不变, 会话键属通用基础设施, utils 是其自然归属。
 const KERNEL_BUDGET = {
   "src/core": 1300,
   "src/plugin": 650,
-  "src/utils": 1400,
+  "src/utils": 1750,
   "src/config": 950,
 };
 function dirLines(dir) {

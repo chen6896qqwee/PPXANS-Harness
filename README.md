@@ -1,70 +1,117 @@
 # 🦐 PPXANS-Harness
 
-<!-- readme-sync: {"tools":96,"skills":67,"core_schema":96,"ctx_tokens":14462,"mcp_tools":118,"tests":1764} -->
-
 **皮皮虾神经系（ANS）+ Harness 一体化智能体内核** —— 纯 Node.js、**零运行时依赖**的可审计自主智能体。
 
-一个会自我修复、自我学习、自主迭代、可审计验证的超级 Agent：**96 个内置工具 · 能力边界护栏 · L0–L4 五层记忆 · SHA-256 审计哈希链 · 标准 MCP 服务端+客户端 · 多模型路由 · 自愈 7/7 · 可验证自改进闭环（self_improve） · 全量测试 **1764 项 (1760 通过 / 4 网络跳过)** · Web UI**。
+一个会自我修复、自我学习、自主迭代、可审计验证的超级 Agent：**98 个内置工具 · 能力边界护栏 · L0–L4 五层记忆 · SHA-256 审计哈希链 · 标准 MCP 服务端+客户端 · 多模型路由 · 自愈 7/7 · 可验证自改进闭环（self_improve） · 全量测试 2044 项 (2040 通过 / 4 网络跳过) · Web UI**。
 
-> ⚠️ 本节数字为 **2026-10-27 实测**（`node --test test/*.test.js`），请勿手改臆测值 —— 改完请重跑并同步本行。
-> 机读锚点由 `node scripts/readme-sync-check.js --fix` 维护，手改会被闸门拦下。
-> 2026-10-25 评估修复轮后全量 0 失败（此前 1 项失败为测试断言过期，已随工具数 113→114 一并修正）；
+> ⚠️ 本节数字为 **2026-10-31 实测**（`node --test test/*.test.js`），请勿手改臆测值 —— 改完请重跑并同步本行。  
+> 机读锚点由 `node scripts/readme-sync-check.js --fix` 维护，手改会被闸门拦下。  
+<!-- readme-sync: {"tools":98,"skills":67,"core_schema":98,"ctx_tokens":14962,"mcp_tools":120,"tests":2044} -->  
+> 2026-10-25 评估修复轮后全量 0 失败（此前 1 项失败为测试断言过期，已随工具数 113→114 一并修正）；  
 > 主干链路（启动 / 对话 / 记忆 / 审计 / 权限 / HTTP / MCP）全量通过。
 
 自带标准 MCP 服务（`POST /mcp`），Claude Desktop / Cursor / 任何 MCP 客户端**开箱即用**；支持各大模型 API + 本地模型，自由回退。
 
-> 🛡️ **自愈基准**：`node scripts/selfheal-bench.js` → **7/7 100%**（发布前门禁，`PPX_MIN_SELFHEAL` 可设阈值）
+> 🌍 **English**: [docs/QUICKSTART-EN.md](docs/QUICKSTART-EN.md) — English quickstart (CLI output and docs beyond the quickstart are currently Chinese-first).
+
+> 🛡️ **自愈基准**：`node scripts/selfheal-bench.js` → **7/7 100%**（发布前门禁，`PPX_MIN_SELFHEAL` 可设阈值）  
 > 🔗 **审计哈希链**：`npm run audit:verify` —— append-only + SHA-256 链式防篡改，篡改/删除可定位到行
+
+---
+
+## 📥 下载安装（普通用户）
+
+从 [GitHub Releases](https://github.com/chen6896qqwee/PPXANS-Harness/releases/latest) 下载单个全量安装包：
+
+**`PPXANS-Harness-Setup-<版本>-x64.exe`**（约 120MB）
+
+- 系统要求：Windows 10/11 x64；**无需预装 Node.js**，运行时已内置
+- 双击安装 → 选择目录 → 完成；默认按当前用户安装，不需要管理员权限
+- 安装后从桌面/开始菜单“皮皮虾”启动，首次运行按向导填入模型 API Key
+- 程序与用户数据分离：程序在 `%LOCALAPPDATA%\Programs\PPXANS-Harness`，会话/记忆/审计在 `%LOCALAPPDATA%\PPXANS-Harness-Desktop`；卸载程序不会删除用户数据
+- 卸载：Windows 设置 → 应用 → “皮皮虾 (PPXANS-Harness)”，或开始菜单里的 Uninstall
+
+**校验安装包**（Release 同时提供 `SHA256SUMS.txt`）：
+
+```powershell
+certutil -hashfile PPXANS-Harness-Setup-4.0.0-x64.exe SHA256
+```
+
+> 当前安装包未做代码签名，首次运行 Windows SmartScreen 可能提示“未知发布者”，  
+> 选择“更多信息 → 仍要运行”即可。校验和与源码可直接对照，介意者建议自行从源码构建。  
+> 没有身份核验证书就无法生成受信任签名；免费开源签名（SignPath Foundation）、  
+> OV 证书与自签测试的取舍见 [docs/SIGNING.md](docs/SIGNING.md)。  
+> **Code signing policy**：[CODE\_SIGNING\_POLICY.md](CODE_SIGNING_POLICY.md)  
+> （签名范围、团队角色与隐私说明；当前发布物未签名）。
+
+**其他平台**（macOS / Linux）：安装包由 CI 在对应平台构建，同样在
+[Releases](https://github.com/chen6896qqwee/PPXANS-Harness/releases/latest) 下载 ——
+macOS 提供 `.dmg/.zip`（Intel 与 Apple Silicon），Linux 提供 `.AppImage/.deb`。
+两者均未签名：macOS 首次打开需右键 →“打开”，Linux AppImage 需先 `chmod +x`。
+也可以直接用源码运行（零运行时依赖）：`npm ci && npm start`。
+
+**从源码构建**：Node.js ≥ 20（推荐 22 LTS）
+
+```bash
+npm ci
+npm run desktop:pack     # → dist-desktop/PPXANS-Harness-Setup-<版本>-x64.exe + SHA256SUMS.txt
+```
+
+发布流程、签名与第三方许可见 [docs/PACKAGING.md](docs/PACKAGING.md)、  
+[docs/SIGNING.md](docs/SIGNING.md) 与 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
 
 ---
 
 ## ✨ 核心特性
 
-| 能力 | 说明 |
-|------|------|
-| 🧠 **五层记忆 L0–L4** | L0 对话 → L1 原子（高斯衰减）→ L2 场景 → L3 画像 → L4 程序性（技能/流程，衰减仅 L1 的 1/4）；语义检索开箱即用（内置零依赖哈希向量兜底 + 向量落盘缓存，配云端 embedding 自动切换） |
-| 🧹 **记忆治理** | 软删可回滚 + 版本链 + TTL 归并 + 按层清理 + 导出/导入迁移 |
-| 🔗 **审计哈希链** | 工具调用 append-only 账本 + SHA-256 链式防篡改 + HMAC 链外密钥锚点（防"整链重算"伪造，密钥不落数据目录），篡改/删除定位到行，可隔离重放 |
-| 🛡️ **权限安全** | AskForApproval 四档审批 + SandboxPolicy 沙箱（工作区写含 realpath 符号链接复核）+ 命令守卫三层防线（shell 结构化解析：命令替换硬拦 / 逐段 argv0 白名单）+ SSRF 防护 + fail-open 钩子栅栏 |
-| 🩺 **自我修复** | 启动体检、损坏 JSON 修复、崩溃恢复、残留清理（自愈 7/7） |
-| 🔄 **自主迭代** | 可验证自改进闭环：失败测试 → LLM 诊断 → SEARCH/REPLACE 补丁 → 快照落盘 → 重跑验证 → 绿保留/红回滚（`self_improve` 工具 + `npm run selfiterate`，默认 propose 只出补丁，apply 需双重确认，全程审计链留痕） |
-| 🖥️ **本体形态 Web UI（2026-10-27）** | 前端以「常驻本体」为中心，不再以「会话列表」为中心：**本体首页**（类型卡 / 已有本体 / 三态状态灯）· **对话页**（对话·轨迹双页签，轨迹可按天回翻，合并工具调用与结构化事件两路来源）· **设置页**（运行状态 / 身份与头像 / 工作区 / 规则 / 后台执行 / 晨间简报 / 日程 / 限额 / 自主时间 / 权限 / 记忆 / 服务）。档案落 `data/bots/profile.json` —— 人肉可编辑；写坏自动退回默认并留 `.broken` 副本。接口 `/api/bot.state` 一次取全首屏，`/api/bot.manage` 单入口写、动作白名单 |
-| 🪄 **自改代码（2026-10-27）** | 皮皮虾改自己的源码：SEARCH/REPLACE 补丁 → 边界校验 → 原子落盘 → 三关验证（语法/行为/边界）→ 绿保留/红整体回滚 → 记账 → 待生效清单。`self_edit` / `self_verify` / `self_rewind` / `self_ledger` 四个工具，账本 `data/selfcode/ledger.jsonl` append-only、改动前备份可回滚，默认 propose 只出 diff，apply 需 config 双开。ESM 无热替换，改完需重启才生效 —— 这段边界写在回执里，不谎称已生效 |
-| 🧬 **持续进化循环** | 每日自主进化编排：弱点聚类定向学习（同类故障病历 ≥N 先治）→ 失败沉淀经验/成功沉淀技能 → 代码自改进 → 进化度量落账 journal（`evolution_loop` 配置 + `npm run evolve:loop` + `evolution_status` 工具随时查看能力快照/弱点/进化曲线，「变强」有账可查） |
-| 📚 **自我学习** | 经验库 + 画像/人格提炼 + refine 失败轨迹闭环 + refineSkill 成功沉淀技能；经验自动沉淀语境 Playbook（进化闭环），失败自动写故障病历并反哺提炼 |
-| 🤖 **多 Agent 军团** | 多进程并行 + DAG 编排 + legion 模式 + spawn_agent 自主协作（并行/差异化视角/仲裁聚合/SDD 审查循环），编排超时可配（`agent.legion.timeoutMs`） |
-| 🔌 **多渠道接入** | HTTP + 飞书（官方 encrypt_key 事件解密 + 签名校验 + 防重放）+ 微信（加解密 + 主动推送 + 加密回包） |
-| 📄 **文档 + RAG + OCR** | read_document（txt/md/pdf/html）+ ingest_document 分块入库 + ocr_image（本地 tesseract / 云回退） |
-| 💬 **CLI 交互** | readline 历史 + /stop 中断 + /reset 清会话 + Ctrl+C 单次中断 |
-| 🧩 **MCP 客户端 + 服务端** | 零依赖 MCP 客户端（stdio + HTTP Streamable）接外部工具；`POST /mcp` 暴露 86 工具 + 记忆/轨迹/统计/会话资源 + 方法型 prompts + ppx.* 管理工具 |
-| ✅ **任务面板** | 任务队列 + 步骤状态推进 + 结果回填 + 技能模板 |
-| ✅ **可观测** | 工具轨迹 JSONL + 结构化事件流（traceId 贯穿）+ tool call result 大摘要 |
-| ✅ **场景系统** | 灵魂文件式场景，命中自动切换行为 |
-| ✅ **流式输出** | SSE 逐字流式（含工具轮次：增量 tool_call 累积，文本实时可见）+ Web UI 实时渲染；同会话并发互斥、/rewind 会话回卷（fork 分支） |
-| 🔐 **HTTP 认证** | Bearer Token，未配置自动生成随机 token 持久化 |
+| 能力                                        | 说明                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 🧠 **五层记忆 L0–L4**                         | L0 对话 → L1 原子（高斯衰减）→ L2 场景 → L3 画像 → L4 程序性（技能/流程，衰减仅 L1 的 1/4）；语义检索开箱即用（内置零依赖哈希向量兜底 + 向量落盘缓存，配云端 embedding 自动切换）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| 🧹 **记忆治理**                               | 软删可回滚 + 版本链 + TTL 归并 + 按层清理 + 导出/导入迁移                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| 🔗 **审计哈希链**                              | 工具调用 append-only 账本 + SHA-256 链式防篡改 + HMAC 链外密钥锚点（防"整链重算"伪造，密钥不落数据目录），篡改/删除定位到行，可隔离重放                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| 🛡️ **权限安全**                              | AskForApproval 四档审批 + SandboxPolicy 沙箱（工作区写含 realpath 符号链接复核）+ 命令守卫三层防线（shell 结构化解析：命令替换硬拦 / 逐段 argv0 白名单）+ SSRF 防护 + fail-open 钩子栅栏                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| 🩺 **自我修复**                               | 启动体检、损坏 JSON 修复、崩溃恢复、残留清理（自愈 7/7）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| 🔄 **自主迭代**                               | 可验证自改进闭环：失败测试 → LLM 诊断 → SEARCH/REPLACE 补丁 → 快照落盘 → 重跑验证 → 绿保留/红回滚（`self_improve` 工具 + `npm run selfiterate`，默认 propose 只出补丁，apply 需双重确认，全程审计链留痕）                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| 🖥️ **本体形态 Web UI（2026-10-27）**           | 前端以「常驻本体」为中心，不再以「会话列表」为中心：**本体首页**（类型卡 / 已有本体 / 三态状态灯）· **对话页**（对话·轨迹双页签，轨迹可按天回翻，合并工具调用与结构化事件两路来源）· **设置页**（运行状态 / 身份与头像 / 工作区 / 规则 / 后台执行 / 晨间简报 / 日程 / 限额 / 自主时间 / 权限 / 记忆 / 服务）。档案落 `data/bots/profile.json` —— 人肉可编辑；写坏自动退回默认并留 `.broken` 副本。接口 `/api/bot.state` 一次取全首屏，`/api/bot.manage` 单入口写、动作白名单                                                                                                                                                                                                                                                                                                 |
+| 🫀 **身体：痛觉 / 记忆 / 工作内存 / 体征（2026-10-30）** | 四样以前没有的东西。**痛觉**：`npm run taskbench:offline` —— 20 个确定性判分任务 + 脚本化计划回放真实工具循环，离线零 LLM，量的是"harness 能不能把正确计划执行成结果"（现状 20/20，3.9s；首跑就抓出免疫闸门错误文案不可行动）。**记忆质量**：探针拆 dev/holdout 两套（只调 dev、只认 holdout，防对着考卷改答案），靠 40+ 概念簇 + 三路加权融合把 holdout recall@3 从 87% 提到 **100%**、dev 从 47% 提到 **93%**；BM25 与 256 维哈希向量**都是字面信号**，概念路是那条缺的语义桥。**工作内存**：`task_stack` 跨轮任务栈（落 `workstack.json`，上限 8 条，空栈零 token，渲染段不含时间戳且只走动态区）。**身体**：侧栏左上角入口 → 简笔躯干 + 四个器官点，状态靠**呼吸节奏**传达（ok 慢/ warn 快 / bad 急促抖动 / **unknown 不动 = 没量过**）；一句话判断按"先说坏的、再说没测的"排；每张卡给体感文案（"15 句换个说法全认得出"）而不是只给百分比；趋势 <2 个点不画线。没跑过一律 `unknown` 并给出怎么跑，**不编健康值** |
+| 🪄 **自改代码（2026-10-27）**                   | 皮皮虾改自己的源码：SEARCH/REPLACE 补丁 → 边界校验 → 原子落盘 → 三关验证（语法/行为/边界）→ 绿保留/红整体回滚 → 记账 → 待生效清单。`self_edit` / `self_verify` / `self_rewind` / `self_ledger` 四个工具，账本 `data/selfcode/ledger.jsonl` append-only、改动前备份可回滚，默认 propose 只出 diff，apply 需 config 双开。ESM 无热替换，改完需重启才生效 —— 这段边界写在回执里，不谎称已生效                                                                                                                                                                                                                                                                                                                      |
+| ⚡ **事件驱动 Trigger/Thread + Watchdog（2026-10-31）** | 对照 DeepSeek《Super-agent 设计探索》一期落地（[docs/SUPERAGENT-GAP.md](docs/SUPERAGENT-GAP.md)）：**Trigger 结构化事件** —— 渠道入站不再退化成裸字符串，飞书完整读出 chat_id/root_id/parent_id/message_id 构造 Trigger（来源/群组/话题/发送者）；**Thread 会话归组** —— 复用四段式会话键，每群/每话题独立会话（互斥+记忆分区白拿），`session_mapping:"shared"` 可回退旧行为；**两级过滤** —— 程序级 Fast Path（渠道/群/发送者黑白名单，deny 恒胜，`mode:"all"` 行为不变）+ 可选 LLM 语义 Slow Path（fail-open）；**结果回投** —— broadcast meta 随 delivery WAL 持久透传；**Watchdog 控制回路** —— 独立定时心跳会话（`agent.watchdog`，默认 30min），看 SQ 死轮/工作栈阻塞/故障病历头部，首行 OK/WARN/CRIT 分级，异常才广播，全量落账 `data/evolve/watchdog.jsonl`；**并发治理接线** —— Legion 挂上 ConcurrencyGovernor（`spawnAgents` 走配额，spawn 不再绕过治理）。二期（订阅直通/Router 批处理/链式召回）路线见差距文档 |
+| 🧬 **持续进化循环**                             | 每日自主进化编排：弱点聚类定向学习（同类故障病历 ≥N 先治）→ 失败沉淀经验/成功沉淀技能 → 代码自改进 → 进化度量落账 journal（`evolution_loop` 配置 + `npm run evolve:loop` + `evolution_status` 工具随时查看能力快照/弱点/进化曲线，「变强」有账可查）                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| 📚 **自我学习**                               | 经验库 + 画像/人格提炼 + refine 失败轨迹闭环 + refineSkill 成功沉淀技能；经验自动沉淀语境 Playbook（进化闭环），失败自动写故障病历并反哺提炼                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| 🤖 **多 Agent 军团**                         | 多进程并行 + DAG 编排 + legion 模式 + spawn_agent 自主协作（并行/差异化视角/仲裁聚合/SDD 审查循环），编排超时可配（`agent.legion.timeoutMs`）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| 🔌 **多渠道接入**                              | HTTP + 飞书（官方 encrypt_key 事件解密 + 签名校验 + 防重放）+ 微信（加解密 + 主动推送 + 加密回包）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| 📄 **文档 + RAG + OCR**                     | read_document（txt/md/pdf/html）+ ingest_document 分块入库 + ocr_image（本地 tesseract / 云回退）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| 💬 **CLI 交互**                             | readline 历史 + /stop 中断 + /reset 清会话 + Ctrl+C 单次中断                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| 🧩 **MCP 客户端 + 服务端**                      | 零依赖 MCP 客户端（stdio + HTTP Streamable）接外部工具；`POST /mcp` 暴露 120 工具 + 记忆/轨迹/统计/会话资源 + 方法型 prompts + ppx.* 管理工具                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ✅ **任务面板**                                | 任务队列 + 步骤状态推进 + 结果回填 + 技能模板                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ✅ **可观测**                                 | 工具轨迹 JSONL + 结构化事件流（traceId 贯穿）+ tool call result 大摘要                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ✅ **场景系统**                                | 灵魂文件式场景，命中自动切换行为                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| ✅ **流式输出**                                | SSE 逐字流式（含工具轮次：增量 tool_call 累积，文本实时可见）+ Web UI 实时渲染；同会话并发互斥、/rewind 会话回卷（fork 分支）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| 🔐 **HTTP 认证**                            | Bearer Token，未配置自动生成随机 token 持久化                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 
-**93 内置工具**（运行时实测，含 MCP 动态注册）：
-- **48 内置**：文件/命令/搜索/HTTP/定时/记忆（读图/检索/入库）/文档（加载/OCR/入库）/场景/技能（加载/创建/提炼）/重构 refine /子 agent spawn + 治理运维（repo_map/apply_patch/review_code/goal_board/audit_verify/persona/selfheal_run/self_improve 等）
-- **22 × ppx.**\***：** chat.send/stream、sessions.\*、providers.(list/add/update/delete/test/reorder)、settings.get/update、task.(templates/create/list/update/step/delete/run)、session.reset
+**98 内置工具**（运行时实测，含 MCP 动态注册）：
+
+- **76 内置**：文件/命令/搜索/HTTP/定时/记忆（读图/检索/入库，L1 事实 + L4 程序性记忆）/文档（加载/OCR/入库）/场景/技能（加载/创建/提炼）/重构 refine /子 agent spawn + 治理运维（repo_map/apply_patch/review_code/goal_board/audit_verify/persona/selfheal_run/self_improve 等）
+- **22 × ppx.*****：** chat.send/stream、sessions.*、providers.(list/add/update/delete/test/reorder)、settings.get/update、task.(templates/create/list/update/step/delete/run)、session.reset
 
 ---
 
-## v3.0 架构（codex 对齐）
+## 架构（v3.0 引入 codex 对齐, v4.0.0 沿用）
 
 v3.0 引入 codex 的 **EQ 事件流 + SQ 在轮账本 + Turn 模型**（详见 docs/ARCHITECTURE-V3.md §三·六），把权限、钩子、编辑、审查、证据能力**分层独立为可替换模块**，并重制零依赖 Web UI：
 
-| 模块 | 出处 | 能力 |
-|------|------|------|
-| `protocol/` | codex | **EQ 事件流为主出口 + SQ 在轮账本**：EQ(WAL) 落盘结构化事件经 `/events` SSE 桥外发（TURN_\*/APPROVAL_\*/TOOL_CALLED/TOOL_OUTPUT 经 callId 配对）；SQ 承载在轮 USER_TURN op 与 INTERRUPT 控制 op（TTL 防腐烂，`/health` 可观测）。Turn 投影层（Session→Task→Turn 状态机）随轮更新，重启后 WAL seq 续读不撞号 |
-| `permissions/` | codex + opencode + CASDK | **三合一权限引擎**：AskForApproval 四档 + SandboxPolicy 三档 + 通配符规则链(last-match-wins) + canUseTool 回调 + Bash/Edit/Plan 审批模板 |
-| `hooks/` | claude-code | **六事件钩子链**：PreToolUse(可否决/改参) / PostToolUse / PreCompact / SessionStart/Stop / SubagentStop，超时熔断，纯 JS |
-| `edit/` | aider | **SEARCH/REPLACE 编辑块**（多候选/空白容错/失败回灌修复）+ 编辑前快照逐文件回滚 |
-| `repomap/` | aider | **仓库地图**：def/ref 提取 → 引用图 → PageRank → token 预算内渲染，缓存 30s |
-| `review/` | 分级审查流水线 | plan→group→review→relocate→filter，输出 P0/P1/P2 静态规则报告 |
-| `evidence/` | oh-my-hermes | **证据边界**：prepared/observed 双层标记 + handoff manifest(哈希) + 目标看板 |
-| `commands/` | claude-code | **斜杠命令统一模型**：内置 /init /plan /review /compact /new /resume /model /status /memory /skills /goal，用户命令从 `.ppx/commands/*.md` 加载 |
+| 模块             | 出处                       | 能力                                                                                                                                                                                                                                         |
+| -------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `protocol/`    | codex                    | **EQ 事件流为主出口 + SQ 在轮账本**：EQ(WAL) 落盘结构化事件经 `/events` SSE 桥外发（TURN\_\*/APPROVAL\_\*/TOOL_CALLED/TOOL_OUTPUT 经 callId 配对）；SQ 承载在轮 USER_TURN op 与 INTERRUPT 控制 op（TTL 防腐烂，`/health` 可观测）。Turn 投影层（Session→Task→Turn 状态机）随轮更新，重启后 WAL seq 续读不撞号 |
+| `permissions/` | codex + opencode + CASDK | **三合一权限引擎**：AskForApproval 四档 + SandboxPolicy 三档 + 通配符规则链(last-match-wins) + canUseTool 回调 + Bash/Edit/Plan 审批模板                                                                                                                           |
+| `hooks/`       | claude-code              | **六事件钩子链**：PreToolUse(可否决/改参) / PostToolUse / PreCompact / SessionStart/Stop / SubagentStop，超时熔断，纯 JS                                                                                                                                      |
+| `edit/`        | aider                    | **SEARCH/REPLACE 编辑块**（多候选/空白容错/失败回灌修复）+ 编辑前快照逐文件回滚                                                                                                                                                                                        |
+| `repomap/`     | aider                    | **仓库地图**：def/ref 提取 → 引用图 → PageRank → token 预算内渲染，缓存 30s                                                                                                                                                                                  |
+| `review/`      | 分级审查流水线                  | plan→group→review→relocate→filter，输出 P0/P1/P2 静态规则报告                                                                                                                                                                                       |
+| `evidence/`    | oh-my-hermes             | **证据边界**：prepared/observed 双层标记 + handoff manifest(哈希) + 目标看板                                                                                                                                                                              |
+| `commands/`    | claude-code              | **斜杠命令统一模型**：内置 /init /plan /review /compact /new /resume /model /status /memory /skills /goal，用户命令从 `.ppx/commands/*.md` 加载                                                                                                               |
 
-> **集成现状**：上述 9 模块中 8 个已装配进运行时（`plugin/v3.js` + `tools/v3.js`，MCP 实测可调）；`session/`（Turn/Rollout/Parts）为 standalone 模块随包保留、有完整单测，但尚未接入主链路，待 v3.1 集成。钩子链 7 个事件（PreToolUse/PostToolUse/PreCompact/PostCompact/SessionStart/SessionStop/SubagentStop）已全部接入 emit 点；语境 Playbook 已形成"经验 → delta → 门禁 → 注入"完整闭环（`evolve/delta-producer.js`）。
+> **集成现状**：上述 9 模块中 8 个已装配进运行时（`plugin/v3.js` + `tools/v3.js`，MCP 实测可调）；`session/` 的 **TurnProjection 投影层已接入主链路**（`agent/index.js` 每轮 begin/end + SQ/EQ 推 TURN\_* 事件），`turn.js` / `rollout.js` / `parts.js` 作为 standalone 模块随包保留、有完整单测，待 v3.1 集成。钩子链 7 个事件（PreToolUse/PostToolUse/PreCompact/PostCompact/SessionStart/SessionStop/SubagentStop）已全部接入 emit 点；语境 Playbook 已形成"经验 → delta → 门禁 → 注入"完整闭环（`evolve/delta-producer.js`）。
 
 **Web UI（本体形态, `public/` 零依赖重制，2026-10-27 换骨）**：主区域三层视图（本体首页 / 对话·轨迹 / 设置），侧栏是本体条目 + 会话·空间·任务·能力，抽屉保留文件树、模型配置、目标看板、审查报告与运行时设置；对话页仍是三栏事件时间线（用户/agent/工具卡/审批卡/计划卡/diff卡）+ 斜杠命令面板 + 审批卡三类模板 + 工作区 Tab（文件树/目标看板/审查报告/设置）+ 子 agent 彩色徽标 + `@` 引用文件 + Esc 中断 + 亮暗主题。
 
@@ -83,28 +130,48 @@ ppx-setup --provider deepseek --key sk-xxx                 # 或一条命令 (--
 # 2. 直接用 (一发即走, 直答退出):
 ppx "帮我看看这个仓库的结构"
 
+# 卡住/不确定配置对不对时先体检 (离线逐项检查; 加 --net 多发一条最小请求探模型连通):
+ppx doctor
+
 # 3. 或起整个 Web 应用 (内核+界面同进程同端口, 自动开浏览器):
 npm start                          # → http://127.0.0.1:8899
 # 等价: node bin/ppx-web.js [--port 9000] [--host 0.0.0.0] [--no-open] [--root D:/ws]
 ```
 
-> 零配置也能启动 —— 离线记忆模式下皮皮虾照常运行 (记忆/文件/技能), 只是缺对话模型;
+> 零配置也能启动 —— 离线记忆模式下皮皮虾照常运行 (记忆/文件/技能), 只是缺对话模型;  
 > Web 首页会显示「配置模型」按钮, 点进去 1 分钟配好。
+
+### 桌面端 · 原生窗口 (Electron)
+
+```bash
+npm install            # 仅开发/打包需要; 运行时依赖仍是 0
+npm run desktop        # 直接开桌面窗口 (Windows 可双击 启动桌面版.bat)
+
+npm run desktop:pack   # 打包 Windows 全量安装包 + SHA256SUMS.txt → dist-desktop/
+```
+
+窗口内还是同一套 Web UI 与内核, 但有了独立任务栏图标、单实例、窗口状态记忆与桌面快捷方式。  
+打包版首次启动会把内置代码播种到 `%LOCALAPPDATA%\PPXANS-Harness-Desktop\workspace` (自改代码需要可写根目录), 升级不覆盖工作副本。  
+细节与排障见 [docs/DESKTOP.md](docs/DESKTOP.md)。
 
 **其他启动方式**
 
 ```bash
 npm run chat          # 终端对话 CLI (ppx / ppxans)
 npm run serve         # 仅 HTTP 接口 (无界面): http://127.0.0.1:8899
+npm run desktop:edge  # 零 Electron 兜底: Edge App 无边框窗口 (bin/ppx-desktop.js)
 npm run web:check     # Web UI 静态自检 (图标/DOM id/语法解析/静态资源)
 npm test              # 全量测试
 ```
 
-### MCP 标准端点 (Streamable HTTP)
+### MCP 接入 (stdio / HTTP 双形态)
 
-`POST http://127.0.0.1:8899/mcp`（同 Bearer token 鉴权）。任何 MCP 客户端（Claude Desktop / Cursor / MCP Inspector 等）可直接接入：
+**stdio 宿主（2026-10-31 新增）**：`ppx mcp serve` —— Claude Code / ZCode / Cursor 等 MCP 客户端把皮皮虾作为
+stdio 型 MCP 服务器直接接入，无需开端口与 token（`claude mcp add ppx -- ppx mcp serve`），细节见 [docs/MCP-STDIO.md](docs/MCP-STDIO.md)。
 
-- `tools/list` + `tools/call` — 86 工具全量暴露
+**HTTP 端点 (Streamable HTTP)**：`POST http://127.0.0.1:8899/mcp`（同 Bearer token 鉴权）。任何 MCP 客户端（Claude Desktop / Cursor / MCP Inspector 等）可直接接入：
+
+- `tools/list` + `tools/call` — 120 工具全量暴露
 - resources：`memory://` `traces://` `stats://` `sessions://`
 - prompts：`humanize` / `plan` / `debug` / `verify` / `write_article`（方法型技能）
 - `ppx.chat.send` / `ppx.chat.stream`（对话工具，驱动完整工具循环）
@@ -130,10 +197,12 @@ npm test              # 全量测试
 
 ### 前缀缓存优化（可选）
 
-默认 system prompt 会写入工作目录的绝对路径（模型少问路径，进程内前缀缓存不退化）。
-如需跨机器/跨工作目录共享 provider 前缀缓存，可把 `agent.workspace_prompt_mode` 设为 `"neutral"`
-或设置环境变量 `PPX_PROMPT_WORKSPACE_MODE=neutral` —— 此时工作目录段使用稳定占位符，不写绝对路径；
+默认 system prompt 会写入工作目录的绝对路径（模型少问路径，进程内前缀缓存不退化）。  
+如需跨机器/跨工作目录共享 provider 前缀缓存，可把 `agent.workspace_prompt_mode` 设为 `"neutral"`  
+或设置环境变量 `PPX_PROMPT_WORKSPACE_MODE=neutral` —— 此时工作目录段使用稳定占位符，不写绝对路径；  
 模型可通过 `pwd` / `list_dir` 自行确认实际路径。
+
+
 
 ---
 
@@ -193,9 +262,9 @@ npm test              # 全量测试
 
 ```bash
 npm test                # 全量测试
-npm run verify          # 一键本地快检 (12 项, 离线, 无需 LLM; 含功能宣称闸门)
+npm run verify          # 一键本地快检 (14 项, 离线, 无需 LLM; 含离线任务基准与记忆召回闸门)
 npm run verify:full     # 一键快检 + 全量测试
-npm run test:coverage   # 全量测试 + Node 内置覆盖率 (行覆盖 90%+)
+npm run test:coverage   # 全量测试 + Node 内置覆盖率 (行覆盖 89.5%, 门禁 85%)
 npm run coverage:gate   # 覆盖率门禁 (行覆盖 >= 85%, CI 用)
 npm run eval            # 本地能力评测 (7 项, 无需 LLM)
 npm run eval -- --llm   # LLM 端到端评测 (需 provider)
@@ -230,7 +299,7 @@ npm run evolve:loop                     # 手动一轮持续进化: 弱点学习
 
 ---
 
-## 📂 目录结构（v3.0）
+## 📂 目录结构
 
 ```
 PPXANS-Harness/
@@ -238,7 +307,7 @@ PPXANS-Harness/
 ├── src/
 │   ├── agent/      Agent 引擎 (工具循环 + 多模型回退 + v3 插件装配)
 │   ├── protocol/   [v3] EQ 事件流(WAL) + SQ 在轮账本/控制 op
-│   ├── session/    [v3] Turn 状态机 + rollout + parts (standalone, 待 v3.1)
+│   ├── session/    [v3] TurnProjection 已接入主链路; turn/rollout/parts standalone (待 v3.1)
 │   ├── permissions/[v3] 审批 + 沙箱 + 规则链 + canUseTool
 │   ├── hooks/      [v3] 六事件钩子链
 │   ├── edit/       [v3] SR 编辑块 + 快照回滚
@@ -249,21 +318,23 @@ PPXANS-Harness/
 │   ├── evidence/   [v3] 证据边界 + 目标看板 + manifest
 │   ├── commands/   [v3] 斜杠命令统一模型
 │   ├── plugin/     v3.js 五插件装配 (permissions/hooks/commands/evidence/protocol)
-│   ├── tools/      工具系统 (86 个 + v3 工具注册)
+│   ├── tools/      工具系统 (内置工具注册; 运行时实测 98 = 76 内置 + 22 ppx.*)
 │   ├── core/  services/  memory/  audit/  ans/  selfheal/  channels/  orchestrator/  llm/  utils/
 ├── public/         零依赖 Web UI (index.html + app.js 对话/工作台 + bot.js 本体/设置/轨迹 + app.css/bot.css)
 ├── bin/            ppx / ppxans / ppx-web / ppx-serve / ppx-channels 入口
 ├── data/           运行时数据 (不进 git)
 ├── references/     第三方项目来源登记
-├── test/           测试 (1633 项)
-└── docs/           文档 (ARCHITECTURE-V3 / QUICKSTART / web-launch 等)
+├── test/           测试 (2044 项)
+└── docs/           文档 (ARCHITECTURE-V3 / QUICKSTART / QUICKSTART-EN / web-launch 等)
 ```
 
 ---
 
 ## 📄 License
 
-Apache License 2.0
+Apache License 2.0。再分发安装包或修改版时，请保留 [LICENSE](LICENSE)、[NOTICE](NOTICE)、
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)，以及安装目录中的
+`LICENSE.electron.txt` / `LICENSES.chromium.html`。
 
 ## 🙏 架构来源与致谢
 

@@ -40,3 +40,10 @@ uploads/
 
 # 审计链 HMAC 密钥 (2026-10-24): 链外锚点, 绝不进版本库
 .ppx/audit-hmac-key
+
+# 桌面端打包产物 (electron-builder)
+dist-desktop/
+
+# 本地安全探针产物与单人本地启动器 (2026-10-31): 前者是评估期残留, 后者只对这台机器有意义
+sandbox-probe/
+启动桌面版.bat

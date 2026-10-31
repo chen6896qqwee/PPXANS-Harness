@@ -1,3 +1,663 @@
+## 4.0.0 (2026-10-31) · 发布版
+
+> 本版本由 2026-10-30 ~ 10-31 的十七个开发批次汇总而成 (原逐批次标题降为下方小节, 内容未动)。
+> 发布版新增「安全收紧」与「架构」两节 —— 修复三处实测可绕的安全洞, 此前版本从未发布过安装包资产。
+
+### 安全收紧 (发布版) · 三处实测可绕的洞
+- **`/api/bot.manage` 权限旁路封堵** (`src/web/bot-api.js`): 此前 `{action:"permission"}` 直写权限引擎, 拿到 bearer token 的一方可以绕过 `/api/permissions` 的「服务端控制台确认码」双门, 静默切 `danger-full-access`。现与该端点同规: 值合法性 fail-closed; 收紧类变更即时生效; 放宽类变更一律拒绝并指回确认码流程 (提权必须人在场)。rank 表与提权判定抽到 `src/permissions/index.js` (`APPROVAL_RANK` / `SANDBOX_RANK` / `detectEscalations`) 供两端共用。
+- **「写文件 + node 执行」连招拦截** (`src/tools/builtin.js`): 命令守卫 argv0 白名单放行 `node app.js` 形态, 但若脚本是本会话刚由 write_file/append_file/move_file/apply_patch 写出的, 即构成绕过白名单的任意代码执行。现登记会话内被写工具改过的路径 (`sessionWrittenFiles`), `run_command` 执行 node/bun/deno 脚本前比对, 命中即拒 (需人工审批); 会话开始前已存在的脚本不受影响。
+- **read_file 受保护路径** (`src/tools/builtin.js`): read_file 在 TRUSTED_TOOLS 免审批白名单里, 此前可读到审计链 HMAC 密钥 (`.ppx/audit-hmac-key` → 可重算重签整条审计链)、HTTP Bearer token (`data/http-token`)、provider 配置 (`config/ppx.json`)。现对这三类路径一律拒读。已知残留: grep/读文档类工具未收口 (记入下轮)。
+- 回归: `test/bot-api.test.js` +2 用例、`test/session-written-js.test.js` (新)、`test/protected-read.test.js` (新); 全量 2044 项 0 失败。
+
+### 架构
+- `session-key.js` 从 orchestrator 下沉到 utils: 消除 ans(L2)→orchestrator(L3) 新增越层依赖, arch-guard 恢复全绿; `web` 模块首次登记进分层表 (L3)。utils 预算 1400→1750 显式上调 (搬移非增长, 决策记录见 scripts/arch-guard.js 注释)。
+
+### 修复
+- **delivery 队列丢失唤醒** (`src/channels/delivery.js`): "一条重试即将到期 + 另一通道 send 在途"的窗口下, 本轮 drain 的定时器已被清、在途通道的 finally 又未返回, 到期重试将**永远无人唤醒** (channel-delivery WAL 测试偶发超时的根因 —— 全量直跑 5 连绿、门禁内偶发 1 红, 是真 bug 不是测试问题)。drain 现按"未被在途通道占用的最早到期时间"补唤醒定时器。
+- `scripts/readme-sync-check.js`: 全量测试失败时打印失败用例名 (此前只说"N 项失败"不说哪项, flaky 无从定位)。
+
+### 渠道投递队列 (失败重试 + TTL + WAL 续投)
+
+> 队列第七项。此前 ChannelManager.broadcast 是 fire-and-forget: 逐通道 try/catch, 失败只 console.warn —— 飞书/企业微信 API 限流一次、网络抖一下, 主动提醒就永远丢了 (连"丢了"都不可见)。补上可靠投递: 重试/退避/TTL/容量/WAL 续投, 全部可观测。入站回复不排队 (用户在等, 直发)。
+
+### 投递队列 (`src/channels/delivery.js`)
+
+- **失败重试**: 指数退避 (2s → 4s → 8s, 上限 60s), 默认首发 + 3 次重试; 耗尽记终态失败, 最近 10 条失败原因进 `deliveryStats().lastErrors` —— "丢了什么、为什么"可查。
+- **过期与容量**: 入队超 `ttl_ms` (默认 1h) 未投出即丢弃 (提醒过期即噪音, 重试期间也检查); 积压超 `max_queue` (默认 200) 丢最旧。
+- **排队模型**: nextAttemptAt 定时调度 + **按通道分组执行** —— 组内串行 (同通道消息有序, 不并发重发), 组间并行 (某通道 send 挂起不阻塞其它通道的重试周期)。首版单 worker 全局锁被测试逼出真问题: 一个挂起的 send 会冻结整个重试周期 —— 重写为按通道 in-flight 集合。
+- **WAL 续投**: JSONL 落 `<dataDir>/channels/delivery.wal.jsonl` (与 protocol EQ 同款折叠语义): 每次入队/重排追加完整 job 行, 终态追加 done 行; 启动 replay 按 id 折叠, 未完成且未过 TTL 的重新入队, **并把 WAL 重写为仅存活 pending (启动压缩防无限增长)**。manager.stop() 时在途消息留 WAL, 下次启动续投。
+- **接线**: `ChannelManager.start()` 按配置建队列 (agent 无 dataDir 的测试桩退化为纯内存); `broadcast()` 返回入队回执 `[{channel, id, queued}]` 不等发送完成, `delivery.enabled=false` 回退旧同步直发; 新增 `mgr.deliveryStats()`。配置 `channels.delivery.{enabled,retry_max,backoff_ms,ttl_ms,max_queue,wal}` (config-consistency 登记 6 键)。
+
+### 测试
+
+- 全量 **2003 项** (1999 通过 / 4 网络跳过, +11)。新增 `test/channel-delivery.test.js` (11 项: 重试/退避节奏/耗尽终态/无队头阻塞/TTL 拦截/容量丢最旧/同通道有序/WAL 续投×2/manager 集成×3 含 stop 留 WAL 重启续投)。存量 broadcast 测试补 `await mgr.delivery.idle()`。`npm run verify` 14/14, lint 0 error。
+
+---
+
+### 技能优先级反转 (项目 > 用户 > 内置) + 多根接线
+
+> 队列第六项。调研发现两层问题叠着: ① skillRootsFromConfig 顺序是 [builtin, user, project] 而 loader 同 id first-wins —— **内置压住一切**, 与 v2 文档宣称的"用户覆盖内置"直接相反, 用户/项目放同 id 技能形同虚设; ② 更严重的是 agent 主路径 `new SkillLoader(<root>/skills)` 只扫内置单根, 用户级 (~/.ppx/skills) 与项目级技能在技能清单注入 / load_skill / 覆盖率里**根本不可见** (skillRootsFromConfig 只喂了 registry 的 sources 汇报), createSkillLoader 是死导出。本轮一并修正。
+
+### 优先级反转
+
+- **新顺序: 项目级 (.ppx/skills) > 用户级 (~/.ppx/skills) > 内置 (随包) > 附加目录** (extra_dirs 维持最低)。roots 顺序即优先级, loader first-wins 语义不变; 语义与文档 v2 宣称对齐。
+- **默认项目根 `<root>/.ppx/skills`** (与 .ppx/commands 同锚点, 开箱即用); `project_dir: ""` 显式关闭 (与 user_dir 同款三态: 未设=默认 / ""=关 / 值=自定义)。
+- **写入根跟随优先级**: create_skill / refine_skill / 技能导入落到可写根中第一个 (项目根优先, 用户级兜底); **内置根只读** —— 用户产物不写进代码树 (npm 装机时内置根在 node_modules 里, 升级替换包目录即冲掉)。项目里放同 id 技能 = 自然覆盖。
+- **真 bug 顺手修掉**: `_load` 的 per-id meta 缓存只按 sig (mtime+size) 比对, 不认文件身份 —— 多根 first-wins 下同 id 随上层根增删在**不同根的文件间迁移**, 两个根的同尺寸 SKILL.md 写进同一 NTFS 时间戳 tick (粒度 ~16ms, FactStore 修过同款) 会被误判"未变", 迁移后继续返回旧根内容。现在缓存命中同时比对 `hit.file`。
+
+### 接线
+
+- **agent 多根装配**: `this.skills = new SkillLoader({ roots: skillRootsFromConfig(...) })` 与 SkillRegistry 同源一份 (registry.loader === agent.skills 钉死), 覆盖率统计与读路径不再分叉。
+- **toolsPlugin/selfmod 同口径**: 此前 `registerSelfmodTools({ skillsDir: <root>/skills })` 单根 —— list_capabilities / load_skill / search_skills 看不见用户与项目技能。现传全量 roots + writeDir (可写根), 与 agent 同一 skillRootsFromConfig 口径; 旧 skillsDir 入参保留兼容。
+
+### 测试
+
+- 全量 **1992 项** (1988 通过 / 4 网络跳过, +3)。新增 `test/skills-priority.test.js` (3 项: 三根同 id 逐层回落链 / agent 接线 (项目压过内置 + registry 同源) / selfmod 全量可见 + create_skill 落项目可写根)。更新 skills-registry (新顺序 + 默认项目根 + 内置只读 + win32 路径等值比较)、skill-upgrade 与 refine (技能落盘断言移到 .ppx/skills, 并改走 agent 真实 loader —— learningSvc 持有 boot 期引用, 替换 a.skills 的测试缝隙失效)。flaky 根因实证: Windows 父目录 mtime 更新延迟/合并不可预测, 回落链测试改用 invalidate() (mtime 自动探测已有 scan-cache 套件钉住)。`npm run verify` 14/14, lint 0 error (52 警告均为存量)。
+
+---
+
+### 自动更新 (检查 + 提示 + 一条命令升级)
+
+> 队列第五项: 此前版本发布只靠用户手动盯 GitHub Releases / npm —— 装了 3.x 的人永远不会知道 4.0 出了。按分发形态各走各的路: npm 装机一条命令升级, 源码装机打印手动步骤, 桌面装机通知带下载链接 (只提示不代装)。
+
+### 更新检查 (`src/update/index.js`, 零依赖)
+
+- **`ppx update [--check]`** (CLI 早退闸门, 不全家桶启动): npm 装机 → `npm install -g ppxans-harness@<最新版>` 跑完提示重启生效; 源码装机 → 只打印 `git pull` + `npm install` 指引 (**不代跑** —— 源码用户的本地改动不可被覆盖); `--check` 只查不装。检查失败给出代理/镜像配置提示, exit 1。
+- **双通道**: npm 通道查 `registry.npmjs.org/ppxans-harness/latest`, `PPX_UPDATE_REGISTRY` 可换国内镜像 (npmmirror); 桌面通道查 GitHub Releases latest tag。网络统一走 `proxiedFetch` (config.network.proxy / 环境变量 / GitHub 镜像兜底), curl 路径传 `timeoutMs`、原生路径传 `signal` (两者超时口径都要给, 实测 curlFetch 不认 signal)。
+- **TTL 缓存**: 结果落 `<dataDir>/update-check.json` 默认 24h 一次; 坏 JSON 当无缓存回源; `force` 绕过。启动通知 fire-and-forget 非阻塞, 网络失败静默不打扰对话; `PPX_UPDATE_CHECK=0` 关闭启动通知与 doctor 检查, **不影响显式 `ppx update`**。
+- **版本串卫生**: 远端返回先过 semver 形状校验 (`sanitizeVersion`) 再进比较/展示; `compareSemver` 按 semver 规约含 prerelease 排序 (数字段数值比, `4.1.0-beta.1 < 4.1.0`)。
+- **装机形态判据**: 代码在 node_modules 里 = npm 装机 (与 datadir 外置逻辑同判据), 否则源码。
+- **doctor --net**: 新增"版本"一项, 显示最新版或"已是最新" —— 只提示, 不算体检失败项 (有新版不是未过)。
+- **桌面端** (electron/main.js): 打包版启动后查 GitHub Releases, 有新版弹系统通知点击进下载页。只提示不代装: 安装包未签名时静默自装撞 SmartScreen, 且 electron-updater 是重依赖 (零依赖红线); dev 源码版不检查 (走 git)。
+
+### 测试
+
+- 全量 **1989 项** (1985 通过 / 4 网络跳过, +14)。新增 `test/update-check.test.js` (14 项: semver 比较含 prerelease/版本串卫生/装机形态/TTL 缓存与坏缓存容忍/网络失败永不 throw/双通道 URL 与镜像覆盖/应用计划/通知文案 + CLI 子进程 e2e×2 —— 本地假 registry 零真实网络)。`npm run verify` 14/14, lint 0 error。
+
+---
+
+### hooks 用户配置格式 (claude-code settings.json 对齐)
+
+> 队列第四项: 钩子链此前只能代码注册 (安全闸/记账/任务指针全是内置), 用户没有任何配置入口 —— "吸收 claude-code 六事件"只吸收了一半 (事件模型有、用户可编程性无)。现在补上配置格式: 命令钩子写进 config 即参与 PreToolUse 否决/改参与 PostToolUse 附加上下文。
+
+### 配置钩子
+
+- **格式** (config/ppx.json 顶层 `hooks` 键, claude-code settings.json 同形): `hooks.<Event>[] = { matcher, hooks: [{ type:"command", command, timeout, fail_closed }] }`。事件名同内置七事件; `matcher` 为工具名整词正则 (仅工具事件有意义); `timeout` 秒 (默认 10, 钳位 120); `fail_closed` 仅 PreToolUse 生效 (故障=拒绝, 与安全钩子同口径)。
+- **执行契约**: 命令经 shell 执行 (cwd=项目根, env 注入 `PPX_PROJECT_DIR`); 载荷 JSON 从 **stdin** 喂入 `{ hook_event_name, tool_name, tool_input, tool_result, cwd, ...原始 payload }` —— 模型数据不走 argv, 命令串不经模型之手, 无注入面。退出码 0: stdout 可选 JSON —— `{"decision":"block","reason"}` 否决 / `{"args":{...}}` 改参 (链式传递) / PostToolUse `{"additionalContext"}` 进上下文; 非 JSON stdout=放行。退出码 2: blocking error (stderr 作否决理由)。其它退出码/超时: 记错误默认放行, `fail_closed` 时拒绝。
+- **实现卫生**: 新增 `src/hooks/user-hooks.js` (解析/校验/执行/注册四段, `runFn` 依赖注入可单测); 接线在 `hooksPlugin` (装配期注册, 失败不阻断启动); agent 消费点零改动 (否决/改参/additionalContext 三条闭环 2026-10-31 已就绪, 直通复用)。用户钩子 priority 200 排在系统钩子 (100) 之后 —— 安全闸先行。
+- **Windows 陷阱实录**: 手拼 `["cmd.exe", ["/c", cmd]]` 数组形式会被引号转义规则绞碎 —— 实测 `node -e "..."` 内层引号丢失后 node 进 REPL, stdin EOF 即 exit 0 **静默放行**。改走 spawn `shell:true` 规范路径 (cmd /d /s /c + verbatim), `node -e` 端到端用例钉住。
+- **两级来源与信任模型**: ① 引擎配置 (config/ppx.json / npm 装机 ~/.ppx/config.json) 的 hooks = 用户自己写的, 与 `api_key_cmd` 同信任级, 默认生效; ② 项目级 `.ppx/settings.json` 的 hooks 随仓库分发 = **不可信输入, 默认不加载** —— 仅当项目根在 `hooks.trust_project_roots` 白名单 (引擎配置里, 仓库改不了自己) 才注册, 未信任时启动日志显式说明。残余风险 (信任后仓库仍可改钩子内容) 在 CONFIG.md 明示。
+- **fail-visible**: 未知事件名/非法正则/空 command/超限 timeout 逐条告警不静默; `timeout` 钳位时说明钳到多少。
+
+### 测试
+
+- 全量 **1975 项** (1971 通过 / 4 网络跳过, +18)。新增 `test/user-hooks.test.js` (18 项: 格式校验 fail-visible/matcher 语义/stdin 载荷/退出码契约/fail_closed 钳位/项目白名单制含 win32 大小写不敏感/priority 次序/改参与 additionalContext 直通/真实 spawn 端到端×2)。config-consistency 注册 `hooks.trust_project_roots` 消费点。`npm run verify` 14/14, lint 0 error (52 警告均为存量)。
+
+---
+
+### MCP stdio 宿主 + tools/list 真分页
+
+> P1 第三项: 任何 MCP 客户端 (Claude Code / ZCode / Cursor) 可把皮皮虾作为 stdio 型 MCP 服务器直接接入 —— 不用开端口, 不用 token。
+
+### MCP
+
+- **stdio 宿主 `ppx mcp serve`**（新增 `src/mcp-stdio.js` + `bin/ppx-mcp.js` + npm 脚本 `mcp:serve` + CLI 路由）：JSON-RPC 2.0 over stdio 逐行分帧; `claude mcp add ppx -- ppx mcp serve` 即接入。**stdout 协议纯净** —— 进程内所有日志（含 agent 启动噪音）自动改道 stderr（实测 boot 期 stdout 零非 JSON 行）。带 `progressToken` 的流式工具调用走与 HTTP 传输同款的 `notifications/progress` + `notifications/message` 契约。客户端关闭 stdin → `agent.shutdown()` 后退出, 不留孤儿。
+- **架构卫生**: 宿主首版放 `src/mcp/` 被架构守卫拦下 —— agent → mcp（既有）+ mcp → agent 成环; 挪到 src 根层组合入口（与 server.js 同级）, 环消除。
+- **tools/list 真分页**（`src/mcp/server.js` + 客户端 `src/mcp/client.js`）：此前是占位实现（单页全量, cursor 非空仅回 `nextCursor:null`）。现在 cursor = base64url(偏移) 按页翻, 每页默认 128（现状 120+ 工具单页装满 → 不发烧游标, 存量客户端零感知）; 非法 cursor → INVALID_PARAMS; 越界 cursor → 空页不炸; 末页不发 nextCursor（官方客户端终止信号）。自有客户端 listTools 按 nextCursor 翻页聚合（50 页上限防死循环）。
+- **接入文档**: `docs/MCP-STDIO.md`（Claude Code / .mcp.json / Inspector 三种接法 + 与 HTTP 端点取舍表）; README MCP 段落改双形态。
+
+### 测试
+
+- 全量 **1957 项**（1953 通过 / 4 网络跳过, +8）。新增 `test/mcp-pagination-stdio.test.js`（分页翻页/单页零游标/非法与越界 cursor/legacy 回归/客户端聚合/stdio 端到端 initialize+tools/list+坏行 Parse error/通知不回响应）。
+
+---
+
+### estimateTokens 自校准 (usage 反馈闭环)
+
+> P1 第二项: 启发式 token 估算收敛到当前模型的真实 tokenizer 口径 —— compaction 触发点/历史预算/system 预算的精度都吃这个估算。
+
+### 校准
+
+- **EWMA 校准器**（新增 `src/utils/token-calibration.js`，接线 `src/agent/index.js` 记账点）：上游返回真值 `usage.completion_tokens` 且回复是**纯文本**（tool_calls 的 JSON 参数计入 completion 但不走文本估算路径，混入会失真）时，用「真值 / `estimateTokensBase` 基础估算」喂 EWMA；`estimateTokens` 内置启发式路径乘上系数。
+- **保护带**: 比值离群闸 [0.2, 5]（截断/异常计费直接丢弃）；<3 样本不生效（单样本噪声）；系数钳位 [0.5, 2.5]（保留"宁高估勿低估"的保守方向）；EWMA 80/20 平滑（偶发样本只挪 20%）。
+- **纯度契约**: `estimateTokensBase` 恒为纯启发式（校准采样的分母），永不被系数污染；用户注入真 tokenizer（`setTokenEstimator`）的路径不乘系数（不扭曲真值）。零持久化 —— 重启后 ~3 次调用重新收敛。
+- **架构卫生**: 首版放在 `src/llm/` 被架构守卫拦下（utils/ 不得依赖 llm/ 越层）—— 挪到 `src/utils/` 同层消费。
+
+### 测试
+
+- 全量 **1949 项**（1945 通过 / 4 网络跳过, +9）。新增 `test/token-calibration.test.js`（收敛闸/离群闸/钳位/EWMA 平滑/base 纯度/真 tokenizer 豁免）。
+
+---
+
+### Docker 容器沙箱 (shell seam 落地)
+
+> P1 第一项: 命令执行的"执行前判定"补上"执行期隔离" —— 对标 OpenClaw 的容器隔离 / codex 的 OS 级沙箱。
+
+### 沙箱
+
+- **DockerShellProvider**（`src/seam/shell.js` + `src/plugin/builtin.js` 接线）：`security.shell_provider="docker"` 时 `run_command` 在一次性容器内执行。动机: 命令守卫 + 路径校验都是执行前判定, 放行后命令以完整用户权限跑在宿主 shell（`write_file` 写 payload.js 再 `node payload.js` 双双放行 = 等价任意代码执行）—— 现在判定遗漏由内核边界兜底。
+- **默认加固**: `--network none`（断网）+ `--cap-drop ALL` + `--security-opt no-new-privileges` + `--memory 1g` / `--cpus 2` / `--pids-limit 256`；宿主环境变量**默认零透传**（白名单 `docker.env_pass`，不含 PATH 防污染容器 PATH）。
+- **语义**: workspace bind-mount 到容器 `/workspace` 并作 cwd（相对路径即用, 文件改动实时落回宿主）；每条命令 `docker run --rm` 一次性容器 —— 文件副作用经挂载持久, 容器内全局状态不跨命令（要装依赖装进 workspace）；cwd 必须在 workspace 内（越界 fail-closed）；宿主侧数组形式 execFile, 命令串不经宿主 shell 解析。
+- **可用性**: 首次执行探针 `docker version`（10s 上限, 结果缓存）；不可用时按 `docker.missing` 回退本地执行（一次性告警）或 fail-closed 报错（`"error"`）。`code_act`（默认关闭）解释器仍在宿主, docker 模式下输出带边界提示。
+- **实现卫生**: `buildDockerRunArgs` 纯函数可单测; `execFile` 依赖注入, 测试不依赖真实 Docker; 修复 `path.relative(root, root)` 返回空串被误判 cwd 越界的边界（同目录 cwd 合法）。
+
+### 测试
+
+- 全量 **1940 项**（1936 通过 / 4 网络跳过, +11）。新增 `test/docker-shell.test.js`（11 项: 旗标/挂载映射/env 白名单/探针缓存/回退/报错/越界/Local 回归）; config-consistency 注册 8 个新叶子键。
+
+---
+
+### 安全收紧与生态兼容批次
+
+> 对标 codex / OpenClaw / ZCode 评审后的第一批落地：修文档-实现缺口、堵提权软出口、CLI 补齐命令面。
+
+### 生态兼容（codex 对齐）
+
+- **AGENTS.md / PPX.md 项目指令真实注入**（新增 `src/memory/project-md.js` + `src/agent/prompts.js`）：`/init` 自创建起就声称"每次启动自动读取"，但注入实现从未存在（ARCHITECTURE-V3 规划的 project-md 未落地）。现在项目根的 `AGENTS.md`（codex/cursor 生态标准）与 `PPX.md` 都会在每轮 system 静态区末段注入；mtime+size 缓存保证文件未变时逐字节稳定（前缀缓存不退化）；单文件 6000 字符预算，超出截断并标注；`/init` 在已有 AGENTS.md 时不再重复创建 PPX.md，文案不再说谎。
+
+### 安全边界
+
+- **权限放宽二次确认**（`src/channels/http.js` POST /api/permissions）：此前拿到 bearer token 就能热切 `danger-full-access` / `approvalMode: never` / 打开网络。现在放宽类变更（升档）需服务端控制台出 6 位一次性确认码（60s TTL），凭码重新提交才生效；确认码只进控制台不进 HTTP 响应，自动化角色（含提示注入的 agent）无法自行闭环；落地的是发起时暂存的变更（防确认间隙偷换参数）。收紧类变更与 plan 会话态不受影响；`approvalMode`/`sandbox` 非法值此前直写引擎，现在 400。
+- **`security.allow_all` 移出 HTTP 可写白名单**（`src/config/settings.js`）：`PUT /api/settings` 显式 400，只能编辑 config/ppx.json 后重启生效。
+- **CORS 默认收紧为 same-origin**（`src/config/index.js` + `src/channels/http.js`）：未配置 `cors_origin` 时跨源带 Origin 的一律 403（此前默认 `*`）。显式放开仍支持 `"*"` / `[]` / 白名单数组；浏览器型跨源 MCP 客户端需配白名单（测试同步）。
+- **HTTP token 持久化文件收紧权限位**：`http-token` 落盘后 chmod 0600（POSIX；Windows 用户目录 ACL 默认受限）。
+- **provider 密钥命令通道 `api_key_cmd`**（`src/config/providers.js` + `src/llm/router.js`）：配一条命令取 stdout 作 key（PowerShell DPAPI / 凭据管理器 / `pass show` 均可），密钥不必明文落盘；优先级 明文 > cmd > env；命令失败按未配置处理不炸启动；`ppx doctor` 密钥检查支持三通道并对明文内联给出降级提示。
+
+### 内核闭环
+
+- **hooks PreToolUse 改参闭环**（`src/hooks/index.js`）：`agent/_runTool` 消费 `h.args` 但 `emit()` 从不返回 → "可改参"一直是死代码。现在钩子返回 `{ args }` 即修改参数（后续钩子链式看到改后参数，emit 带出最终 args）；无改动时同引用零回归；block 语义不变。
+
+### CLI / Web UI
+
+- **CLI 接入统一命令注册表**（`src/cli.js`）：此前只认 4 条硬编码命令，15 条内置 + `.ppx/commands` 用户命令在 CLI 全部不可用；现在其余 `/xxx` 直通 `agent.chat` 落地层（控制面不落库不进 LLM）。**Tab 补全**（`commandCompleter`，registry + 本地命令合并去重）。**busy 期间 `/stop` 可用**（此前 busy 检查在前把 /stop 静默吞掉，帮助文案说得到做不到）；其余输入显式告知不再静默丢弃。
+- **Web UI 权限面板适配二次确认**（`public/app.js`）：放宽时弹确认码输入框，凭码重新提交；非法值 400 的报错也可见。
+
+### 测试
+
+- 全量 **1929 项**（1925 通过 / 4 网络跳过，+37）。新增：project-md / hook-args / permission-confirm / cli-completer / api-key-cmd 五个套件；更新：channels（CORS 默认）、settings-api（allow_all 拒 API）、mcp-server（跨源白名单 + 非回环 403）、audit-2026-09-17（CORS 层先拦）。`npm run verify` 14/14，lint 0 error，README 数字锚点已同步。
+
+---
+
+### 发布前最后矫正
+
+> 全量门禁 + 独立复核后修掉的一批问题。版本仍为 4.0.0（尚未打 tag / 发布）。
+
+### 缺陷修复
+
+- **FactStore 磁盘签名误判「未变」**（`src/memory/fact-store.js`、`skills/ppx-memory/scripts/fact-store.js`）：原实现只用 `mtimeNs:size` 判断是否需要锁内重读，但 Windows NTFS 文件时间戳粒度约 16ms —— 同一 tick 内两次同大小写入的签名完全相同，外部/回溯写入会被静默忽略（实测 10 次里 2 次误判，表现为 `fact-tombstone-purge` 用例随机失败，且不同轮次失败点漂移）。现在签名并入 **inode**（`writeJson` 走临时文件 + rename，每次应用写入都换 inode），原地手改再由「文件戳未落定（<250ms）就重读」兜住。30 轮复现 0 失败。
+- **记忆召回探针语料含本机绝对路径**（`scripts/memory-recall.js`）：改为中性路径，公开仓库不再暴露个人目录；holdout recall@3 仍为 100%。
+
+### 发布卫生
+
+- 开发脚本的 LM Studio 兜底改为读 `PPX_LOCAL_BASE_URL` / `PPX_LOCAL_API_KEY`（默认值不变）：`scripts/e2e-response-smoke.js`、`scripts/eval.js`、`scripts/memory-benchmark.js`、`scripts/toolcall-smoke.js`。
+- 文档口径：`docs/ARCHITECTURE-CURRENT.md` 版本引用 3.5.0 → 4.0.0；`docs/PROJECT-OVERVIEW.md` src 文件数 194 → 189（实测）；`docs/web-launch.md` 移除已失效的截图引用。
+
+---
+
+### 源码验收优化批次
+
+> 对桌面皮皮虾做逐项验收后，按"能验证的才改"原则修掉一批安全/可靠性/性能缺陷。
+> 审计 HMAC 密钥可被 agent 读取是既定设计，本轮**未改动**。
+
+### 安全边界
+
+- **CSP 去哈希**：首屏主题脚本外置为 `/theme.js`，`script-src 'self'` 不再依赖内容哈希；页面保持零可执行内联脚本。
+- **SSRF IPv6 归一化**：`isPrivateIP` 覆盖 IPv4-mapped（`::ffff:7f00:1`）、NAT64、6to4、Teredo、ULA、链路本地、文档网段；无法解析的 IPv6 一律按私有处理（fail-closed）。
+- **审批缓存不再归一化命令**：`echo "rm -rf /"` 与 `echo rm -rf /` 不再共享一次批准；缓存键只做 trim。
+- **相对路径沙箱**：命令内 `cd ..`、重定向目标、`--flag=../x`、`~`/`$HOME`/`%USERPROFILE%`/`../x` 参数都会参与越界检查，动态路径直接拒绝。
+- **令牌日志脱敏**：非 TTY 日志不再打印完整 Bearer token（`PPX_SHOW_AUTH_TOKEN=1` 可恢复）；`/events` 查询令牌改为恒时比较。
+- **自改测试保护**：`guardPath` 按路径模式拒绝 `test/`、`tests/`、`spec/`、`__tests__/`、`*.test.js`、`*.spec.js`；删除模型可控的 `allow_test_edit` 参数，"关掉测试保护"不再是一个工具参数。
+
+### 打包与门禁
+
+- **发布包不再带本机配置**：`config/` 只打包 `ppx.json.example` / `identity.md` / `ishiki.md`；新增 `scripts/package-scan.js` 阻断 `config/ppx.json`、备份、`data/`、密钥与明文凭据进入安装包。
+- **门禁不再只看 verify**：`verify:full` / `gate:release` / nightly 都跑 lint + 全量测试 + README 测试数同步。
+- **ESLint 忽略构建产物**：`dist-desktop/**` 不再把打包后的源码副本重复计入。
+- **独立安装包构建去 python3/zip 依赖**：`scripts/package.js` 改用 Windows 自带 `System32\tar.exe` 写 zip、PowerShell `.NET` 抽取内置 `node.exe`，并修复 `--node` 参数解析跳位；便携版 zip、Setup 安装器、NSIS 安装包与 portable 单文件均已实际构建并通过产物扫描。NSIS 安装包额外做了 `/S` 静默安装（23.5s，退出码 0）与安装后启动冒烟，均在当前机器通过。
+- **开源发布规范化**：桌面端只产出一个全量安装包 `PPXANS-Harness-Setup-<版本>-x64.exe`；产物后自动生成 GNU 兼容的 `SHA256SUMS.txt`；新增 `NOTICE` / `THIRD-PARTY-NOTICES.md`（Electron/Chromium/Node 许可与再分发要求），独立包补发 Node 的 `LICENSE.node.txt`；安装包 `copyright` 改为真实版权人，卸载项显示“皮皮虾 (PPXANS-Harness)”。
+- **Release 工作流**：新增 `.github/workflows/release.yml`，`v*` tag 触发，校验 tag 与 package.json 版本一致，跑 `gate:release` → 构建 → 校验和 → 自动创建 GitHub Release（附安装包、校验和、LICENSE/NOTICE；源码包由 GitHub 自动附带），可选 `WINDOWS_CSC_LINK` 签名。
+- **代码签名准备（无证书也可先行）**：新增 `docs/SIGNING.md`（SignPath Foundation 免费 OSS / OV 证书 / Azure Artifact Signing / 自签测试三条路线与费用、地区限制、SmartScreen 预期）、`CODE_SIGNING_POLICY.md`（SignPath 申请所需的公开签名策略）与 `docs/signpath-release.yml`（获批后启用的签名发布样例）；新增 `scripts/verify-signature.js`（PowerShell `Get-AuthenticodeSignature`，支持 `--require` / `--json`）与 `npm run signature:check`。
+- **发布流签名状态可见**：`release.yml` 构建后生成 `SIGNATURE-STATUS.txt`，写入 Job Summary 并随 Release 上传；仓库变量 `REQUIRE_SIGNED_RELEASE=true` 时未签名或签名无效直接让发布失败。当前 3.5.0 仍为未签名发布（无身份核验证书，自签不能消除 SmartScreen）。
+- **README 增加普通用户下载安装区**：固定下载入口、系统要求、安装/卸载、SHA-256 校验、SmartScreen 说明与源码构建方式。
+- **社区文件补齐**：新增 `CODE_OF_CONDUCT.md` 与 `.github/ISSUE_TEMPLATE/`（Bug/Feature 表单、安全漏洞私密入口、下载入口）。
+
+### 桌面端
+
+- **版本化升级**：同版本启动零落盘（尊重自改代码）；新版本先备份为 `workspace.backup-<旧版本>-<时间>`，再叠加新代码，保留 `data/ uploads/ .ppx/ config/ppx.json identity.md PPX.md`。
+- **进程树回收**：Windows 用 `taskkill /T /F`，POSIX 杀进程组，避免内核子进程残留。
+- **端口归属校验**：桌面壳与内核用一次性 HMAC 挑战应答互相确认，只有验证通过的同名服务才会被复用。
+
+### 记忆与存储
+
+- **审计追加尾读**：`_loadSeq`/`lastHash` 只读文件尾部，不再为每条审计全量读盘（`verify` 仍全量重放）。
+- **自愈覆盖关键存储**：facts / scenes / meta / scheduler / bot profile 损坏时优先从最新备份恢复，否则隔离损坏文件并重置。
+- **L4 程序性记忆有了生产写入入口**：`memory_add` 新增 `layer=4`（默认仍为 L1），沿用唯一写入入口的脱敏/去重/来源分级；去重命中不重复落条。
+- **`memory.backend=sqlite` 真正生效**：此前 `factsPlugin` 永远装配 JSON `FactStore`，`SqliteFactStore` 只有测试在用，文档承诺的切换配置静默无效。现按 `config.memory.backend` 装配 SQLite 后端；`node:sqlite` 不可用（Node < 22.5）或打开失败时告警并回退 JSON，退出时释放数据库句柄；新增 `test/memory-backend-sqlite-wiring.test.js` 锁死装配与落盘/检索行为。
+
+### Web UI
+
+- **流式渲染节流**：delta 合并到约 60ms 一次重绘，`done`/`error` 立即收口并取消待执行重绘，长回答不再 O(n²) 解析 Markdown。
+- **站内确认/输入弹窗**：新增 `public/ui.js`，替换原生 `confirm`/`prompt`；支持 Esc、焦点圈定与归还、危险操作配色。
+- **轮询不打断输入**：`bot.js` 重建首页列表前检查活动输入控件；轮询失败按 5→10→20→30s 退避。
+
+### 已知边界 (未在本轮翻转)
+
+- 默认 JSON 记忆后端仍是"锁内整文件读改写"；需要高写入吞吐请切 `memory.backend=sqlite`（Node >= 22.5）。
+- 会话启动会加载全部 JSONL 分片；按天分片已避免单文件无限增长，但历史很长的数据目录仍有启动成本。
+- `memory_add(layer=4)` 命中已有同内容 L1 记录时不会自动升级层级（如实回报 `layer` 与原记录 id）。
+
+---
+
+### 身体批次二：记忆召回 47%→93% / 痛觉进闸门 / 面板变身体
+
+> §12 建的"镜子"第一眼照出来记忆召回只有 60%（dev 集 47%），面板顶着 `overall: "bad"`。
+> 这一轮从这个最差的指标下手，做完再把它变成常驻闸门，最后把面板从"四张指标卡"做成"身体"。
+
+### 记忆检索：从"两种字面算法"到真的能听懂换说法
+
+**根因**：`querySemantic` 是 dense + BM25 两路 RRF，看着像标准做法，但**两路都是字面信号** ——
+BM25 是中文二字组 + IDF，dense 是 256 维字符 n-gram 哈希余弦（还是算重合度，只是换个加权）。
+查询与事实字面零交集时两路同时为空："什么操作系统" 永远找不到 "用户用 Windows 11"。
+
+- **新增 `src/memory/lexicon.js`**：40+ 个**概念簇**（同义/上下位词），命中任意成员即整簇参与检索。
+  刻意写成簇而不是"问题→答案"映射 —— 簇是领域常识，映射表只能是背答案。
+- **`rrfFuse` 支持权重**（缺省全 1，向后兼容）：BM25 1.0 / 概念 0.9 / dense **0.45**。
+  三路等权时 dense 的噪声与 BM25 的准确命中同票，融合结果被拉平 —— 这是召回上不去的直接原因。
+- **dense 准入门槛 0.08**（实测：真命中 0.041~0.275，噪声 0~0.074，区间重叠；取 0.12 会误杀唯一的弱语义桥）。
+- **`_conceptRank`** 单独成一路，不污染原查询串；命中 1 个扩展词时要求它是罕见词（df 判据，
+  不用绝对 IDF —— 小库 N=2 时 df=1 的 idf 只有 0.69，绝对阈值会把强命中一起误杀）。
+- 顺带修：`_statsCache` 的 key 没区分 `includeExpired`，两种口径会共用统计。
+
+**结果**（`npm run memory:recall`）：
+
+| 集 | recall@1 | recall@3 | MRR |
+|---|---|---|---|
+| dev（15 难例） | 33% → **53%** | 47% → **93%** | 0.417 → **0.700** |
+| holdout（15 只验收） | 80% → 80% | 87% → **100%** | 0.850 → **0.889** |
+
+**holdout 也涨了** —— 不是靠 dev 过拟合换来的。dev recall@1 只到 53% 是诚实边界：
+需要"跨两跳"的查询（日志 → 安全 → 哈希）零依赖词典做不对，也不该硬凑。
+
+### 探针加留出集：先解决"怎么知道自己没作弊"
+
+手工词典天生过拟合。`scripts/memory-recall.js` 拆成 **dev（可调）/ holdout（只看不调）**，
+语料 20 → 40 条，报告默认输出两套指标 + `acceptance`（= holdout recall@3）。
+
+### 痛觉进闸门：`npm run verify` 12 → 14 项
+
+- `离线任务基准`（`taskbench-offline --strict`）：20 个确定性判分任务，红了就挡。
+- `记忆召回质量`（`memory-recall --check`）：holdout recall@3 < 90% 即非零退出。
+  门槛按"当前水位的下限"设，职责是**拦住回退**，不是逼着往上加。
+
+### 面板变身体
+
+- **躯干 + 器官点**：左侧简笔躯干，四个器官对应四项体征（头=痛觉 / 胸=记忆 / 腹=负荷 / 右手=手头的事）。
+  状态不只靠颜色，还靠**呼吸节奏**：ok 3.4s / warn 1.9s / bad 0.9s + 抖动 / **unknown 完全不动** ——
+  "不跳"就是"没量过"。点可点击，亮一下对应卡片。
+- **一句话判断**：从"有指标不健康"这种标签换成有内容的判断，顺序按医生说话 —— 先说坏的，再说没测的，最后报平安。
+- **体感文案**：主文案不再是 `recall@3 93%`，而是 `15 句换个说法全认得出, 一句没错`（数字降为小字）。
+  判定不改，只换措辞。
+- **趋势**：新增 `scripts/lib/bench-history.js` 追加 `<kind>-history.jsonl`（留 60 条），
+  面板读最近 6 次画 sparkline；**少于 2 个点不画线**（一个点连不成线，硬画就是编）。
+
+### 修掉的三个既有缺陷
+
+| # | 缺陷 | 后果 |
+|---|---|---|
+| D-1 | `.bcards / .bcard / .bdot` 与首页 `#typeCards` 同名 | 身体页样式改掉了首页类型卡外观。改为 `.bodywrap` 作用域隔离 |
+| D-2 | 面板拿 `recallK`（dev+holdout 混合）当健康值 | 把"泛化能力"与"难例比例"搅在一起。改用 `acceptance`（holdout），老报告无此字段时退回 |
+| D-3 | 体感文案分母用总查询数 30 | 「15 句的 100%」被说成「30 句全对」，样本量凭空翻倍 |
+
+### 平台相关缺陷：CSP 哈希 vs CRLF
+
+`public/index.html` 里唯一内联脚本的 sha256 硬编码在 `SECURITY_CSP`，而本机 `core.autocrlf=true`。
+重新检出把该文件转成 CRLF → 哈希失配 → 浏览器**静默**拦掉首屏主题脚本（页面照常能用，只是主题闪一下）。
+
+- 新增 `.gitattributes` 钉死 `public/index.html text eol=lf`（哈希是字节级契约）。
+- 本仓库被污染的 CRLF 文件统一转回 LF（顺带发现上一轮 8 个文件也是 CRLF）。
+- 起因：Windows 上 `io.open(p,'w')` 会把 `\n` 转成 `\r\n`。改 JS/CSS/HTML 别再走这条路。
+
+### 验证
+
+- 全量 `npm test`：**1879 用例 / 1875 pass / 4 skip / 0 fail**
+- `npm run verify`：**14/14**（含新增两道闸门）
+- 新增守卫：`test/memory-recall-lexicon-2026-10-30.test.js`（12 例）、`test/body-skin-2026-10-30.test.js`（9 例）
+- 漂移守卫：31/31（新增 `lexicon.js` 一对，防词典只改一边）
+- 文档：`docs/OPTIMIZATION-2026-10-30.md` §13
+
+---
+
+### 身体：痛觉 / 工作内存 / 记忆质量 / 体征面板
+
+> 前六轮都在抠 I/O、token、并发 —— 全是"能立刻报出数字"的优化。
+> 但一个系统最缺的往往不是这些：**它不知道自己干得对不对，也没有"手头这件事"的记忆。**
+> 这一轮换方向，造四样以前没有的东西。
+
+### P0 痛觉：`npm run taskbench:offline`
+
+`npm test` 的 1845 个断言只证明"功能没被改坏"，`eval` 是 7 项冒烟；而 `taskbench` 要真 LLM key。
+**没有任何东西在量"它能不能把事干成"** —— 这也正是前几轮只能盯毫秒数的原因。
+
+做法：复用 `bench/tasks.js` 里 20 个**确定性判分**任务（verify 不用 LLM 评审），补上
+`bench/offline-plans.js`（每个任务一份"人类会怎么走"的工具序列），离线执行器把它当模型的
+`tool_calls` 回放，走**真实的** agent 工具循环，最后跑原 verify。测的是 **harness 能不能把
+正确计划执行成结果**（路径/校验/超时/截断/落盘），不是模型聪不聪明。**零 LLM、零网络、3.7 秒。**
+
+首跑 19/20，抓到两个真问题：
+- `delete_file` 被**免疫闸门**拦下，而错误文案是 `危险工具未授信: delete_file` —— 不可行动，
+  模型只会原样重试到轮次耗尽。已补三条出路（请用户授信 / 换只读方式 / 说明后收尾）。
+- `approval_headless=auto-approve` 管不到免疫闸门（设计如此，但两套语义没对齐）。基准改为
+  **对计划中实际用到的工具逐个授信**（模拟用户已批准），没写进计划的危险工具仍然拦着。
+
+现状 **20/20，3.7s**。此后每一轮优化的裁判。
+
+### P1 工作内存：`task_stack` + `src/session/workstack.js`
+
+每轮 `_context()` 都从人格/画像/记忆重新拼 —— 拼出「我一贯是谁」和「你刚才说了什么」，
+缺中间那层「我正在干什么」。被打断或上下文压缩后，只能翻 `memory/turns` 归档猜。
+
+- 落 `<dataDir>/workstack.json`（原子写 + 文件锁），上限 8 条未完成项，超了淘汰最久没动的
+- 全部步骤勾完自动转 done；空栈渲染为空串（**零 token**）；渲染段**不含时间戳**
+- 段落落在**动态区** —— 加任务不作废 provider 静态前缀缓存
+
+### P2 记忆质量：`npm run memory:recall`
+
+`memory_search` 的"语义检索"从没被量过。第一版探针直接 `new FactStore()` 测纯 BM25 得
+recall@1 33% —— **口径错了**（真实链路是 `querySemantic`，plugin 会注入哈希 embedder 做 RRF）。
+改成走 `PPXAgent` 真实装配后：
+
+| 指标 | 纯 BM25（错口径） | dense+BM25 RRF（真实） |
+|---|---|---|
+| recall@1 | 33% | 33% |
+| recall@3 | 40% | **60%** |
+| MRR | 0.356 | **0.478** |
+
+RRF 有效但**仍未及格**：15 个查询里 6 个连前 3 都进不去，几条直接返回空。
+典型：「什么操作系统」→ 记忆是「Windows 11」；「怎么防止日志被改」→「审计链用 SHA-256」。
+字面不重合，256 维哈希向量抓不住，BM25 也没词可匹配。这是**基线**，不再是可忽略的瑕疵。
+
+### P3 镜子：身体页 `/api/body.state`
+
+侧栏左上角新增**身体**入口（带三态状态点），点进去四张体征卡：
+痛觉（离线任务成功率）· 记忆（库规模 + recall）· 手头的事（任务栈）· 负荷（工具/会话/provider/uptime）。
+
+**关键取舍：没测过一律 `unknown`（灰点），不编健康值。** 一个会撒谎的仪表盘比没有更糟 ——
+"没测过"和"测过没问题"必须是两种状态。首屏静默拉一次只更新那个点：打开面板才知道健不健康，
+等于没有仪表盘。
+
+### 验证
+
+- `npm run taskbench:offline`：20/20
+- `npm run memory:recall`：recall@1 33% / recall@3 60% / MRR 0.478
+- 新增 `test/body-2026-10-30.test.js`（11 例：任务栈六条契约 + 体征不编数 + 静态前缀不被位移 + 参数校验早失败）
+- 全量 `npm test`：1856 用例 / 1852 pass / 4 skip / 0 fail
+- `npm run verify`：12/12（预算上调 14,500 → 14,800，明细见 `ctx-profile.js` 沿革）
+- `npm run web:check`：全过
+- 端到端实测：`curl /api/body.state` → `{overall:"bad", pain:{20/20 ok}, memory:{recall@3 60% bad}, ...}`
+
+---
+
+### L2 落地：锁内不重读 + 去重索引（并记录预期落空）
+
+> 上一轮把 L2 写成"FactStore 写路径批提交，乐观 −30%~40%"。实际做了两项更小的改动，
+> **收益只有 0.5%~7%**。数字不好看，但比留着一个错预期更值钱 —— 原因写在下面。
+
+### 做了什么
+
+**① 锁内 `_reload` 按磁盘签名跳过重读**
+`add()` 在锁内 `_reload()`：`readJson(全量 facts.json)` + `_stampProvenance(全量遍历)` +
+`rebuildIndex(全量重建 BM25 倒排)`。同进程刚写完时内存就是那份内容，再解析一遍纯属浪费。
+新增 `_diskSignature()`（`mtimeNs:size`，bigint stat —— 毫秒精度在 NTFS 上判不出"同毫秒两次
+不同写入"），签名未变直接返回内存态；`save()` / `_flushLocked()` 写盘后刷新签名。
+
+**② 去重走 O(1) 归一化键索引**
+去重原本对全部 facts 线性跑 `_normKey`（每条一次多次正则）。改为
+`_byKey: Map<scope+归一化键, fact[]>`，与倒排索引同生命周期；命中后仍按 `status` 过滤，
+与原线性 `find` 逐项同语义。
+
+### 实测（诚实版）
+
+| 场景 | 改前 | 改后 | 变化 |
+|---|---|---|---|
+| bench 隔离会话（空记忆库） | 1530 ms | 1522 ms | −0.5%（噪声内） |
+| 探针 20×3（200 条库） | 1705 ms | 1588 ms | −6.9% |
+
+拆开 `add()` 看：`_reload` 7%、`rebuildIndex` 1.6%、`save()` 落盘 11%，但**整个 `add()` 占 47%**
+—— 剩下约 30% 是 `scrubPII` 正则、`_norm/_normKey` 归一化、`resolveWriteTier`、
+`withFileLock` 自身五六个系统调用。这些是每轮都要做的纯 CPU/系统调用，不改"每轮落一条记忆"
+这个产品行为就压不下去。
+
+**所以没继续做"WAL 批提交"**：它最多吃到那 11% 里的一部分，收益撑不起"记忆延迟提交"
+带来的读到旧值时间窗。数量级变化在 L3（异步锁），需单独立项。
+
+### 守卫
+
+`test/fact-reload-signature-2026-10-30.test.js`（7 例），全打在"签名跳过出错 = 用过期内存储
+覆盖别人刚写的记忆"这条路径上：同进程两实例互不覆盖 / 外部改盘能被检出 / 文件删除不残留旧内存 /
+去重的同内容·不同 scope·软删·restore 四种边界。
+
+镜像副本 `skills/ppx-memory/scripts/fact-store.js` 同步 8 处（漂移守卫全绿）。
+
+### 验证
+
+- 全量 `npm test`：1845 用例 / 1841 pass / 4 skip / 0 fail
+- `npm run verify`：12/12
+
+---
+
+### L1 落地：归档合批 + 压缩检查节流
+
+> 上一轮量出并发瓶颈在 `memory.recordTurn`（占 71%），但拆开每一项都只有 17%~32%。
+> 这轮按 L1（只动**可重建**的归档写入）落地，单轮内核开销 −17.5%，并发总耗时 −23.8%。
+
+### ① 修了个真 bug：压缩检查的节流失效
+
+`_compactIfNeeded` 的 60s 节流读 `_lastCompactAt`，而它**只在真压缩完成后**才更新。
+于是当天事件数没到阈值（<50）时，每轮 `recordTurn` 都会 `replayDay` 把当天全部分片读一遍再逐行解析
+—— 节流形同虚设。新增独立的 `_lastCompactCheckAt`，把"每轮读盘"降到"每 60s 读一次"。
+
+### ② turns 归档合批
+
+turns 归档的唯一输入就是 session 事件日志（丢了能重放），所以不必每轮
+`ensureDir + withFileLock + appendText`：
+
+- 入队 `_archiveQueue`，攒够 **5 条** 或距上次落盘超 **3s** 才真写
+- 真写时按文件分组，**一次锁 + 一次 append 写多行**
+- 三个强制收口点：跨天 `_rollDay` / 读取 `turnArchive()` / 进程收口 `agent.shutdown()`
+- 首轮仍立即落盘（初值 0 ⇒ 惰性超时对第一次必然成立），"CLI 跑一轮就退出"零延迟
+
+镜像副本 `skills/ppx-memory/scripts/memory-ticker.js` 同步（漂移守卫 29/29）。
+
+### 实测
+
+| 指标 | 改前 | 改后 | 变化 |
+|---|---|---|---|
+| 单轮内核开销（串行） | 38.3 ms | **31.6 ms** | −17.5% |
+| 隔离会话并发 60 请求 | 2008 ms | **1530 ms** | −23.8% |
+| 隔离会话 p50 | 669 ms | **507 ms** | −24.2% |
+| 同会话并发 p50 | 804 ms | 666 ms | −17.2% |
+| 并发度 slowdown | 0.87 | 0.81 | 没质变 |
+
+slowdown 0.81 = 20 个会话的请求仍然基本排队。L1 减的是每轮固定开销，**不是让 I/O 变异步** ——
+真正的并行要 L3（异步锁），那需要重写 `withFileLock` + 全套跨进程回归。
+
+### 验证
+
+- 新增 `test/turn-archive-batch-2026-10-30.test.js`（7 例）：合批不丢行 / 阈值自动落盘 /
+  读接口自动收口 / shutdown 收口 / 压缩检查 6 轮只读一次 / 节流过期会重查 / 空 flush 幂等
+- 适配 `test/memory-turn-context.test.js`：直接读 turns 文件前需显式 flush（新契约）
+- 全量 `npm test` + `npm run verify` 见提交记录
+
+---
+
+### 并发诊断 + 探索熔断放宽
+
+> 前三轮分别修了 I/O、循环收口、上下文成本。这轮先回答一个一直没人量过的问题：
+> **不同会话之间到底能不能并行？** 答案是"不能"，而且不是任何一个单点造成的。
+
+### 先修测量工具：原来的 bench 没在测并发
+
+`scripts/bench.js` 前两项都跑在 **default 会话**上，而 `agent.chat()` 对同一 sessionKey 有
+`_withSessionLock` 串行化（防历史交错/记忆双写，这是设计）。所以旧 bench 量到的 800ms p50
+量的是"排队"，真正的并发能力被完全掩盖。
+
+新增第 (3) 项 **隔离会话并发**：N 个不同 sessionKey 同时跑 vs 同样多请求串行跑，输出 `slowdown`。
+
+```
+── (3) 隔离会话并发 (20 会话 × 3 轮 = 60 请求) ──
+  并发 2008ms (p50 669ms) | 串行 2295ms (38.3ms/请求)
+  并发度 slowdown = 0.87  (1.00 = 完全串行; 越接近 0.05 越好)
+```
+
+**20 个不同会话、60 个请求，和串行跑一样慢。**
+
+### 逐项证否（只关一个变量，20 会话 × 3 轮）
+
+| 关掉什么 | 耗时 | 结论 |
+|---|---|---|
+| 基线 | 2344 ms | — |
+| 事件流 + 工具轨迹写入 | 2312 ms | 不是它 |
+| 画像读 / `_context()` | ~2380 ms | 不是它 |
+| 文件锁轮询 20ms → 4ms | 2418 ms | 不是它 |
+| `FactStore` 切 WAL | 2178 ms | 几乎不是（−5%） |
+| `session` 落盘 `_flush` | 1876 ms | 有份（−20%） |
+| **`memory.recordTurn` 整体** | **677 ms** | **就是它（−71%）** |
+| └ 只关 `factStore.addMemory` | 1655 ms | 内部多子项分摊，无单点 |
+
+关掉整体省 71%，拆开每一项只省 17%~32% —— 开销不是某一行 I/O，而是"每轮把记忆这一摊子
+完整跑一遍"的合计（读全量 facts + 索引 + 去重 + 衰减 + 归档 + 压缩检查，12ms/轮）。
+
+### 为什么"简单异步化"做不到
+
+`withFileLock` 是**同步**锁，源码里有硬约束：async 回调会在第一个 `await` 处把控制权交回事件循环，
+锁在最需要它的地方静默失效（历史上真丢过数据）。改成异步锁是独立工程，需要配套跨进程回归。
+
+分层方案（L1 归档合批 / L2 WAL 批提交 / L3 全异步）已写进
+`docs/OPTIMIZATION-2026-10-30.md §11.4`，**本轮一个都没做** —— 收益不足或风险过大。
+
+### 顺带修掉的真问题：探索熔断 3 轮 → 5 轮
+
+`ToolLoopPolicy` 原本"连续 3 轮只读工具 → 叫停"。"读 5 个文件再动手"是最常见的合法工作流，
+却在第 3 轮被判空转、任务做一半被掐。防乱翻本来就有独立的重复检测在管，两个不同性质的问题
+不该用同一个数字。
+
+`DEFAULT_EXPLORE_BREAK` 3 → 5（`agent.explore_break_limit` 仍可调）；新增用例
+"连续 4 轮只读必须放行"。
+
+### 顺带修掉两处文档漂移
+
+- `docs/CONFIG.md`：`proactive.enabled` 写 `false`，代码是 `true`。
+- `README.md` 目录树测试数 `1822` → 实测值。
+
+### 验证
+
+- `node scripts/bench.js`：第 (3) 项正常输出，失败数计入退出码
+- 全量 `npm test` / `npm run verify`：见本轮提交时记录
+
+---
+
+### 工具 schema 的钱收回来：曝光分层 + 按需取 schema
+
+> 前两轮改的是"每轮要跑的 I/O"和"循环怎么结束"。这轮改的是**每轮都要发的 token** ——
+> 工具 schema 占固定上下文 87%，而真实轨迹里 96 个工具只用到 30 个。
+
+### 问题
+
+- `scripts/ctx-profile.js` 实测：97 个工具 schema = **12,591 tok/请求**，`_context()` 只有 1,882 tok。
+- `data/logs/traces/*.jsonl`（327 条真实轨迹）里出现过约 30 个工具，前 6 个占 2/3 调用量；
+  `team_room_*` / `expert_pack_*` / `persona_*` / `git_*` / `vad_detect` 等长尾一次都没调用过。
+- `ToolCatalog.setExposure()`（2026-10-05）注释写着"名字仍出现在 system 静态区【按需工具】名单里
+  （见 agent prompts）"—— 而 `prompts.js` 里没有那一段，全仓零调用方。**机制是死代码。**
+
+### 改了什么
+
+- **接线**：`agent._applyToolExposure()` 读 `config.agent.tool_exposure`（`"all"` 默认 / `"core"` /
+  自定义数组），启动与 `reloadSettings` 各应用一次；`prompts._toolsPrompt()` 渲染【按需工具】段
+  （只在收窄时非空、名单恒升序守前缀缓存契约、纳入 system 预算裁剪顺序）。
+- **给一条真路**：新增 `tool_schema(name)` —— 名字 → 完整 JSON Schema，可逗号分隔多个。
+  没有它，"按需"就是"名字可见、参数靠猜"，比全量下发更糟。自定义名单会被强制并入
+  `META_TOOLS_ALWAYS`（`tool_schema` / `list_capabilities`），否则模型连怎么取 schema 都不知道。
+- **瘦身**：删掉工具描述里"逐条复述参数语义"的重复部分（参数表已写）：
+  spawn_agent 103→53 tok、code_run 87→57、skill_import 98→82、vad_detect 62→52、team_room_open 106→78。
+  新增 `tool_schema` 花的 ~100 tok 被这些抵掉，**默认预算没涨**（14,462 → 14,447）。
+
+### 效果
+
+```
+=== 曝光收窄 (tool_exposure="core") 能省多少 ===
+  下发工具数             27   (all 模式 97 个)
+  降级为按需             70 个  (名字进 system, schema 不进请求, 用 tool_schema 现取)
+  固定开销             5602 tok  (all 模式 14447 tok, 省 8845 tok / 61%)
+```
+
+| 模式 | 下发 schema | 固定开销 |
+|---|---|---|
+| `all`（默认，行为不变） | 97 个 | 14,447 tok |
+| `core` | 27 个 | **5,602 tok**（−61%） |
+
+对 32k 窗口的小模型：固定开销从占用 45% 窗口降到 17%。
+
+### 边界
+
+- **默认没改**。收窄会不会降低工具调用准确率，要真模型 A/B 才能回答，仓库里没那个环境 ——
+  所以给开关 + 数据，不替你拍板。
+- **成本是转移不是消失**：调长尾工具会多一轮 `tool_schema` 往返。高频工具都在核心名单里，
+  代价只落在"偶尔用一次"的工具上。
+- `tool_schema` 进了 `test/capability-guard.test.js` 的只读豁免面快照（它只读内存元数据），
+  是显式评审后加的，不是让快照自动跟着长。
+
+### 验证
+
+- `npm test`：全绿；新增 `test/tool-exposure-2026-10-30.test.js`（8 例）
+- `npm run verify`：12/12（ctx-profile 预算闸门 14,447 ≤ 14,500）
+- `node scripts/ctx-profile.js` 现在自带 all/core 对比段，不用再手算
+
+---
+
+### 工具循环加固：轮次收口 / 并发上限 / 签名键序无关
+
+> 上一轮省的是"每轮固定开销"（fs I/O）。这一轮动的是**循环怎么结束、怎么并发、怎么判重复** ——
+> 三个问题都在 `src/core/policy.js`，改动面窄，但每一个都直接改行为，所以每个都配了守卫。
+
+### 改了什么
+
+- **轮次耗尽强制收口**（`agent.exhausted_finalize`，默认 true）
+  旧行为：跑满 `max_tool_rounds` 直接甩一句「工具调用轮次过多, 已停止。」—— 前 7 轮读的文件、
+  改的代码、跑的测试全部作废，用户拿到零信息。新行为：补一次 **不带工具** 的调用
+  （`tools: []`），让模型基于已有轨迹给出「已做什么 / 没做完什么 / 下一步」，并在回复末尾
+  强制标注「⚠️ 工具轮次上限已用尽 (N 轮 / M 次调用, 其中 K 次成功)… 本轮未再执行任何新操作」。
+  四条边界不触发收口：无工具轨迹 / 用户中断 / 预算已耗尽 / 收口调用失败或空回复（回落原文案，不假装成功）。
+  代价：+1 次 LLM 调用，且只发生在"钱已经花了、只差一句话"的场景。
+- **同轮工具并发上限**（`agent.max_parallel_tools`，默认 4，0 = 不限）
+  旧行为：同一轮 N 个 `tool_calls` 无条件 `Promise.all` 全并发 —— 模型一次吐 20 个
+  `run_command` 就是 20 个 shell 同时起跑。军团侧早有背压（`legion.max_concurrent_agents`），
+  工具侧一直没有。新增 `mapBounded(items, cap, fn)` 保序有界并发：结果下标对齐输入，
+  `tool_call_id` 配对顺序不变；调用数未超限时仍走原全并发路径（零额外开销）。
+- **参数签名键序无关**（新增 `src/utils/canonical.js` 的 `stableJson`）
+  旧行为：`JSON.stringify(args)` 跟随属性插入序，模型用 `{path,limit}` 和 `{limit,path}`
+  重发同一请求时重复计数器不动，熔断比设定晚好几轮；`services/triage.js` 的 LOOP 归因同样漏判。
+  现 `policy.recordTurn` 与 `triage.sig` 共用一份稳定序列化（键名升序 / 深度上限 / 数组顺序保留）。
+
+### 证据（同一探针，旧文件 vs 新文件）
+
+| 观测点 | 旧 | 新 |
+|---|---|---|
+| 8 个同轮调用的并发峰值（cap=3） | 8 | 3 |
+| 换键序重发 → 触发重复方向盘 | false | true |
+| 4 轮耗尽后的返回 | 「轮次过多, 已停止。」 | 收口正文 + 诚实标注 |
+| 该场景 LLM 调用次数 | 4 | 5（多出的是收口） |
+
+### 验证
+
+- 全量 `npm test`：1822 用例 / 1818 pass / 4 skip / 0 fail
+- `npm run verify`：12/12（含 arch-guard / readme-sync / silent-catch / ctx-profile）
+- 新增守卫 `test/tool-loop-hardening-2026-10-30.test.js`（12 例）；`test/policy.test.js` 与
+  `test/chaos.test.js` 的轮次上限契约改为「8 轮工具 + 1 次无工具收口」；
+  `test/config-consistency.test.js` 的 CONSUMED 表补两条（新键有真实消费点，没塞进 RESERVED 蒙过去）
+- 文档：`docs/CONFIG.md` 补两个配置项；`docs/OPTIMIZATION-2026-10-30.md` 追加 §9
+
+---
+
 ## 3.5.0 (2026-10-27) · 第二十四轮 - 前端换骨：从「会话工作台」到「常驻本体」
 
 > 上一轮让皮皮虾能改自己的源码。这一轮动的是**它长什么样** —— 前端主形态从
@@ -207,7 +867,9 @@ dsh-bot 支持建多个 bot 实例（每个独立 workspace）。皮皮虾一个
 
 ---
 
-## 未发布 (2026-10-24·第二十轮) - v4.0 NEON 科幻风重设计 + 文件树精装
+> 注: 下面这批 2026-10-24 的工作在事后被贴上 v3.5.0 标签 (版本号当时尚未发布, 属"批次做完再定版本"的历史习惯)。时序以日期为准 —— 它们发生在上方 3.3.x 发布**之前**。
+
+## 3.5.0 (2026-10-24·第二十轮) - v4.0 NEON 科幻风重设计 + 文件树精装
 
 > 用户: "前端不够科幻请重新设计, 工作文件像毛坯"。参考 Linear (精密克制/1px 描边/
 > 极暗光晕) + GitHub Primer (面板对比/语义色) + AI 前端渐变玻璃语言, 融合出
@@ -237,7 +899,7 @@ dsh-bot 支持建多个 bot 实例（每个独立 workspace）。皮皮虾一个
 ("task" → 9 命中); web:check 全过; 全量 1727 项 0 失败; 浅色主题回归正常。
 
 ---
-## 未发布 (2026-10-24·第十九轮) - 工作区面板从右栏迁到左栏 (用户要求)
+## 3.5.0 (2026-10-24·第十九轮) - 工作区面板从右栏迁到左栏 (用户要求)
 
 > 用户: "右边的模块全部放到左边"。工作区抽屉 (文件/模型/目标/审查/设置) 此前
 > 停靠右缘, 现整体迁到侧栏与主区之间 —— 全部模块集中于左列。
@@ -250,7 +912,7 @@ dsh-bot 支持建多个 bot 实例（每个独立 workspace）。皮皮虾一个
   (模型配置) → 左侧面板打开 + tab 切换 + 卡片渲染全通。
 
 ---
-## 未发布 (2026-10-24·第十八轮) - 剩余 UI 面真浏览器扫尾 + Enter 双发待证项关闭
+## 3.5.0 (2026-10-24·第十八轮) - 剩余 UI 面真浏览器扫尾 + Enter 双发待证项关闭
 
 > 第十八轮：R13/R17 两轮浏览器实测各抓出 4-5 个缺陷, 本轮扫掉最后一批盲区面
 > (命令面板/记忆/审查/设置/空间弹窗/hero chips), 修 1 缺陷, 关 1 待证项。
@@ -281,7 +943,7 @@ dsh-bot 支持建多个 bot 实例（每个独立 workspace）。皮皮虾一个
 全量 1727 项 0 失败; verify 12/12; lint 0 error; web:check 全过。
 
 ---
-## 未发布 (2026-10-24·第十七轮) - /task 空提示落地 + 任务面板三方同源 + 质量收口
+## 3.5.0 (2026-10-24·第十七轮) - /task 空提示落地 + 任务面板三方同源 + 质量收口
 
 > 第十七轮：侧栏任务面板一直提示"发送 /task 创建"——但 /task 命令根本不存在
 > (空提示, 探测实锤); 且 HTTP /api/tasks 与 MCP ppx.task.* 各自懒建 TaskBoard
@@ -305,7 +967,7 @@ dsh-bot 支持建多个 bot 实例（每个独立 workspace）。皮皮虾一个
   侧栏任务组实时出现 + 计数徽标, /task del 清理, 目标看板抽屉正常。
 
 ---
-## 未发布 (2026-10-24·第十六轮) - 模型配置功能补全 (4 项缺口, 含 1 个数据丢失 bug)
+## 3.5.0 (2026-10-24·第十六轮) - 模型配置功能补全 (4 项缺口, 含 1 个数据丢失 bug)
 
 > 第十六轮：用户反馈"模型配置功能不够全"。侦察+探测实锤 4 个缺口, 全部补齐。
 > 探测电池 0/4 起步 → 4/4; 真浏览器交互验证 (保存路由/停用/启用往返/磁盘持久化)。
@@ -333,7 +995,7 @@ dsh-bot 支持建多个 bot 实例（每个独立 workspace）。皮皮虾一个
 (测试对真实 config 的改动已还原)。
 
 ---
-## 未发布 (2026-10-24·第十五轮) - 前端视觉重做 (表面层级 / 阅读体验 / 控件质感)
+## 3.5.0 (2026-10-24·第十五轮) - 前端视觉重做 (表面层级 / 阅读体验 / 控件质感)
 
 > 第十五轮：用户反馈"前端不好看"。真浏览器截图 + 视觉模型审丑诊断出六类病灶,
 > 四轮迭代治理 (全部 CSS 层, DOM 结构与 check-web 类名契约不变, 产品逻辑零改动)。
@@ -360,7 +1022,7 @@ dsh-bot 支持建多个 bot 实例（每个独立 workspace）。皮皮虾一个
 "接近 Codex/Claude 的成熟聊天范式"。web:check 全过, 全量回归 0 失败。
 
 ---
-## 未发布 (2026-10-24·第十四轮) - MCP 双向全链路实测 + 外部工具审批闸门 (安全缺口修复)
+## 3.5.0 (2026-10-24·第十四轮) - MCP 双向全链路实测 + 外部工具审批闸门 (安全缺口修复)
 
 > 第十四轮：README 宣称"标准 MCP 服务端+客户端"——存量测试只到零件级 (客户端连
 > fixture / 注册进目录 / 端点协议)，缺三段全链路。本轮补齐并用真模型实测，顺藤抓出
@@ -396,7 +1058,7 @@ dsh-bot 支持建多个 bot 实例（每个独立 workspace）。皮皮虾一个
 
 ---
 
-## 未发布 (2026-10-24·第十三轮) - Web UI 真浏览器 E2E + 审批双向闭环 (产品门面首次实弹)
+## 3.5.0 (2026-10-24·第十三轮) - Web UI 真浏览器 E2E + 审批双向闭环 (产品门面首次实弹)
 
 > 第十三轮：Web UI 此前只有静态检查 (check-web) 和服务端通道探测 (R9)，从未被真浏览器
 > 端到端驱动过。本轮用真浏览器跑通「自鉴权 → 真模型流式 → 斜杠命令 → 审批闭环 → 回卷」
@@ -436,7 +1098,7 @@ dsh-bot 支持建多个 bot 实例（每个独立 workspace）。皮皮虾一个
 
 ---
 
-## 未发布 (2026-10-24·第十二轮) - "交互主轴"接线审计与修复 (Turn 状态机 + SQ/EQ)
+## 3.5.0 (2026-10-24·第十二轮) - "交互主轴"接线审计与修复 (Turn 状态机 + SQ/EQ)
 
 > 第十二轮：README v3.0 宣称 SQ/EQ 双队列 + Turn 模型是"交互主轴"——探测电池实测发现
 > **主轴是悬空的**: TurnProjection 全仓零实例化、chat/turn/* 事件零 emit、SQ 零生产者,
@@ -497,7 +1159,7 @@ chat 通道 / chatStream 流式 / 流式中途 interrupt (TURN_ABORTED + 投影 
 
 ---
 
-## 未发布 (2026-10-24·第十一轮) - 进化闭环真模型实测 (旗舰卖点首次全链路验证)
+## 3.5.0 (2026-10-24·第十一轮) - 进化闭环真模型实测 (旗舰卖点首次全链路验证)
 
 > 第十一轮：纯验证轮——"自我学习/自我进化/多 Agent"三个核心卖点此前只有 stub 测试，
 > 本轮用真实 GLM 模型端到端实测，全部通过。产品代码零改动。
@@ -521,7 +1183,7 @@ chat 通道 / chatStream 流式 / 流式中途 interrupt (TURN_ABORTED + 投影 
 
 ---
 
-## 未发布 (2026-10-24·第十轮) - 流式接入 provider 回退链 + 空回复哨兵
+## 3.5.0 (2026-10-24·第十轮) - 流式接入 provider 回退链 + 空回复哨兵
 
 > 第十轮：补上 R9 审计的延续发现——流式通道绕过 provider 回退链，以及一个更深的
 > 存量缺陷"空回复被当成有效答案"。新增 3 项回归测试。
@@ -544,7 +1206,7 @@ chat 通道 / chatStream 流式 / 流式中途 interrupt (TURN_ABORTED + 投影 
 
 ---
 
-## 未发布 (2026-10-24·第九轮) - 重定向链路审计 (双入口一致性 + 状态残留)
+## 3.5.0 (2026-10-24·第九轮) - 重定向链路审计 (双入口一致性 + 状态残留)
 
 > 第九轮：按"双入口逐项对照"方法论做系统审计 + 真模型流式探测（7/7 全过），
 > 抓出 4 个重定向链路上的正确性问题。新增 3 项链路回归测试。
@@ -572,7 +1234,7 @@ chat 通道 / chatStream 流式 / 流式中途 interrupt (TURN_ABORTED + 投影 
 
 ---
 
-## 未发布 (2026-10-24·第八轮) - 流式通道命令修复 + 回卷入口可见化
+## 3.5.0 (2026-10-24·第八轮) - 流式通道命令修复 + 回卷入口可见化
 
 > 第八轮：修一个 R3 命令接线漏掉的整个通道——Web UI（chatStream）发斜杠命令曾被
 > 当普通文本喂给 LLM；并把 /rewind 搬到 Web 顶栏一键可达。新增 3 项回归测试。
@@ -592,7 +1254,7 @@ chat 通道 / chatStream 流式 / 流式中途 interrupt (TURN_ABORTED + 投影 
 
 ---
 
-## 未发布 (2026-10-24·第七轮) - 上手简单化 (对齐 DSH / Open WebUI)
+## 3.5.0 (2026-10-24·第七轮) - 上手简单化 (对齐 DSH / Open WebUI)
 
 > 第七轮：把"配置模型 → 用起来"的路径压到最短。目标: 用户不需要懂 base_url /
 > model_preference / 环境变量名, 1 分钟内从零到对话。
@@ -613,7 +1275,7 @@ chat 通道 / chatStream 流式 / 流式中途 interrupt (TURN_ABORTED + 投影 
 
 ---
 
-## 未发布 (2026-10-24·第六轮) - 前端 UI 与启动界面美化
+## 3.5.0 (2026-10-24·第六轮) - 前端 UI 与启动界面美化
 
 > 第六轮：Web UI 视觉精修（两主题真机截图验收）+ CLI/Web 启动横幅统一设计。
 > 纯表现层改动：不动 DOM 结构钩子与类名契约，check-web 全过。
@@ -641,7 +1303,7 @@ chat 通道 / chatStream 流式 / 流式中途 interrupt (TURN_ABORTED + 投影 
 
 ---
 
-## 未发布 (2026-10-24·第五轮) - 会话回卷 + 并发互斥 + 降级防护
+## 3.5.0 (2026-10-24·第五轮) - 会话回卷 + 并发互斥 + 降级防护
 
 > 第五轮：补齐 codex/claude-code 桌 stakes 的"会话回卷"，并修两个并发/降级正确性隐患。
 > 新增 4 项回归测试（`test/hardening-r5-2026-10-24.test.js`），R3 resume 测试升级为重定向语义。
@@ -670,7 +1332,7 @@ chat 通道 / chatStream 流式 / 流式中途 interrupt (TURN_ABORTED + 投影 
 
 ---
 
-## 未发布 (2026-10-24·第四轮) - 流式工具调用 + 截断可见化
+## 3.5.0 (2026-10-24·第四轮) - 流式工具调用 + 截断可见化
 
 > 第四轮：消灭最后一个大能力缺口——"带工具就整体退化为非流式"。真模型实测同任务
 > 13.8s → 3.3s（逐字推送 25 个 delta）。新增 7 项回归测试（`test/hardening-r4-2026-10-24.test.js`）。
@@ -699,7 +1361,7 @@ chat 通道 / chatStream 流式 / 流式中途 interrupt (TURN_ABORTED + 投影 
 
 ---
 
-## 未发布 (2026-10-24·第三轮) - 真模型接入 + 交互面收口
+## 3.5.0 (2026-10-24·第三轮) - 真模型接入 + 交互面收口
 
 > 第三轮：接通真实 LLM（GLM-4.7）首次全链路实测（eval 11/11 + agentic e2e），随后把
 > 审计暴露的交互面缺口一次收口：11 条死命令接线、缺失工具补齐、钩子语义对齐。
@@ -741,7 +1403,7 @@ chat 通道 / chatStream 流式 / 流式中途 interrupt (TURN_ABORTED + 投影 
 
 ---
 
-## 未发布 (2026-10-24·第二轮) - 流式计账 + 副作用可撤销 + 仓库地图升级
+## 3.5.0 (2026-10-24·第二轮) - 流式计账 + 副作用可撤销 + 仓库地图升级
 
 > 第二轮加固：修第一轮遗留真 bug（流式失明/回放双执行）、给破坏性文件操作加撤销能力、
 > 仓库地图从"同名共现近似"升级为"真实 import 图"。新增 8 项回归测试
@@ -786,7 +1448,7 @@ chat 通道 / chatStream 流式 / 流式中途 interrupt (TURN_ABORTED + 投影 
 
 ---
 
-## 未发布 (2026-10-24) - "把建好的接活 + 把边界做真" 加固批次
+## 3.5.0 (2026-10-24) - "把建好的接活 + 把边界做真" 加固批次
 
 > 一次全仓审计（5 路并行深读，区分"代码实测"与"README 宣称"）驱动：把空转的引擎接成闭环、
 > 把字符串过滤升级为结构化校验、给审计链加防重算锚点。新增 23 项回归测试
