@@ -76,9 +76,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "signature check failed (REQUIRE_SIGNED_RELEASE=$env:REQUIRE_SIGNED_RELEASE)" }
           "" | Add-Content $env:GITHUB_STEP_SUMMARY
           "### Authenticode" | Add-Content $env:GITHUB_STEP_SUMMARY
-          "```" | Add-Content $env:GITHUB_STEP_SUMMARY
+          # 注意: 反引号在 PowerShell 双引号串里是转义符, 必须**单引号**字面量 (2026-10-31 首轮 release 实测 ParserError)
+          '```' | Add-Content $env:GITHUB_STEP_SUMMARY
           Get-Content dist-desktop/SIGNATURE-STATUS.txt | Add-Content $env:GITHUB_STEP_SUMMARY
-          "```" | Add-Content $env:GITHUB_STEP_SUMMARY
+          '```' | Add-Content $env:GITHUB_STEP_SUMMARY
 
       - uses: actions/upload-artifact@v4
         with:
