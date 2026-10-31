@@ -93,6 +93,16 @@ test("guardPath: 默认拒绝改测试文件, allowTestEdit 才放行", () => {
   assert.equal(guardPath(root, rel, { testFiles: [rel], allowTestEdit: true }).ok, true);
 });
 
+test("guardPath: 不传 testFiles 也能按路径特征识别测试文件 (2026-10-30)", () => {
+  const root = path.resolve(os.tmpdir(), "ppx-guard-root3");
+  for (const rel of ["test/math.test.js", "tests/math.js", "spec/x.js", "__tests__/y.js", "src/a.spec.js"]) {
+    assert.equal(guardPath(root, rel).ok, false, `应自动识别为测试文件: ${rel}`);
+  }
+  assert.equal(guardPath(root, "src/math.js").ok, true);
+  assert.equal(guardPath(root, "src/latest.js").ok, true);
+  assert.equal(guardPath(root, "docs/testing.md").ok, true);
+});
+
 test("propose: 只出 diff, 磁盘零改动", async () => {
   const root = mkFixture();
   try {

@@ -1,3 +1,4 @@
+const path = require('node:path');
 const pptxgenjs = require('pptxgenjs');
 const pres = new pptxgenjs();
 
@@ -336,7 +337,8 @@ s9.addText('// SYSTEM.STANDBY  ·  POWERED BY 皮皮虾', {
 });
 
 // === 输出 ===
-const outPath = 'C:\\Users\\chen\\Desktop\\AI发展史_机甲风格.pptx';
+const outPath = process.env.PPX_PPTX_OUT
+  || path.join(process.cwd(), 'AI发展史_机甲风格.pptx');
 pres.writeFile({ fileName: outPath }).then(() => {
   console.log('DONE: ' + outPath);
 }).catch(err => {

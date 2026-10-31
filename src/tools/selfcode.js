@@ -16,10 +16,79 @@
 //   · self_edit 想真正落盘要过**双门**: 调用参数 mode="apply" + config agent.self_code.mode="apply"。
 //     单点误用不会把代码改坏, 这是从 self_improve 沿用下来的同一条纪律。
 import path from "node:path";
+import fs from "node:fs";
 import { SelfCodeEngine } from "../selfcode/engine.js";
 import { verifyChange, guardPath } from "../selfcode/verify.js";
+import { parseEditBlocks, parseCodexPatch, resolvePatchTargets, looksLikePath } from "../edit/editblock.js";
 
 const ERR = (name, msg) => `[工具错误] ${name}: ${msg}`;
+
+// ---- 自动测试发现 (2026-10-30 强化) ----
+// 此前 self_edit 的 tests 参数"不给则只验语法" —— 模型忘传时 apply 就裸落盘。
+// 现在按补丁目标文件三级映射相关测试, 让"改完即验证"不依赖模型自觉:
+//   ① 同名/同前缀: src/llm/fence.js → test/fence*.test.js
+//   ② 引用: 测试文件的 import 路径含该模块 (../src/llm/fence)
+//   ③ 兜底: config agent.self_iteration.target_files 前 3 个 (全局适应度)
+function extractPatchFiles(raw) {
+  const files = new Set();
+  for (const m of String(raw || "").matchAll(/\*\*\* (?:Update|Add|Move) File: ([^\s*]+)/g)) {
+    files.add(m[1].replace(/\\/g, "/"));
+  }
+  try {
+    let blocks = parseEditBlocks(raw);
+    if (!blocks.length) {
+      const cx = parseCodexPatch(raw);
+      if (cx.detected) blocks = cx.blocks || [];
+    }
+    const targets = resolvePatchTargets(raw, blocks);
+    blocks.forEach((b, i) => {
+      const p = looksLikePath(b.path) ? b.path : (targets[i] || "");
+      if (p) files.add(String(p).replace(/\\/g, "/"));
+    });
+  } catch { /* 粗解析失败不影响主流程 (引擎稍后还会完整解析) */ }
+  return [...files].filter((f) => /\.(js|mjs|cjs|json|md)$/i.test(f));
+}
+
+function discoverRelatedTests(agent, srcFiles, cap = 6) {
+  const root = agent?.root || process.cwd();
+  let testFiles = [];
+  try {
+    testFiles = fs.readdirSync(path.join(root, "test")).filter((f) => f.endsWith(".test.js"));
+  } catch { return []; }
+  const bases = srcFiles.map((f) => String(f).replace(/\\/g, "/"));
+  const picked = new Set();
+  const push = (name) => { if (testFiles.includes(name) && !picked.has(name) && picked.size < cap) picked.add(name); };
+  // ① 同名/同前缀
+  for (const f of bases) {
+    const base = path.basename(f).replace(/\.[^.]+$/, "");
+    for (const t of testFiles) {
+      const tn = t.replace(/\.test\.js$/, "");
+      if (tn === base || tn.startsWith(base + ".") || tn.startsWith(base + "-")) push(t);
+    }
+  }
+  // ② import 引用
+  if (picked.size < cap) {
+    const need = bases.map((f) => f.replace(/\.[^.]+$/, ""));
+    for (const t of testFiles) {
+      if (picked.has(t)) continue;
+      let txt = "";
+      try { txt = fs.readFileSync(path.join(root, "test", t), "utf8"); } catch { continue; }
+      for (const f of need) {
+        if (txt.includes(f)) { push(t); break; }
+      }
+      if (picked.size >= cap) break;
+    }
+  }
+  // ③ 兜底: 一个都没找到时跑全局适应度前 3 个, 保证 apply 至少有一道回归网
+  if (!picked.size) {
+    const fit = (agent?.config?.agent?.self_iteration?.target_files) || [];
+    for (const t of fit) {
+      if (picked.size >= Math.min(cap, 3)) break;
+      push(String(t).split("/").pop());
+    }
+  }
+  return [...picked];
+}
 
 function engineFor(agent, { allowTestEdit = false } = {}) {
   const root = agent?.root || process.cwd();
@@ -43,7 +112,7 @@ export function registerSelfCodeTools(catalog, { agent, getAgent } = {}) {
   catalog.register({
     name: "self_edit",
     capability: { readOnly: false, riskLevel: "high", sideEffect: "system" },
-    description: "改自己的源码。SEARCH/REPLACE 补丁 → 落盘 → 语法+指定测试验证 → 绿保留/红整体回滚 → 记账。默认 propose 只出 diff; apply 需 config agent.self_code.mode=apply 双开。改完需重启生效。",
+    description: "改自己的源码。SEARCH/REPLACE 补丁 → 落盘 → 语法+指定测试验证 → 绿保留/红整体回滚 → 记账。默认 propose 只出 diff; apply 需 config agent.self_code.mode=apply 双开; apply 未传 tests 时自动按补丁目标映射相关测试验证。改完需重启生效。",
     parameters: {
       type: "object",
       properties: {
@@ -51,7 +120,6 @@ export function registerSelfCodeTools(catalog, { agent, getAgent } = {}) {
         tests: { type: "array", items: { type: "string" }, description: "验证用测试文件 (相对 root); 不给则只验语法" },
         mode: { type: "string", enum: ["propose", "apply"], description: "propose=只出 diff(默认), apply=落盘并验证" },
         reason: { type: "string", description: "自改理由, 记进账本" },
-        allow_test_edit: { type: "boolean", description: "允许改测试文件 (默认 false)" },
       },
       required: ["patch"],
     },
@@ -69,9 +137,20 @@ export function registerSelfCodeTools(catalog, { agent, getAgent } = {}) {
       if (mode === "apply" && cfg.mode !== "apply") {
         return ERR("self_edit", "apply 需 config agent.self_code.mode=\"apply\" 显式开启 (双门防误改), 当前为 propose");
       }
-      const eng = engineFor(ag, { allowTestEdit: !!args.allow_test_edit });
+      // 2026-10-30: 测试文件保护不可由模型参数关闭 (旧 allow_test_edit 开关已移除)
+      const eng = engineFor(ag);
       const t = Array.isArray(args.tests) ? args.tests.map(String).slice(0, 12) : [];
+      // apply 且未显式给 tests → 自动映射相关测试 (改完即验证, 不裸落盘)
+      let autoTests = [];
+      if (mode === "apply" && !t.length) {
+        const targets = extractPatchFiles(patch);
+        if (targets.length) autoTests = discoverRelatedTests(ag, targets, 6);
+        if (autoTests.length) t.push(...autoTests);
+      }
       const r = await eng.run({ patch, tests: t, mode, reason: String(args.reason || "") });
+      if (autoTests.length) {
+        r.autoTests = { files: autoTests, note: "apply 未显式传 tests, 已按补丁目标自动映射相关测试参与验证" };
+      }
       try { ag._eqPush?.("selfcode", { stage: r.stage, ok: !!r.ok, ledgerId: r.ledgerId || null, files: (r.files || []).map((f) => f.path) }); } catch {}
       return JSON.stringify(r, null, 2);
     },

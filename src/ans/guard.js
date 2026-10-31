@@ -148,7 +148,18 @@ export function installGuardOnCatalog(catalog, guardHandle) {
         st.lastVerdict = { verdict: "block", verb, note: reason || "dangerous-not-whitelisted" };
       } catch {}
     }
-    return { decision: "deny", reason: "免疫闸门: 危险工具未授信: " + verb, priority: 100 };
+    return {
+      decision: "deny",
+      // 2026-10-30: 原文案只有"危险工具未授信: X" —— 模型拿到它不知道能做什么, 大概率原样重试
+      //   直到轮次耗尽 (实测离线基准 delete-file 就是这样红的)。补上可执行的下一步, 与权限引擎
+      //   拒绝的文案口径对齐: 要么请用户显式授信, 要么换一条不需要授信的路。
+      //   注意: 这里**不**因为 approval_headless=auto-approve 而放行 —— 免疫闸门是独立于审批的
+      //   第二道防线, auto-approve 表达的是"批准这次操作", 不是"信任这个工具的所有未来调用"。
+      reason: `免疫闸门: 危险工具未授信: ${verb}`
+        + ` —— 这是独立于审批的安全闸门。可执行的下一步: ①请用户确认后由用户显式授信 (approveGuard("${verb}")); `
+        + "②或改用不需要授信的只读方式完成同一件事; ③或向用户说明「该操作需要授权」并结束本轮。不要重复重试同一调用。",
+      priority: 100,
+    };
   }, { name: "immune-guard", priority: 100 });
   return { enabled: true, off };
 }

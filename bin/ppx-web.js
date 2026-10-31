@@ -15,6 +15,7 @@
 import { ensureUTF8Console } from "../src/utils/winutf8.js";
 import { installCrashGuard } from "../src/utils/crashguard.js";
 import { startServer } from "../src/server.js";
+import { readPpxConfig } from "../src/utils/config-file.js";
 import { webBanner } from "../src/utils/banner.js";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
@@ -43,12 +44,9 @@ const root = path.resolve(argOf("--root", process.env.PPX_ROOT || DEFAULT_ROOT))
 // ---- 端口解析 (--port > PPX_PORT > config/ppx.json > 8899) ----
 function configPort() {
   try {
-    const p = path.join(root, "config", "ppx.json");
-    if (fs.existsSync(p)) {
-      const cfg = JSON.parse(fs.readFileSync(p, "utf8"));
-      const n = Number(cfg?.channels?.http?.port);
-      if (Number.isFinite(n) && n > 0) return n;
-    }
+    const cfg = readPpxConfig(root, {});
+    const n = Number(cfg?.channels?.http?.port);
+    if (Number.isFinite(n) && n > 0) return n;
   } catch { /* 配置缺失/损坏 → 用默认端口 */ }
   return 8899;
 }

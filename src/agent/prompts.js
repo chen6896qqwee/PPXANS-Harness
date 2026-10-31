@@ -9,6 +9,7 @@ import { context as rewardContext } from "../ans/reward.js";
 import { imageFileToDataUrl } from "../tools/builtin.js";
 import { summarize as pwfSummarize } from "../planning/pwf.js";
 import { renderBullets } from "../evolve/playbook.js";
+import { loadProjectInstructions } from "../memory/project-md.js";
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_SYSTEM_RATIO, CHARS_PER_TOKEN } from "./context.js";
 import { boundaryPrompt, detectHighRisk, riskDirective } from "../ans/boundary.js";
 
@@ -68,6 +69,39 @@ export const promptMethods = {
           + "\n…[技能目录超出预算已裁剪, 其余请用 skill_search 按关键词检索]";
       }
       return body;
+    } catch { return ""; }
+  },
+
+  // 【按需工具】段 (2026-10-30 接线): 只在 tool_exposure 收窄时非空 —— 全量曝光时返回 "" (零 token)。
+  // 内容契约 (前缀缓存): 名字恒升序 (catalog.hiddenFromLLM 已排序), 段内无时间戳/无计数漂移以外的
+  //   可变内容; 工具集合在一次装配内恒定 ⇒ 同进程逐字节稳定, 不会作废 provider 前缀缓存。
+  // 为什么给名字而不是直接不给: 模型必须知道"存在这么一个工具"才可能去取 schema; 只留名字
+  //   (每名字约 5~8 tok) 换掉整段 schema (每工具 100+ tok), 这是这笔交易的全部意义。
+  _toolsPrompt() {
+    try {
+      if (!this.tools || typeof this.tools.hiddenFromLLM !== "function") return "";
+      const hidden = this.tools.hiddenFromLLM();
+      if (!hidden.length) return "";
+      const acfg = this.config?.agent || {};
+      const CHAR_BUDGET = Number(acfg.tool_catalog_budget) || 1500;
+      let body = `【按需工具】另有 ${hidden.length} 个工具本轮未下发完整参数 (省上下文)。`
+        + "需要时先调 tool_schema(name) 取参数定义再调用, 不要凭猜写参数:";
+      body += "\n" + hidden.join(", ");
+      if (body.length > CHAR_BUDGET) {
+        body = body.slice(0, Math.max(200, CHAR_BUDGET - 40)).trimEnd()
+          + "\n…[按需工具名单超出预算已裁剪, 其余用 list_capabilities 枚举]";
+      }
+      return body;
+    } catch { return ""; }
+  },
+
+  // 【手头的事】段 (2026-10-30, P1): 跨轮任务栈。空栈返回 "" (零 token)。
+  // 位置契约: 内容随任务变化 ⇒ **只能放动态区**(检索段之后), 绝不能进静态前缀,
+  //   否则每加/改一件事就作废整段 provider 缓存。段内不含时间戳 (逐字节稳定)。
+  _workStackPrompt() {
+    try {
+      if (!this.workStack || typeof this.workStack.render !== "function") return "";
+      return this.workStack.render();
     } catch { return ""; }
   },
 
@@ -141,11 +175,16 @@ export const promptMethods = {
       { key: "persona", text: identity },                       // 人格卡片 (静态身份区)
       { key: "profile", text: profile },                        // L3 画像 (静态身份区)
       { key: "skills", text: skills },
+      // 按需工具名单: 紧跟技能目录 (同属"我有什么能力"的静态索引区); 全量曝光时为空串不占位
+      { key: "tools", text: this._toolsPrompt() },
       { key: "experience", text: experience },                  // 经验块: 静态区末位 (技能清单之后、检索段之前)
       { key: "plan", text: planCtx },
       { key: "citation", text: citation },
       { key: "perspective", text: perspective },
       { key: "extra", text: extra },
+      // 项目指令 (AGENTS.md / PPX.md): 放静态区末段 (extra 之后) —— 文件变更才作废前缀,
+      //   位置越靠后失效半径越小; 语义上仍是"约定"而非动态检索内容。
+      { key: "projectmd", text: this._projectMdPrompt() },
       { key: "dsml", text: dsml },
       { key: "reward", text: rewardCtx },
       { key: "playbook", text: playbookCtx },
@@ -153,6 +192,8 @@ export const promptMethods = {
       //   放到检索段之后会重新引入"检索段在中间"的前缀作废问题。
       { key: "risk", text: riskDirective(detectHighRisk(userMsg || "", this.config), this.config) },
       { key: "retrieval", text: retrieval },                    // 动态检索段: 随 userMsg 变 (含 "# 今日对话")
+      // 手头的事: 动态段 (随任务变), 紧跟检索段之后 —— 必须在静态区之外
+      { key: "workstack", text: this._workStackPrompt() },
       // 目标看板: 恒在检索段**之后** (契约: 加/改目标不得动静态区一个字节)。
       { key: "goals", text: goalsCtx },
     ].filter((p) => p.text);
@@ -172,7 +213,7 @@ export const promptMethods = {
     if (total <= budget) return parts.map((p) => p.text).join("\n\n");
     // 裁剪顺序 = 裁剪代价从小到大; values / boundary / base 不在表内 → 永不裁 (行为底线)。
     // risk 放最后: 它是已命中高风险域后的强制护栏, 优先级最高, 最后才考虑牺牲。
-    const TRIM_ORDER = ["goals", "reward", "perspective", "skills", "plan", "citation", "extra", "dsml", "risk"];
+    const TRIM_ORDER = ["goals", "workstack", "reward", "perspective", "skills", "tools", "plan", "citation", "extra", "projectmd", "dsml", "risk"];
     for (const key of TRIM_ORDER) {
       if (total <= budget) break;
       const p = parts.find((x) => x.key === key);
@@ -189,6 +230,14 @@ export const promptMethods = {
       p.text = next;
     }
     return parts.filter((p) => p.text).map((p) => p.text).join("\n\n");
+  },
+
+  // 【项目指令】段 (2026-10-31): AGENTS.md / PPX.md 项目约定注入 —— 修复 /init 自创建起
+  //   就声称"每次启动自动读取"但注入实现从未存在的文档-实现缺口 (ARCHITECTURE-V3 规划的
+  //   project-md 四级记忆, 本段先落地项目根一级)。AGENTS.md 为 codex/cursor 生态标准文件。
+  //   无文件返回 "" 零 token; 文件未变时 project-md 缓存逐字节稳定 (前缀缓存契约)。
+  _projectMdPrompt() {
+    try { return loadProjectInstructions(this.root); } catch { return ""; }
   },
 
   // PWF 持久规划摘要 (2026-10-06): 无计划返回 "", 零侵入向后兼容; 异常静默不阻断主链路

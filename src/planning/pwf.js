@@ -115,6 +115,13 @@ export function readAll(root) {
 
 // 压缩摘要 (上下文注入用): 目标 + 步骤勾选状态 + 最近 3 条进度 + 最近 3 条发现
 // 无计划返回 "" (零侵入, 向后兼容)
+// 2026-10-30: 注入前剥离机器烘的 ISO 时间戳 (progress/findings 每条由 appendProgress/appendFinding
+//   自动加 nowISO 前缀) —— plan 段在 system 静态区, 必须满足"块内零时间戳"前缀缓存契约
+//   (同 test/prefix-cache-static-region.test.js C/D 与 cache-audit volatile 扫描的同一判据)。
+//   文件内时间戳保留不动 —— 只剥注入面, 不碰事实内容里用户自写的日期。
+const MACHINE_STAMP_RE = /^(\s*-\s*)\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?(\s+)/;
+const stripMachineStamp = (lines) => lines.map((l) => l.replace(MACHINE_STAMP_RE, "$1$2"));
+
 export function summarize(root) {
   if (!planExists(root)) return "";
   const { task_plan, findings, progress } = readAll(root);
@@ -127,8 +134,8 @@ export function summarize(root) {
   ];
   const lastOf = (md, n) =>
     md.split("\n").filter((l) => /^- /.test(l)).slice(-n);
-  const prog = lastOf(progress, 3);
-  const find = lastOf(findings, 3);
+  const prog = stripMachineStamp(lastOf(progress, 3));
+  const find = stripMachineStamp(lastOf(findings, 3));
   if (prog.length) out.push("", "最近进度:", ...prog);
   if (find.length) out.push("", "关键发现:", ...find);
   return out.join("\n");

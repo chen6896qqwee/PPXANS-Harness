@@ -1,0 +1,217 @@
+name: Release
+
+# 开源发布标准:
+#   触发 v* tag → 跑发布门禁 → 构建三平台安装包 (Windows NSIS / macOS dmg+zip / Linux AppImage+deb)
+#   → 汇总 SHA256SUMS.txt → 上传 GitHub Release (源码 zip/tar.gz 由 GitHub 自动附带)
+#
+# 代码签名 (可选): 配置 secrets.WINDOWS_CSC_LINK (pfx/base64) 与
+#   secrets.WINDOWS_CSC_KEY_PASSWORD 后自动签名; 未配置则产出未签名安装包,
+#   首次运行会有 SmartScreen 提示, 属于预期行为。
+#   签名方案与申请步骤见 docs/SIGNING.md。仓库变量 REQUIRE_SIGNED_RELEASE=true
+#   可把"必须签名"变成硬门禁 (默认只报告签名状态, 不阻塞未签名发布)。
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows-installer:
+    name: windows x64 installer
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Verify tag matches package.json
+        shell: pwsh
+        run: |
+          $tag = "$env:GITHUB_REF_NAME".TrimStart("v")
+          $ver = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($tag -ne $ver) { throw "tag $tag != package.json version $ver" }
+          Write-Host "releasing v$ver"
+
+      - name: Install dev dependencies
+        run: npm ci
+
+      # 与本地发版同一道门禁: verify + lint + README 数字(含全量测试)
+      - name: Release gate
+        run: npm run gate:release
+
+      - name: Build NSIS installer + checksums
+        run: npm run desktop:pack
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+          CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+
+      - name: Verify release assets
+        shell: pwsh
+        run: |
+          $exe = @(Get-ChildItem dist-desktop/PPXANS-Harness-Setup-*.exe)
+          if ($exe.Count -ne 1) { throw "expected exactly one Setup exe, got $($exe.Count)" }
+          if (-not (Test-Path dist-desktop/SHA256SUMS.txt)) { throw "SHA256SUMS.txt missing" }
+          Get-Content dist-desktop/SHA256SUMS.txt
+
+      # 签名状态始终写进 Job Summary 与 Release 资产; 未签名不阻塞, 但必须如实可见。
+      # 设置仓库变量 REQUIRE_SIGNED_RELEASE=true 后, 未签名/无效签名直接失败。
+      - name: Check Authenticode signature
+        shell: pwsh
+        env:
+          REQUIRE_SIGNED_RELEASE: ${{ vars.REQUIRE_SIGNED_RELEASE }}
+        run: |
+          $cmd = @("scripts/verify-signature.js", "--out", "dist-desktop/SIGNATURE-STATUS.txt")
+          if ($env:REQUIRE_SIGNED_RELEASE -eq "true") { $cmd += "--require" }
+          node @cmd
+          if ($LASTEXITCODE -ne 0) { throw "signature check failed (REQUIRE_SIGNED_RELEASE=$env:REQUIRE_SIGNED_RELEASE)" }
+          "" | Add-Content $env:GITHUB_STEP_SUMMARY
+          "### Authenticode" | Add-Content $env:GITHUB_STEP_SUMMARY
+          "```" | Add-Content $env:GITHUB_STEP_SUMMARY
+          Get-Content dist-desktop/SIGNATURE-STATUS.txt | Add-Content $env:GITHUB_STEP_SUMMARY
+          "```" | Add-Content $env:GITHUB_STEP_SUMMARY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ppxans-harness-windows-x64
+          path: |
+            dist-desktop/PPXANS-Harness-Setup-*.exe
+            dist-desktop/SHA256SUMS.txt
+            dist-desktop/SIGNATURE-STATUS.txt
+            LICENSE
+            NOTICE
+            THIRD-PARTY-NOTICES.md
+            CODE_SIGNING_POLICY.md
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          ASSETS=(dist-desktop/PPXANS-Harness-Setup-*.exe dist-desktop/SHA256SUMS.txt dist-desktop/SIGNATURE-STATUS.txt LICENSE NOTICE THIRD-PARTY-NOTICES.md CODE_SIGNING_POLICY.md)
+          gh release create "$TAG" "${ASSETS[@]}" \
+            --title "皮皮虾 PPXANS-Harness ${TAG}" \
+            --generate-notes \
+            || gh release upload "$TAG" "${ASSETS[@]}" --clobber
+
+  mac-installer:
+    name: macos x64 + arm64
+    needs: windows-installer
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dev dependencies
+        run: npm ci
+
+      # 未配置证书时产出未签名包, 首次打开需右键 → 打开 (Gatekeeper 提示), 属预期行为
+      - name: Build dmg + zip
+        run: npm run desktop:pack:mac
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      - name: Verify release assets
+        run: |
+          ls -1 dist-desktop/*.dmg dist-desktop/*.zip
+          test -f dist-desktop/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ppxans-harness-macos
+          path: |
+            dist-desktop/*.dmg
+            dist-desktop/*.zip
+          if-no-files-found: error
+
+      - name: Upload to GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          gh release upload "$TAG" dist-desktop/*.dmg dist-desktop/*.zip --clobber
+
+  linux-installer:
+    name: linux x64
+    needs: windows-installer
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dev dependencies
+        run: npm ci
+
+      - name: Build AppImage + deb
+        run: npm run desktop:pack:linux
+
+      - name: Verify release assets
+        run: |
+          ls -1 dist-desktop/*.AppImage dist-desktop/*.deb
+          test -f dist-desktop/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ppxans-harness-linux
+          path: |
+            dist-desktop/*.AppImage
+            dist-desktop/*.deb
+          if-no-files-found: error
+
+      - name: Upload to GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          gh release upload "$TAG" dist-desktop/*.AppImage dist-desktop/*.deb --clobber
+
+  # 各平台 job 各自生成的 SHA256SUMS.txt 只覆盖本平台产物; 这里汇总成一份,
+  # 否则最后上传的那个会覆盖前面的, 用户校验时找不到其他平台的条目。
+  release-checksums:
+    name: combined SHA256SUMS
+    needs: [windows-installer, mac-installer, linux-installer]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Rebuild combined checksums
+        run: |
+          mkdir -p combined
+          find artifacts -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.zip' -o -name '*.AppImage' -o -name '*.deb' \) -exec cp {} combined/ \;
+          ls -l combined
+          node scripts/checksums.js combined --pattern "PPXANS-Harness-.*\\.(exe|dmg|zip|AppImage|deb)$"
+
+      - name: Upload combined checksums
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" combined/SHA256SUMS.txt --clobber

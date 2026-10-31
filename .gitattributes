@@ -1,0 +1,15 @@
+# 行尾策略 (2026-10-30)
+#
+# 背景: 本机 core.autocrlf=true, 检出时会把工作区文件转成 CRLF。
+#   绝大多数文件无所谓, 但 public/index.html 里唯一那个内联脚本的 sha256 被**硬编码**
+#   在 SECURITY_CSP (src/channels/http.js) 里。一旦工作区是 CRLF, 哈希立刻失配,
+#   浏览器会拦掉首屏主题脚本。
+#
+#   症状极隐蔽: 页面照常能用, 只是主题闪一下 (FOUC 兜底失效), 控制台一条 CSP 报错。
+#   2026-10-30 就是因为改这个文件时换行被写成 CRLF 才撞上的 (测试红在 security-headers)。
+#
+# 所以: 这个文件必须钉死 LF。它的哈希是字节级契约, 不允许被任何工具"顺手"改行尾。
+public/index.html text eol=lf
+
+# 其余按 git 默认判定 (不强制, 避免一次性改动全部历史文件的行尾)
+* text=auto

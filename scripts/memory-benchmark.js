@@ -65,7 +65,7 @@ async function main() {
   // LLM 扩展: 探测本地 chat 模型
   let llm = null, llmName = "离线";
   try {
-    const p = new LLMClient({ id: "lmstudio", base_url: "http://127.0.0.1:1234/v1", api_key: "lm-studio", model: CHAT_MODEL, timeout_ms: 60000 });
+    const p = new LLMClient({ id: "lmstudio", base_url: process.env.PPX_LOCAL_BASE_URL || "http://127.0.0.1:1234/v1", api_key: process.env.PPX_LOCAL_API_KEY || "lm-studio", model: CHAT_MODEL, timeout_ms: 60000 });
     if (await p.health()) { llm = p; agent.llm = p; llmName = CHAT_MODEL; }
   } catch {}
 

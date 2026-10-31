@@ -6,6 +6,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "./config/index.js";
 import { isPlaceholder } from "./config/placeholder.js";
+import { configFilePath } from "./utils/config-file.js";
+import { readJsonGuarded } from "./utils/store.js";
+import { resolveDataDir } from "./utils/datadir.js";
+import { resolveApiKeyCmd } from "./llm/router.js";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -24,20 +28,24 @@ export async function runDoctor({ net = false } = {}) {
   check(results, `Node 版本 ${process.version}`, major >= 20, major >= 20 ? "" : "需要 Node >= 20");
 
   // 2. 配置文件存在 + 可解析
-  let config = null;
-  try {
-    config = loadConfig(ROOT);
-    check(results, "配置文件解析", true, "config/ppx.json");
-  } catch (e) {
-    check(results, "配置文件解析", false, e.message.slice(0, 100));
+  // 注意: loadConfig 对缺文件/坏 JSON 都会静默回退默认值 —— 只调它永远是 ✓, 必须自己看文件。
+  const cfgPath = configFilePath(ROOT);
+  const probe = readJsonGuarded(cfgPath);
+  if (!probe.existedBefore) {
+    check(results, "配置文件", false, `${cfgPath} 不存在 — 运行 ppx-setup (源码目录: npm run setup) 生成`);
+  } else if (probe.parseFailed) {
+    check(results, "配置文件", false, `${cfgPath} 不是合法 JSON — 修好或改名后重跑`);
     console.log("\n结论: 修复 config/ppx.json 后重跑 ppx doctor");
     process.exit(1);
+  } else {
+    check(results, "配置文件", true, cfgPath);
   }
+  const config = loadConfig(ROOT);
 
   // 3. providers: 声明 / 占位 / 密钥解析
+  // 2026-10-31: 密钥三通道 (api_key 明文 / api_key_env / api_key_cmd), 明文内联给降级提示
   const provs = (config.providers || []).filter(Boolean);
   check(results, `模型 provider 声明 ${provs.length} 个`, provs.length > 0, provs.length ? "" : "在 config/ppx.json providers 里至少配一个");
-  let keyOk = 0;
   for (const p of provs) {
     const label = `${p.id} (${p.model})`;
     if (isPlaceholder(p.model) || isPlaceholder(p.base_url)) {
@@ -47,17 +55,23 @@ export async function runDoctor({ net = false } = {}) {
     const keyInline = p.api_key && !isPlaceholder(String(p.api_key));
     const envVal = p.api_key_env ? process.env[p.api_key_env] : null;
     const keyEnv = envVal && !isPlaceholder(String(envVal));
-    if (keyInline || keyEnv) {
-      keyOk++;
-      check(results, `  ${label} 密钥`, true, keyInline ? "内联" : `env ${p.api_key_env}`);
+    const keyCmd = !!p.api_key_cmd;
+    if (keyInline || keyEnv || keyCmd) {
+      const note = keyInline
+        ? "内联明文 — 建议改用 api_key_env 或 api_key_cmd, 避免 key 随配置文件落盘"
+        : keyCmd
+          ? `cmd ${String(p.api_key_cmd).slice(0, 60)}`
+          : `env ${p.api_key_env}`;
+      check(results, `  ${label} 密钥`, true, note);
     } else {
-      check(results, `  ${label} 密钥`, false, p.api_key_env ? `未设置 — export ${p.api_key_env}=你的key` : "配置 api_key 或 api_key_env");
+      check(results, `  ${label} 密钥`, false, p.api_key_env ? `未设置 — export ${p.api_key_env}=你的key` : "配置 api_key / api_key_env / api_key_cmd");
     }
   }
   const llmReady = provs.some((p) => {
     const keyInline = p.api_key && !isPlaceholder(String(p.api_key));
     const envVal = p.api_key_env ? process.env[p.api_key_env] : null;
-    return !isPlaceholder(p.model || "") && !isPlaceholder(p.base_url || "") && (keyInline || (envVal && !isPlaceholder(String(envVal))));
+    return !isPlaceholder(p.model || "") && !isPlaceholder(p.base_url || "")
+      && (keyInline || p.api_key_cmd || (envVal && !isPlaceholder(String(envVal))));
   });
 
   // 4. 模型连通 (--net 才发请求: 一条最小对话, 8s 超时)
@@ -65,8 +79,8 @@ export async function runDoctor({ net = false } = {}) {
     for (const p of provs) {
       const keyInline = p.api_key && !isPlaceholder(String(p.api_key));
       const envVal = p.api_key_env ? process.env[p.api_key_env] : null;
-      if (!(keyInline || (envVal && !isPlaceholder(String(envVal))))) continue;
-      const key = keyInline ? p.api_key : envVal;
+      const key = keyInline ? p.api_key : (p.api_key_cmd ? resolveApiKeyCmd(p) : envVal);
+      if (!key || isPlaceholder(String(key))) continue;
       const t0 = Date.now();
       try {
         const res = await fetch(String(p.base_url).replace(/\/$/, "") + "/chat/completions", {
@@ -85,16 +99,16 @@ export async function runDoctor({ net = false } = {}) {
     console.log("  (模型连通性探测未执行 — 加 --net 发一条最小真实请求)");
   }
 
-  // 5. 数据目录可写
+  // 5. 数据目录可写 (与运行时同一解析规则: PPX_DATA_DIR > 默认目录)
+  const dataDir = resolveDataDir(ROOT);
   try {
-    const d = path.join(ROOT, "data");
-    fs.mkdirSync(d, { recursive: true });
-    const probe = path.join(d, `.doctor-${Date.now()}`);
-    fs.writeFileSync(probe, "ok");
-    fs.unlinkSync(probe);
-    check(results, "数据目录可写 data/", true);
+    fs.mkdirSync(dataDir, { recursive: true });
+    const probeFile = path.join(dataDir, `.doctor-${Date.now()}`);
+    fs.writeFileSync(probeFile, "ok");
+    fs.unlinkSync(probeFile);
+    check(results, `数据目录可写 ${dataDir}`, true);
   } catch (e) {
-    check(results, "数据目录可写 data/", false, e.message.slice(0, 80));
+    check(results, `数据目录可写 ${dataDir}`, false, e.message.slice(0, 80));
   }
 
   // 6. 技能数量 (递归数 SKILL.md, 与 skills-registry 口径一致)
@@ -112,6 +126,23 @@ export async function runDoctor({ net = false } = {}) {
     check(results, `技能库 ${skills} 个 (12 能力域)`, skills > 0);
   } catch (e) {
     check(results, "技能库", false, e.message.slice(0, 60));
+  }
+
+  // 7. 新版本检查 (--net 才查, 离线优先; 只提示不算体检失败 —— 有新版不是"未过项")
+  //    PPX_UPDATE_CHECK=0 时跳过 (与启动通知同一开关)。
+  if (net && process.env.PPX_UPDATE_CHECK !== "0") {
+    try {
+      const cur = readJsonGuarded(path.join(ROOT, "package.json")).data?.version || "0.0.0";
+      const { checkWithConfig, updateNotice } = await import("./update/index.js");
+      const u = await checkWithConfig({ config, currentVersion: cur, dataDir });
+      if (u.ok) {
+        check(results, "版本", true, u.updateAvailable ? updateNotice(u) : `已是最新 v${cur}`);
+      } else {
+        console.log(`  - 版本检查跳过 (${u.reason}) — 不影响体检结论`);
+      }
+    } catch (e) {
+      console.log(`  - 版本检查跳过 (${String(e.message || e).slice(0, 60)}) — 不影响体检结论`);
+    }
   }
 
   // 汇总

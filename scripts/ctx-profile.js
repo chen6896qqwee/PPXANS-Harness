@@ -92,7 +92,30 @@ console.log('  对照实测: 基线平均 17836 tok/任务 (含多轮工具循�
 //       付得起的理由: 没有这三个工具, agent 对自身代码只能"建议改哪里"而不能真改 ——
 //         自主性的最后一段路就在这里; 每次落盘前留备份的代价换来的是"改坏了能一键退回"。
 //       后续若要压回, 优先把 SEARCH/REPLACE 格式说明移出 schema, 改由 SKILL 按需加载。
-const CONTEXT_BUDGET_TOKENS = 14500;
+//     → 14500 保持 (2026-10-30 工具循环加固): 实测 14447, 加了一个工具但净额几乎没动。
+//        +tool_schema ~100 tok (按需工具模式的配套件: 名字 → schema 的那条路, 没有它收窄就是死路)
+//        -spawn_agent 描述 103→53 tok / -code_run 87→57 / -skill_import 98→82 / -vad_detect 62→52
+//        / -team_room_open 106→78 —— 删的都是"描述里逐条复述参数语义"的重复部分 (参数表里已经写了)。
+//       预算没涨, 但压力变了: 现在多了一个 **agent.tool_exposure = "core"** 的开关, 收窄后固定开销
+//       约 4.6k tok (见下方"曝光收窄"段)。闸门仍按默认 all 模式卡 14500 —— 默认行为不变才谈得上闸门。
+//     → 14800 (2026-10-30 身体批次): 实测 14,725。增量明细 (+278):
+//        +task_stack 277 —— 「手头的事」这层的唯一入口 (跨轮任务栈; 被打断/上下文压缩后
+//          还能接上, 不必每轮从 memory/turns 归档里猜"上一件事做到哪了")。
+//        付得起的理由: ① 它换掉的是模型**重新探索**的那几轮 (每轮都是工具调用 + 上下文);
+//          ② [手头的事] prompt 段在空栈时是空串 (零 token), 有任务时也就 30~60 tok;
+//          ③ 该段落在动态区, 不参与静态前缀, 加任务不会作废 provider 缓存。
+//        已做的压缩: task_stack 参数描述全部压到一行 (8 个参数共 ~250 tok, 无法再砍 —
+//          参数表本身就是它的能力面)。若将来要压回 14500, 优先砍 spawn_agent (857 tok)。
+//     → 15000 (2026-10-30 发布批次总账): 实测 14,962。增量明细 (+162):
+//        本批次 (v3.5.0 "前端换骨+自改代码闭环" 收尾) 相对 14800 定额时的实测 14,725 净增 ~237 tok:
+//          task_stack +277 (见上段 14800 账) / tool_schema +~100 (按需工具配套, 见 14500 段)
+//          / selfcode+selfmod 描述扩写与 lexicon 会话注入 ~-140 (既有工具压缩对冲后净额)。
+//        付得起的理由: ① tool_schema 是 tool_exposure 收窄 (省 61%) 能成立的配套件;
+//          ② task_stack 是「手头的事」唯一入口 (见上段); ③ 削减路径已评估 ——
+//          spawn_agent 857 tok 大头是 15 个参数 schema (能力面), 且描述为 2026-10-25
+//          "参数可发现性" 修复的产物, 再压有回归风险。若将来压回, 优先:
+//          a) spawn_agent 参数描述逐条压缩 (~60 tok); b) plan_files 312 tok 段并入 SKILL 按需加载。
+const CONTEXT_BUDGET_TOKENS = 15000;
 const checkIdx = process.argv.indexOf('--check');
 if (checkIdx >= 0) {
   const mIdx = process.argv.indexOf('--max-tokens');
@@ -106,6 +129,30 @@ if (checkIdx >= 0) {
   } else {
     console.log(`  ✓ 固定开销 ${total} tok <= 预算 ${maxTok} tok`);
   }
+}
+
+// 5. 曝光收窄的账 (agent.tool_exposure = "core", 2026-10-30)
+//    这笔账以前只写在文档散文里, 现在让闸门脚本自己算: 长尾工具每轮都在付 schema 钱。
+//    默认仍是 all —— 这里只报"如果收窄能省多少", 不改变任何默认行为。
+try {
+  const dataDir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'ppx-ctx-core-'));
+  const a2 = new PPXAgent({ root, dataDir: dataDir2 });
+  a2.config.agent.tool_exposure = 'core';
+  a2._applyToolExposure();
+  const tools2 = a2.tools.toOpenAI();
+  const ctx2 = a2._context('随便问个问题');
+  const t2 = est(norm(JSON.stringify(tools2)));
+  const s2 = est(norm(ctx2));
+  const slim = t2 + s2;
+  console.log('\n=== 曝光收窄 (tool_exposure="core") 能省多少 ===');
+  console.log('  下发工具数         ' + String(tools2.length).padStart(6) + '   (all 模式 ' + tools.length + ' 个)');
+  console.log('  降级为按需         ' + String(a2.tools.hiddenFromLLM().length).padStart(6) + ' 个  (名字进 system, schema 不进请求, 用 tool_schema 现取)');
+  console.log('  固定开销           ' + String(slim).padStart(6) + ' tok  (all 模式 ' + total + ' tok, 省 ' + (total - slim) + ' tok / '
+    + Math.round((1 - slim / total) * 100) + '%)');
+  await a2.shutdown();
+  fs.rmSync(dataDir2, { recursive: true, force: true });
+} catch (e) {
+  console.log('\n  (曝光对比测量失败, 不影响闸门: ' + e.message + ')');
 }
 
 // 4. 最大的单个工具 schema

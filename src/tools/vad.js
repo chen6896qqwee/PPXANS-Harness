@@ -141,14 +141,14 @@ async function sileroVad(abs, opts) {
 export function registerVadTools(catalog, { rootDir = process.cwd() } = {}) {
   catalog.register({
     name: "vad_detect",
-    description: "语音活动检测 (VAD): 找出音频里有人说话的时间段。默认零依赖能量算法 (16-bit PCM WAV); 可选 silero 神经网络后端 (需 onnxruntime-node + onnx 模型)。用于 ASR 前切分、语音断句。",
+    description: "语音活动检测 (VAD): 找出音频里有人说话的时间段。默认零依赖能量算法 (16-bit PCM WAV), 可选 silero 神经网络 (需 onnxruntime-node + onnx 模型)。",
     parameters: {
       type: "object",
       properties: {
-        path: { type: "string", description: "WAV 文件路径 (16-bit PCM; 其他格式请先转码)" },
-        backend: { type: "string", enum: ["energy", "silero"], description: "energy=零依赖能量阈值 (默认); silero=神经网络 (需 onnxruntime-node)" },
+        path: { type: "string", description: "WAV 文件路径 (16-bit PCM; 其他格式先转码)" },
+        backend: { type: "string", enum: ["energy", "silero"], description: "energy=零依赖能量阈值 (默认); silero=需 onnxruntime-node" },
         model: { type: "string", description: "silero 后端: silero_vad.onnx 模型路径" },
-        threshold: { type: "number", description: "能量后端: RMS 进入阈值 (默认 0.015 自适应底噪); silero 后端: 概率阈值 (默认 0.5)" },
+        threshold: { type: "number", description: "能量后端 RMS 阈值 (默认 0.015 自适应底噪); silero 概率阈值 (默认 0.5)" },
       },
       required: ["path"],
     },

@@ -253,7 +253,7 @@ export class LLMClient {
       throw e;
     }
     const url = `${this.baseUrl}/chat/completions`;
-    const body = { model: this.model, messages, temperature, max_tokens: maxTokens, stream: true, ...this._thinkParams() };
+    const body = { model: this.model, messages, temperature, max_tokens: maxTokens, stream: true, stream_options: { include_usage: true }, ...this._thinkParams() };
     if (tools.length) body.tools = tools;
     const ctrl = new AbortController();
     // 2026-10-25 评估修复: 超时从"总时长制"改"空闲制" —— 原实现一次 setTimeout 定死,
@@ -370,11 +370,12 @@ export class LLMClient {
     // { once: true } (2026-09-18 修复): 复用同一 signal 的多次流式对话不再累积监听器
     if (extSig) extSig.addEventListener("abort", () => ctrl.abort(), { once: true });
     let full = "";
+    let usage = null; // 纯流式路径的 usage 暂存 (Web 状态条数据源, 由记账包装层读取)
     try {
       const resp = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${this.apiKey}` },
-        body: JSON.stringify({ model: this.model, messages, temperature, max_tokens: maxTokens, stream: true, ...this._thinkParams() }),
+        body: JSON.stringify({ model: this.model, messages, temperature, max_tokens: maxTokens, stream: true, stream_options: { include_usage: true }, ...this._thinkParams() }),
         signal: ctrl.signal,
       });
       if (!resp.ok) {
@@ -402,11 +403,13 @@ export class LLMClient {
           if (data === "[DONE]") { streamDone = true; break; }
           try {
             const j = JSON.parse(data);
+            if (j.usage) usage = j.usage; // include_usage 端点在收尾 chunk 回传
             const delta = j.choices?.[0]?.delta?.content;
             if (delta) { full += delta; onDelta && onDelta(delta); }
           } catch {}
         }
       }
+      this.__ppxStreamUsage = usage; // 仍返回纯文本 (调用方按字符串消费), usage 挂实例由记账层读取
       return full;
     } finally {
       if (idleTimer) clearTimeout(idleTimer);

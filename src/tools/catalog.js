@@ -13,6 +13,40 @@ export { TOOL_ERROR_PREFIX };
 // 策略订阅者默认熔断参数: 60s 窗口内 3 次异常 → 熔断, 冷却 10s 后放行单个探测
 const DEFAULT_SUBSCRIBER_BREAKER = { threshold: 3, windowMs: 60000, cooldownMs: 10000 };
 
+// ---- 按需工具: 核心曝光名单 (2026-10-30) ----
+// 为什么要它: 工具 schema 是全仓最贵的固定开销 —— 实测 96 个工具 schema ≈ 11.2k tok/请求,
+//   占固定上下文 (14.5k) 的 77%。而 data/logs/traces 的真实轨迹 (2026-10-23~10-30, 327 条)
+//   里只有约 30 个工具被调用过, 前 10 个占 2/3 调用量: 长尾工具一辈子难得调一次, 却每轮付钱。
+// 机制不是新造的: ToolCatalog.setExposure 早就实现了"名单内下发 schema, 其余只留名字",
+//   但此前**零调用方**(注释写"见 agent prompts", 而 prompts 里并没有那一段) —— 属于典型的
+//   "完整实现 + 半截接线"。本常量 + agent._applyToolExposure + prompts._toolsPrompt 把它接通。
+// 默认值仍是 "all"(全量下发), 行为逐字节不变; 要省这份开销就设 agent.tool_exposure: "core"。
+export const CORE_TOOL_EXPOSURE = [
+  // 文件读写与改代码 (主干闭环: 找 → 读 → 改 → 验)
+  "read_file", "write_file", "append_file", "delete_file", "move_file", "undo_file",
+  "list_dir", "search_files", "apply_patch",
+  // 执行
+  "run_command", "code_act", "code_run",
+  // 文档/图片
+  "read_document", "read_image",
+  // 网络
+  "web_search", "fetch_page", "http_request",
+  // 记忆
+  "memory_search", "memory_add",
+  // 技能 (渐进加载的入口: 只列名 → skill_search → load_skill)
+  "load_skill", "skill_search",
+  // 委派
+  "spawn_agent",
+  // 人机与环境
+  "get_time", "notify", "clarify",
+  // 元能力 (取 schema / 枚举能力)
+  "tool_schema", "list_capabilities",
+];
+
+// 任何曝光名单都必须保留的元工具 —— 否则模型连"怎么把别的工具的参数取出来"都不知道,
+// 按需模式会退化成"看得到名字但永远调不对"。自定义名单会被强制并入这两项。
+export const META_TOOLS_ALWAYS = ["tool_schema", "list_capabilities"];
+
 // ---- Deny-Wins 决策合并 (HookBus consolidate 语义) ----
 // 多个策略订阅者对同一工具调用给出冲突决策时:
 //   任一 deny 一票否决 (取最高优先级 reason); 否则任一 ask → ask; 否则 allow

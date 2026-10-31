@@ -2,11 +2,9 @@
 import { ensureUTF8Console } from "../utils/winutf8.js";
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
 import { fileURLToPath } from "node:url";
 
-import { TOOL_ERROR_PREFIX } from "../tools/index.js";
-import { normalizeCommand } from "../tools/command-guard.js";
+import { TOOL_ERROR_PREFIX, CORE_TOOL_EXPOSURE, META_TOOLS_ALWAYS } from "../tools/index.js";
 import { explainError } from "../utils/public-error.js";
 import { selfCheckReply, sanitizeReply } from "../core/selfcheck.js";
 // 重构第一刀 (2026-09-14): 工具循环执行策略抽至 src/core/policy.js
@@ -19,6 +17,7 @@ import { MemoryService } from "../services/memory-service.js";
 import { LearningService } from "../services/learning-service.js";
 export { isOverflowError as _isOverflowError, trimToolResult, toToolContent } from "../core/policy.js";
 import { logicalDay } from "../utils/store.js";
+import { resolveDataDir } from "../utils/datadir.js";
 import { scrubPII } from "../utils/pii.js";
 import { loadConfig } from "../config/index.js";
 import { info, warn, error, debug } from "../utils/logger.js";
@@ -34,10 +33,12 @@ import { v3Plugins } from "../plugin/v3.js";
 // (projection.js 宣称"接入主链路"实为零消费悬空代码), SQ 也零生产者。本轮接线:
 // chat/chatStream 每轮 begin→(SQ 提交 USER_TURN op)→end→(消费 op + EQ 推 TURN_* 事件)。
 import { TurnProjection } from "../session/projection.js";
+import { WorkStack } from "../session/workstack.js";
 import { OpType, EventType } from "../protocol/index.js";
 // P2-3: 占位符判定与路由共用唯一真相源, 避免"启动告警"和"实际选模型"两套口径漂移
 import { isPlaceholder, hasPlaceholderField } from "../config/placeholder.js";
 import { registerMcpTools } from "../mcp/index.js";
+import { watchdogHeartbeat } from "../ans/watchdog.js";
 import { createTaskBoard } from "../mcp/tasks.js";
 import { Auditor } from "../audit/verifier.js";
 // ANS 独立模块 (可更换): 价值对齐 / 自主任务生成 / 生命周期
@@ -49,7 +50,8 @@ import { installGuard, guardStatus, installGuardOnCatalog } from "../ans/guard.j
 import { categorizeFailure } from "../evolve/delta-producer.js";
 // 持续进化循环 (2026-10-25): learn→iterate→journal 每日编排 (config.agent.evolution_loop)
 import { installEvolutionLoop } from "../evolve/loop.js";
-import { estimateTokens } from "../utils/text.js";
+import { estimateTokens, estimateTokensBase } from "../utils/text.js";
+import { recordTokenSample } from "../utils/token-calibration.js";
 import { scanInjection, wrapUntrusted, reportSuspicious, stripProtoKeys } from "../security/injection.js";
 import { SkillLoader } from "../skills/loader.js";
 import { SkillRegistry, skillRootsFromConfig } from "../skills/registry.js";
@@ -75,12 +77,14 @@ const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..")
 // P2-2 降级提示标记: 追加在用户可见回复末尾的哨兵串 (历史/记忆写入前按它剥离)
 const FALLBACK_NOTICE_TAG = "\n\n> ⚠ "; 
 
+// 按天用量账本保留的天数上限 (使用统计页最长看一年, 再多只增体积不增信息)
+const USAGE_DAY_KEEP = 370;
+
 export class PPXAgent {
   constructor({ root = ROOT, configFile = null, plugins = [], dataDir = null, globalDataDir = null } = {}) {
     this.root = root;
-    // dataDir 可覆盖: 显式参数 > PPX_DATA_DIR 环境变量 > 默认目录
-    // 默认目录: 包装在 node_modules 里时外置到 ~/.ppx (防卸载丢数据), 否则 root/data
-    this.dataDir = dataDir || process.env.PPX_DATA_DIR || this._defaultDataDir(root);
+    // dataDir 可覆盖: 显式参数 > PPX_DATA_DIR 环境变量 > 默认目录 (规则见 utils/datadir.js)
+    this.dataDir = resolveDataDir(root, dataDir);
     // 全局共享数据目录 (跨 agent 共享经验等): 显式参数 > PPX_AGENT_GLOBAL_DATA_DIR > 本地 dataDir
     this.globalDataDir = globalDataDir || process.env.PPX_AGENT_GLOBAL_DATA_DIR || this.dataDir;
     this.config = this._loadConfig(configFile);
@@ -176,10 +180,18 @@ export class PPXAgent {
       this.permissions.autoApproveHighRisk = !!this.config.agent?.auto_approve_high_risk;
     }
     // ZCode 使用统计对齐 (2026-10-02): 会话级 token/调用次数记账 (零侵入包装 provider)
-    this.usageStats = { calls: 0, tokens: 0, cost: 0, byModel: {} };
+    // 2026-10-30: 增 promptTokens / cacheHitTokens 两个累计字段 —— 底部状态条要显示
+    //   "累计 tok · 缓存命中 %", 而原来只累计 total, 算不出命中率。
+    //   「使用统计」页要按天/按模型画趋势与占比, 只有累计值就攒不出折线。
+    this.usageStats = { calls: 0, tokens: 0, cost: 0, promptTokens: 0, cacheHitTokens: 0, byModel: {}, days: {} };
     this._installedAt = Date.now();
     this._lastUsageFlushCalls = 0; // 周期落盘水位 (每 N 次调用落一次盘)
     this._budgetExceeded = false;  // 达到 budget.usd 后置位, 拦截后续模型调用
+    // 2026-10-30: 从 usage-stats.json 恢复累计账本。
+    //   此前这个文件**只写不读** —— 每次重启盘点归零, 于是"累计 3.2M tok / 缓存命中 96%"
+    //   这类指标永远攒不起来 (面板上刚涨到有意义的量就归零)。恢复只读累计字段,
+    //   不恢复 budget 判定 (预算以当前 config 为准, 旧的 budget_usd 不作数)。
+    this._loadUsageStats();
     this._installUsageTracking();
     // 待审批映射 (codex approval flow): id -> { req, resolve, timer }
     this._pendingApprovals = new Map();
@@ -187,7 +199,7 @@ export class PPXAgent {
     this._approvalSurfaces = new Set(); // 具名审批面登记 (Web "http" / CLI "cli" …)
     this._humanChannel = false;          // CLI 人类在场标记 (无审批面但有人能答话)
     // B2: 审批缓存 (codex ApprovalStore 语义) — 会话内相同命令批准后不重复 ask
-    // key = `${tool}:${normalizeCommand(command)}`; 只存批准结果, 拒绝/超时不入缓存
+    // key = `${tool}:${原样命令}` (仅 trim); 只存批准结果, 拒绝/超时不入缓存
     this._approvalCache = new Map();
     // plan 模式 (2026-10-05 /plan /do 死命令修复): 按会话存储的计划态集合
     // (sessionKey -> 是否在计划模式)。与引擎级 permissions.planEnabled 是两条轨道:
@@ -374,9 +386,14 @@ export class PPXAgent {
     //   `agent.skillRegistry` (skill_coverage / capability_matrix 依赖), 但此前从无任何地方 provide 过,
     //   于是这两个工具恒返回「技能注册表未装配」。这里复用同一个 loader (不改变 this.skills 的既有行为),
     //   只额外挂上按配置推导的 roots 供覆盖率统计使用。
+    // 2026-10-31 (队列⑥): 多根装配落地 —— 此前 new SkillLoader(<root>/skills) 只扫内置单根,
+    //   用户级 (~/.ppx/skills) 与项目级 (.ppx/skills) 技能在 agent 主路径 (技能清单注入 /
+    //   load_skill / 覆盖率) **永远不可见**, skillRootsFromConfig 只喂了 registry 的 sources 汇报。
+    //   现在读写同一份多根 roots (项目 > 用户 > 内置), 与 toolsPlugin 的 selfmod 同口径。
     try {
-      this.skills = new SkillLoader(path.join(this.root, "skills"));
-      this.skillRegistry = new SkillRegistry({ loader: this.skills, roots: skillRootsFromConfig(this.config, this.root) });
+      this.skillRoots = skillRootsFromConfig(this.config, this.root);
+      this.skills = new SkillLoader({ roots: this.skillRoots, maxDepth: this.config?.skills?.max_depth });
+      this.skillRegistry = new SkillRegistry({ loader: this.skills, roots: this.skillRoots });
     } catch {
       this.skills = null;
       this.skillRegistry = null;
@@ -422,12 +439,25 @@ export class PPXAgent {
     // 注入 LLM 摘要器/提炼器 (依赖 service, 装配后注入)
     this.memory.summarizer = (raw) => this.memorySvc.summarizeMemory(raw);
     this.memory.setExtractor((u, a, related) => this.memorySvc.extractMemory(u, a, related));
+
+    // ---- 跨轮任务栈 (2026-10-30, P1: 「我正在干什么」) ----
+    // 每轮 _context 都从人格/画像/记忆重新拼"我是谁", 却没有"手头这件事"的持久层。
+    // 这里是那一层: 落在 <dataDir>/workstack.json, 跨轮/跨会话/压缩后都活着。
+    // 装配失败不阻断启动 (退化 = 没有任务栈记忆, 其余功能不受影响)。
+    try {
+      this.workStack = new WorkStack(this.dataDir);
+    } catch (e) {
+      this.workStack = null;
+      warn(`[workstack] 初始化失败 (任务栈不可用): ${e?.message || e}`);
+    }
   }
 
   // ---- 装配阶段 7: 启动动作 (禁用工具 / MCP 自动连接 / 首次画像 / 进化循环) ----
   _initStartup() {
     // 应用 tools.disabled: 从 config/ppx.json 读取需禁用的工具, 启动时禁用 (设置 UI 写盘生效)
     this._applyDisabledTools();
+    // 应用 agent.tool_exposure: 默认 all (全量下发); core = 只下发核心名单 + 其余按需取 schema
+    this._applyToolExposure();
 
     // 可选: 启动时自动连接 MCP 服务器 (config.mcp.auto_connect = true 时非阻塞连接)
     if (this.config.mcp?.auto_connect && this.config.mcp.servers?.length) {
@@ -444,11 +474,7 @@ export class PPXAgent {
     try { installEvolutionLoop(this); } catch { /* 进化循环装配失败不阻断启动 */ }
   }
 
-  // 默认数据目录: 包装在 node_modules 里(全局/本地安装)时外置到 ~/.ppx, 否则 root/data
-  _defaultDataDir(root) {
-    if (String(root).includes("node_modules")) return path.join(os.homedir(), ".ppx");
-    return path.join(root, "data");
-  }
+  // 默认数据目录规则已收敛到 utils/datadir.js (与 ppx doctor 共用, 防止两处漂移)
 
   // 主动通知 + 中断 API
   setNotify(cb) { this._notifyCb = typeof cb === "function" ? cb : null; }
@@ -634,10 +660,18 @@ export class PPXAgent {
         return this.tools.call("review_code", { path: intent.target || "." }, { agent: this });
       }
       case "init_project": {
+        // 2026-10-31: 注入实现已落地 (src/memory/project-md.js), 文案不再说谎;
+        //   已有 AGENTS.md (codex/cursor 生态标准) 时不再重复创建 PPX.md。
+        const agentsPath = path.join(this.root, "AGENTS.md");
         const p = path.join(this.root, "PPX.md");
-        if (fs.existsSync(p)) return `PPX.md 已存在 (${p}), 项目记忆继续沿用。`;
+        const haveAgents = fs.existsSync(agentsPath);
+        const havePpx = fs.existsSync(p);
+        if (haveAgents || havePpx) {
+          const which = [haveAgents && "AGENTS.md", havePpx && "PPX.md"].filter(Boolean).join(" + ");
+          return `项目指令已存在 (${which}) — 每次对话自动注入, 继续沿用。`;
+        }
         fs.writeFileSync(p, [
-          "# PPX.md — 项目记忆 (皮皮虾每次启动自动读取)",
+          "# PPX.md — 项目记忆 (每次对话自动注入)",
           "",
           "## 构建与验证",
           "- 测试: `npm test` · 快检: `npm run verify`",
@@ -646,7 +680,7 @@ export class PPXAgent {
           "<!-- 在这里写下: 架构约定 / 代码风格 / 禁止事项 / 常用命令 -->",
           "",
         ].join("\n"));
-        return `已创建 PPX.md (${p}) —— 写入项目约定后, 每次对话自动注入。`;
+        return `已创建 PPX.md (${p}) —— 写入项目约定后, 每次对话自动注入 (也兼容 AGENTS.md, codex/cursor 生态标准文件)。`;
       }
       case "set_model": {
         const providers = this.allProviders || [];
@@ -816,7 +850,7 @@ export class PPXAgent {
         return { ok: false, error: parts.join("\n") };
       }
       // B2: 审批缓存 (codex ApprovalStore 语义) — 会话内相同命令已批准过则不重复 ask
-      // 仅命令类工具参与; 缓存 key = `${tool}:${normalizeCommand(command)}`
+      // 仅命令类工具参与; 缓存 key = `${tool}:${原样命令}` (不归一化引号/空白)
       // 命中 = 本次会话已显式批准, 视为放行; 拒绝/超时永不入缓存
       const cacheKey = this._approvalCacheKey(name, args);
       const cached = cacheKey && this.config.agent?.approval_cache !== false && this._approvalCache.get(cacheKey);
@@ -1419,14 +1453,17 @@ export class PPXAgent {
   }
 
   // B2: 审批缓存 key 计算 — 仅命令类工具参与 (非命令工具改参数不放行, 防止漏审对象被缓存)
-  // 复用 command-guard 的 normalizeCommand (去引号防绕过 + 合并空白), 防 `echo  a` / `echo "a"` 变体
-  //   造成同命令不同 key 或异命令同 key 导致漏审。返回 null = 不缓存该工具。
+  // 2026-10-30 安全修复: 缓存 key 必须与「人类实际看到的命令」逐字节一致。
+  //   旧实现复用 normalizeCommand (去引号 + 合并空白), 把 `echo "rm -rf /"` 与 `echo rm -rf /`
+  //   归一成同一个 key —— 批准前者后, 后者直接命中缓存跳过审批, 属于语义级越权。
+  //   现在只 trim 首尾空白, 不碰内部引号/空白; 不同写法最多多问一次, 不会误放行。
+  //   命令在 run_command/code_act 中固定以工作区为 cwd 执行, 因此无需把 cwd 纳入 key。
+  // 返回 null = 不缓存该工具。
   _approvalCacheKey(name, args) {
     if (!/run_command|shell|exec|bash|code_act/i.test(String(name))) return null;
     const cmd = args?.command ?? args?.cmd ?? args?.code ?? args?.script;
     if (typeof cmd !== "string" || !cmd.trim()) return null;
-    const norm = normalizeCommand(cmd);
-    return norm ? `${name}:${norm}` : null;
+    return `${name}:${cmd.trim()}`;
   }
 
   // 统一工具执行入口 (http 原生 tool_calls + 文本工具调用修复) [P0#1]
@@ -1658,34 +1695,53 @@ export class PPXAgent {
   // 全部收敛到 src/core/policy.js runToolLoop, 此处只注入依赖, 策略可独立测试/替换。
   // 2026-10-24 (R4): onDelta/signal 透传 —— chatStream 的流式工具循环入口。
   async _llmWithTools(seedMessages, llmInstance = this.llm, onDelta = null, signal = null) {
-    return runToolLoop({
-      seedMessages,
-      llm: llmInstance,
-      tools: this.toolsEnabled ? this.tools.toOpenAI() : [],
-      config: this.config,
-      isInterrupted: () => this._interrupted,
-      onDelta,
-      signal,
-      onStep: (ev) => { if (this._onStepEvent) { try { this._onStepEvent(ev); } catch {} } },
-      // 轮内中间草稿采集 (2026-10-10): 每轮模型回包内容进草稿桶, 落库时并入 memory/turns
-      onAssistantMsg: (ev) => this._recordDraft(ev),
-      runTool: (name, args) => this._runTool(name, args),
-      shrinkMessages: (messages, budget) => this._shrinkMessagesForOverflow(messages, budget),
-      histTokenCap: () => this._histTokenCap(),
-      onEvent: (type, payload) => { this._onPolicyEvent(type, payload); this.tracer.event(type, payload); },
-      // v1.6.0 第四刀: 超时重试决策 (幂等才重试) + 超时预算查询 (事件采集)
-      isIdempotentTool: (name) => this._toolIdempotent(name),
-      toolTimeoutOf: (name) => this._toolTimeoutOf(name),
-      // 2026-10-24: 循环内预算闸门 —— 每轮 LLM 调用前消费入口闸的判定 (_budgetBlocked
-      // 返回非空 = 预算耗尽文案)。首轮跳过 (入口已查), 只拦"循环中途烧穿"的情形。
-      budgetBlocked: () => this._budgetBlocked(),
-      // 回合级后置校验闸门 (2026-10-05): 收尾前 harness 自己跑确定性检查, 不过则经 steering
-      // 通道把失败喂回模型 (修正机会 ≤2), 用尽诚实上报。rootDir 缺省时不启用。
-      postCondition: {
-        rootDir: this.root,
-        capabilityOf: (n) => (this.tools && this.tools.getCapability ? this.tools.getCapability(n) : null),
-      },
-    });
+    // 2026-10-30: 本轮运行统计 (轮次/工具步数/输出速度), 落 this.lastRun 供底部状态条与
+    //   /api/run.state 复用。此前这套数只在前端内存里算, 页面一刷新就没了 ——
+    //   "1 轮 33 步 · 241 tok/s" 刷新后消失, 看着像功能不存在。
+    const run = { rounds: 0, steps: 0, t0: Date.now(), tokps: 0, at: new Date().toISOString() };
+    this.lastRun = run;
+    try {
+      return await runToolLoop({
+        seedMessages,
+        llm: llmInstance,
+        tools: this.toolsEnabled ? this.tools.toOpenAI() : [],
+        config: this.config,
+        isInterrupted: () => this._interrupted,
+        onDelta,
+        signal,
+        onStep: (ev) => {
+          // runToolLoop 的 round 从 0 起算 (首轮 = 0), 故轮次数 = round + 1。
+          //   此前用 `ev.round > run.rounds` 判断, 0 > 0 恒假 → 单次生成永远记成 0 轮。
+          if (typeof ev.round === "number") run.rounds = Math.max(run.rounds, ev.round + 1);
+          if (this._onStepEvent) { try { this._onStepEvent(ev); } catch {} }
+        },
+        // 轮内中间草稿采集 (2026-10-10): 每轮模型回包内容进草稿桶, 落库时并入 memory/turns
+        onAssistantMsg: (ev) => this._recordDraft(ev),
+        runTool: (name, args) => { run.steps += 1; return this._runTool(name, args); },
+        shrinkMessages: (messages, budget) => this._shrinkMessagesForOverflow(messages, budget),
+        histTokenCap: () => this._histTokenCap(),
+        onEvent: (type, payload) => { this._onPolicyEvent(type, payload); this.tracer.event(type, payload); },
+        // v1.6.0 第四刀: 超时重试决策 (幂等才重试) + 超时预算查询 (事件采集)
+        isIdempotentTool: (name) => this._toolIdempotent(name),
+        toolTimeoutOf: (name) => this._toolTimeoutOf(name),
+        // 2026-10-24: 循环内预算闸门 —— 每轮 LLM 调用前消费入口闸的判定 (_budgetBlocked
+        // 返回非空 = 预算耗尽文案)。首轮跳过 (入口已查), 只拦"循环中途烧穿"的情形。
+        budgetBlocked: () => this._budgetBlocked(),
+        // 回合级后置校验闸门 (2026-10-05): 收尾前 harness 自己跑确定性检查, 不过则经 steering
+        // 通道把失败喂回模型 (修正机会 ≤2), 用尽诚实上报。rootDir 缺省时不启用。
+        postCondition: {
+          rootDir: this.root,
+          capabilityOf: (n) => (this.tools && this.tools.getCapability ? this.tools.getCapability(n) : null),
+        },
+      });
+    } finally {
+      // 输出速度: 只在真有 completion 数时算, 否则留 0 (状态条据此不显示 tok/s)。
+      //   分母含工具往返 —— 与前端 done 事件里的口径一致, 不另造一套。
+      const out = Number(this.lastUsage?.completion_tokens);
+      const secs = (Date.now() - run.t0) / 1000;
+      if (Number.isFinite(out) && out > 0 && secs > 0.3) run.tokps = Math.round((out / secs) * 10) / 10;
+      run.ms = Date.now() - run.t0;
+    }
   }
 
   // 政策事件回流: 默认转 tracer 埋点; 对会沉淀智力的关键事件 (B3 反思闸门拦停) 额外写入经验库
@@ -1916,6 +1972,31 @@ export class PPXAgent {
     if (this._proactiveTimer) { clearInterval(this._proactiveTimer); this._proactiveTimer = null; }
   }
 
+  // 启动 Watchdog 控制回路 (config.agent.watchdog.enabled 才启用; 2026-10-31 Super-agent 一期)
+  // 回调契约: cb({ts, level, text, signals}) —— level ∈ ok|warn|crit; 低打扰: 仅 warn/crit 才回调
+  // (server.js 把回调接到 manager.broadcast)。防重入与 proactive ticker 同款。
+  startWatchdog(cb) {
+    const cfg = this.config.agent?.watchdog;
+    if (!cfg || !cfg.enabled) return null;
+    if (this._watchdogTimer) return this._watchdogTimer;
+    const ms = Math.max(5, Number(cfg.interval_minutes) || 30) * 60000;
+    let _watchdogRunning = false;
+    this._watchdogTimer = setInterval(async () => {
+      if (_watchdogRunning) return;
+      _watchdogRunning = true;
+      try {
+        const r = await watchdogHeartbeat(this);
+        if (r && r.level !== "ok" && typeof cb === "function") { try { cb(r); } catch {} }
+      } catch { /* 心跳不带回崩主服务 */ } finally { _watchdogRunning = false; }
+    }, ms);
+    info(`[watchdog] 控制回路已启动 (每 ${Math.round(ms / 60000)} 分钟, 异常才广播)`);
+    return this._watchdogTimer;
+  }
+
+  stopWatchdog() {
+    if (this._watchdogTimer) { clearInterval(this._watchdogTimer); this._watchdogTimer = null; }
+  }
+
   // 接入 MCP 服务器: 连接 + 注册工具到 catalog (可选能力, 显式调用)
   // servers 缺省用 config.mcp.servers; 返回注册的工具数
   async connectMcp(servers = null) {
@@ -1957,6 +2038,7 @@ export class PPXAgent {
     this.config = this._loadConfig(null);
     this.llm = resolveLLM(this.config);
     this.allProviders = resolveAllLLMs(this.config);
+    this._installUsageTracking(); // 热重载换了新客户端实例, 记账包装必须重装 (否则 usage 统计/状态条全部失明)
     this._refreshAuxRouting();
     info(`[providers] 热重载完成: ${this.allProviders.length} 个客户端`);
     return { llm: this.llm ? (this.llm.backend || this.llm.model) : null, count: this.allProviders.length };
@@ -1982,6 +2064,8 @@ export class PPXAgent {
     this.ctx.provide("userName", this.userName);
     // 应用 tools.disabled 变更 (设置 UI 启停工具后立即生效)
     this._applyDisabledTools();
+    // 曝光名单同样随配置热更新 (改 tool_exposure 不用重启)
+    this._applyToolExposure();
     info(`[settings] 热重载完成: 用户=${this.userName}, 模式=${this.config.agent?.mode || "react"}`);
     return { userName: this.userName, mode: this.config.agent?.mode || "react" };
   }
@@ -1997,6 +2081,30 @@ export class PPXAgent {
       }
       if (n) info(`[tools] 已禁用 ${n} 个工具: ${disabled.join(", ")}`);
     } catch { /* 工具未就绪时静默跳过 */ }
+  }
+
+  // 按需工具曝光 (2026-10-30 接线): config.agent.tool_exposure
+  //   "all" (默认) / 未设 = 全部工具下发完整 schema —— 与既有行为逐字节一致;
+  //   "core"          = 只下发 CORE_TOOL_EXPOSURE 名单的 schema, 其余降级为静态区【按需工具】名单
+  //                     (名字可见, 需要时用 tool_schema 取完整参数定义再调用);
+  //   数组            = 自定义名单 (与核心名单取并集, 保证 tool_schema / list_capabilities 永远可见,
+  //                     否则模型连"怎么取 schema"都不知道)。
+  // 为什么: 工具 schema 是全仓最贵的固定开销 (96 个 ≈ 11.2k tok/请求), 而真实轨迹里 96 个只用到 30 个。
+  //   机制 (catalog.setExposure) 早就写好了却零调用方 —— 这里把它接上, 默认不改变任何行为。
+  _applyToolExposure() {
+    try {
+      if (!this.tools || typeof this.tools.setExposure !== "function") return;
+      const cfg = this.config?.agent?.tool_exposure;
+      let list = null;
+      if (cfg === "core") list = CORE_TOOL_EXPOSURE;
+      else if (Array.isArray(cfg) && cfg.length) list = [...new Set([...cfg.map(String), ...META_TOOLS_ALWAYS])];
+      else if (cfg && cfg !== "all") warn(`[tools] 未知 tool_exposure 配置: ${String(cfg)} (支持 "all" / "core" / 字符串数组), 按 all 处理`);
+      this.tools.setExposure(list);
+      if (list) {
+        const hidden = this.tools.hiddenFromLLM();
+        info(`[tools] 按需曝光: ${list.length} 个工具下发完整 schema, ${hidden.length} 个降级为按需 (用 tool_schema 取参数)`);
+      }
+    } catch (e) { /* 曝光配置异常不得阻断启动 */ warn(`[tools] 应用 tool_exposure 失败: ${e?.message || e}`); }
   }
 
   // ZCode 使用统计对齐: 包装所有 provider 的 chat/apiChat/streamChat, 累计 token/调用次数/金额 (零侵入)
@@ -2017,15 +2125,43 @@ export class PPXAgent {
           const r = await orig(msgs, opts);
           try {
             const isStream = meth === "streamChat";
-            const u = isStream ? (r && typeof r === "object" ? r.usage : null) : r?.usage;            const tk = u
+            // streamChat 返回纯文本, usage 挂在客户端实例上 (stream_options.include_usage 回传)
+            const u = isStream
+              ? (r && typeof r === "object" ? r.usage : (c.__ppxStreamUsage || null))
+              : r?.usage;            const tk = u
               ? ((u?.total_tokens ?? (u?.prompt_tokens || 0) + (u?.completion_tokens || 0)) || 0)
               // 无 usage (流式常态): prompt(序列化后的消息体) + 产出(返回文本) 分语言精估
               : estimateTokens(JSON.stringify(msgs ?? "")) + estimateTokens(isStream ? String(r ?? "") : "");
             // 2026-10-11: 记录最近一次 LLM usage 原样 (含 DeepSeek 的 prompt_cache_hit_tokens /
-            //   prompt_cache_miss_tokens), 供 Web 状态条展示 "上下文长度 · 缓存命中" (HTTP done 事件透传)
+            //   prompt_tokens_details.cached_tokens), 供 Web 状态条展示 "上下文长度 · 缓存命中" (HTTP done 事件透传)
             if (u) this.lastUsage = u;
+            // 2026-10-31: token 校准采样 —— 有真值 completion_tokens 且回复是纯文本时, 用
+            //   「真值 / 基础估算」喂 EWMA 校准器 (estimateTokens 内置启发式路径乘系数收敛)。
+            //   只采纯文本: tool_calls 的 JSON 参数计入 completion_tokens 但不走文本估算, 混入会失真。
+            {
+              const completion = Number(u?.completion_tokens) || 0;
+              if (completion > 0) {
+                let replyText = null;
+                if (isStream && typeof r === "string") replyText = r;
+                else {
+                  const msg = r?.message || r?.choices?.[0]?.message || null;
+                  const c0 = msg?.content;
+                  if (typeof c0 === "string" && c0 && !(Array.isArray(msg?.tool_calls) && msg.tool_calls.length)) replyText = c0;
+                }
+                if (replyText) recordTokenSample({ observed: completion, estimatedBase: estimateTokensBase(replyText) });
+              }
+            }
             this.usageStats.calls++;
             this.usageStats.tokens += tk;
+            // 2026-10-30: 累计 prompt / 缓存命中 —— 底部状态条要显示"累计 tok · 缓存命中 %"。
+            //   命中率只能靠累计算 (单次调用要么全命中要么全不命中, 显示出来没意义)。
+            //   上游没给缓存字段时不计入分母, 避免把"不知道"算成"没命中"。
+            if (u) {
+              const pt = Number(u.prompt_tokens) || 0;
+              const ch = Number(u.prompt_cache_hit_tokens ?? u.prompt_tokens_details?.cached_tokens);
+              if (pt > 0) this.usageStats.promptTokens += pt;
+              if (Number.isFinite(ch) && ch >= 0) this.usageStats.cacheHitTokens += ch;
+            }
             const m = c.model || "unknown";
             // 金额折算: 价格表来自 config.budget.model_prices 覆盖 + 内置表 (pricing.js)
             const cost = estimateCost(m, u || {}, this.config.budget?.model_prices);
@@ -2034,6 +2170,14 @@ export class PPXAgent {
             this.usageStats.byModel[m].calls++;
             this.usageStats.byModel[m].tokens += tk;
             this.usageStats.byModel[m].cost = Math.round(((this.usageStats.byModel[m].cost || 0) + cost) * 1e9) / 1e9;
+            // 按天 × 按模型分桶 (使用统计页的趋势/热力/占比数据源)
+            const day = logicalDay();
+            const d = this.usageStats.days[day] ??= { calls: 0, tokens: 0, byModel: {} };
+            d.calls++;
+            d.tokens += tk;
+            const dm = d.byModel[m] ??= { calls: 0, tokens: 0 };
+            dm.calls++;
+            dm.tokens += tk;
             this._afterUsageAccounted();
           } catch (e) {
             // 2026-10-10 (P0-1): 原为空 catch, 把 estimateCost 未 import 的 ReferenceError 吞了整整一轮。
@@ -2055,10 +2199,59 @@ export class PPXAgent {
     if (this.usageStats.calls - this._lastUsageFlushCalls >= 10) this._flushUsageStats();
   }
 
-  // 使用统计落盘 (周期 + shutdown 共用)。失败静默 (不阻塞对话/退出)。
-  _flushUsageStats() {
+  // 从 usage-stats.json 恢复累计账本 (2026-10-30)。
+  //   只恢复累计字段 (calls / tokens / cost / promptTokens / cacheHitTokens / byModel),
+  //   **不恢复** budget_usd 或任何闸门状态 —— 预算以当前 config 为准, 用旧文件里的值
+  //   会把"上次配置了 $5 预算"带到"这次没配"的场景里, 静默拦掉所有调用。
+  //   文件缺失 / 损坏 / 字段类型不对时一律从零开始, 不抛。
+  _loadUsageStats() {
     try {
+      const f = path.join(this.dataDir, "usage-stats.json");
+      if (!fs.existsSync(f)) return false;
+      const j = JSON.parse(fs.readFileSync(f, "utf8"));
+      const num = (v) => (Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : 0);
+      this.usageStats.calls = num(j.calls);
+      this.usageStats.tokens = num(j.tokens);
+      this.usageStats.cost = num(j.cost);
+      this.usageStats.promptTokens = num(j.promptTokens);
+      this.usageStats.cacheHitTokens = num(j.cacheHitTokens);
+      this.usageStats.byModel = (j.byModel && typeof j.byModel === "object") ? j.byModel : {};
+      this.usageStats.days = this._sanitizeUsageDays(j.days);
+      // 落盘水位对齐到恢复后的值: 否则恢复 500 次调用后, 第一次 _afterUsageAccounted
+      // 就会误判"距上次落盘已 500 次"而立刻再写一遍盘 (无害但多余)。
+      this._lastUsageFlushCalls = this.usageStats.calls;
+      return true;
+    } catch { return false; }
+  }
+
+  // 按天账本清洗: 只认 YYYY-MM-DD 键与非负数值, 其余丢弃 (旧 usage-stats.json 没有这个字段)。
+  _sanitizeUsageDays(raw) {
+    const out = {};
+    if (!raw || typeof raw !== "object") return out;
+    const num = (v) => (Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : 0);
+    for (const [day, b] of Object.entries(raw)) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || !b || typeof b !== "object") continue;
+      const byModel = {};
+      for (const [m, v] of Object.entries((b.byModel && typeof b.byModel === "object") ? b.byModel : {})) {
+        if (!v || typeof v !== "object") continue;
+        byModel[m] = { calls: num(v.calls), tokens: num(v.tokens) };
+      }
+      out[day] = { calls: num(b.calls), tokens: num(b.tokens), byModel };
+    }
+    return out;
+  }
+
+  // 按天账本裁剪: 只留最近 USAGE_DAY_KEEP 天, 防长跑进程把账本写肥。
+  _pruneUsageDays() {
+    const days = Object.keys(this.usageStats.days || {}).sort();
+    if (days.length <= USAGE_DAY_KEEP) return;
+    for (const d of days.slice(0, days.length - USAGE_DAY_KEEP)) delete this.usageStats.days[d];
+  }
+
+  // 使用统计落盘 (周期 + shutdown 共用)。失败静默 (不阻塞对话/退出)。
+  _flushUsageStats() {    try {
       const budgetUsd = Number(this.config.budget?.usd) || 0;
+      this._pruneUsageDays();
       const payload = {
         updated: new Date().toISOString(),
         ...this.usageStats,
@@ -2091,23 +2284,27 @@ export class PPXAgent {
   //   留下孤儿进程。返回 Promise 后调用方可选择 await (旧调用方不 await 也兼容)。
   async shutdown() {
     this.stopProactiveTicker();
+    this.stopWatchdog();
     // 2026-10-24: SessionStop 钩子接线 —— 供外部钩子做会话收尾观测。
     //   刻意 fire-and-forget (不 await): shutdown 原时序里紧跟着使用统计/记忆落盘,
     //   在这里插入 await 会推迟它们一个微任务, 与"调用方不等 shutdown 就删数据目录"
     //   的调用模式 (CLI 退出/测试) 相撞, 产生锁超时竞态。钩子链自带超时熔断, 自行收敛。
     try { this.hooks?.emit?.("SessionStop", { sessions: [...(this._seenSessions || [])] })?.catch?.(() => {}); } catch { /* 不阻塞退出 */ }
     // 使用统计落盘 (ZCode 使用统计对齐): data/usage-stats.json
-    try {
-      fs.writeFileSync(path.join(this.dataDir, "usage-stats.json"),
-        JSON.stringify({ updated: new Date().toISOString(), ...this.usageStats }, null, 2));
-    } catch { /* 落盘失败不阻塞退出 */ }
+    this._flushUsageStats();
     this._mcp?.close?.();
     // v1.0.8: 清理军团子进程 (spawn_agent 派生的 worker), 防后台残留
     if (this._legion && typeof this._legion.shutdownAll === "function") {
       try { await this._legion.shutdownAll(); } catch { /* 回收失败不阻塞退出 */ }
     }
+    // 归档合批队列收口 (2026-10-30): 优雅退出时把 turns 里还没落盘的行写完 ——
+    //   合批只在"达阈值/超时/强制点"落盘, 退出路径必须显式 flush, 否则最后几轮归档丢失
+    //   (可从 events 重建, 但没理由让正常退出也丢)。
+    this.memory.flushTurnArchive?.();
     this.memory._saveState?.();
     this.scheduler?.shutdown?.(); // ⑤/②: 清定时器防进程挂起
+    // 2026-10-30: memory.backend=sqlite 时释放数据库句柄 (JSON 后端无 close, 可选链兼容)
+    try { this.facts?.close?.(); } catch { /* 已关闭或释放失败不阻塞退出 */ }
     this.healer.markClean();
   }
 }

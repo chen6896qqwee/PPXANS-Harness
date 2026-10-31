@@ -33,6 +33,7 @@ export class EvolutionLoop {
     this.journalFile = config.journal_file || path.join(this.dataDir, JOURNAL_FILE);
     // self_iteration 配置沿用 (mode/max_files/max_attempts/max_llm_calls 等), evolution_loop 只管编排
     this.iterateCfg = { ...(agent?.config?.agent?.self_iteration || {}), ...(config.self_iteration || {}) };
+    this._rot = 0;               // 适应度轮换游标: 集 > max_files 时跨夜轮转, 不永远只跑前 N 个
     this.running = false;        // 单飞锁
     this.lastRunAt = 0;
     this.minIntervalMs = Number(config.min_interval_ms) || 60 * 1000;
@@ -94,9 +95,22 @@ export class EvolutionLoop {
     if (!Array.isArray(files) || !files.length) {
       return { ran: false, reason: "未配置目标测试文件 (agent.self_iteration.target_files)" };
     }
+    // 轮换: 集 > max_files 时按游标旋转, 每夜覆盖不同区段 (几夜扫完全集), 修掉
+    // "slice(0, N) 恒取前 N 个、后面的文件永远轮不到"的盲区
+    const maxFiles = Math.max(1, Number(this.iterateCfg.max_files) || 3);
+    let ordered = files;
+    let rotated = false;
+    if (files.length > maxFiles) {
+      const at = this._rot % files.length;
+      ordered = files.slice(at).concat(files.slice(0, at));
+      this._rot = (at + maxFiles) % files.length;
+      rotated = true;
+    }
     const engine = new SelfIterationEngine(a, { ...this.iterateCfg, root: this.root });
     try {
-      return await engine.run({ targetFiles: files.map((f) => path.resolve(this.root, f)) });
+      const r = await engine.run({ targetFiles: ordered.map((f) => path.resolve(this.root, f)) });
+      if (rotated) r.rotated = true;
+      return r;
     } catch (e) {
       warn(`[evolution-loop] 代码迭代异常: ${e.message}`);
       return { ran: false, reason: e.message };

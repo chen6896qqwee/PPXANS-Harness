@@ -1,4 +1,4 @@
-﻿// src/memory/l3.js - L3 核心画像 (腾讯风格 persona generation)
+// src/memory/l3.js - L3 核心画像 (腾讯风格 persona generation)
 // 从记忆提炼: 用户画像 (user.persona.md) + agent 人格 (agent.persona.md)
 // 零依赖: 高频词统计 + 主题聚合, 输出结构化画像
 //
@@ -30,6 +30,11 @@ export class PersonaStore {
     this.metaFile = path.join(this.dir, "meta.json");
     this.userName = userName;
     this._migrated = new Set(); // 每实例一次性惰性迁移守卫 (避免每轮 _context 都重复扫描/重写)
+    // 画像正文读缓存 (2026-10-30 热路径优化): _l3Context 每轮 system prompt 都要读两份画像,
+    //   实测 2 次整文件读 ≈1.2ms/轮 —— 画像一天才变一次, 却按轮次付钱。
+    //   缓存键 = stat(mtimeMs:size): 人工编辑/重写画像后签名变化即重读, 语义与直接读盘一致;
+    //   迁移 (_stripBakedDay) 会重写文件, 故落缓存的签名取**迁移之后**再 stat 的值。
+    this._textCache = new Map(); // file -> { sig, text }
   }
 
   // 从一批事实提炼用户画像
@@ -124,9 +129,21 @@ ${uniq.map((l) => `- ${l.lesson}`).join("\n") || "- 暂无"}
   }
 
   _readPersona(file, metaKey) {
+    // 指纹 = stat(mtimeMs:size)。未变则直接命中缓存 (省略整文件读 + BOM 处理);
+    // 文件被编辑/重写 (含本模块迁移) 后指纹变化 → 重读, 与"每次都读盘"的结果一致。
+    const sig = this._sigOf(file);
+    const hit = this._textCache.get(file);
+    if (hit && hit.sig === sig) return hit.text;
     const text = this._read(file);
-    if (!text || this._migrated.has(file)) return text;
-    return this._stripBakedDay(file, metaKey, text);
+    const out = (!text || this._migrated.has(file)) ? text : this._stripBakedDay(file, metaKey, text);
+    // 迁移可能重写了文件: 缓存签名必须取迁移后的状态, 否则下一轮会误判失效 (迁移只跑一次)
+    this._textCache.set(file, { sig: this._sigOf(file), text: out });
+    return out;
+  }
+
+  // 文件指纹 (mtimeMs:size); 文件不存在/不可读返回 null (与 readText 的缺省语义对齐)
+  _sigOf(file) {
+    try { const st = fs.statSync(file); return `${st.mtimeMs}:${st.size}`; } catch { return null; }
   }
 
   // 惰性迁移 (幂等, 每实例每文件一次): 剥掉正文烘日期行 → 重写文件 → 日期写入 meta (不丢信息)。

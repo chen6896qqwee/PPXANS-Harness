@@ -16,6 +16,8 @@
     view: "chat",       // home | chat | settings
     pane: "talk",       // talk | trace
     timer: null,
+    pollMs: 5000,       // 当前轮询间隔 (失败指数退避, 成功回到 5s)
+    pollErr: false,     // 上一次 /api/bot.state 是否失败
     traces: [],
     traceDays: [],
     traceStats: {},
@@ -24,6 +26,8 @@
     memPath: null,      // 设置页正在看的记忆文件
     memText: "",
     typeFormOpen: false,
+    plugins: [],        // /api/plugins 列表
+    plugEdit: null,     // 正在编辑的插件 (null = 列表; isNew = 新建)
   };
 
   function $(id) { return document.getElementById(id); }
@@ -126,7 +130,7 @@
   /* ================= 视图 ================= */
   function showView(v) {
     B.view = v;
-    ["home", "chat", "settings"].forEach(function (k) {
+    ["home", "chat", "settings", "body", "plugins", "stats"].forEach(function (k) {
       var el = $("view-" + k);
       if (el) el.classList.toggle("on", k === v);
     });
@@ -136,7 +140,151 @@
       if (inp && !(B.s && B.s.live && B.s.live.pendingApprovals)) setTimeout(function () { inp.focus(); }, 30);
     }
     if (v === "settings") renderSettings();
+    if (v === "body") loadBody();
+    if (v === "plugins") { renderPlugins(); loadPlugins(); }
+    if (v === "stats" && window.PPXSTATS) window.PPXSTATS.load();
     try { localStorage.setItem("ppx_view", v); } catch (e) { /* 隐私模式下无所谓 */ }
+  }
+
+  /* ================= 身体 (2026-10-30) =================
+     四张卡 = 四个体征。数据全部来自 /api/body.state (真实产物), 没跑过就显示 unknown 与"怎么跑",
+     不编造健康值 —— 一个会撒谎的仪表盘比没有仪表盘更糟。 */
+  var BODY_LABEL = { ok: "正常", warn: "注意", bad: "不健康", unknown: "没数据" };
+  var OVERALL_LABEL = { ok: "体征正常", warn: "有指标需要看", bad: "有指标不健康", unknown: "数据不全" };
+
+  function pct(v) { return (v == null || !isFinite(v)) ? "—" : Math.round(v * 100) + "%"; }
+
+  function fillCard(id, state, val, html) {
+    var card = $(id);
+    if (!card) return;
+    card.setAttribute("data-state", state || "unknown");
+    var dot = card.querySelector(".bdot");
+    if (dot) dot.className = "bdot t-" + (state || "unknown");
+    var v = card.querySelector(".bval");
+    if (v) v.textContent = val == null ? "—" : String(val);
+    var b = card.querySelector(".bcard-b");
+    if (b) b.innerHTML = html;
+  }
+
+  function setFeel(id, text) {
+    var el = $(id);
+    if (el) el.textContent = text || "—";
+  }
+
+  // 器官点: 状态写到 data-state, 呼吸节奏由 CSS 决定。
+  //   unknown **不动** —— "不跳"就是"没量过", 比在图上写"暂无数据"更省事也更诚实。
+  function setOrgan(organ, state) {
+    var g = document.querySelector('.borgan[data-organ="' + organ + '"]');
+    if (g) g.setAttribute("data-state", state || "unknown");
+  }
+
+  // 趋势线: 少于 2 个点直接返回空 —— 一个点连不成线, 硬画就是编。
+  function spark(vals, tone) {
+    if (!vals || vals.length < 2) return "";
+    var w = 96, h = 20, pad = 3;
+    var min = Math.min.apply(null, vals), max = Math.max.apply(null, vals);
+    var span = max - min;
+    if (!(span > 0.001)) span = 0.001; // 全等时画一条平线 (那也是信息: 一直没动)
+    var pts = vals.map(function (v, i) {
+      var x = pad + (i / (vals.length - 1)) * (w - pad * 2);
+      var y = h - pad - ((v - min) / span) * (h - pad * 2);
+      return x.toFixed(1) + "," + y.toFixed(1);
+    });
+    var last = pts[pts.length - 1].split(",");
+    return '<svg class="bspark t-' + esc(tone || "unknown") + '" viewBox="0 0 ' + w + " " + h + '" width="' + w + '" height="' + h + '" aria-hidden="true">'
+      + '<polyline points="' + pts.join(" ") + '"></polyline>'
+      + '<circle cx="' + last[0] + '" cy="' + last[1] + '" r="2"></circle></svg>';
+  }
+
+  function loadBody() {
+    req("/api/body.state", { timeout: 8000 }).then(function (s) {
+      var o = $("bodyOverall");
+      if (o) o.textContent = OVERALL_LABEL[s.overall] || "—";
+      var dot = $("bodyDot");
+      if (dot) dot.className = "bdot t-" + (s.overall || "unknown");
+      var vd = $("bodyVerdict");
+      if (vd) vd.textContent = s.verdict || "—";
+      var hist = s.history || {};
+
+      // 痛觉: 离线任务成功率 (harness 能不能把正确计划执行成结果)
+      var p = s.pain || {};
+      setOrgan("pain", p.state);
+      if (p.total) {
+        fillCard("cardPain", p.state, pct(p.rate),
+          '<div class="brow"><b>' + p.passed + "/" + p.total + "</b> 个任务干成 · 耗时 " + fmtMs(p.ms) + "</div>"
+          + '<div class="bsub">最近一次 ' + esc(shortAgo(p.at)) + "前 · " + esc(BODY_LABEL[p.state] || p.state) + "</div>"
+          + spark(hist.pain, p.state));
+      } else {
+        fillCard("cardPain", "unknown", "—", '<div class="bnote">' + esc(p.hint || "还没跑过") + "</div>");
+      }
+      setFeel("painFeel", p.feeling);
+
+      // 记忆: 库规模 + 召回质量。
+      //   recallK 这一栏现在读的是 acceptance (= holdout 留出集), 也就是"换个说法还认不认得出";
+      //   recall1 是"原话直接命中"。两个数分开写, 不合成一个看起来体面的分。
+      var m = s.memory || {};
+      setOrgan("memory", m.state);
+      var memHtml = '<div class="brow"><b>' + (m.facts == null ? "?" : m.facts) + "</b> 条有效记忆</div>";
+      if (m.recallK != null) {
+        // 拆两行: 一行放"两种命中率", 一行放"用的什么向量 + 什么时候跑的"。
+        //   挤成一行在窄卡里会被截断 —— 面板宁可多一行, 也不要让人看到 "hash…"。
+        memHtml += '<div class="bsub">换个说法认得出来 <b>' + pct(m.recallK) + "</b> · 原话直接命中 " + pct(m.recall1) + "</div>";
+        memHtml += '<div class="bsub">向量 ' + esc(m.embedder || "?") + " · 最近一次 " + esc(shortAgo(m.at)) + "前 · " + esc(BODY_LABEL[m.state] || m.state) + "</div>"
+          + spark(hist.memory, m.state);
+      } else {
+        memHtml += '<div class="bnote">' + esc(m.hint || "还没跑过") + "</div>";
+      }
+      fillCard("cardMemory", m.state, m.recallK == null ? "—" : pct(m.recallK), memHtml);
+      setFeel("memFeel", m.feeling);
+
+      // 手头的事: 跨轮任务栈
+      var w = s.work || {};
+      setOrgan("work", w.state);
+      var items = (w.items || []).filter(function (x) { return x.status !== "done"; });
+      var workVal = items.length ? items.length + " 件" : "空";
+      var workHtml = "";
+      if (items.length) {
+        workHtml = items.slice(0, 5).map(function (x) {
+          var st = x.status === "blocked" ? "⏸" : "▶";
+          var pend = (x.steps || []).filter(function (st2) { return !st2.done; }).length;
+          return '<div class="bitem">' + st + " " + esc(x.goal) + (pend ? ' <span class="bsub">(' + pend + " 步未完成)</span>" : "") + "</div>";
+        }).join("");
+      } else {
+        workHtml = '<div class="bnote">手头没挂着的事。长任务开工前让皮皮虾 task_stack push 一条。</div>';
+      }
+      fillCard("cardWork", w.state || "unknown", workVal, workHtml);
+      setFeel("workFeel", w.feeling);
+
+      // 负荷
+      var l = s.load || {};
+      setOrgan("load", l.state || "ok");
+      fillCard("cardLoad", "ok", l.tools == null ? "—" : l.tools + " 工具",
+        '<div class="brow">会话 <b>' + (l.sessions == null ? "?" : l.sessions) + "</b> · 模型 provider <b>" + (l.providers == null ? "?" : l.providers) + "</b></div>"
+        + '<div class="bsub">进程已跑 ' + esc(fmtMs(l.uptimeMs)) + " · " + esc(l.node || "") + "</div>");
+      setFeel("loadFeel", l.feeling);
+    }).catch(function (e) {
+      var o = $("bodyOverall");
+      if (o) o.textContent = "读取失败: " + e.message;
+      var vd = $("bodyVerdict");
+      if (vd) vd.textContent = "拿不到体征 —— 不是「健康」, 是「不知道」。";
+    });
+  }
+
+  // 点器官 = 把对应卡片亮一下。
+  //   画了空间映射就得让它能用: 光靠颜色对应, 人得来回找 "头是哪个指标"。
+  function bindOrgans() {
+    var map = { pain: "cardPain", memory: "cardMemory", work: "cardWork", load: "cardLoad" };
+    var org = document.querySelectorAll(".borgan");
+    for (var i = 0; i < org.length; i++) {
+      (function (g) {
+        g.addEventListener("click", function () {
+          var card = $(map[g.getAttribute("data-organ")]);
+          if (!card) return;
+          card.classList.add("blink");
+          setTimeout(function () { card.classList.remove("blink"); }, 1200);
+        });
+      })(org[i]);
+    }
   }
 
   function showPane(p) {
@@ -159,10 +307,12 @@
   function loadState(quiet) {
     return req("/api/bot.state", { timeout: 10000 }).then(function (j) {
       if (!j || !j.ok) throw new Error((j && j.error) || "读取本体状态失败");
+      B.pollErr = false;
       B.s = j;
       renderAll(j);
       return j;
     }).catch(function (e) {
+      B.pollErr = true;
       if (!quiet) {
         var box = $("homeErr");
         if (box) { box.hidden = false; box.textContent = e.message; }
@@ -170,6 +320,15 @@
         if (sub) sub.textContent = "状态不可用: " + e.message;
       }
     });
+  }
+
+  // 轮询重绘不能吞掉用户正在输入的控件: 内联改名/新建类型等输入框一旦被 innerHTML
+  //   重建, 输入到一半的内容和焦点都会消失 (5 秒一次的轮询会反复触发)。
+  function hasActiveEditor(container) {
+    var ae = document.activeElement;
+    if (!container || !ae || !container.contains(ae)) return false;
+    var tag = String(ae.tagName || "").toLowerCase();
+    return tag === "input" || tag === "textarea" || tag === "select" || ae.isContentEditable;
   }
 
   function renderAll(s) {
@@ -222,10 +381,14 @@
 
     // 类型卡
     var cards = $("typeCards");
-    if (cards) {
+    if (cards && !hasActiveEditor(cards)) {
       cards.innerHTML = (s.types || []).map(function (t) {
         var on = t.id === s.bot.type;
+        // 类型图标盘: 内置四类各配一图一色 (配色在 app.css .bcard-ico), 自定义类型走通用 spark
+        var tico = { companion: "bot", assistant: "zap", researcher: "scan", scribe: "book" }[t.id] || "spark";
+        var tcls = { companion: "c-comp", assistant: "c-asst", researcher: "c-rsch", scribe: "c-scrb" }[t.id] || "c-custom";
         return '<button class="bcard" data-type="' + esc(t.id) + '"' + (on ? ' style="border-color:var(--accent)"' : "") + '>'
+          + '<span class="bcard-ico ' + tcls + '" aria-hidden="true">' + ico(tico, 15) + '</span>'
           + '<b>' + esc(t.name) + (on ? ' · 现在这个' : "") + '</b>'
           + '<span>' + esc(t.blurb || "—") + '</span>'
           + (!t.builtin ? '<span class="del" data-deltype="' + esc(t.id) + '" title="删除类型">' + ico("close", 12) + '</span>' : "")
@@ -235,7 +398,7 @@
 
     // 已有本体
     var rows = $("botRows");
-    if (rows) {
+    if (rows && !hasActiveEditor(rows)) {
       rows.innerHTML = (s.bots || []).map(function (b) {
         var on = b.id === s.bot.id;
         var avHtml = (on && s.bot.avatarUrl)
@@ -750,6 +913,13 @@
     if (back) back.onclick = function () { showView("chat"); };
     var rf = $("btnSetRefresh");
     if (rf) rf.onclick = function () { loadState(); toast("已刷新"); };
+    // 身体页 (2026-10-30): 左上角入口 + 返回 + 刷新
+    var bb = $("btnBody");
+    if (bb) bb.onclick = function () { showView("body"); };
+    var bk = $("bodyBack");
+    if (bk) bk.onclick = function () { showView("home"); };
+    var br = $("btnBodyRefresh");
+    if (br) br.onclick = function () { loadBody(); toast("已刷新体征"); };
     // 侧栏「本体设置」
     var cap = $("capSettings");
     if (cap) cap.onclick = function () { showView("settings"); };
@@ -872,6 +1042,296 @@
     }).catch(function (e) { toast(e.message, true); });
   }
 
+  /* ================= 插件 (2026-10-30) =================
+     左侧「插件」组 + 管理页。插件 = 工作区 plugins/<id>/ 下的清单 + 入口 .cjs,
+     启动时由内核装配一次 —— 保存只落盘, 重启应用才生效。页面把这句话写明白,
+     不假装热更新; 代码语法在服务端先过一遍, 错了不落盘。 */
+
+  function accessLabel(p) {
+    return p && p.access === "full-access" ? "完整权限" : "受限";
+  }
+
+  function plugTemplate(id, name) {
+    return "// " + (name || id) + " - 皮皮虾用户插件\n"
+      + "//\n"
+      + "// 入口在启动时被装配一次。可用能力:\n"
+      + "//   ctx.provide(name, service)  注册服务 (供其他插件/内核 consume)\n"
+      + "//   ctx.consume(name)           消费其他插件提供的服务\n"
+      + "//   ctx.onDispose(fn)           注册卸载钩子\n"
+      + "// 默认权限 restricted: 只能注册非敏感服务; 需要完整权限请在插件页显式选择 full-access。\n"
+      + "module.exports = function setup(ctx) {\n"
+      + "  ctx.provide(\"user." + id + "\", {\n"
+      + "    hello() {\n"
+      + "      return \"" + (name || id) + " 已就绪\";\n"
+      + "    },\n"
+      + "  });\n"
+      + "};\n";
+  }
+
+  function suggestPluginId() {
+    var used = {};
+    (B.plugins || []).forEach(function (p) { used[p.id] = 1; });
+    for (var i = 1; i < 1000; i++) {
+      if (!used["plugin_" + i]) return "plugin_" + i;
+    }
+    return "plugin_" + Date.now();
+  }
+
+  function loadPlugins() {
+    return req("/api/plugins", { timeout: 10000 }).then(function (j) {
+      if (!j || !j.ok) throw new Error((j && j.error) || "读取插件失败");
+      B.plugins = j.plugins || [];
+      renderPluginList();
+      // 表单打开时不覆盖, 免得正在输入的草稿被轮询冲掉
+      if (B.view === "plugins" && !B.plugEdit) renderPlugins();
+    }).catch(function (e) {
+      var el = $("pluginList");
+      if (el) el.innerHTML = '<div class="empty">' + esc(e.message) + '</div>';
+    });
+  }
+
+  function renderPluginList() {
+    var el = $("pluginList");
+    if (!el) return;
+    var list = B.plugins || [];
+    if (!list.length) {
+      el.innerHTML = '<div class="empty">还没有插件<br><button class="btn xs" data-pnew>＋ 新建插件</button></div>';
+      return;
+    }
+    el.innerHTML = list.map(function (p) {
+      var on = B.view === "plugins" && B.plugEdit && B.plugEdit.id === p.id;
+      var tag = p.loose ? "只读" : (!p.enabled ? "停用" : "");
+      return '<button class="cap pitem' + (on ? " on" : "") + '" data-popen="' + esc(p.id) + '" title="' + esc((p.description || p.name || p.id) + " · " + accessLabel(p)) + '">'
+        + ico("plug", 14)
+        + '<span class="t">' + esc(p.name || p.id) + '</span>'
+        + (tag ? '<span class="ptag' + (p.loose ? "" : " off") + '">' + esc(tag) + '</span>' : "")
+        + '</button>';
+    }).join("");
+  }
+
+  function openNewPlugin() {
+    var id = suggestPluginId();
+    B.plugEdit = {
+      isNew: true, id: id, name: "新插件", description: "",
+      access: "restricted", enabled: true, entry: "index.cjs",
+      code: plugTemplate(id, "新插件"),
+    };
+    renderPluginList();
+    renderPlugins();
+    var wrap = $("pluginWrap");
+    if (wrap) wrap.scrollTop = 0;
+  }
+
+  function openPlugin(id) {
+    if (!id) return;
+    var isLoose = (B.plugins || []).some(function (p) { return p.id === id && p.loose; });
+    if (isLoose) { toast("散文件插件是只读的，直接改插件目录里的文件即可", true); return; }
+    req("/api/plugins/" + encodeURIComponent(id), { timeout: 10000 }).then(function (j) {
+      if (!j || !j.ok || !j.plugin) throw new Error((j && j.error) || "读取插件失败");
+      var p = j.plugin;
+      B.plugEdit = {
+        isNew: false, id: p.id, name: p.name, description: p.description || "",
+        access: p.access, enabled: p.enabled, entry: p.entry, code: p.code || "",
+      };
+      if (B.view !== "plugins") showView("plugins");
+      else { renderPluginList(); renderPlugins(); }
+    }).catch(function (e) { toast(e.message, true); });
+  }
+
+  function renderPlugins() {
+    var wrap = $("pluginWrap");
+    if (!wrap) return;
+    var p = B.plugEdit;
+    var sub = $("plugSub");
+    if (sub) sub.textContent = p
+      ? (p.isNew ? "新建插件 · 保存后重启应用生效" : "编辑 " + (p.name || p.id) + " · 保存后重启应用生效")
+      : "用户插件 · 保存后重启应用生效";
+    wrap.innerHTML = p ? pluginFormHtml(p) : pluginListHtml(B.plugins || []);
+  }
+
+  function pluginListHtml(list) {
+    var en = list.filter(function (p) { return p.enabled; }).length;
+    var html = '<div class="ssec"><div class="ssec-head">插件<span class="flex1"></span>'
+      + '<span class="svd">共 ' + list.length + ' · 启用 ' + en + '</span></div>'
+      + '<div class="shint">插件放在工作区 plugins/ 目录, 每个插件一个目录: ppx.plugin.json + 入口 .cjs。保存只落盘, 重启应用后才会被装配。</div>'
+      + '<div class="prow"><button class="wbtn primary" data-pnew>新建插件</button>'
+      + '<button class="wbtn" data-prefresh>刷新</button></div>'
+      + '</div>';
+
+    if (!list.length) {
+      return html + '<div class="empty">还没有插件。点「新建插件」写第一个。</div>';
+    }
+
+    html += list.map(function (p) {
+      var tags = '<span class="ptag acc-' + esc(p.access) + '">' + esc(accessLabel(p)) + '</span>';
+      if (!p.enabled) tags += '<span class="ptag off">已停用</span>';
+      if (p.loose) tags += '<span class="ptag">散文件·只读</span>';
+      if (p.error) tags += '<span class="ptag err">清单错误</span>';
+      var acts = "";
+      if (!p.loose && !p.error) {
+        acts = '<button class="wbtn" data-pedit="' + esc(p.id) + '">编辑</button>'
+          + '<button class="wbtn" data-ptoggle="' + esc(p.id) + '" data-enabled="' + (p.enabled ? "1" : "0") + '">'
+          + (p.enabled ? "停用" : "启用") + '</button>'
+          + '<button class="wbtn danger" data-pdel="' + esc(p.id) + '">删除</button>';
+      }
+      return '<div class="pcard' + (p.enabled ? "" : " off") + '">'
+        + '<div class="pcard-h"><span class="pnm">' + ico("plug", 14) + esc(p.name || p.id) + '</span>' + tags + '</div>'
+        + '<div class="pcard-id">' + esc(p.id) + ' · ' + esc(p.entry) + ' · ' + fmtBytes(p.size)
+        + (p.mtime ? ' · ' + esc(shortAgo(p.mtime)) : "") + '</div>'
+        + (p.description ? '<div class="pcard-b">' + esc(p.description) + '</div>' : "")
+        + (p.error ? '<div class="pcard-b perr">' + esc(p.error) + '</div>' : "")
+        + (acts ? '<div class="pacts">' + acts + '</div>' : "")
+        + '</div>';
+    }).join("");
+
+    return html + '<div class="pwarn">插件代码在内核进程里运行, 等于你亲手运行的脚本。只装你读得懂的代码; 拿不准就用「受限」。</div>';
+  }
+
+  function pluginFormHtml(p) {
+    var accessOpts = [["restricted", "受限（推荐）"], ["full-access", "完整权限"]].map(function (o) {
+      return '<option value="' + o[0] + '"' + (p.access === o[0] ? " selected" : "") + '>' + o[1] + '</option>';
+    }).join("");
+    var html = '<div class="ssec"><div class="ssec-head">' + (p.isNew ? "新建插件" : "编辑插件")
+      + '<span class="flex1"></span><span class="svd">' + esc(p.id || "—") + '</span></div>'
+      + srow("标识", '<input type="text" id="plugId" class="grow" value="' + esc(p.id)
+        + '"' + (p.isNew ? "" : " disabled") + ' spellcheck="false" placeholder="plugin_1">',
+        p.isNew ? "2-40 位字母/数字/下划线/短横线，创建后不可改。" : "标识创建后不可改。")
+      + srow("名称", '<input type="text" id="plugName" class="grow" value="' + esc(p.name) + '" maxlength="60">')
+      + srow("说明", '<input type="text" id="plugDesc" class="grow" value="' + esc(p.description)
+        + '" maxlength="500" placeholder="这个插件做什么">')
+      + srow("权限", '<select id="plugAccess">' + accessOpts + '</select>',
+        "受限 = 只能注册普通服务；完整权限 = 可触碰内核敏感能力，保存前会再确认。")
+      + srow("状态", '<select id="plugEnabled"><option value="1"' + (p.enabled ? " selected" : "") + '>启用</option>'
+        + '<option value="0"' + (p.enabled ? "" : " selected") + '>停用</option></select>')
+      + srow("入口", '<input type="text" id="plugEntry" class="grow" value="' + esc(p.entry || "index.cjs")
+        + '"' + (p.isNew ? "" : " disabled") + ' spellcheck="false">',
+        "插件目录内的 .cjs 文件名。")
+      + '</div>';
+
+    html += '<div class="ssec"><div class="ssec-head">代码<span class="flex1"></span>'
+      + '<span class="svd">保存前会做语法检查</span></div>'
+      + '<textarea class="pcode" id="plugCode" spellcheck="false">' + esc(p.code || "") + '</textarea>'
+      + '<div class="prow"><button class="wbtn primary" data-psave>保存</button>'
+      + '<button class="wbtn" data-pcancel>取消</button></div>'
+      + '</div>'
+      + '<div class="pwarn">保存只落盘, 重启皮皮虾后插件才会被装配。代码在内核进程中运行, 请只写你理解的内容。</div>';
+    return html;
+  }
+
+  function savePlugin() {
+    var p = B.plugEdit;
+    if (!p) return;
+    var id = (($("plugId") || {}).value || "").trim();
+    var name = (($("plugName") || {}).value || "").trim();
+    var desc = (($("plugDesc") || {}).value || "").trim();
+    var access = (($("plugAccess") || {}).value) || "restricted";
+    var enabled = (($("plugEnabled") || {}).value) !== "0";
+    var entry = (($("plugEntry") || {}).value || "index.cjs").trim();
+    var code = (($("plugCode") || {}).value) || "";
+
+    if (!name) { toast("名称不能为空", true); return; }
+    if (p.isNew && !/^[a-zA-Z0-9][a-zA-Z0-9_-]{1,39}$/.test(id)) {
+      toast("标识需为 2-40 位字母/数字/下划线/短横线", true);
+      return;
+    }
+    var submit = function () {
+      var body = { name: name, description: desc, access: access, enabled: enabled, code: code };
+      if (p.isNew) { body.id = id; body.entry = entry; }
+      var path = p.isNew ? "/api/plugins" : "/api/plugins/" + encodeURIComponent(p.id);
+      var method = p.isNew ? "POST" : "PUT";
+
+      req(path, { method: method, timeout: 20000, body: JSON.stringify(body) }).then(function (j) {
+        if (!j || !j.ok) throw new Error((j && j.error) || "保存失败");
+        B.plugins = j.plugins || B.plugins;
+        B.plugEdit = null;
+        renderPluginList();
+        renderPlugins();
+        toast(j.message || "已保存，重启应用后生效");
+      }).catch(function (e) { toast(e.message, true); });
+    };
+    // full-access 是危险操作: 用站内弹窗 (可键盘操作/Esc 取消), 而不是会冻结页面的原生 confirm
+    if (access === "full-access") {
+      if (!window.PPXUI || !window.PPXUI.confirm) {
+        if (confirm("完整权限插件能触碰内核敏感能力。仅在你完全信任这段代码时继续，确定保存？")) submit();
+        return;
+      }
+      window.PPXUI.confirm("full-access 插件能触碰内核敏感能力, 只保存你完全信任的代码。", {
+        title: "保存完整权限插件?", okText: "保存", danger: true,
+      }).then(function (ok) { if (ok) submit(); });
+      return;
+    }
+    submit();
+  }
+
+  function togglePlugin(id, enabled) {
+    if (!id) return;
+    req("/api/plugins/" + encodeURIComponent(id), {
+      method: "PUT", timeout: 15000, body: JSON.stringify({ enabled: !!enabled }),
+    }).then(function (j) {
+      if (!j || !j.ok) throw new Error((j && j.error) || "操作失败");
+      B.plugins = j.plugins || B.plugins;
+      renderPluginList();
+      renderPlugins();
+      toast(enabled ? "已启用，重启应用后生效" : "已停用，重启应用后生效");
+    }).catch(function (e) { toast(e.message, true); });
+  }
+
+  function deletePlugin(id) {
+    var p = (B.plugins || []).filter(function (x) { return x.id === id; })[0];
+    var nm = p ? (p.name || p.id) : id;
+    var go = function () {
+      req("/api/plugins/" + encodeURIComponent(id), { method: "DELETE", timeout: 15000 }).then(function (j) {
+        if (!j || !j.ok) throw new Error((j && j.error) || "删除失败");
+        B.plugins = j.plugins || B.plugins;
+        if (B.plugEdit && B.plugEdit.id === id) B.plugEdit = null;
+        renderPluginList();
+        renderPlugins();
+        toast(j.message || "已移入回收站，重启应用后生效");
+      }).catch(function (e) { toast(e.message, true); });
+    };
+    if (!window.PPXUI || !window.PPXUI.confirm) {
+      if (confirm("删除插件「" + nm + "」？目录会移入 data/plugin-trash，可人工找回。")) go();
+      return;
+    }
+    window.PPXUI.confirm("目录会移入 data/plugin-trash, 可人工找回; 重启后生效。", {
+      title: "删除插件「" + nm + "」?", okText: "删除", danger: true,
+    }).then(function (ok) { if (ok) go(); });
+  }
+
+  function bindPlugins() {
+    var add = $("btnPluginAdd");
+    if (add) add.onclick = function () { showView("plugins"); openNewPlugin(); };
+
+    var pl = $("pluginList");
+    if (pl) pl.onclick = function (e) {
+      var nw = e.target.closest("[data-pnew]");
+      if (nw) { showView("plugins"); openNewPlugin(); return; }
+      var it = e.target.closest("[data-popen]");
+      if (it) openPlugin(it.getAttribute("data-popen"));
+    };
+
+    var back = $("plugBack");
+    if (back) back.onclick = function () { B.plugEdit = null; renderPluginList(); showView("home"); };
+    var rf = $("plugRefresh");
+    if (rf) rf.onclick = function () { loadPlugins(); toast("已刷新"); };
+
+    var wrap = $("pluginWrap");
+    if (wrap) wrap.onclick = function (e) {
+      var t = e.target.closest("[data-pnew],[data-pedit],[data-ptoggle],[data-pdel],[data-pcancel],[data-psave],[data-prefresh]");
+      if (!t) return;
+      if (t.hasAttribute("data-psave")) { savePlugin(); return; }
+      if (t.hasAttribute("data-pcancel")) { B.plugEdit = null; renderPluginList(); renderPlugins(); return; }
+      if (t.hasAttribute("data-prefresh")) { loadPlugins(); toast("已刷新"); return; }
+      if (t.hasAttribute("data-pnew")) { openNewPlugin(); return; }
+      if (t.hasAttribute("data-pedit")) { openPlugin(t.getAttribute("data-pedit")); return; }
+      if (t.hasAttribute("data-ptoggle")) {
+        togglePlugin(t.getAttribute("data-ptoggle"), t.getAttribute("data-enabled") !== "1");
+        return;
+      }
+      if (t.hasAttribute("data-pdel")) deletePlugin(t.getAttribute("data-pdel"));
+    };
+  }
+
   /* ================= 轮询 ================= */
   // 轮询间隔 5 秒, 不是 3 秒。
   // 服务端按 IP 限 60 请求/分钟 (TokenBucket); 首屏还有 app.js 的审批/任务/生命周期三路
@@ -879,10 +1339,17 @@
   // 5 秒 + 隐藏页暂停后, 稳态落在 24 请求/分左右, 留足余量。
   function startPoll() {
     stopPoll();
-    B.timer = setInterval(function () {
-      if (document.hidden) return;
-      loadState(true);
-    }, 5000);
+    function tick() {
+      if (document.hidden) { B.timer = setTimeout(tick, 5000); return; }
+      loadState(true).then(function () {
+        // 失败 → 5s/10s/20s/30s 退避, 成功立即回到 5s: 两个标签页 + app.js 的三路定时器
+        // 共用同一条 IP 限流 (60/分), 撞 429 时继续 5s 猛打只会让两边都空窗。
+        B.pollMs = B.pollErr ? Math.min(30000, (B.pollMs || 5000) * 2) : 5000;
+        B.timer = setTimeout(tick, B.pollMs);
+      });
+    }
+    B.pollMs = 5000;
+    B.timer = setTimeout(tick, B.pollMs);
   }
   function stopPoll() {
     if (B.timer) { clearInterval(B.timer); B.timer = null; }
@@ -894,17 +1361,24 @@
     bindHome();
     bindChat();
     bindSettings();
+    bindPlugins();
 
     // 默认进对话页: 打开就能说话。首页从「返回」/「新建本体」/点品牌进。
     var saved = null;
     try { saved = localStorage.getItem("ppx_view"); } catch (e) { /* 无所谓 */ }
-    showView(saved === "home" || saved === "settings" ? saved : "chat");
+    showView(["home", "settings", "plugins", "stats"].indexOf(saved) >= 0 ? saved : "chat");
     showPane("talk");
 
     loadState().then(function () {
       // 首屏之后再挂轮询, 避免刚打开就打两个请求
     }).catch(function () {});
     startPoll();
+    loadPlugins();
+
+    // 身体体征: 首屏后静默拉一次, 只更新左上角状态点 (不打开页面)
+    //   —— 打开面板才知道自己健不健康, 等于没有仪表盘。
+    bindOrgans();
+    loadBody();
 
     document.addEventListener("visibilitychange", function () {
       if (!document.hidden) loadState(true);
@@ -915,6 +1389,7 @@
     showView: showView,
     showPane: showPane,
     showSettings: function () { showView("settings"); },
+    showBody: function () { showView("body"); },
     reload: function () { return loadState(); },
     state: function () { return B.s; },
   };

@@ -54,6 +54,22 @@ test("离线聊天 (无 LLM)", async () => {
   agent.shutdown();
 });
 
+// 2026-10-30: 轮次 off-by-one 回归守卫。runToolLoop 的 round 从 0 起算 (首轮 = 0),
+//   agent._llmWithTools 的 onStep 必须记成 round+1, 否则单次生成永远显示 "0 轮" (且 0 是
+//   falsy, 前端连"轮"前缀都不出现)。用桩 LLM 走一轮直接返回, 不依赖真实模型。
+test("lastRun 轮次从 1 起算 (off-by-one 回归)", async () => {
+  const agent = new PPXAgent({ root: tmpRoot("agent") });
+  const stubLlm = {
+    model: "stub",
+    context_window: 8192,
+    apiChat: async () => ({ message: { content: "好的", tool_calls: [] }, usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } }),
+  };
+  await agent._llmWithTools([{ role: "user", content: "hi" }], stubLlm);
+  assert.ok(agent.lastRun, "lastRun 应被记录");
+  assert.strictEqual(agent.lastRun.rounds, 1, `单次生成应记 1 轮 (0 索引 + 1), 实际 ${agent.lastRun && agent.lastRun.rounds}`);
+  agent.shutdown();
+});
+
 test("interrupt 后新一轮 chat 自动复位中断状态", async () => {
   const agent = new PPXAgent({ root: tmpRoot("agent") });
   agent.interrupt();

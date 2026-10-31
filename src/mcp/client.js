@@ -301,8 +301,19 @@ export class McpClient {
   }
 
   async listTools() {
-    const r = await this._request("tools/list", {});
-    const tools = (r && r.tools) || [];
+    // 2026-10-31: 服务端 tools/list 真分页后, 客户端按 nextCursor 翻页聚合 (上限 50 页防死循环)。
+    let tools = [];
+    let cursor = null;
+    let pages = 0;
+    do {
+      const r = await this._request("tools/list", cursor ? { cursor } : {});
+      tools = tools.concat((r && r.tools) || []);
+      cursor = r && r.nextCursor ? String(r.nextCursor) : null;
+      if (++pages >= 50 && cursor) {
+        warn("[mcp] tools/list 分页超过 50 页, 截断 (服务端列表异常?)");
+        break;
+      }
+    } while (cursor);
     // v2.6.0: x-mcp-header 客户端支持 — 解析每把工具的 inputSchema 里的 x-mcp-header 标注,
     // 存为 { 参数路径 -> headerName }; 非法标注 (约束见 MCP 2026-07-28 规范) 的工具整体排除
     this._toolHeaders = new Map(); // toolName -> [{ path: string[], header: string }]

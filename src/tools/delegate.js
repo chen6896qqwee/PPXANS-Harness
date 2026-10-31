@@ -515,7 +515,7 @@ export function registerDelegateTools(catalog, opts = {}) {
   catalog.register({
     name: "spawn_agent",
     capability: { readOnly: false, riskLevel: "medium", sideEffect: "system" },
-    description: "派生子 agent 处理子任务并等待结果, 适合需要专门角色、并行或隔离执行的任务。子 agent 共享全局经验库。task 单任务 / tasks 数组并行多任务; perspectives 注入差异化视角; arbitrate=true 主 agent 仲裁聚合; review=true 走 SDD 审查循环 (实施→只读审查→修复→复审, 达上限熔断交主 agent 裁定)。",
+    description: "派生子 agent 处理子任务并等待结果; 适合需要专门角色、并行或隔离执行的任务。子 agent 共享全局经验库。各参数之间怎么搭配, 见参数说明 (task/tasks 二选一; perspectives 配 tasks; arbitrate 聚合; review 走 SDD 审查; supervisor 走监督者编排)。",
     parameters: {
       type: "object",
       properties: {

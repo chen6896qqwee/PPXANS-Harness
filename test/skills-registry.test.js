@@ -61,22 +61,25 @@ test("loader v2: frontmatter domain 优先于路径推断; name_zh 作显示名"
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test("loader v2: 多根装配 —— 同 id 先到的根胜出, 读取跟随、写入只落可写根", () => {
+test("loader v2: 多根装配 —— 同 id 先到的根胜出 (项目>用户), 读取跟随、写入只落可写根", () => {
   const a = tmp("rootA");
   const b = tmp("rootB");
   try {
-    writeSkill(a, "data/x", { desc: "来自 A (内置)" });
-    writeSkill(b, "data/x", { desc: "来自 B (用户覆盖)" });
+    writeSkill(a, "data/x", { desc: "来自 A (项目覆盖)" });
+    writeSkill(b, "data/x", { desc: "来自 B (用户)" });
     writeSkill(b, "personal/only-here", { desc: "只在 B" });
+    // roots 顺序即优先级 (2026-10-31 队列⑥): 项目根在前, 同 id 压过用户根
     const l = new SkillLoader({ roots: [
-      { id: "builtin", dir: a, kind: "builtin", writable: true },
+      { id: "project", dir: a, kind: "project", writable: true },
       { id: "user", dir: b, kind: "user", writable: true },
     ] });
-    assert.equal(l.get("data/x").description, "来自 A (内置)", "先到的根胜出");
+    assert.equal(l.get("data/x").description, "来自 A (项目覆盖)", "先到的根 (项目) 胜出");
     assert.equal(l.get("personal/only-here").description, "只在 B", "第二根独有的技能可见");
-    assert.equal(l.get("data/x").source, "builtin");
+    assert.equal(l.get("data/x").source, "project");
     assert.equal(l.writeDir, path.resolve(a), "可写根 = 第一个 writable 根");
-    // 缓存: 删除后必须消失
+    // 缓存: 删除后必须消失 (项目根同 id 删除 → 回落用户根)
+    fs.rmSync(path.join(a, "data", "x"), { recursive: true, force: true });
+    assert.equal(l.get("data/x").description, "来自 B (用户)", "项目根删除后回落用户根");
     fs.rmSync(path.join(b, "personal", "only-here"), { recursive: true, force: true });
     assert.equal(l.has("personal/only-here"), false);
   } finally {
@@ -121,19 +124,31 @@ test("registry: 按域/来源/关键词过滤 list()", () => {
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test("registry: 配置 → 技能根 (内置/用户/项目/附加, 去重, 兜底)", () => {
+test("registry: 配置 → 技能根 (项目>用户>内置>附加, 去重, 兜底)", () => {
+  // 2026-10-31 (队列⑥): 优先级反转为 项目 > 用户 > 内置 > 附加, 顺序即优先级
   const roots = skillRootsFromConfig({ skills: { builtin: true, user_dir: "~/.ppx/skills", project_dir: "/tmp/proj", extra_dirs: ["/tmp/extra"] } }, "/root");
   const kinds = roots.map((r) => r.kind);
-  assert.deepEqual(kinds, ["builtin", "user", "project", "extra"]);
-  assert.equal(roots[0].dir, path.join("/root", "skills"));
+  assert.deepEqual(kinds, ["project", "user", "builtin", "extra"]);
+  assert.equal(roots[0].dir, "/tmp/proj", "项目根最优先");
   assert.equal(roots[1].dir, path.join(os.homedir(), ".ppx", "skills"), "~ 被展开");
-  // 全关 → 兜底仍留内置 (否则技能系统整体失效)
-  const only = skillRootsFromConfig({ skills: { builtin: false, user_dir: "" } }, "/root");
+  assert.equal(roots[2].writable, false, "内置根只读 (用户产物不写进代码树)");
+  // 未设 project_dir → 默认 <root>/.ppx/skills (与 .ppx/commands 同锚点); "" 显式关闭
+  const def = skillRootsFromConfig({ skills: {} }, "/root");
+  assert.equal(def[0].dir, path.join("/root", ".ppx", "skills"), "项目根默认 .ppx/skills");
+  const off = skillRootsFromConfig({ skills: { project_dir: "" } }, "/root");
+  assert.deepEqual(off.map((r) => r.kind), ["user", "builtin"], "project_dir='' 显式关闭项目根");
+  // 全关 → 兜底仍留内置 (否则技能系统整体失效), 且兜底根可写 (create_skill 有处落盘)
+  const only = skillRootsFromConfig({ skills: { builtin: false, user_dir: "", project_dir: "" } }, "/root");
   assert.equal(only.length, 1);
   assert.equal(only[0].kind, "builtin", "兜底内置");
-  // 重复目录去重
-  const dup = skillRootsFromConfig({ skills: { user_dir: "/root/skills" } }, "/root");
-  assert.equal(dup.filter((r) => r.dir === path.join("/root", "skills")).length, 1);
+  assert.equal(only[0].writable, true, "兜底根可写");
+  // 重复目录去重 (先到者优先级更高, 后到者剔除)
+  const dup = skillRootsFromConfig({ skills: { user_dir: "/root/skills", project_dir: "" } }, "/root");
+  assert.equal(
+    dup.filter((r) => path.resolve(r.dir).toLowerCase() === path.resolve("/root/skills").toLowerCase()).length,
+    1,
+    "同目录只留先到的 user 根",
+  );
   assert.equal(expandHome("~"), os.homedir());
   assert.equal(expandHome("/abs/path"), "/abs/path");
 });

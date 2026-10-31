@@ -43,4 +43,14 @@ test("ppx --help 秒回用法, 不进 REPL", async () => {
   assert.equal(code, 0);
   assert.match(stdout, /用法/);
   assert.match(stdout, /ppx-serve/);
+  assert.match(stdout, /ppx doctor/);
+});
+
+test("ppx doctor 直接体检并退出 (不被当成提问进 REPL)", async () => {
+  // 退出码取决于本机配置 (1 = 有 ✗ 项), 这里只锁"跑完并给出结论", 不锁成败
+  const { code, stdout } = await run(["doctor"]);
+  assert.ok(code === 0 || code === 1, `unexpected exit ${code}`);
+  assert.match(stdout, /体检/);
+  assert.match(stdout, /数据目录可写/);
+  assert.match(stdout, /结论:/);
 });

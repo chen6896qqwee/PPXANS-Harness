@@ -128,6 +128,38 @@ test("workspace 沙箱: cwd 越界也拒绝", async () => {
   assert.equal(d.decision, "deny");
 });
 
+// 2026-10-30: 旧实现只抽绝对路径, 相对穿越/重定向/动态路径全部漏判。
+test("workspace 沙箱: 命令内相对穿越/重定向/动态路径均拒绝", async () => {
+  const root = tmpDir();
+  const eng = createPermissionEngine({
+    sandbox: SandboxPolicy.WORKSPACE_WRITE,
+    workspaceRoot: root,
+    approvalMode: AskForApproval.ON_REQUEST,
+  });
+  const cases = [
+    "cd ..",
+    "cd -P ../outside",
+    "echo x > ../evil.txt",
+    "echo x >> ../../evil.txt",
+    "cp a.txt ../../evil.txt",
+    "mv a.txt ../evil.txt",
+    "tee ../evil.txt",
+    "node -e \"x\" --out=../evil.txt",
+    "echo x > $HOME/.bashrc",
+    "echo x > %USERPROFILE%\\evil.txt",
+    "cat ~/secret.txt",
+  ];
+  for (const command of cases) {
+    const d = await eng.check("run_command", { command });
+    assert.equal(d.decision, "deny", `应拦截相对越界: ${command} (实际 ${d.decision} / ${d.reason || ""})`);
+  }
+  // 工作区内的普通命令不能被误伤 (run_command 本身仍需审批, 这里只断言不是越界 deny)
+  for (const command of ["ls -la", "npm run build", "git status", "echo hello > out.txt", "cp a.txt b.txt"]) {
+    const d = await eng.check("run_command", { command });
+    assert.notEqual(d.decision, "deny", `工作区内命令不应被拦: ${command} (${d.reason || ""})`);
+  }
+});
+
 // ---- P1-1 回归 (2026-10-10): URL 不是本地路径 ----
 // 病根: collectPaths 裸正则把 https://host/path 切成 s://host/path, path.resolve 把 s: 当盘符
 //   → 误判"路径越界", git clone / curl / npm --registry 全被拦且理由是假的。

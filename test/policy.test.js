@@ -71,17 +71,51 @@ test("runToolLoop: 中断信号立即返回", async () => {
   assert.equal(out, "[皮皮虾] 任务已被中断 (operator cancelled).");
 });
 
-test("runToolLoop: 轮次超上限停止", async () => {
+test("runToolLoop: 轮次超上限停止 (显式关闭收口时保留硬停止文案)", async () => {
   const plan = Array.from({ length: 12 }, () => ({ tool_calls: [tc("t", "get_time")], content: null }));
   const llm = mockLLM(plan);
   const out = await runToolLoop({
     seedMessages: [{ role: "user", content: "hi" }],
-    llm, tools: [], config: { agent: { max_tool_rounds: 3 } },
+    llm, tools: [], config: { agent: { max_tool_rounds: 3, exhausted_finalize: false } },
     runTool: async () => "10:30",
     shrinkMessages: (m) => m,
   });
   assert.equal(out, "[皮皮虾] 工具调用轮次过多, 已停止。");
   assert.equal(llm.calls.length, 3, "只应跑 3 轮");
+});
+
+test("runToolLoop: 轮次用尽后补一次无工具收口 (2026-10-30)", async () => {
+  const plan = Array.from({ length: 12 }, () => ({ tool_calls: [tc("t", "get_time")], content: null }));
+  // 第 4 次调用 = 收口轮 (前 3 次是工具轮)
+  plan[3] = { tool_calls: [], content: "已确认当前时间, 但未完成安装步骤" };
+  const llm = mockLLM(plan);
+  const seenTools = [];
+  const raw = llm.apiChat;
+  llm.apiChat = async (messages, opts) => { seenTools.push(Array.isArray(opts?.tools) ? opts.tools.length : null); return raw(messages, opts); };
+  const out = await runToolLoop({
+    seedMessages: [{ role: "user", content: "hi" }],
+    llm, tools: [{ type: "function", function: { name: "get_time" } }],
+    config: { agent: { max_tool_rounds: 3 } },
+    runTool: async () => "10:30",
+    shrinkMessages: (m) => m,
+  });
+  assert.match(out, /已确认当前时间, 但未完成安装步骤/, "应带出收口正文");
+  assert.match(out, /工具轮次上限已用尽 \(3 轮 \/ 3 次工具调用/, "必须诚实标注轮次用尽");
+  assert.equal(llm.calls.length, 4, "3 轮工具 + 1 轮收口");
+  assert.equal(seenTools.at(-1), 0, "收口调用不得携带工具 (否则又开一轮)");
+});
+
+test("runToolLoop: 收口调用失败则回落硬停止 (不假装成功)", async () => {
+  const plan = Array.from({ length: 6 }, () => ({ tool_calls: [tc("t", "get_time")], content: null }));
+  plan[2] = new Error("provider down"); // 第 3 次调用 = 收口轮, 直接抛错
+  const llm = mockLLM(plan);
+  const out = await runToolLoop({
+    seedMessages: [{ role: "user", content: "hi" }],
+    llm, tools: [], config: { agent: { max_tool_rounds: 2 } },
+    runTool: async () => "10:30",
+    shrinkMessages: (m) => m,
+  });
+  assert.equal(out, "[皮皮虾] 工具调用轮次过多, 已停止。");
 });
 
 // ---- 探索熔断 / 重复检测 ----
@@ -90,7 +124,9 @@ test("runToolLoop: 连续探索无产出 -> 注入方向盘, 模型改出结论"
   const plan = [
     { tool_calls: [tc("t1", "read_file", '{"path":"a"}')], content: null },
     { tool_calls: [tc("t2", "read_file", '{"path":"b"}')], content: null },
-    { tool_calls: [tc("t3", "read_file", '{"path":"c"}')], content: null }, // 第3轮触发熔断
+    { tool_calls: [tc("t3", "read_file", '{"path":"c"}')], content: null },
+    { tool_calls: [tc("t4", "read_file", '{"path":"d"}')], content: null },
+    { tool_calls: [tc("t5", "read_file", '{"path":"e"}')], content: null }, // 第5轮触发熔断
     { tool_calls: [], content: "结论" },
   ];
   const llm = mockLLM(plan);
@@ -103,6 +139,28 @@ test("runToolLoop: 连续探索无产出 -> 注入方向盘, 模型改出结论"
   assert.equal(out, "结论");
   const steered = llm.calls.some((c) => c.contents.some((s) => s.includes("检测到连续探索循环")));
   assert.ok(steered, "应注入探索熔断方向盘消息");
+});
+
+test("runToolLoop: 连续 4 轮只读不熔断 (读多个文件是合法探索, 2026-10-30 放宽)", async () => {
+  // 旧默认阈值 3 会在第 3 轮把"读 a/b/c 再动手"当成空转叫停 —— 那是最常见的工作流。
+  // 现在默认 5: 4 轮只读必须放行, 且不能注入任何拦停文案。
+  const plan = [
+    { tool_calls: [tc("t1", "read_file", '{"path":"a"}')], content: null },
+    { tool_calls: [tc("t2", "read_file", '{"path":"b"}')], content: null },
+    { tool_calls: [tc("t3", "read_file", '{"path":"c"}')], content: null },
+    { tool_calls: [tc("t4", "read_file", '{"path":"d"}')], content: null },
+    { tool_calls: [], content: "看完了, 结论如下" },
+  ];
+  const llm = mockLLM(plan);
+  const out = await runToolLoop({
+    seedMessages: [{ role: "user", content: "分析这几个文件" }],
+    llm, tools: [], config: {},
+    runTool: async () => "内容",
+    shrinkMessages: (m) => m,
+  });
+  assert.equal(out, "看完了, 结论如下");
+  const steered = llm.calls.some((c) => c.contents.some((s) => s.includes("检测到连续探索循环")));
+  assert.equal(steered, false, "4 轮合法探索不得被熔断");
 });
 
 test("runToolLoop: 重复相同工具+参数 -> 注入重复警告", async () => {
@@ -182,17 +240,21 @@ test("runToolLoop: 工具错误喂回模型修正重试", async () => {
 test("ToolLoopPolicy.recordTurn: 探索连击计数与熔断", () => {
   const p = new ToolLoopPolicy({});
   assert.equal(p.exploreBreak, DEFAULT_EXPLORE_BREAK);
-  // 前 2 轮只读: 不熔断
+  // 默认阈值应为 5 (2026-10-30 从 3 放宽: 读几个文件再动手是最常见的工作流)
+  assert.equal(DEFAULT_EXPLORE_BREAK, 5);
+  // 前 4 轮只读: 不熔断
   assert.equal(p.recordTurn([tc("t1", "read_file")]), null);
   assert.equal(p.recordTurn([tc("t2", "list_dir")]), null);
-  // 第 3 轮仍只读: 熔断
-  const steer = p.recordTurn([tc("t3", "web_search")]);
+  assert.equal(p.recordTurn([tc("t3", "web_search")]), null);
+  assert.equal(p.recordTurn([tc("t4", "read_document")]), null);
+  // 第 5 轮仍只读: 熔断
+  const steer = p.recordTurn([tc("t5", "fetch_page")]);
   assert.ok(steer.includes("连续探索循环"));
   // 熔断后状态清零: 再记录只读是新的连击起点
   assert.equal(p.exploreStreak, 0);
   // 混合调用 (含非探索工具) 重置连击
   p.exploreStreak = 2;
-  assert.equal(p.recordTurn([tc("t4", "run_command")]), null);
+  assert.equal(p.recordTurn([tc("t6", "run_command")]), null);
   assert.equal(p.exploreStreak, 0);
 });
 

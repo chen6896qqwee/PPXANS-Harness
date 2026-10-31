@@ -12,13 +12,14 @@
 //   退出码: 0 = 完整, 1 = 存在缺失模块
 //
 // 扫描范围: 全树 .js/.mjs/.cjs, 跳过 node_modules / .git / data / dist / 隔离区
+// dist-desktop: electron-builder 产物, 内含源码副本, 扫描会误报"缺失模块"
 // 只检查【相对路径】import (`./x`, `../x`); node: 内置与裸包名 (外部依赖) 不在此职责内。
 
 import fs from "node:fs";
 import path from "node:path";
 
 const ROOT = path.resolve(process.argv[2] || ".");
-const SKIP_DIRS = new Set(["node_modules", ".git", "data", "dist", ".cache", ".stage", ".x"]);
+const SKIP_DIRS = new Set(["node_modules", ".git", "data", "dist", "dist-desktop", ".cache", ".stage", ".x"]);
 const EXTS = new Set([".js", ".mjs", ".cjs"]);
 const RESOLVE_SUFFIXES = ["", ".js", ".mjs", ".cjs", ".json"];
 

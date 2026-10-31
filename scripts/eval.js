@@ -107,7 +107,7 @@ function resolveE2EProvider() {
   }
   // c. LM Studio 本地兜底
   const MODEL = process.env.PPX_E2E_MODEL || "qwen3.5-9b-the-defiant-fable-uncnr-heretic-neo-max-mtp";
-  return { source: "lmstudio 兜底", config: { id: "lmstudio", base_url: "http://127.0.0.1:1234/v1", api_key: "lm-studio", model: MODEL, vision: true, timeout_ms: 120000 } };
+  return { source: "lmstudio 兜底", config: { id: "lmstudio", base_url: process.env.PPX_LOCAL_BASE_URL || "http://127.0.0.1:1234/v1", api_key: process.env.PPX_LOCAL_API_KEY || "lm-studio", model: MODEL, vision: true, timeout_ms: 120000 } };
 }
 
 async function llmE2E() {

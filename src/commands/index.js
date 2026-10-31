@@ -164,3 +164,19 @@ export function createRegistryWithUserCommands(dir, { extra = [] } = {}) {
   const user = loadUserCommands(dir);
   return createCommandRegistry({ commands: [...BUILTIN_COMMANDS, PLAN_EXIT_ALIAS, ...user, ...extra] });
 }
+
+// CLI Tab 补全器 (2026-10-31): 给 readline completer 用 —— 返回 [候选数组, 已输入前缀]。
+// names 由调用方合并好 (registry 名单 + CLI 本地命令 + quit/exit), 这里只做匹配, 保持纯函数可单测。
+// 只补全 "/" 开头的输入; 其余返回空 (普通问题不弹候选, 免打扰)。
+export function commandCompleter(names) {
+  const set = [...new Set((names || []).map(String))];
+  return function complete(line) {
+    const s = String(line || "");
+    if (!s.startsWith("/") || s.includes(" ")) return [[], s]; // 有参数后不再补命令名
+    const hits = set
+      .filter((n) => ("/" + n).startsWith(s))
+      .map((n) => "/" + n)
+      .sort();
+    return [hits, s];
+  };
+}

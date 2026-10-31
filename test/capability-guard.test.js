@@ -190,6 +190,9 @@ const READ_ONLY_SURFACE = [
   //   self_verify 读源码+跑测试子进程, 只出结论; self_ledger 只读账本与 pending 清单。
   //   注意 self_edit / self_rewind 是 readOnly:false + riskLevel:high, 刻意不进这张表。
   "self_verify",
+  // 2026-10-30 按需工具批次 (显式评审): tool_schema 只读内存里的工具元数据并回一份
+  //   JSON Schema, 不碰文件/网络/进程 —— plan 模式直通是安全的 (它连"读文件"都不做)。
+  "tool_schema",
 ];
 
 function engine({ root, catalog, sandbox, plan }) {

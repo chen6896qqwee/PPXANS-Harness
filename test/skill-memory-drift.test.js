@@ -20,7 +20,16 @@ const PAIRS = [
       "sweepExpired(", "setValidity(", "_isCurrent(", "supersedeId",
       "_embedCacheGet(", "items: items.map(", "deleteReason",
       // F7 (2026-10-05): 追加日志的字节水位 (与条数阈值互补), 副本缺它 = 批量替换仍无上限。
-      "this.walMaxBytes", "walSizeBytes(this.walFile)"],
+      "this.walMaxBytes", "walSizeBytes(this.walFile)",
+      // 2026-10-30 三路召回: 概念路 + RRF 权重 + dense 准入门槛。
+      //   副本缺任一项 = 技能版记忆仍然只认字面, 换个说法就召回不到。
+      "_conceptRank(", "weights: [1.0, 0.9, 0.45]", "sim >= 0.08", "stats.grams"],
+  },
+  {
+    // 概念词典 (2026-10-30): 召回能力的来源之一。它单独成对 —— 只改词典不改副本时,
+    //   技能版会拿到"没有新概念的 fact-store" (代码同源但知识更少), 那种漂移最难发现。
+    src: "src/memory/lexicon.js", copy: `${SKILL}/lexicon.js`,
+    markers: ["expandedTerms", "conceptMatches", "CONCEPT_COUNT"],
   },
   {
     src: "src/memory/session.js", copy: `${SKILL}/session.js`,

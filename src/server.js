@@ -30,6 +30,12 @@ export async function startServer({ root = process.cwd(), port = 8899, host = "1
     agent.startProactiveTicker((payload) => manager.broadcast(payload.text));
   }
 
+  // Watchdog 控制回路 (2026-10-31 Super-agent 一期): 独立定时心跳会话监控体征与任务进展,
+  //   低打扰 —— 仅 warn/crit 才广播; ok 心跳只落 data/evolve/watchdog.jsonl
+  if (agent.config.agent?.watchdog?.enabled) {
+    agent.startWatchdog((r) => manager.broadcast(`[watchdog:${r.level}] ${r.text}`));
+  }
+
   const server = manager.httpServer;
   return {
     agent,

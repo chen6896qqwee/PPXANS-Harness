@@ -2,17 +2,21 @@
 
 > 由皮皮虾自动生成 (ZCode repo-wiki 机制对齐)。每个结论绑定源码位置 (file:line); 敏感文件 (token/secret/credential/password 等) 已排除 0 个。
 
-**规模**: 文件 400 · 定义 8556 · 内部依赖边 251
+**规模**: 文件 400 · 定义 14004 · 内部依赖边 288
 
 ## (根目录)
 
 ### `CHANGELOG.md`
 
-- `## 未发布 (2026-10-09) - 全量修复: 依赖回归 + 会话误删 + 半成品接线` — CHANGELOG.md:1
-- `## v3.2.0 (2026-10-06) - 军团指挥技能 + 向量/语音体检 + 测试补盲区` — CHANGELOG.md:55
-- `## v3.1.0 (2026-10-06) - GitHub 精选增强: 持久规划 + 技能生态` — CHANGELOG.md:80
-- `## 未发布 (2026-10-04a) - 全功能评估 + 向量记忆/语音开箱即用` — CHANGELOG.md:104
-- `## 未发布 (2026-10-03d) - 提示注入红队测试 + 内容层注入防线` — CHANGELOG.md:131
+- `## 4.0.0 (2026-10-31) · 发布前最后矫正` — CHANGELOG.md:1
+- `## 4.0.0 (2026-10-30) · 源码验收优化批次` — CHANGELOG.md:17
+- `## 4.0.0 (2026-10-30 第七轮) · 身体：痛觉 / 工作内存 / 记忆质量 / 体征面板` — CHANGELOG.md:150
+- `## 4.0.0 (2026-10-30 第四轮) · 并发诊断 + 探索熔断放宽` — CHANGELOG.md:313
+- `## 4.0.0 (2026-10-30) · 工具循环加固：轮次收口 / 并发上限 / 签名键序无关` — CHANGELOG.md:437
+
+### `CODE_SIGNING_POLICY.md`
+
+- `# Code signing policy` — CODE_SIGNING_POLICY.md:1
 
 ### `CONTRIBUTING.md`
 
@@ -23,11 +27,19 @@
 
 ### `README.md`
 
-- `## 🧪 测试 / 评测 / CI` — README.md:120
-- `## 📄 License` — README.md:180
-- `# 3. 启动自愈体检` — README.md:77
+- `## 🧪 测试 / 评测 / CI` — README.md:246
+- `## 📄 License` — README.md:318
+- `# 2. 直接用 (一发即走, 直答退出):` — README.md:121
 - `# 🦐 PPXANS-Harness` — README.md:1
-- `## v3.0 架构（codex 对齐）` — README.md:45
+- `## v3.0 架构（codex 对齐）` — README.md:90
+
+### `THIRD-PARTY-NOTICES.md`
+
+- `# Third-Party Notices` — THIRD-PARTY-NOTICES.md:1
+- `## Distributed with the desktop installer` — THIRD-PARTY-NOTICES.md:7
+- `## Distributed with the standalone package (optional)` — THIRD-PARTY-NOTICES.md:17
+- `## Build-time only (not distributed)` — THIRD-PARTY-NOTICES.md:27
+- `## Bundled third-party skills` — THIRD-PARTY-NOTICES.md:38
 
 ## bench
 
@@ -39,23 +51,39 @@
 - `function printTable(res, { verbose = false } = {}) {` — bench/falsify.js:139
 - `function selfProbe() {` — bench/falsify.js:161
 
+### `bench/offline-plans.js`
+
+- `export function planCoverage(taskIds = []) {` — bench/offline-plans.js:145
+- `const extra = Object.keys(OFFLINE_PLANS).filter((id) => !taskIds.includes(id));` — bench/offline-plans.js:147
+- `const missing = taskIds.filter((id) => !OFFLINE_PLANS[id]);` — bench/offline-plans.js:146
+- `const RENAMED = 'export async function loadData() { return 1; }\nexport async function main() { const r = await loadData` — bench/offline-plans.js:17
+- `const CALC_FIXED = 'export function add(a, b) {\n  return a + b;\n}\n';` — bench/offline-plans.js:16
+
 ### `bench/tasks.js`
 
 - `export function summarize(results) {` — bench/tasks.js:399
 - `function nodeRun(file, fnName, args) {` — bench/tasks.js:24
 - `function nodeCheck(file) {` — bench/tasks.js:17
-- `const f = path.join(c.sandbox, "broken.js");` — bench/tasks.js:150
 - `const s = String(n).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");` — bench/tasks.js:71
+- `const t = R(c.sandbox, "rename-me.js");` — bench/tasks.js:183
 
 ### `bench/team-longrun.js`
 
 - `async function runTopology(topology, tasks) {` — bench/team-longrun.js:62
-- `function members_served_threshold(r) { return r.members * 10; } // 样本太小时饿死率没意义` — bench/team-longrun.js:169
+- `function members_served_threshold(r) { return r.members * 10; } // 样本太小时饿死率没意义` — bench/team-longrun.js:168
 - `function stubExecutor({ latencyMs = 5, jitterMs = 8 } = {}) {` — bench/team-longrun.js:47
-- `const r = room.dispatch(target.id, `任务#${i}: 处理第 ${i} 项`, { via: "host" });` — bench/team-longrun.js:90
+- `const r = room.dispatch(target.id, `任务#${i}: 处理第 ${i} 项`, { via: "host" });` — bench/team-longrun.js:89
 - `const i = argv.indexOf(k);` — bench/team-longrun.js:32
 
 ## bin
+
+### `bin/ppx-desktop.js`
+
+- `async function main() {` — bin/ppx-desktop.js:154
+- `function shutdown(code = 0) {` — bin/ppx-desktop.js:141
+- `function ping() {` — bin/ppx-desktop.js:73
+- `function configPort(r) {` — bin/ppx-desktop.js:42
+- `function spawnServer() {` — bin/ppx-desktop.js:96
 
 ### `bin/ppx-setup.js`
 
@@ -63,19 +91,23 @@
 - `async function finish(provider, preset) {` — bin/ppx-setup.js:39
 - `function readConfig() {` — bin/ppx-setup.js:22
 - `function writeConfig(raw) {` — bin/ppx-setup.js:25
-- `const model = args.includes("--model") ? args[args.indexOf("--model") + 1] : "";` — bin/ppx-setup.js:82
+- `const key = args.includes("--key") ? args[args.indexOf("--key") + 1] : "";` — bin/ppx-setup.js:81
 
 ### `bin/ppx-web.js`
 
-- `function shutdown(signal) {` — bin/ppx-web.js:129
-- `function argOf(name, fallback = "") {` — bin/ppx-web.js:35
-- `function banner(url) {` — bin/ppx-web.js:81
-- `function configPort() {` — bin/ppx-web.js:43
-- `function openBrowser(url) {` — bin/ppx-web.js:67
+- `function shutdown(signal) {` — bin/ppx-web.js:128
+- `function banner(url) {` — bin/ppx-web.js:82
+- `function argOf(name, fallback = "") {` — bin/ppx-web.js:36
+- `function configPort() {` — bin/ppx-web.js:44
+- `function openBrowser(url) {` — bin/ppx-web.js:68
 
 ## config
 
 ## docs
+
+### `docs/全量回归测试报告-2026-10-11.md`
+
+- `# 皮皮虾 (PPXANS-Harness) 全量回归测试报告` — docs/全量回归测试报告-2026-10-11.md:1
 
 ### `docs/完整评估修复报告-2026-10-09.md`
 
@@ -91,17 +123,17 @@
 ### `docs/ABSORB-DEEPSEEK-HARNESS.md`
 
 - `# 首次安装并构建内嵌 dsh（需要网络拉取依赖）` — docs/ABSORB-DEEPSEEK-HARNESS.md:36
+- `## 2. 底座切换` — docs/ABSORB-DEEPSEEK-HARNESS.md:25
+- `## 4. 架构对应关系` — docs/ABSORB-DEEPSEEK-HARNESS.md:70
 - `# DeepSeek Harness 吸收与底座切换说明` — docs/ABSORB-DEEPSEEK-HARNESS.md:1
 - `## 1. 吸收内容` — docs/ABSORB-DEEPSEEK-HARNESS.md:16
-- `## 2. 底座切换` — docs/ABSORB-DEEPSEEK-HARNESS.md:25
-- `# 运行 dsh CLI（web / headless / ...）` — docs/ABSORB-DEEPSEEK-HARNESS.md:40
 
 ### `docs/ABSORB-OCTOP-2026-10-07.md`
 
-- `## 3. 明确没吸收的（附理由）` — docs/ABSORB-OCTOP-2026-10-07.md:48
-- `## 1. 吸收映射表` — docs/ABSORB-OCTOP-2026-10-07.md:17
 - `## 2. 三个设计取舍（为什么没照抄）` — docs/ABSORB-OCTOP-2026-10-07.md:35
 - `## 4. 交付清单` — docs/ABSORB-OCTOP-2026-10-07.md:64
+- `## 3. 明确没吸收的（附理由）` — docs/ABSORB-OCTOP-2026-10-07.md:48
+- `## 1. 吸收映射表` — docs/ABSORB-OCTOP-2026-10-07.md:17
 - `## 5. 证据` — docs/ABSORB-OCTOP-2026-10-07.md:110
 
 ### `docs/AGENT-GRADING-L1-L4.md`
@@ -111,6 +143,14 @@
 - `## 总判定：**L2+（接近 L3，差"扰动测试集标准化"与"在线 A/B"两项）**` — docs/AGENT-GRADING-L1-L4.md:5
 - `## L1-L4 逐级对照` — docs/AGENT-GRADING-L1-L4.md:7
 - `## 与 GPA/AgentEval 指标的映射` — docs/AGENT-GRADING-L1-L4.md:31
+
+### `docs/ARCHITECTURE-CURRENT.md`
+
+- `## 3. 对话主链路 (流式)` — docs/ARCHITECTURE-CURRENT.md:59
+- `## 1. 进程与入口链` — docs/ARCHITECTURE-CURRENT.md:37
+- `## 6. 进化体系 (自主变强闭环)` — docs/ARCHITECTURE-CURRENT.md:112
+- `# PPXANS-Harness 架构现状 (v4.0.0, 2026-10-30)` — docs/ARCHITECTURE-CURRENT.md:1
+- `## 2. Agent 装配五阶段 (`src/agent/index.js` 构造器)` — docs/ARCHITECTURE-CURRENT.md:49
 
 ### `docs/ARCHITECTURE-ORGANISM.md`
 
@@ -123,9 +163,9 @@
 ### `docs/ARCHITECTURE-V3.md`
 
 - `## 三·五、集成现状（v3.0 发布口径）` — docs/ARCHITECTURE-V3.md:67
-- `## 五、目录结构（v3.0 增量）` — docs/ARCHITECTURE-V3.md:84
-- `# PPX v3.0 架构设计 — Codex 对齐 + 七项目特性吸收` — docs/ARCHITECTURE-V3.md:1
+- `## 五、目录结构（v3.0 增量）` — docs/ARCHITECTURE-V3.md:123
 - `## 二、新模块与职责（9 个）` — docs/ARCHITECTURE-V3.md:42
+- `# PPX v3.0 架构设计 — Codex 对齐 + 七项目特性吸收` — docs/ARCHITECTURE-V3.md:1
 - `## 三、集成点（不动 v2.x 主链路，全部经插件装配）` — docs/ARCHITECTURE-V3.md:56
 
 ### `docs/AUDIT-2026-09-17.md`
@@ -137,9 +177,9 @@
 ### `docs/CONFIG.md`
 
 - `## agent（智能体）` — docs/CONFIG.md:32
-- `## user` — docs/CONFIG.md:50
-- `## memory（记忆）` — docs/CONFIG.md:56
-- `## channels（通道）` — docs/CONFIG.md:101
+- `## memory（记忆）` — docs/CONFIG.md:60
+- `## user` — docs/CONFIG.md:54
+- `## channels（通道）` — docs/CONFIG.md:105
 - `## providers（模型提供方）` — docs/CONFIG.md:14
 
 ### `docs/DATA-FLOWS.md`
@@ -147,20 +187,24 @@
 - `# PPXANS-Harness · 数据流透明披露 (NOTICE)` — docs/DATA-FLOWS.md:1
 - `## 用户自担部分 (ZCode NOTICE 同款声明)` — docs/DATA-FLOWS.md:28
 
+### `docs/DESKTOP.md`
+
+- `# 桌面端 (Electron)` — docs/DESKTOP.md:1
+
 ### `docs/EVALUATION-2026-10-07-DAWN-agent-report.md`
 
+- `## 4. 逐维要点` — docs/EVALUATION-2026-10-07-DAWN-agent-report.md:92
 - `## 3. 八维加权评分` — docs/EVALUATION-2026-10-07-DAWN-agent-report.md:74
 - `# PPXANS-Harness 智能体评估报告（实测）` — docs/EVALUATION-2026-10-07-DAWN-agent-report.md:1
 - `## 1. 实测基线（本次全部数字均为现场实跑）` — docs/EVALUATION-2026-10-07-DAWN-agent-report.md:16
-- `## 4. 逐维要点` — docs/EVALUATION-2026-10-07-DAWN-agent-report.md:92
 - `## 0. 一句话结论` — docs/EVALUATION-2026-10-07-DAWN-agent-report.md:10
 
 ### `docs/EVALUATION-2026-10-07.md`
 
+- `## 4. 与最可比对手的逐项差异` — docs/EVALUATION-2026-10-07.md:270
 - `## 3. 八维加权评分` — docs/EVALUATION-2026-10-07.md:89
 - `# 皮皮虾（PPXANS-Harness）评估报告` — docs/EVALUATION-2026-10-07.md:1
 - `## 1. 实测基线（本报告全部数字均为本地实跑，非引用）` — docs/EVALUATION-2026-10-07.md:16
-- `## 4. 与最可比对手的逐项差异` — docs/EVALUATION-2026-10-07.md:270
 - `## 0. 一句话结论` — docs/EVALUATION-2026-10-07.md:8
 
 ### `docs/EVALUATION-2026-10-09-FINAL.md`
@@ -196,6 +240,14 @@
 - `## 三、接口统一使用 MCP 协议` — docs/MODEL-SETUP.md:75
 - `# 模型 API 配置指南 + MCP 统一接口` — docs/MODEL-SETUP.md:1
 
+### `docs/OPEN-SOURCE-REPORT-2026-10-31.md`
+
+- `## 2. 模块代码与测试健康度` — docs/OPEN-SOURCE-REPORT-2026-10-31.md:44
+- `## 4. 许可证与第三方合规` — docs/OPEN-SOURCE-REPORT-2026-10-31.md:111
+- `# PPXANS-Harness 开源发布报告（最终轮）` — docs/OPEN-SOURCE-REPORT-2026-10-31.md:1
+- `## 1. 核查方法与命令` — docs/OPEN-SOURCE-REPORT-2026-10-31.md:26
+- `## 0. 结论摘要` — docs/OPEN-SOURCE-REPORT-2026-10-31.md:9
+
 ### `docs/OPTIMIZATION-2026-10-07-ROUND2.md`
 
 - `## 5. 复测：七道闸门` — docs/OPTIMIZATION-2026-10-07-ROUND2.md:156
@@ -206,17 +258,25 @@
 
 ### `docs/OPTIMIZATION-2026-10-07-SUPER-AGENT.md`
 
+- `## 4. 并发调度机制 (重点二)` — docs/OPTIMIZATION-2026-10-07-SUPER-AGENT.md:129
 - `## 3. 技能内置方式 (重点一)` — docs/OPTIMIZATION-2026-10-07-SUPER-AGENT.md:71
 - `## 1. 现状体检 (改造前)` — docs/OPTIMIZATION-2026-10-07-SUPER-AGENT.md:26
-- `## 4. 并发调度机制 (重点二)` — docs/OPTIMIZATION-2026-10-07-SUPER-AGENT.md:129
 - `## 6. 能力边界与人类监督` — docs/OPTIMIZATION-2026-10-07-SUPER-AGENT.md:266
-- `## 8. 诚实清单: 没做的与做不到的` — docs/OPTIMIZATION-2026-10-07-SUPER-AGENT.md:314
+- `## 7. 验证证据` — docs/OPTIMIZATION-2026-10-07-SUPER-AGENT.md:284
+
+### `docs/OPTIMIZATION-2026-10-30.md`
+
+- `## 2. 架构快照（读出来的骨架）` — docs/OPTIMIZATION-2026-10-30.md:27
+- `# 2) 本轮四项优化的定向回归` — docs/OPTIMIZATION-2026-10-30.md:199
+- `## 4. 发现（按影响排序）` — docs/OPTIMIZATION-2026-10-30.md:99
+- `## 11. 同日第四轮：并发到底卡在哪（测量 + 逐项证否，本轮几乎没改运行时）` — docs/OPTIMIZATION-2026-10-30.md:361
+- `## 3. 量化基线` — docs/OPTIMIZATION-2026-10-30.md:69
 
 ### `docs/PACKAGING.md`
 
-- `## 运行时解析约定 (2026-10-01 重构)` — docs/PACKAGING.md:36
-- `# PC 端打包指南 (Windows)` — docs/PACKAGING.md:1
-- `## 安装包行为 (Setup-win64.cmd)` — docs/PACKAGING.md:27
+- `# PC 端打包与开源发布指南 (Windows)` — docs/PACKAGING.md:1
+- `## 开源发布标准 (GitHub Releases)` — docs/PACKAGING.md:8
+- `## 安装包行为 (Setup-win64.cmd)` — docs/PACKAGING.md:87
 
 ### `docs/ppxans-audit-brief-2026-10-03.md`
 
@@ -228,11 +288,11 @@
 
 ### `docs/PROJECT-OVERVIEW.md`
 
-- `## 3. 核心模块与业务功能` — docs/PROJECT-OVERVIEW.md:202
+- `## 2. 整体架构与目录划分` — docs/PROJECT-OVERVIEW.md:80
+- `## 4. 关键实现逻辑` — docs/PROJECT-OVERVIEW.md:405
+- `## 3. 核心模块与业务功能` — docs/PROJECT-OVERVIEW.md:206
 - `# PPXANS-Harness 项目说明文档` — docs/PROJECT-OVERVIEW.md:1
-- `## 1. 项目概述` — docs/PROJECT-OVERVIEW.md:23
-- `## 2. 整体架构与目录划分` — docs/PROJECT-OVERVIEW.md:76
-- `## 4. 关键实现逻辑` — docs/PROJECT-OVERVIEW.md:401
+- `## 1. 项目概述` — docs/PROJECT-OVERVIEW.md:27
 
 ### `docs/QUICKSTART-EN.md`
 
@@ -244,17 +304,17 @@
 
 ### `docs/QUICKSTART.md`
 
-- `## 3. 配置模型` — docs/QUICKSTART.md:47
+- `## 2. 安装` — docs/QUICKSTART.md:14
+- `## 4. 三种使用方式` — docs/QUICKSTART.md:63
+- `## 3. 配置模型` — docs/QUICKSTART.md:48
 - `## 1. 环境要求` — docs/QUICKSTART.md:5
-- `## 2. 安装` — docs/QUICKSTART.md:13
-- `## 4. 三种使用方式` — docs/QUICKSTART.md:62
-- `## 5. 通道（消息接入 + 主动提醒投递）` — docs/QUICKSTART.md:98
+- `## 5. 通道（消息接入 + 主动提醒投递）` — docs/QUICKSTART.md:99
 
 ### `docs/RC1-SPEC.md`
 
 - `## 附录 A：术语表` — docs/RC1-SPEC.md:279
-- `## 1. 静态结构：八大系统` — docs/RC1-SPEC.md:21
 - `## 4. 横切流程裁决` — docs/RC1-SPEC.md:192
+- `## 1. 静态结构：八大系统` — docs/RC1-SPEC.md:21
 - `## 0. 设计哲学` — docs/RC1-SPEC.md:9
 - `# 系统 / Agent 有机体操作系统 — RC1 规范手册` — docs/RC1-SPEC.md:1
 
@@ -266,9 +326,22 @@
 - `## 七、研究前沿 → 落地映射 (2026-10-09 论文扫描, 供 v3.3/v3.4 取材)` — docs/ROADMAP-LIGHTKERNEL-2026-10-08.md:92
 - `## 八、评测体系 v2 (2026-10-09, GPA/AgentEval/T-SAIAS 对照落地)` — docs/ROADMAP-LIGHTKERNEL-2026-10-08.md:112
 
+### `docs/SIGNING.md`
+
+- `# Windows 代码签名指南` — docs/SIGNING.md:1
+- `## 2. 仓库里已经准备好的部分` — docs/SIGNING.md:46
+- `## 11. 常见问题` — docs/SIGNING.md:338
+- `# 3) 用测试证书打包` — docs/SIGNING.md:255
+- `## 1. 为什么不能“随便签一下”` — docs/SIGNING.md:26
+
 ### `docs/STRENGTH-FRAMEWORK-MAPPING.md`
 
 - `# Agent 变强框架对账表（2026-10-09）` — docs/STRENGTH-FRAMEWORK-MAPPING.md:1
+
+### `docs/TheOne-借鉴优化方案-2026-10-11.md`
+
+- `# 皮皮虾 × TheOne 借鉴优化方案 (2026-10-11)` — docs/TheOne-借鉴优化方案-2026-10-11.md:1
+- `## 二、本次已落地 (v3.4)` — docs/TheOne-借鉴优化方案-2026-10-11.md:20
 
 ### `docs/USER-TEST-REPORT.md`
 
@@ -278,15 +351,25 @@
 ### `docs/web-launch.md`
 
 - `# 皮皮虾 Web 启动与界面方案` — docs/web-launch.md:1
-- `## 四、与旧版 Next.js 界面的关系` — docs/web-launch.md:197
+- `## 四、与旧版 Next.js 界面的关系` — docs/web-launch.md:191
 
 ### `docs/WIKI.md`
 
-- `## src` — docs/WIKI.md:590
-- `## config` — docs/WIKI.md:53
-- `## scripts` — docs/WIKI.md:209
-- `## skills` — docs/WIKI.md:418
-- `## docs` — docs/WIKI.md:55
+- `## src` — docs/WIKI.md:2117
+- `## scripts` — docs/WIKI.md:524
+- `## skills` — docs/WIKI.md:960
+- `## config` — docs/WIKI.md:104
+- `## docs` — docs/WIKI.md:106
+
+## docs/bench
+
+### `docs/bench/nightly-2026-10-24.md`
+
+- `# 皮皮虾 Nightly 基准报告 — 2026-10-24` — docs/bench/nightly-2026-10-24.md:1
+
+### `docs/bench/nightly-2026-10-26.md`
+
+- `# 皮皮虾 Nightly 基准报告 — 2026-10-26` — docs/bench/nightly-2026-10-26.md:1
 
 ## docs/launch
 
@@ -297,6 +380,16 @@
 - `## 1) Hacker News — Show HN（英文）` — docs/launch/launch-posts.md:8
 - `## 2) V2EX — 分享创造（中文）` — docs/launch/launch-posts.md:60
 - `## 4) X / Twitter（英文，短）` — docs/launch/launch-posts.md:115
+
+## electron
+
+### `electron/main.js`
+
+- `function probe(port, timeout = 1200, secret = DESKTOP_SECRET) {` — electron/main.js:180
+- `function startServer(root, port) {` — electron/main.js:247
+- `async function boot() {` — electron/main.js:544
+- `function loadState() {` — electron/main.js:303
+- `function saveState() {` — electron/main.js:311
 
 ## experts/ai-coding-coach
 
@@ -382,21 +475,51 @@
 
 ### `public/app.js`
 
-- `function get(path) { return req(path); }` — public/app.js:140
-- `function stream() {` — public/app.js:349
-- `function req(path, opts) {` — public/app.js:124
-- `function send() {` — public/app.js:512
-- `function headers(json) {` — public/app.js:80
+- `function get(path) { return req(path, { timeout: 30000 }); }` — public/app.js:181
+- `function stream() {` — public/app.js:620
+- `function req(path, opts) {` — public/app.js:157
+- `function esc(s) {` — public/app.js:59
+- `function headers(json) {` — public/app.js:108
+
+### `public/bot.js`
+
+- `function req(path, opts) {` — public/bot.js:82
+- `function esc(s) {` — public/bot.js:35
+- `function headers(json) {` — public/bot.js:69
+- `function base() {` — public/bot.js:64
+- `function toast(msg, isErr) {` — public/bot.js:45
+
+### `public/stats.js`
+
+- `function parseDay(s) { var p = String(s).split("-"); return new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2])); }` — public/stats.js:87
+- `function shortDay(s) { var d = parseDay(s); return (d.getMonth() + 1) + "月" + d.getDate() + "日"; }` — public/stats.js:88
+- `function req(path) {` — public/stats.js:34
+- `function esc(s) {` — public/stats.js:20
+- `function load() {` — public/stats.js:376
+
+### `public/theme.js`
+
+- `var p = null;` — public/theme.js:8
+- `var old = null;` — public/theme.js:11
+- `var white = p === "system" ? !(window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches) : p === "light";` — public/theme.js:15
+
+### `public/ui.js`
+
+- `function node(tag, cls, text) {` — public/ui.js:22
+- `function build() {` — public/ui.js:29
+- `function open(kind, message, opts) {` — public/ui.js:101
+- `function finish(value) {` — public/ui.js:85
+- `function cleanup() {` — public/ui.js:145
 
 ## references
 
 ### `references/THIRD-PARTY-SOURCES.md`
 
-- `## 3. 已吸收的自研项目` — references/THIRD-PARTY-SOURCES.md:49
-- `## 4. 未吸收的重复副本` — references/THIRD-PARTY-SOURCES.md:81
+- `## 4. 未吸收的重复副本` — references/THIRD-PARTY-SOURCES.md:69
+- `## 3. 已吸收的自研项目` — references/THIRD-PARTY-SOURCES.md:37
 - `## 1. openai/codex（未被吸收）` — references/THIRD-PARTY-SOURCES.md:9
-- `## 2. deepseek-ai/deepseek-harness（以可选底座接入，不复制源码）` — references/THIRD-PARTY-SOURCES.md:23
-- `## 5. P0 (2026-09-15) 借鉴登记 — Aegis / HookBus / dsh / ACE 设计思想` — references/THIRD-PARTY-SOURCES.md:58
+- `## 2. deepseek-ai/deepseek-harness（未接入，仅吸收设计）` — references/THIRD-PARTY-SOURCES.md:22
+- `## 5. P0 (2026-09-15) 借鉴登记 — Aegis / HookBus / dsh / ACE 设计思想` — references/THIRD-PARTY-SOURCES.md:46
 
 ## scripts
 
@@ -406,7 +529,7 @@
 - `function assert(cond, msg) { if (!cond) throw new Error(msg); }` — scripts/acceptance.js:43
 - `async function functionalSuite() {` — scripts/acceptance.js:46
 - `async function securitySuite() {` — scripts/acceptance.js:157
-- `async function performanceSuite() {` — scripts/acceptance.js:215
+- `async function performanceSuite() {` — scripts/acceptance.js:214
 
 ### `scripts/arch-guard.js`
 
@@ -420,17 +543,17 @@
 
 - `const a = process.hrtime.bigint();` — scripts/audit-bench.js:29
 - `const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ppx-audit-bench-'));` — scripts/audit-bench.js:8
-- `const size = fs.statSync(log.file).size;` — scripts/audit-bench.js:18
 - `const ms = Number(t1 - t0) / 1e6;` — scripts/audit-bench.js:17
+- `const size = fs.statSync(log.file).size;` — scripts/audit-bench.js:18
 - `const t0 = process.hrtime.bigint();` — scripts/audit-bench.js:12
 
 ### `scripts/audit-verify.js`
 
 - `const args = process.argv.slice(2);` — scripts/audit-verify.js:9
-- `let v = log.verify();` — scripts/audit-verify.js:18
+- `let v = log.verify();` — scripts/audit-verify.js:20
 - `const dataDir = process.env.PPX_DATA_DIR || path.join(process.cwd(), "data");` — scripts/audit-verify.js:14
-- `const q = quarantineBroken(dataDir);` — scripts/audit-verify.js:23
-- `const tailN = tailIdx >= 0 ? Number(args[tailIdx + 1]) || 10 : 0;` — scripts/audit-verify.js:12
+- `const q = quarantineBroken(dataDir, { hmacKey });` — scripts/audit-verify.js:25
+- `const hmacKey = loadOrCreateHmacKey(process.cwd());` — scripts/audit-verify.js:16
 
 ### `scripts/bench-store.js`
 
@@ -442,11 +565,11 @@
 
 ### `scripts/bench.js`
 
-- `function stubLLM() {` — scripts/bench.js:16
-- `const sessions = agent.sessionStore.list();` — scripts/bench.js:58
-- `const per = Math.ceil(ROUNDS / CONCURRENCY);` — scripts/bench.js:35
-- `const ms = Date.now() - t0;` — scripts/bench.js:57
-- `const reply = await agent.chat(`并发#${i} 消息${r}`);` — scripts/bench.js:40
+- `function stubLLM() {` — scripts/bench.js:25
+- `const s = Date.now();` — scripts/bench.js:77
+- `const sessions = agent.sessionStore.list();` — scripts/bench.js:67
+- `const ms = Date.now() - t0;` — scripts/bench.js:66
+- `const per = Math.ceil(ROUNDS / CONCURRENCY);` — scripts/bench.js:44
 
 ### `scripts/benchmark.js`
 
@@ -454,7 +577,7 @@
 - `async function runCase(client, c) {` — scripts/benchmark.js:49
 - `function pickProvider(config) {` — scripts/benchmark.js:15
 - `const r = await runCase(client, c);` — scripts/benchmark.js:93
-- `const client = pickProvider(config);` — scripts/benchmark.js:83
+- `const p = provs.find((p) => {` — scripts/benchmark.js:17
 
 ### `scripts/cache-audit.js`
 
@@ -467,34 +590,66 @@
 ### `scripts/check-web.mjs`
 
 - `const js = fs.readFileSync(path.join(root, "public", "app.js"), "utf8");` — scripts/check-web.mjs:10
-- `const f = path.join(root, "public", u.replace(/^\//, ""));` — scripts/check-web.mjs:69
+- `const f = path.join(root, "public", u.replace(/^\//, ""));` — scripts/check-web.mjs:102
+- `const ok = (m) => console.log("  ✓ " + m);` — scripts/check-web.mjs:23
 - `const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");` — scripts/check-web.mjs:8
-- `const ok = (m) => console.log("  ✓ " + m);` — scripts/check-web.mjs:15
-- `const fail = (m) => { console.log("  ✗ " + m); bad++; };` — scripts/check-web.mjs:14
+- `const stats = fs.readFileSync(path.join(root, "public", "stats.js"), "utf8");` — scripts/check-web.mjs:16
+
+### `scripts/checksums.js`
+
+- `const f = path.join(abs, name);` — scripts/checksums.js:37
+- `const args = process.argv.slice(2);` — scripts/checksums.js:14
+- `const re = pattern ? new RegExp(pattern) : /^PPXANS-Harness-Setup-.*\.exe$/i;` — scripts/checksums.js:25
+- `const lines = files.map((f) => {` — scripts/checksums.js:50
+- `const target = path.resolve(out || path.join(baseDir, "SHA256SUMS.txt"));` — scripts/checksums.js:54
+
+### `scripts/claim-gate.js`
+
+- `const README = path.join(ROOT, "README.md");` — scripts/claim-gate.js:17
+- `const target = e.target ? path.join(ROOT, e.target) : testFile;` — scripts/claim-gate.js:35
+- `const entries = JSON.parse(fs.readFileSync(MANIFEST, "utf8"));` — scripts/claim-gate.js:19
+- `const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");` — scripts/claim-gate.js:15
+- `const readme = fs.readFileSync(README, "utf8");` — scripts/claim-gate.js:20
+
+### `scripts/coverage-gate.js`
+
+- `function parseMin(argv) {` — scripts/coverage-gate.js:17
+- `const n = Number(fromArg.split("=")[1]);` — scripts/coverage-gate.js:20
+- `const r = spawnSync(NODE, args, {` — scripts/coverage-gate.js:30
+- `const m = out.match(/all files\s*\|?\s*(\d+(?:\.\d+)?)/);` — scripts/coverage-gate.js:49
+- `const env = Number(process.env.PPX_MIN_COVERAGE);` — scripts/coverage-gate.js:23
 
 ### `scripts/ctx-profile.js`
 
 - `const a = new PPXAgent({ root, dataDir });` — scripts/ctx-profile.js:8
 - `const t = String(s || '');` — scripts/ctx-profile.js:12
-- `const tools = a.tools.toOpenAI();` — scripts/ctx-profile.js:25
+- `const tools = a.tools.toOpenAI();` — scripts/ctx-profile.js:35
 - `const root = process.cwd();` — scripts/ctx-profile.js:6
-- `const v = a.ctx.consume(key);` — scripts/ctx-profile.js:38
+- `const v = a.ctx.consume(key);` — scripts/ctx-profile.js:48
 
 ### `scripts/dedupe-facts.js`
 
 - `const key = store._normKey(f.content);` — scripts/dedupe-facts.js:26
 - `const args = process.argv.slice(2);` — scripts/dedupe-facts.js:12
 - `const A = store._bigramSet(a), B = store._bigramSet(b);` — scripts/dedupe-facts.js:78
+- `const store = new FactStore(dataDir);` — scripts/dedupe-facts.js:20
 - `let before = store.list();` — scripts/dedupe-facts.js:21
-- `const dataDir = path.resolve(positional[0] || path.join(process.cwd(), "data"));` — scripts/dedupe-facts.js:19
 
 ### `scripts/depcheck.js`
 
-- `function walk(dir, out = []) {` — scripts/depcheck.js:26
-- `function resolveTarget(fromFile, spec) {` — scripts/depcheck.js:82
-- `function stripComments(src) {` — scripts/depcheck.js:46
-- `const n = src.length;` — scripts/depcheck.js:49
-- `const c = src[i];` — scripts/depcheck.js:53
+- `function walk(dir, out = []) {` — scripts/depcheck.js:27
+- `function stripComments(src) {` — scripts/depcheck.js:47
+- `function resolveTarget(fromFile, spec) {` — scripts/depcheck.js:83
+- `const n = src.length;` — scripts/depcheck.js:50
+- `const code = stripComments(src);` — scripts/depcheck.js:103
+
+### `scripts/desktop-pack.js`
+
+- `const r = spawnSync(process.execPath, [cli, "--win", "--x64", ...process.argv.slice(2)], {` — scripts/desktop-pack.js:44
+- `const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");` — scripts/desktop-pack.js:22
+- `const sig = spawnSync(` — scripts/desktop-pack.js:70
+- `const scan = spawnSync(process.execPath, [path.join(ROOT, "scripts", "package-scan.js"), appDir], { stdio: "inherit" });` — scripts/desktop-pack.js:56
+- `const appDir = path.join(ROOT, "dist-desktop", "win-unpacked", "resources", "app");` — scripts/desktop-pack.js:54
 
 ### `scripts/e2e-response-smoke.js`
 
@@ -512,25 +667,29 @@
 - `async function localCapabilities() {` — scripts/eval.js:43
 - `function resolveE2EProvider() {` — scripts/eval.js:84
 
+### `scripts/evolution-loop.js`
+
+- `async function main() {` — scripts/evolution-loop.js:23
+- `const agent = new PPXAgent({ root: ROOT });` — scripts/evolution-loop.js:24
+- `const files = argv.filter((a) => !a.startsWith("--"));` — scripts/evolution-loop.js:21
+- `const summary = await loop.cycle({` — scripts/evolution-loop.js:36
+- `const loop = agent._evolutionLoop || new EvolutionLoop(agent, agent.config?.agent?.evolution_loop || {});` — scripts/evolution-loop.js:25
+
 ### `scripts/expert-drill.mjs`
 
 - `const r = await main.tools.call("spawn_agent", {` — scripts/expert-drill.mjs:15
-- `const main = new PPXAgent({ root: ROOT, dataDir: path.join(tmp, "m"), globalDataDir: path.join(tmp, "g") });` — scripts/expert-drill.mjs:12
 - `const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ppx-expert-e2e-"));` — scripts/expert-drill.mjs:11
+- `const main = new PPXAgent({ root: ROOT, dataDir: path.join(tmp, "m"), globalDataDir: path.join(tmp, "g") });` — scripts/expert-drill.mjs:12
 - `const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");` — scripts/expert-drill.mjs:10
 - `const t0 = Date.now();` — scripts/expert-drill.mjs:14
 
-### `scripts/final-cleanup.py`
-
-- `def rm_path(rel, kind):` — scripts/final-cleanup.py:12
-
 ### `scripts/legion-e2e.js`
 
-- `const main = new PPXAgent({` — scripts/legion-e2e.js:14
-- `const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ppx-legion-e2e-"));` — scripts/legion-e2e.js:11
-- `const entries = board === "(记忆板暂无匹配内容)" ? [] : board.split("\n");` — scripts/legion-e2e.js:45
-- `const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");` — scripts/legion-e2e.js:10
-- `const board = await main.tools.call("board_query", { topic: "侦察兵" }, { agent: main });` — scripts/legion-e2e.js:44
+- `const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ppx-legion-e2e-"));` — scripts/legion-e2e.js:13
+- `const main = new PPXAgent({` — scripts/legion-e2e.js:16
+- `const entries = board === "(记忆板暂无匹配内容)" ? [] : board.split("\n");` — scripts/legion-e2e.js:47
+- `const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");` — scripts/legion-e2e.js:12
+- `const t0 = Date.now();` — scripts/legion-e2e.js:29
 
 ### `scripts/list-tools.mjs`
 
@@ -540,6 +699,14 @@
 - `const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");` — scripts/list-tools.mjs:6
 - `const dangerous = sorted.filter((n) => /^(delete|remove|clear|wipe|drop|purge|truncate|overwrite)/i.test(n));` — scripts/list-tools.mjs:24
 
+### `scripts/make-icon.mjs`
+
+- `function ico(entries) {` — scripts/make-icon.mjs:53
+- `function bmpEntry(image, size) {` — scripts/make-icon.mjs:20
+- `const src = nativeImage.createFromPath(SRC);` — scripts/make-icon.mjs:79
+- `const i = (y * size + x) * 4;` — scripts/make-icon.mjs:27
+- `const c = (sx + sy * size) * 4;` — scripts/make-icon.mjs:24
+
 ### `scripts/mcp-smoke.js`
 
 - `async function main() {` — scripts/mcp-smoke.js:33
@@ -548,37 +715,93 @@
 - `const tools = await client.listTools();` — scripts/mcp-smoke.js:40
 - `const client = new McpClient(srv);` — scripts/mcp-smoke.js:37
 
+### `scripts/mecha_ai_pptx.js`
+
+- `function decor(slide) {` — scripts/mecha_ai_pptx.js:19
+- `const isComment = line.startsWith('//');` — scripts/mecha_ai_pptx.js:117
+- `const isComment = line.startsWith('//');` — scripts/mecha_ai_pptx.js:154
+- `const isComment = line.startsWith('//');` — scripts/mecha_ai_pptx.js:193
+- `const isComment = line.startsWith('//');` — scripts/mecha_ai_pptx.js:230
+
 ### `scripts/memory-benchmark.js`
 
 - `async function main() {` — scripts/memory-benchmark.js:57
 - `const agent = new PPXAgent({ root: ROOT, dataDir });` — scripts/memory-benchmark.js:59
 - `const t = Date.now();` — scripts/memory-benchmark.js:86
 - `const t = Date.now();` — scripts/memory-benchmark.js:96
-- `const p = new LLMClient({ id: "lmstudio", base_url: "http://127.0.0.1:1234/v1", api_key: "lm-studio", model: CHAT_MODEL,` — scripts/memory-benchmark.js:68
+- `const p = new LLMClient({ id: "lmstudio", base_url: process.env.PPX_LOCAL_BASE_URL || "http://127.0.0.1:1234/v1", api_ke` — scripts/memory-benchmark.js:68
+
+### `scripts/memory-recall.js`
+
+- `function pickQueries() {` — scripts/memory-recall.js:128
+- `const agent = new PPXAgent({ root: dir, configFile: null, dataDir: path.join(dir, ".ppx"), globalDataDir: path.join(dir,` — scripts/memory-recall.js:142
+- `const n = gRows.length;` — scripts/memory-recall.js:167
+- `const n = rows.length;` — scripts/memory-recall.js:180
+- `const f = store.add(text, { source: "conversation" });` — scripts/memory-recall.js:147
 
 ### `scripts/multimodal-smoke.js`
 
-- `const r = await client.chat([` — scripts/multimodal-smoke.js:52
-- `let client = null;` — scripts/multimodal-smoke.js:36
-- `const c = new LLMClient(cand);` — scripts/multimodal-smoke.js:39
-- `const ok = await c.health().catch(() => false);` — scripts/multimodal-smoke.js:40
+- `const r = await client.chat([` — scripts/multimodal-smoke.js:51
+- `let client = null;` — scripts/multimodal-smoke.js:35
+- `const ok = await c.health().catch(() => false);` — scripts/multimodal-smoke.js:39
+- `const c = new LLMClient(cand);` — scripts/multimodal-smoke.js:38
 - `const cfg = JSON.parse(fs.readFileSync(path.join(ROOT, "config", "ppx.json"), "utf8"));` — scripts/multimodal-smoke.js:18
+
+### `scripts/nightly-bench.js`
+
+- `const r = spawnSync(NODE, [b.file], { cwd: ROOT, encoding: "utf8", env: { ...process.env, NO_COLOR: "1" }, timeout: 10 *` — scripts/nightly-bench.js:49
+- `const ok = r.status === 0;` — scripts/nightly-bench.js:52
+- `const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");` — scripts/nightly-bench.js:20
+- `const metrics = r.status === 0 ? b.extract(out) : {};` — scripts/nightly-bench.js:51
+- `const t0 = Date.now();` — scripts/nightly-bench.js:48
+
+### `scripts/package-scan.js`
+
+- `function rel(p) { return path.relative(root, p).replace(/\\/g, "/"); }` — scripts/package-scan.js:33
+- `function walk(d, depth = 0) {` — scripts/package-scan.js:35
+- `const r = rel(fp);` — scripts/package-scan.js:41
+- `const root = path.resolve(dir);` — scripts/package-scan.js:24
+- `const dir = process.argv[2];` — scripts/package-scan.js:18
 
 ### `scripts/package.js`
 
-- `function run(cmd, cmdArgs, opts = {}) {` — scripts/package.js:44
-- `function makeZip(stage, outPath, withTopDir) {` — scripts/package.js:99
-- `function makeInstaller(payloadZip, outPath) {` — scripts/package.js:184
-- `function ensureNodeRuntime() {` — scripts/package.js:51
-- `function stageApp(zipPath) {` — scripts/package.js:71
+- `function run(cmd, cmdArgs, opts = {}) {` — scripts/package.js:52
+- `function powershell(script, extraEnv = {}) {` — scripts/package.js:62
+- `function extractZipEntry(zipPath, entryPattern, outPath) {` — scripts/package.js:70
+- `function makeZip(stage, outPath, withTopDir) {` — scripts/package.js:140
+- `function makeInstaller(payloadZip, outPath) {` — scripts/package.js:227
+
+### `scripts/perf-hotpath.mjs`
+
+- `function stats(samples) {` — scripts/perf-hotpath.mjs:55
+- `async function main() {` — scripts/perf-hotpath.mjs:423
+- `function emit(text) {` — scripts/perf-hotpath.mjs:521
+- `function opsStart() { opsReset(); COUNTER.on = true; }` — scripts/perf-hotpath.mjs:105
+- `function opsAdd(acc, one) {` — scripts/perf-hotpath.mjs:112
+
+### `scripts/probe-r12-turn-real.js`
+
+- `function check(name, ok, detail = "") {` — scripts/probe-r12-turn-real.js:27
+- `const agent = new PPXAgent({` — scripts/probe-r12-turn-real.js:20
+- `const stream = agent.chatStream("写一篇 3000 字的散文, 主题不限, 尽量长。", { sessionKey: SK });` — scripts/probe-r12-turn-real.js:82
+- `const before = eqEvents.length;` — scripts/probe-r12-turn-real.js:40
+- `const before = eqEvents.length;` — scripts/probe-r12-turn-real.js:53
+
+### `scripts/probe-r14-mcp-real.js`
+
+- `function check(name, ok, detail = "") {` — scripts/probe-r14-mcp-real.js:22
+- `const agent = new PPXAgent({` — scripts/probe-r14-mcp-real.js:15
+- `const count = await agent.connectMcp([{ command: process.execPath, args: [FIXTURE] }]);` — scripts/probe-r14-mcp-real.js:30
+- `const reply = await agent.chat("请用名字带 add 的工具计算 21 加 21, 只告诉我结果数字。", { sessionKey: "r14-real" });` — scripts/probe-r14-mcp-real.js:45
+- `const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ppx-r14-real-"));` — scripts/probe-r14-mcp-real.js:13
 
 ### `scripts/readme-sync-check.js`
 
-- `function measureTools() {` — scripts/readme-sync-check.js:60
-- `function measureSkills() {` — scripts/readme-sync-check.js:81
-- `async function measureMcp() {` — scripts/readme-sync-check.js:106
-- `async function measureContext() {` — scripts/readme-sync-check.js:95
-- `function measureTests() {` — scripts/readme-sync-check.js:124
+- `function measureTools() {` — scripts/readme-sync-check.js:74
+- `function measureSkills() {` — scripts/readme-sync-check.js:95
+- `async function measureMcp() {` — scripts/readme-sync-check.js:127
+- `async function measureContext() {` — scripts/readme-sync-check.js:112
+- `function measureTests() {` — scripts/readme-sync-check.js:158
 
 ### `scripts/release.js`
 
@@ -588,13 +811,29 @@
 - `const DIST = path.join(ROOT, "dist");` — scripts/release.js:12
 - `const tgz = fs.readdirSync(DIST).filter((f) => f.endsWith(".tgz"));` — scripts/release.js:52
 
+### `scripts/selfcode.js`
+
+- `function arg(name, def = null) {` — scripts/selfcode.js:24
+- `function readPatch(p) {` — scripts/selfcode.js:31
+- `function testsFrom(v) {` — scripts/selfcode.js:38
+- `const r = await eng.run({ patch: readPatch(process.argv[3]), tests: testsFrom(arg("tests")), mode: "propose" });` — scripts/selfcode.js:55
+- `const r = await eng.run({` — scripts/selfcode.js:59
+
 ### `scripts/selfheal-bench.js`
 
-- `function put(root, rel, content) { const f = path.join(root, rel); fs.mkdirSync(path.dirname(f), { recursive: true }); f` — scripts/selfheal-bench.js:19
 - `function touchOld(f, ageMs) { try { const t = new Date(Date.now() - ageMs); fs.utimesSync(f, t, t); } catch {} }` — scripts/selfheal-bench.js:20
+- `function put(root, rel, content) { const f = path.join(root, rel); fs.mkdirSync(path.dirname(f), { recursive: true }); f` — scripts/selfheal-bench.js:19
 - `function mk(root, rel) { const d = path.join(root, rel); fs.mkdirSync(d, { recursive: true }); return d; }` — scripts/selfheal-bench.js:18
 - `function score(name, ok, detail = "") {` — scripts/selfheal-bench.js:12
 - `function put(root, rel, content) { const f = path.join(root, rel); fs.mkdirSync(path.dirname(f), { recursive: true }); f` — scripts/selfheal-bench.js:19
+
+### `scripts/selfiterate.js`
+
+- `async function main() {` — scripts/selfiterate.js:24
+- `const agent = new PPXAgent({ root: ROOT });` — scripts/selfiterate.js:44
+- `const r = await runTestFile(f, { cwd: ROOT, timeoutMs: 120000 });` — scripts/selfiterate.js:31
+- `const files = argv.filter((a) => !a.startsWith("--"));` — scripts/selfiterate.js:22
+- `const all = fs.readdirSync(testDir).filter((f) => f.endsWith(".test.js")).map((f) => path.join(testDir, f));` — scripts/selfiterate.js:28
 
 ### `scripts/silent-catch-guard.mjs`
 
@@ -614,18 +853,25 @@
 
 ### `scripts/skill-lint.js`
 
-- `const bad = strict ? pass + warn : pass + warn + fail;` — scripts/skill-lint.js:27
 - `const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");` — scripts/skill-lint.js:11
 - `const strict = process.argv.includes("--strict");` — scripts/skill-lint.js:12
 - `const flag = !r.ok ? "✗" : r.warnings.length ? "△" : "✓";` — scripts/skill-lint.js:21
 
 ### `scripts/stats.js`
 
-- `const src = Object.entries(s.memory.l1.by_source || {}).map(([k, v]) => `${k}:${v}`).join(" ");` — scripts/stats.js:18
 - `const agent = new PPXAgent({ root: ROOT });` — scripts/stats.js:11
 - `const s = agent.stats();` — scripts/stats.js:12
+- `const src = Object.entries(s.memory.l1.by_source || {}).map(([k, v]) => `${k}:${v}`).join(" ");` — scripts/stats.js:18
 - `const json = process.argv.includes("--json");` — scripts/stats.js:10
 - `const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");` — scripts/stats.js:9
+
+### `scripts/taskbench-offline.js`
+
+- `function scriptedLLM(plan) {` — scripts/taskbench-offline.js:56
+- `function makeOfflineAgent(taskId) {` — scripts/taskbench-offline.js:86
+- `const agent = new PPXAgent({` — scripts/taskbench-offline.js:88
+- `const llm = scriptedLLM(OFFLINE_PLANS[taskId]);` — scripts/taskbench-offline.js:94
+- `const dir = path.join(ROOT, "data", "bench");` — scripts/taskbench-offline.js:162
 
 ### `scripts/taskbench.js`
 
@@ -639,8 +885,8 @@
 
 - `async function runTool(name, args) {` — scripts/toolcall-smoke.js:23
 - `const r = await c.apiChat(messages, { tools });` — scripts/toolcall-smoke.js:41
+- `const fs = await import("node:fs");` — scripts/toolcall-smoke.js:27
 - `const args = JSON.parse(call.function.arguments || "{}");` — scripts/toolcall-smoke.js:50
-- `const result = await runTool(call.function.name, args);` — scripts/toolcall-smoke.js:51
 - `const c = new LLMClient(config);` — scripts/toolcall-smoke.js:35
 
 ### `scripts/verify-p01-cost.mjs`
@@ -651,10 +897,26 @@
 - `const ok =` — scripts/verify-p01-cost.mjs:27
 - `for (let i = 0; i < 10; i++) await a.llm.apiChat([{ role: "user", content: "x" }]);` — scripts/verify-p01-cost.mjs:23
 
+### `scripts/verify-signature.js`
+
+- `const text = line.trim();` — scripts/verify-signature.js:129
+- `const f = path.join(abs, name);` — scripts/verify-signature.js:53
+- `let json = false;` — scripts/verify-signature.js:26
+- `const args = process.argv.slice(2);` — scripts/verify-signature.js:22
+- `const re = pattern ? new RegExp(pattern) : /^PPXANS-Harness-Setup-.*\.exe$/i;` — scripts/verify-signature.js:43
+
+### `scripts/verify.js`
+
+- `const r = spawnSync(NODE, [check.file, ...check.args], {` — scripts/verify.js:42
+- `const ok = r.status === 0;` — scripts/verify.js:48
+- `const lines = out.split(/\r?\n/).slice(-25);` — scripts/verify.js:53
+- `const ROOT = path.resolve(here, "..");` — scripts/verify.js:13
+- `const verbose = process.argv.includes("--verbose");` — scripts/verify.js:38
+
 ### `scripts/wiki.js`
 
-- `const out = oi >= 0 ? path.resolve(process.argv[oi + 1]) : path.join(target, "docs", "WIKI.md");` — scripts/wiki.js:11
 - `const w = generateWiki(target);` — scripts/wiki.js:13
+- `const out = oi >= 0 ? path.resolve(process.argv[oi + 1]) : path.join(target, "docs", "WIKI.md");` — scripts/wiki.js:11
 - `const target = path.resolve(process.argv[2] && !process.argv[2].startsWith("--") ? process.argv[2] : ROOT);` — scripts/wiki.js:9
 - `const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");` — scripts/wiki.js:8
 - `const oi = process.argv.indexOf("--out");` — scripts/wiki.js:10
@@ -665,11 +927,19 @@
 
 - `function walk(dir, out = []) {` — scripts/analysis/dep-graph.js:9
 - `const p = path.join(dir, e.name);` — scripts/analysis/dep-graph.js:12
-- `const root = process.argv[2] || ".";` — scripts/analysis/dep-graph.js:6
-- `const out = new Set();` — scripts/analysis/dep-graph.js:34
 - `const code = fs.readFileSync(f, "utf8");` — scripts/analysis/dep-graph.js:33
+- `const out = new Set();` — scripts/analysis/dep-graph.js:34
+- `const root = process.argv[2] || ".";` — scripts/analysis/dep-graph.js:6
 
 ## scripts/lib
+
+### `scripts/lib/bench-history.js`
+
+- `export function appendHistory(dir, kind, entry) {` — scripts/lib/bench-history.js:25
+- `export function historyPath(dir, kind) {` — scripts/lib/bench-history.js:20
+- `const file = historyPath(dir, kind);` — scripts/lib/bench-history.js:28
+- `const lines = fs.readFileSync(file, "utf8").split("\n").filter(Boolean);` — scripts/lib/bench-history.js:31
+- `const tmp = file + ".tmp";` — scripts/lib/bench-history.js:34
 
 ### `scripts/lib/cache-audit-core.js`
 
@@ -681,11 +951,11 @@
 
 ### `scripts/lib/tmp-agent.js`
 
-- `export function cleanupTmp(rootOrAgent, { quiet = false } = {}) {` — scripts/lib/tmp-agent.js:114
-- `export function makeTmpRoot(prefix, config) {` — scripts/lib/tmp-agent.js:59
-- `export function makeAgentOnRoot(root, overrides = {}) {` — scripts/lib/tmp-agent.js:80
-- `export function makeTmpAgent(prefix, overrides = {}) {` — scripts/lib/tmp-agent.js:101
-- `function ensureInsideSafeRoot(root) {` — scripts/lib/tmp-agent.js:64
+- `export function cleanupTmp(rootOrAgent, { quiet = false } = {}) {` — scripts/lib/tmp-agent.js:113
+- `export function makeTmpRoot(prefix, config) {` — scripts/lib/tmp-agent.js:58
+- `export function makeAgentOnRoot(root, overrides = {}) {` — scripts/lib/tmp-agent.js:79
+- `export function makeTmpAgent(prefix, overrides = {}) {` — scripts/lib/tmp-agent.js:100
+- `function isInside(child, parent) {` — scripts/lib/tmp-agent.js:35
 
 ## skills
 
@@ -1034,10 +1304,10 @@
 
 ### `skills/code/claude-api/shared/anthropic-cli.md`
 
+- `# macOS` — skills/code/claude-api/shared/anthropic-cli.md:19
 - `# Anthropic CLI (`ant`)` — skills/code/claude-api/shared/anthropic-cli.md:1
 - `## When to use the CLI vs the SDK` — skills/code/claude-api/shared/anthropic-cli.md:5
 - `## Install and auth` — skills/code/claude-api/shared/anthropic-cli.md:16
-- `# macOS` — skills/code/claude-api/shared/anthropic-cli.md:19
 - `# Linux / WSL - pick the release from github.com/anthropics/anthropic-cli/releases` — skills/code/claude-api/shared/anthropic-cli.md:23
 
 ### `skills/code/claude-api/shared/claude-platform-on-aws.md`
@@ -1096,7 +1366,7 @@
 - `## Setup` — skills/code/mcp-builder/reference/evaluation.md:382
 - `## Output Format` — skills/code/mcp-builder/reference/evaluation.md:220
 - `## Overview` — skills/code/mcp-builder/reference/evaluation.md:3
-- `## Troubleshooting` — skills/code/mcp-builder/reference/evaluation.md:578
+- `## Answer Guidelines` — skills/code/mcp-builder/reference/evaluation.md:116
 
 ### `skills/code/mcp-builder/reference/mcp_best_practices.md`
 
@@ -1444,16 +1714,16 @@
 - `## Process` — skills/meta/skill-creator/agents/comparator.md:20
 - `## Role` — skills/meta/skill-creator/agents/comparator.md:5
 - `## Inputs` — skills/meta/skill-creator/agents/comparator.md:11
-- `## Output Format` — skills/meta/skill-creator/agents/comparator.md:91
 - `## Guidelines` — skills/meta/skill-creator/agents/comparator.md:194
+- `## Output Format` — skills/meta/skill-creator/agents/comparator.md:91
 
 ### `skills/meta/skill-creator/agents/grader.md`
 
 - `## Process` — skills/meta/skill-creator/agents/grader.md:19
 - `## Role` — skills/meta/skill-creator/agents/grader.md:5
 - `## Inputs` — skills/meta/skill-creator/agents/grader.md:11
-- `## Output Format` — skills/meta/skill-creator/agents/grader.md:106
 - `## Guidelines` — skills/meta/skill-creator/agents/grader.md:216
+- `## Output Format` — skills/meta/skill-creator/agents/grader.md:106
 
 ## skills/meta/skill-creator/eval-viewer
 
@@ -1542,407 +1812,63 @@
 
 ### `skills/office/docx/SKILL.md`
 
-- `## Dependencies` — skills/office/docx/SKILL.md:91
-- `## Comments` — skills/office/docx/SKILL.md:76
-- `# DOCX creation, editing, and analysis` — skills/office/docx/SKILL.md:9
-- `## Creating with docx-js — gotchas` — skills/office/docx/SKILL.md:21
-- `## Verify the output` — skills/office/docx/SKILL.md:37
+- `# Word 文档` — skills/office/docx/SKILL.md:10
 
 ## skills/office/docx-report
 
 ## skills/office/docx/scripts
 
-### `skills/office/docx/scripts/accept_changes.py`
+### `skills/office/docx/scripts/docx_tool.py`
 
-- `def accept_changes(` — skills/office/docx/scripts/accept_changes.py:36
-- `def _setup_libreoffice_macro() -> bool:` — skills/office/docx/scripts/accept_changes.py:91
-
-### `skills/office/docx/scripts/comment.py`
-
-- `def main() -> None:` — skills/office/docx/scripts/comment.py:313
-- `def _append_xml(xml_path: Path, root_tag: str, content: str) -> None:` — skills/office/docx/scripts/comment.py:100
-- `def _generate_hex_id() -> str:` — skills/office/docx/scripts/comment.py:90
-- `def add_comment(` — skills/office/docx/scripts/comment.py:235
-- `def _encode_smart_quotes(text: str) -> str:` — skills/office/docx/scripts/comment.py:94
-
-### `skills/office/docx/scripts/merge_runs.py`
-
-- `def main() -> None:` — skills/office/docx/scripts/merge_runs.py:274
-- `def _rendered_text(elem) -> str:` — skills/office/docx/scripts/merge_runs.py:226
-- `def merge_runs(input_dir: str) -> tuple[int, str]:` — skills/office/docx/scripts/merge_runs.py:40
-- `def _is_run(node, run_names: set[str]) -> bool:` — skills/office/docx/scripts/merge_runs.py:191
-- `def _has_preserve(elem) -> bool:` — skills/office/docx/scripts/merge_runs.py:222
-
-## skills/office/docx/scripts/office
-
-### `skills/office/docx/scripts/office/soffice.py`
-
-- `def run_soffice(args: Iterable[str], **kwargs) -> subprocess.CompletedProcess:` — skills/office/docx/scripts/office/soffice.py:38
-- `def get_soffice_env() -> dict:` — skills/office/docx/scripts/office/soffice.py:27
-- `def _needs_shim() -> bool:` — skills/office/docx/scripts/office/soffice.py:53
-- `def _ensure_shim() -> Path:` — skills/office/docx/scripts/office/soffice.py:62
-
-### `skills/office/docx/scripts/office/validate.py`
-
-- `def main():` — skills/office/docx/scripts/office/validate.py:48
-- `def _fail(message: str):` — skills/office/docx/scripts/office/validate.py:31
-- `def _has_tracked_changes(unpacked_dir: Path) -> bool:` — skills/office/docx/scripts/office/validate.py:36
-
-## skills/office/docx/scripts/office/helpers
-
-### `skills/office/docx/scripts/office/helpers/__init__.py`
-
-- `def safe_extract(zf: zipfile.ZipFile, dest: Path) -> None:` — skills/office/docx/scripts/office/helpers/__init__.py:74
-- `def opc_target(target: str, source_part: str, target_mode: str = "") -> str | None:` — skills/office/docx/scripts/office/helpers/__init__.py:24
-- `def part_text(data: bytes) -> str:` — skills/office/docx/scripts/office/helpers/__init__.py:63
-- `def rezip(src_dir: Path, out_path: Path) -> None:` — skills/office/docx/scripts/office/helpers/__init__.py:85
-- `def rels_source_part(rels_file: Path, unpacked_dir: Path) -> str:` — skills/office/docx/scripts/office/helpers/__init__.py:58
-
-### `skills/office/docx/scripts/office/helpers/pptx_chart.py`
-
-- `def find_chart_problems(files: Mapping[str, bytes]) -> list[str]:` — skills/office/docx/scripts/office/helpers/pptx_chart.py:164
-- `def _strip_ext_lst(text: str) -> str:` — skills/office/docx/scripts/office/helpers/pptx_chart.py:21
-- `def _check_stacked_label_positions(part: str, xml: str) -> list[str]:` — skills/office/docx/scripts/office/helpers/pptx_chart.py:36
-- `def _declared_axes(xml: str) -> dict[str, list[str]]:` — skills/office/docx/scripts/office/helpers/pptx_chart.py:82
-- `def _canonical_ids(axes: dict[str, list[str]], limit: int) -> list[str] | None:` — skills/office/docx/scripts/office/helpers/pptx_chart.py:89
-
-### `skills/office/docx/scripts/office/helpers/pptx_slide.py`
-
-- `A denylist over lxml's messages, so an unrecognised error class is a miss rather` — skills/office/docx/scripts/office/helpers/pptx_slide.py:3
-- `def fatal_slide_errors(errors: set[str]) -> list[str]:` — skills/office/docx/scripts/office/helpers/pptx_slide.py:53
-- `def is_schema_verdict(error: str) -> bool:` — skills/office/docx/scripts/office/helpers/pptx_slide.py:49
-
-### `skills/office/docx/scripts/office/helpers/pptx_theme.py`
-
-- `def _shares(files: Mapping[str, bytes]):` — skills/office/docx/scripts/office/helpers/pptx_theme.py:82
-- `def live_shared_master_themes(files: Mapping[str, bytes]) -> list[str]:` — skills/office/docx/scripts/office/helpers/pptx_theme.py:108
-- `def _sort_key(name: str) -> tuple[int, int]:` — skills/office/docx/scripts/office/helpers/pptx_theme.py:29
-- `def _rels_path(part: str) -> str:` — skills/office/docx/scripts/office/helpers/pptx_theme.py:35
-- `def _resolve(rels_path: str, target: str) -> str:` — skills/office/docx/scripts/office/helpers/pptx_theme.py:40
-
-## skills/office/docx/scripts/office/validators
-
-### `skills/office/docx/scripts/office/validators/base.py`
-
-- `class BaseSchemaValidator:` — skills/office/docx/scripts/office/validators/base.py:24
-- `def validate(self):` — skills/office/docx/scripts/office/validators/base.py:121
-- `def repair(self) -> int:` — skills/office/docx/scripts/office/validators/base.py:124
-- `def _validate_single_file_xsd(self, xml_file, base_path, schema_path=None):` — skills/office/docx/scripts/office/validators/base.py:778
-- `def validate_xml(self):` — skills/office/docx/scripts/office/validators/base.py:162
-
-### `skills/office/docx/scripts/office/validators/docx.py`
-
-- `class DOCXSchemaValidator(BaseSchemaValidator):` — skills/office/docx/scripts/office/validators/docx.py:19
-- `def validate(self):` — skills/office/docx/scripts/office/validators/docx.py:27
-- `def repair(self) -> int:` — skills/office/docx/scripts/office/validators/docx.py:404
-- `def _parse_id_value(self, val: str, base: int = 16) -> int:` — skills/office/docx/scripts/office/validators/docx.py:257
-- `def validate_whitespace_preservation(self):` — skills/office/docx/scripts/office/validators/docx.py:69
-
-### `skills/office/docx/scripts/office/validators/pptx.py`
-
-- `class PPTXSchemaValidator(BaseSchemaValidator):` — skills/office/docx/scripts/office/validators/pptx.py:13
-- `def validate(self):` — skills/office/docx/scripts/office/validators/pptx.py:28
-- `def _get_schema_path(self, xml_file):` — skills/office/docx/scripts/office/validators/pptx.py:204
-- `def _package_map(self) -> dict:` — skills/office/docx/scripts/office/validators/pptx.py:74
-- `def _preprocess_for_schema(self, xml_doc, relative_path):` — skills/office/docx/scripts/office/validators/pptx.py:209
-
-### `skills/office/docx/scripts/office/validators/redlining.py`
-
-- `class RedliningValidator:` — skills/office/docx/scripts/office/validators/redlining.py:25
-- `def group(elem):` — skills/office/docx/scripts/office/validators/redlining.py:128
-- `def validate(self):` — skills/office/docx/scripts/office/validators/redlining.py:38
-- `def repair(self) -> int:` — skills/office/docx/scripts/office/validators/redlining.py:35
-- `def _tracked_change_key(self, elem):` — skills/office/docx/scripts/office/validators/redlining.py:107
+- `def runs(text):` — skills/office/docx/scripts/docx_tool.py:142
+- `def main(argv=None):` — skills/office/docx/scripts/docx_tool.py:641
+- `def table(rows):` — skills/office/docx/scripts/docx_tool.py:184
+- `def para(text, style=None, num_id=None, ilvl=0, spacing=None):` — skills/office/docx/scripts/docx_tool.py:170
+- `def _lvl(ilvl, fmt, text, left, font=None):` — skills/office/docx/scripts/docx_tool.py:84
 
 ## skills/office/meeting-notes
 
 ## skills/office/pdf
 
-### `skills/office/pdf/forms.md`
-
-- `# Fillable fields` — skills/office/pdf/forms.md:6
-- `# Non-fillable fields` — skills/office/pdf/forms.md:78
-- `## Step 1: Try Structure Extraction First` — skills/office/pdf/forms.md:81
-- `## Approach A: Structure-Based Coordinates (Preferred)` — skills/office/pdf/forms.md:96
-- `## Approach B: Visual Estimation (Fallback)` — skills/office/pdf/forms.md:172
-
-### `skills/office/pdf/reference.md`
-
-- `# PDF Processing Advanced Reference` — skills/office/pdf/reference.md:1
-- `## pypdfium2 Library (Apache/BSD License)` — skills/office/pdf/reference.md:5
-- `# Load PDF` — skills/office/pdf/reference.md:15
-- `# Render page to image` — skills/office/pdf/reference.md:18
-- `# Convert to PIL Image` — skills/office/pdf/reference.md:25
-
 ### `skills/office/pdf/SKILL.md`
 
-- `# Split` — skills/office/pdf/SKILL.md:226
-- `# Save` — skills/office/pdf/SKILL.md:140
-- `# Merge` — skills/office/pdf/SKILL.md:223
-- `## Overview` — skills/office/pdf/SKILL.md:11
-- `# Extract text` — skills/office/pdf/SKILL.md:24
+- `# PDF 文件` — skills/office/pdf/SKILL.md:10
 
 ## skills/office/pdf/scripts
 
-### `skills/office/pdf/scripts/check_bounding_boxes.py`
+### `skills/office/pdf/scripts/pdf_tool.py`
 
-- `class RectAndField:` — skills/office/pdf/scripts/check_bounding_boxes.py:9
-- `def get_bounding_box_messages(fields_json_stream) -> list[str]:` — skills/office/pdf/scripts/check_bounding_boxes.py:15
-- `def rects_intersect(r1, r2):` — skills/office/pdf/scripts/check_bounding_boxes.py:20
-
-### `skills/office/pdf/scripts/convert_pdf_to_images.py`
-
-- `def convert(pdf_path, output_dir, max_dim=1000):` — skills/office/pdf/scripts/convert_pdf_to_images.py:9
-
-### `skills/office/pdf/scripts/create_validation_image.py`
-
-- `def create_validation_image(page_number, fields_json_path, input_path, output_path):` — skills/office/pdf/scripts/create_validation_image.py:9
-
-### `skills/office/pdf/scripts/extract_form_field_info.py`
-
-- `def get_field_info(reader: PdfReader):` — skills/office/pdf/scripts/extract_form_field_info.py:47
-- `def get_full_annotation_field_id(annotation):` — skills/office/pdf/scripts/extract_form_field_info.py:9
-- `def make_field_dict(field, field_id):` — skills/office/pdf/scripts/extract_form_field_info.py:19
-- `def sort_key(f):` — skills/office/pdf/scripts/extract_form_field_info.py:96
-- `def write_field_info(pdf_path: str, json_output_path: str):` — skills/office/pdf/scripts/extract_form_field_info.py:110
-
-### `skills/office/pdf/scripts/extract_form_structure.py`
-
-- `def main():` — skills/office/pdf/scripts/extract_form_structure.py:91
-- `def extract_form_structure(pdf_path):` — skills/office/pdf/scripts/extract_form_structure.py:20
-
-### `skills/office/pdf/scripts/fill_fillable_fields.py`
-
-- `def fill_pdf_fields(input_pdf_path: str, fields_json_path: str, output_pdf_path: str):` — skills/office/pdf/scripts/fill_fillable_fields.py:11
-- `def validation_error_for_field_value(field_info, field_value):` — skills/office/pdf/scripts/fill_fillable_fields.py:55
-- `def monkeypatch_pydpf_method():` — skills/office/pdf/scripts/fill_fillable_fields.py:74
-- `def patched_get_inherited(self, key: str, default = None):` — skills/office/pdf/scripts/fill_fillable_fields.py:80
-
-### `skills/office/pdf/scripts/fill_pdf_form_with_annotations.py`
-
-- `def transform_from_image_coords(bbox, image_width, image_height, pdf_width, pdf_height):` — skills/office/pdf/scripts/fill_pdf_form_with_annotations.py:10
-- `def transform_from_pdf_coords(bbox, pdf_height):` — skills/office/pdf/scripts/fill_pdf_form_with_annotations.py:23
-- `def fill_pdf_form(input_pdf_path, fields_json_path, output_pdf_path):` — skills/office/pdf/scripts/fill_pdf_form_with_annotations.py:33
+- `def main(argv=None):` — skills/office/pdf/scripts/pdf_tool.py:259
+- `def read_bytes(path):` — skills/office/pdf/scripts/pdf_tool.py:33
+- `def cmd_validate(args):` — skills/office/pdf/scripts/pdf_tool.py:222
+- `def analyse(path):` — skills/office/pdf/scripts/pdf_tool.py:145
+- `def decode_string(raw):` — skills/office/pdf/scripts/pdf_tool.py:38
 
 ## skills/office/pptx
 
-### `skills/office/pptx/SKILL.md`
-
-- `## Scripts` — skills/office/pptx/SKILL.md:19
-- `## Dependencies` — skills/office/pptx/SKILL.md:238
-- `# PPTX creation, editing, and analysis` — skills/office/pptx/SKILL.md:9
-- `## Creating with pptxgenjs — gotchas` — skills/office/pptx/SKILL.md:31
-- `## Editing existing decks and templates` — skills/office/pptx/SKILL.md:54
-
 ## skills/office/pptx/scripts
 
-### `skills/office/pptx/scripts/add_slide.py`
+### `skills/office/pptx/scripts/pptx_tool.py`
 
-- `def main() -> None:` — skills/office/pptx/scripts/add_slide.py:329
-- `def _die(msg: str) -> NoReturn:` — skills/office/pptx/scripts/add_slide.py:71
-- `def add_slide(unpacked_dir: Path, source: str, after: str | None = None) -> str:` — skills/office/pptx/scripts/add_slide.py:308
-- `def _find_slide_relationship(pres_rels: str, slide_name: str) -> str | None:` — skills/office/pptx/scripts/add_slide.py:235
-- `def get_next_slide_number(slides_dir: Path) -> int:` — skills/office/pptx/scripts/add_slide.py:76
-
-### `skills/office/pptx/scripts/clean.py`
-
-- `class RefusedToClean(Exception):` — skills/office/pptx/scripts/clean.py:63
-- `def get_referenced_files(unpacked_dir: Path) -> set:` — skills/office/pptx/scripts/clean.py:179
-- `def _slide_rids(pres_rels_path: Path, unpacked_dir: Path) -> dict[str, str]:` — skills/office/pptx/scripts/clean.py:28
-- `def get_slides_in_sldidlst(unpacked_dir: Path) -> set[str]:` — skills/office/pptx/scripts/clean.py:44
-- `def remove_orphaned_slides(unpacked_dir: Path) -> list[str]:` — skills/office/pptx/scripts/clean.py:67
-
-### `skills/office/pptx/scripts/thumbnail.py`
-
-- `def main():` — skills/office/pptx/scripts/thumbnail.py:44
-- `def _is_hidden(zf: zipfile.ZipFile, part: str) -> bool:` — skills/office/pptx/scripts/thumbnail.py:99
-- `def get_slide_info(pptx_path: Path) -> list[dict]:` — skills/office/pptx/scripts/thumbnail.py:109
-- `def build_slide_list(` — skills/office/pptx/scripts/thumbnail.py:142
-- `def create_hidden_placeholder(size: tuple[int, int]) -> Image.Image:` — skills/office/pptx/scripts/thumbnail.py:179
-
-## skills/office/pptx/scripts/office
-
-### `skills/office/pptx/scripts/office/soffice.py`
-
-- `def run_soffice(args: Iterable[str], **kwargs) -> subprocess.CompletedProcess:` — skills/office/pptx/scripts/office/soffice.py:38
-- `def get_soffice_env() -> dict:` — skills/office/pptx/scripts/office/soffice.py:27
-- `def _needs_shim() -> bool:` — skills/office/pptx/scripts/office/soffice.py:53
-- `def _ensure_shim() -> Path:` — skills/office/pptx/scripts/office/soffice.py:62
-
-### `skills/office/pptx/scripts/office/validate.py`
-
-- `def main():` — skills/office/pptx/scripts/office/validate.py:48
-- `def _fail(message: str):` — skills/office/pptx/scripts/office/validate.py:31
-- `def _has_tracked_changes(unpacked_dir: Path) -> bool:` — skills/office/pptx/scripts/office/validate.py:36
-
-## skills/office/pptx/scripts/office/helpers
-
-### `skills/office/pptx/scripts/office/helpers/__init__.py`
-
-- `def safe_extract(zf: zipfile.ZipFile, dest: Path) -> None:` — skills/office/pptx/scripts/office/helpers/__init__.py:74
-- `def opc_target(target: str, source_part: str, target_mode: str = "") -> str | None:` — skills/office/pptx/scripts/office/helpers/__init__.py:24
-- `def part_text(data: bytes) -> str:` — skills/office/pptx/scripts/office/helpers/__init__.py:63
-- `def rezip(src_dir: Path, out_path: Path) -> None:` — skills/office/pptx/scripts/office/helpers/__init__.py:85
-- `def rels_source_part(rels_file: Path, unpacked_dir: Path) -> str:` — skills/office/pptx/scripts/office/helpers/__init__.py:58
-
-### `skills/office/pptx/scripts/office/helpers/pptx_chart.py`
-
-- `def find_chart_problems(files: Mapping[str, bytes]) -> list[str]:` — skills/office/pptx/scripts/office/helpers/pptx_chart.py:164
-- `def _strip_ext_lst(text: str) -> str:` — skills/office/pptx/scripts/office/helpers/pptx_chart.py:21
-- `def _check_stacked_label_positions(part: str, xml: str) -> list[str]:` — skills/office/pptx/scripts/office/helpers/pptx_chart.py:36
-- `def _declared_axes(xml: str) -> dict[str, list[str]]:` — skills/office/pptx/scripts/office/helpers/pptx_chart.py:82
-- `def _canonical_ids(axes: dict[str, list[str]], limit: int) -> list[str] | None:` — skills/office/pptx/scripts/office/helpers/pptx_chart.py:89
-
-### `skills/office/pptx/scripts/office/helpers/pptx_slide.py`
-
-- `A denylist over lxml's messages, so an unrecognised error class is a miss rather` — skills/office/pptx/scripts/office/helpers/pptx_slide.py:3
-- `def fatal_slide_errors(errors: set[str]) -> list[str]:` — skills/office/pptx/scripts/office/helpers/pptx_slide.py:53
-- `def is_schema_verdict(error: str) -> bool:` — skills/office/pptx/scripts/office/helpers/pptx_slide.py:49
-
-### `skills/office/pptx/scripts/office/helpers/pptx_theme.py`
-
-- `def _shares(files: Mapping[str, bytes]):` — skills/office/pptx/scripts/office/helpers/pptx_theme.py:82
-- `def live_shared_master_themes(files: Mapping[str, bytes]) -> list[str]:` — skills/office/pptx/scripts/office/helpers/pptx_theme.py:108
-- `def _sort_key(name: str) -> tuple[int, int]:` — skills/office/pptx/scripts/office/helpers/pptx_theme.py:29
-- `def _rels_path(part: str) -> str:` — skills/office/pptx/scripts/office/helpers/pptx_theme.py:35
-- `def _resolve(rels_path: str, target: str) -> str:` — skills/office/pptx/scripts/office/helpers/pptx_theme.py:40
-
-## skills/office/pptx/scripts/office/validators
-
-### `skills/office/pptx/scripts/office/validators/base.py`
-
-- `class BaseSchemaValidator:` — skills/office/pptx/scripts/office/validators/base.py:24
-- `def validate(self):` — skills/office/pptx/scripts/office/validators/base.py:121
-- `def repair(self) -> int:` — skills/office/pptx/scripts/office/validators/base.py:124
-- `def _validate_single_file_xsd(self, xml_file, base_path, schema_path=None):` — skills/office/pptx/scripts/office/validators/base.py:778
-- `def validate_xml(self):` — skills/office/pptx/scripts/office/validators/base.py:162
-
-### `skills/office/pptx/scripts/office/validators/docx.py`
-
-- `class DOCXSchemaValidator(BaseSchemaValidator):` — skills/office/pptx/scripts/office/validators/docx.py:19
-- `def validate(self):` — skills/office/pptx/scripts/office/validators/docx.py:27
-- `def repair(self) -> int:` — skills/office/pptx/scripts/office/validators/docx.py:404
-- `def _parse_id_value(self, val: str, base: int = 16) -> int:` — skills/office/pptx/scripts/office/validators/docx.py:257
-- `def validate_whitespace_preservation(self):` — skills/office/pptx/scripts/office/validators/docx.py:69
-
-### `skills/office/pptx/scripts/office/validators/pptx.py`
-
-- `class PPTXSchemaValidator(BaseSchemaValidator):` — skills/office/pptx/scripts/office/validators/pptx.py:13
-- `def validate(self):` — skills/office/pptx/scripts/office/validators/pptx.py:28
-- `def _get_schema_path(self, xml_file):` — skills/office/pptx/scripts/office/validators/pptx.py:204
-- `def _package_map(self) -> dict:` — skills/office/pptx/scripts/office/validators/pptx.py:74
-- `def _preprocess_for_schema(self, xml_doc, relative_path):` — skills/office/pptx/scripts/office/validators/pptx.py:209
-
-### `skills/office/pptx/scripts/office/validators/redlining.py`
-
-- `class RedliningValidator:` — skills/office/pptx/scripts/office/validators/redlining.py:25
-- `def group(elem):` — skills/office/pptx/scripts/office/validators/redlining.py:128
-- `def validate(self):` — skills/office/pptx/scripts/office/validators/redlining.py:38
-- `def repair(self) -> int:` — skills/office/pptx/scripts/office/validators/redlining.py:35
-- `def _tracked_change_key(self, elem):` — skills/office/pptx/scripts/office/validators/redlining.py:107
+- `def esc(text):` — skills/office/pptx/scripts/pptx_tool.py:158
+- `def main(argv=None):` — skills/office/pptx/scripts/pptx_tool.py:600
+- `def shape(shape_id, name, prst, x, y, cx, cy, color):` — skills/office/pptx/scripts/pptx_tool.py:197
+- `def textbox(shape_id, name, x, y, cx, cy, paragraphs, anchor="t", align="l"):` — skills/office/pptx/scripts/pptx_tool.py:162
+- `def text_para(text, size, color, bold=False, bullet=None, level=0, align="l", space_after=600):` — skills/office/pptx/scripts/pptx_tool.py:173
 
 ## skills/office/xlsx
-
-### `skills/office/xlsx/SKILL.md`
-
-- `## Dependencies` — skills/office/xlsx/SKILL.md:99
-- `# XLSX creation, editing, and analysis` — skills/office/xlsx/SKILL.md:9
-- `## Requirements for every output` — skills/office/xlsx/SKILL.md:22
-- `## Recalculate (mandatory whenever the file contains formulas)` — skills/office/xlsx/SKILL.md:32
-- `## Choosing formulas that survive verification` — skills/office/xlsx/SKILL.md:63
 
 ## skills/office/xlsx-workbook
 
 ## skills/office/xlsx/scripts
 
-### `skills/office/xlsx/scripts/recalc.py`
+### `skills/office/xlsx/scripts/xlsx_tool.py`
 
-- `def main():` — skills/office/xlsx/scripts/recalc.py:282
-- `def recalc(filename, timeout=30, force=False):` — skills/office/xlsx/scripts/recalc.py:124
-- `def _stamp(path):` — skills/office/xlsx/scripts/recalc.py:51
-- `def has_gtimeout():` — skills/office/xlsx/scripts/recalc.py:41
-- `def setup_libreoffice_macro(profile_dir: Path, timeout=30):` — skills/office/xlsx/scripts/recalc.py:56
-
-## skills/office/xlsx/scripts/office
-
-### `skills/office/xlsx/scripts/office/soffice.py`
-
-- `def run_soffice(args: Iterable[str], **kwargs) -> subprocess.CompletedProcess:` — skills/office/xlsx/scripts/office/soffice.py:38
-- `def get_soffice_env() -> dict:` — skills/office/xlsx/scripts/office/soffice.py:27
-- `def _needs_shim() -> bool:` — skills/office/xlsx/scripts/office/soffice.py:53
-- `def _ensure_shim() -> Path:` — skills/office/xlsx/scripts/office/soffice.py:62
-
-### `skills/office/xlsx/scripts/office/validate.py`
-
-- `def main():` — skills/office/xlsx/scripts/office/validate.py:48
-- `def _fail(message: str):` — skills/office/xlsx/scripts/office/validate.py:31
-- `def _has_tracked_changes(unpacked_dir: Path) -> bool:` — skills/office/xlsx/scripts/office/validate.py:36
-
-## skills/office/xlsx/scripts/office/helpers
-
-### `skills/office/xlsx/scripts/office/helpers/__init__.py`
-
-- `def safe_extract(zf: zipfile.ZipFile, dest: Path) -> None:` — skills/office/xlsx/scripts/office/helpers/__init__.py:74
-- `def opc_target(target: str, source_part: str, target_mode: str = "") -> str | None:` — skills/office/xlsx/scripts/office/helpers/__init__.py:24
-- `def part_text(data: bytes) -> str:` — skills/office/xlsx/scripts/office/helpers/__init__.py:63
-- `def rezip(src_dir: Path, out_path: Path) -> None:` — skills/office/xlsx/scripts/office/helpers/__init__.py:85
-- `def rels_source_part(rels_file: Path, unpacked_dir: Path) -> str:` — skills/office/xlsx/scripts/office/helpers/__init__.py:58
-
-### `skills/office/xlsx/scripts/office/helpers/pptx_chart.py`
-
-- `def find_chart_problems(files: Mapping[str, bytes]) -> list[str]:` — skills/office/xlsx/scripts/office/helpers/pptx_chart.py:164
-- `def _strip_ext_lst(text: str) -> str:` — skills/office/xlsx/scripts/office/helpers/pptx_chart.py:21
-- `def _check_stacked_label_positions(part: str, xml: str) -> list[str]:` — skills/office/xlsx/scripts/office/helpers/pptx_chart.py:36
-- `def _declared_axes(xml: str) -> dict[str, list[str]]:` — skills/office/xlsx/scripts/office/helpers/pptx_chart.py:82
-- `def _canonical_ids(axes: dict[str, list[str]], limit: int) -> list[str] | None:` — skills/office/xlsx/scripts/office/helpers/pptx_chart.py:89
-
-### `skills/office/xlsx/scripts/office/helpers/pptx_slide.py`
-
-- `A denylist over lxml's messages, so an unrecognised error class is a miss rather` — skills/office/xlsx/scripts/office/helpers/pptx_slide.py:3
-- `def fatal_slide_errors(errors: set[str]) -> list[str]:` — skills/office/xlsx/scripts/office/helpers/pptx_slide.py:53
-- `def is_schema_verdict(error: str) -> bool:` — skills/office/xlsx/scripts/office/helpers/pptx_slide.py:49
-
-### `skills/office/xlsx/scripts/office/helpers/pptx_theme.py`
-
-- `def _shares(files: Mapping[str, bytes]):` — skills/office/xlsx/scripts/office/helpers/pptx_theme.py:82
-- `def live_shared_master_themes(files: Mapping[str, bytes]) -> list[str]:` — skills/office/xlsx/scripts/office/helpers/pptx_theme.py:108
-- `def _sort_key(name: str) -> tuple[int, int]:` — skills/office/xlsx/scripts/office/helpers/pptx_theme.py:29
-- `def _rels_path(part: str) -> str:` — skills/office/xlsx/scripts/office/helpers/pptx_theme.py:35
-- `def _resolve(rels_path: str, target: str) -> str:` — skills/office/xlsx/scripts/office/helpers/pptx_theme.py:40
-
-## skills/office/xlsx/scripts/office/validators
-
-### `skills/office/xlsx/scripts/office/validators/base.py`
-
-- `class BaseSchemaValidator:` — skills/office/xlsx/scripts/office/validators/base.py:24
-- `def validate(self):` — skills/office/xlsx/scripts/office/validators/base.py:121
-- `def repair(self) -> int:` — skills/office/xlsx/scripts/office/validators/base.py:124
-- `def _validate_single_file_xsd(self, xml_file, base_path, schema_path=None):` — skills/office/xlsx/scripts/office/validators/base.py:778
-- `def validate_xml(self):` — skills/office/xlsx/scripts/office/validators/base.py:162
-
-### `skills/office/xlsx/scripts/office/validators/docx.py`
-
-- `class DOCXSchemaValidator(BaseSchemaValidator):` — skills/office/xlsx/scripts/office/validators/docx.py:19
-- `def validate(self):` — skills/office/xlsx/scripts/office/validators/docx.py:27
-- `def repair(self) -> int:` — skills/office/xlsx/scripts/office/validators/docx.py:404
-- `def _parse_id_value(self, val: str, base: int = 16) -> int:` — skills/office/xlsx/scripts/office/validators/docx.py:257
-- `def validate_whitespace_preservation(self):` — skills/office/xlsx/scripts/office/validators/docx.py:69
-
-### `skills/office/xlsx/scripts/office/validators/pptx.py`
-
-- `class PPTXSchemaValidator(BaseSchemaValidator):` — skills/office/xlsx/scripts/office/validators/pptx.py:13
-- `def validate(self):` — skills/office/xlsx/scripts/office/validators/pptx.py:28
-- `def _get_schema_path(self, xml_file):` — skills/office/xlsx/scripts/office/validators/pptx.py:204
-- `def _package_map(self) -> dict:` — skills/office/xlsx/scripts/office/validators/pptx.py:74
-- `def _preprocess_for_schema(self, xml_doc, relative_path):` — skills/office/xlsx/scripts/office/validators/pptx.py:209
-
-### `skills/office/xlsx/scripts/office/validators/redlining.py`
-
-- `class RedliningValidator:` — skills/office/xlsx/scripts/office/validators/redlining.py:25
-- `def group(elem):` — skills/office/xlsx/scripts/office/validators/redlining.py:128
-- `def validate(self):` — skills/office/xlsx/scripts/office/validators/redlining.py:38
-- `def repair(self) -> int:` — skills/office/xlsx/scripts/office/validators/redlining.py:35
-- `def _tracked_change_key(self, elem):` — skills/office/xlsx/scripts/office/validators/redlining.py:107
+- `def main(argv=None):` — skills/office/xlsx/scripts/xlsx_tool.py:521
+- `def cmd_validate(args):` — skills/office/xlsx/scripts/xlsx_tool.py:453
+- `def cmd_create(args):` — skills/office/xlsx/scripts/xlsx_tool.py:307
+- `def cmd_read(args):` — skills/office/xlsx/scripts/xlsx_tool.py:406
+- `def cell_ref(row, col):` — skills/office/xlsx/scripts/xlsx_tool.py:75
 
 ## skills/plan
 
@@ -1994,8 +1920,8 @@
 ### `skills/ppx-memory/scripts/cli.js`
 
 - `function addMemory(content, fl = {}) {` — skills/ppx-memory/scripts/cli.js:46
-- `function printFacts(list) {` — skills/ppx-memory/scripts/cli.js:60
 - `function parseArgs(argv) {` — skills/ppx-memory/scripts/cli.js:28
+- `function printFacts(list) {` — skills/ppx-memory/scripts/cli.js:60
 - `function readSession(limit = 50) {` — skills/ppx-memory/scripts/cli.js:72
 - `const a = argv[i];` — skills/ppx-memory/scripts/cli.js:32
 
@@ -2004,16 +1930,16 @@
 - `export class Experience {` — skills/ppx-memory/scripts/experience.js:23
 - `function _isTemplateLike(a, b) {` — skills/ppx-memory/scripts/experience.js:19
 - `const n = Number(limit) || 0;` — skills/ppx-memory/scripts/experience.js:107
+- `const q = String(taskDesc || "").toLowerCase();` — skills/ppx-memory/scripts/experience.js:76
 - `const existing = this.lessons.find((l) => String(l.lesson || "").trim().replace(/\s+/g, " ") === normKey);` — skills/ppx-memory/scripts/experience.js:48
-- `const l = this.lessons.find((x) => x.id === id);` — skills/ppx-memory/scripts/experience.js:93
 
 ### `skills/ppx-memory/scripts/fact-store.js`
 
-- `export class FactStore {` — skills/ppx-memory/scripts/fact-store.js:35
-- `function cryptoRandomId() {` — skills/ppx-memory/scripts/fact-store.js:1166
-- `export function rrfFuse(lists, { k = 60 } = {}) {` — skills/ppx-memory/scripts/fact-store.js:1174
-- `const f = this.facts.find((x) => x.id === id);` — skills/ppx-memory/scripts/fact-store.js:329
-- `const f = this.facts.find((x) => x.id === id);` — skills/ppx-memory/scripts/fact-store.js:850
+- `export class FactStore {` — skills/ppx-memory/scripts/fact-store.js:41
+- `export function rrfFuse(lists, { k = 60, weights = null } = {}) {` — skills/ppx-memory/scripts/fact-store.js:1296
+- `function cryptoRandomId() {` — skills/ppx-memory/scripts/fact-store.js:1285
+- `const s = fn(c, f.content);` — skills/ppx-memory/scripts/fact-store.js:768
+- `let s = bm * 10 * (0.4 + 0.6 * recency);` — skills/ppx-memory/scripts/fact-store.js:818
 
 ### `skills/ppx-memory/scripts/id.js`
 
@@ -2030,24 +1956,32 @@
 
 - `function tokenize(text) {` — skills/ppx-memory/scripts/l2.js:16
 - `export class SceneStore {` — skills/ppx-memory/scripts/l2.js:67
+- `function fnv1a(str) {` — skills/ppx-memory/scripts/l2.js:54
 - `function mergeOne(a, b) {` — skills/ppx-memory/scripts/l2.js:25
 - `function sceneSig(s) {` — skills/ppx-memory/scripts/l2.js:44
-- `function fnv1a(str) {` — skills/ppx-memory/scripts/l2.js:54
 
 ### `skills/ppx-memory/scripts/l3.js`
 
 - `export class PersonaStore {` — skills/ppx-memory/scripts/l3.js:21
-- `const a = this.agentPersona();` — skills/ppx-memory/scripts/l3.js:109
-- `const text = this._read(file);` — skills/ppx-memory/scripts/l3.js:127
-- `const key = String(pick(it) || "").trim().replace(/\s+/g, " ");` — skills/ppx-memory/scripts/l3.js:92
-- `let out = text;` — skills/ppx-memory/scripts/l3.js:135
+- `const a = this.agentPersona();` — skills/ppx-memory/scripts/l3.js:114
+- `const text = this._read(file);` — skills/ppx-memory/scripts/l3.js:137
+- `const key = String(pick(it) || "").trim().replace(/\s+/g, " ");` — skills/ppx-memory/scripts/l3.js:97
+- `const out = (!text || this._migrated.has(file)) ? text : this._stripBakedDay(file, metaKey, text);` — skills/ppx-memory/scripts/l3.js:138
+
+### `skills/ppx-memory/scripts/lexicon.js`
+
+- `export function expandedTerms(query) {` — skills/ppx-memory/scripts/lexicon.js:168
+- `function termHits(fragment) {` — skills/ppx-memory/scripts/lexicon.js:130
+- `export function conceptMatches(query) {` — skills/ppx-memory/scripts/lexicon.js:147
+- `function cjkGrams(text) {` — skills/ppx-memory/scripts/lexicon.js:114
+- `const out = new Set();` — skills/ppx-memory/scripts/lexicon.js:115
 
 ### `skills/ppx-memory/scripts/memory-ticker.js`
 
 - `export class MemoryTicker {` — skills/ppx-memory/scripts/memory-ticker.js:49
-- `function _scrub(text) {` — skills/ppx-memory/scripts/memory-ticker.js:642
-- `function _hasSignal(user, assistant) {` — skills/ppx-memory/scripts/memory-ticker.js:647
-- `function _renderLines(sessionStore, day) {` — skills/ppx-memory/scripts/memory-ticker.js:27
+- `function _scrub(text) {` — skills/ppx-memory/scripts/memory-ticker.js:721
+- `function _hasSignal(user, assistant) {` — skills/ppx-memory/scripts/memory-ticker.js:726
+- `function labelFacts(list) {` — skills/ppx-memory/scripts/memory-ticker.js:743
 - `function _lineOfEvent(e) {` — skills/ppx-memory/scripts/memory-ticker.js:44
 
 ### `skills/ppx-memory/scripts/pii.js`
@@ -2077,10 +2011,10 @@
 ### `skills/ppx-memory/scripts/session.js`
 
 - `export class SessionStore {` — skills/ppx-memory/scripts/session.js:40
-- `const f = this._safe(fromKey), t = this._safe(toKey);` — skills/ppx-memory/scripts/session.js:391
-- `const s = lines[i].trim();` — skills/ppx-memory/scripts/session.js:212
-- `const e = JSON.parse(s);` — skills/ppx-memory/scripts/session.js:215
-- `const e = evs[i];` — skills/ppx-memory/scripts/session.js:251
+- `const s = lines[i].trim();` — skills/ppx-memory/scripts/session.js:251
+- `const e = JSON.parse(s);` — skills/ppx-memory/scripts/session.js:254
+- `const e = evs[i];` — skills/ppx-memory/scripts/session.js:290
+- `const t = String(title || "").trim();` — skills/ppx-memory/scripts/session.js:553
 
 ### `skills/ppx-memory/scripts/similarity.js`
 
@@ -2092,18 +2026,18 @@
 
 ### `skills/ppx-memory/scripts/store.js`
 
-- `export function withFileLock(file, fn, { timeoutMs = 3000, pollMs = 20, staleMs = 15000 } = {}) {` — skills/ppx-memory/scripts/store.js:114
+- `export function withFileLock(file, fn, { timeoutMs = 3000, pollMs = 20, staleMs = 15000 } = {}) {` — skills/ppx-memory/scripts/store.js:123
 - `export function ensureDir(dir) {` — skills/ppx-memory/scripts/store.js:6
-- `export function readJson(file, fallback = null) {` — skills/ppx-memory/scripts/store.js:32
-- `export function writeJson(file, obj) {` — skills/ppx-memory/scripts/store.js:63
-- `export function logicalDay(d = new Date()) {` — skills/ppx-memory/scripts/store.js:269
+- `export function readJson(file, fallback = null) {` — skills/ppx-memory/scripts/store.js:41
+- `export function writeJson(file, obj) {` — skills/ppx-memory/scripts/store.js:72
+- `export function logicalDay(d = new Date()) {` — skills/ppx-memory/scripts/store.js:278
 
 ### `skills/ppx-memory/scripts/wal.js`
 
 - `export function appendWal(walFile, evt) {` — skills/ppx-memory/scripts/wal.js:19
 - `export function truncateWal(walFile) {` — skills/ppx-memory/scripts/wal.js:40
-- `export function walFileOf(file) {` — skills/ppx-memory/scripts/wal.js:14
 - `export function walSizeBytes(walFile) {` — skills/ppx-memory/scripts/wal.js:51
+- `export function walFileOf(file) {` — skills/ppx-memory/scripts/wal.js:14
 - `export function readWal(walFile) {` — skills/ppx-memory/scripts/wal.js:25
 
 ## skills/ppx-selfheal
@@ -2116,11 +2050,11 @@
 
 ### `skills/ppx-selfheal/scripts/cli.js`
 
-- `const f = path.join(DATA, "integrity.json");` — skills/ppx-selfheal/scripts/cli.js:44
+- `const f = path.join(DATA, "integrity.json");` — skills/ppx-selfheal/scripts/cli.js:45
 - `const out = (o) => console.log(typeof o === "string" ? o : JSON.stringify(o, null, 2));` — skills/ppx-selfheal/scripts/cli.js:21
 - `const cmd = process.argv[2] || "check";` — skills/ppx-selfheal/scripts/cli.js:24
-- `const healer = new Healer(ROOT, DATA);` — skills/ppx-selfheal/scripts/cli.js:22
 - `const ROOT = process.env.PPX_ROOT || path.resolve(HERE, "..", "..", "..");` — skills/ppx-selfheal/scripts/cli.js:18
+- `const healer = new Healer(ROOT, DATA);` — skills/ppx-selfheal/scripts/cli.js:22
 
 ### `skills/ppx-selfheal/scripts/healer.js`
 
@@ -2128,7 +2062,7 @@
 - `const p = path.join(dir, f);` — skills/ppx-selfheal/scripts/healer.js:62
 - `const p = path.join(d, f);` — skills/ppx-selfheal/scripts/healer.js:104
 - `const p = path.join(this.dataDir, f);` — skills/ppx-selfheal/scripts/healer.js:136
-- `const facts = path.join(this.dataDir, "memory", "facts.json");` — skills/ppx-selfheal/scripts/healer.js:32
+- `const d = path.join(this.dataDir, sub);` — skills/ppx-selfheal/scripts/healer.js:28
 
 ### `skills/ppx-selfheal/scripts/logger.js`
 
@@ -2140,11 +2074,11 @@
 
 ### `skills/ppx-selfheal/scripts/store.js`
 
-- `export function withFileLock(file, fn, { timeoutMs = 3000, pollMs = 20, staleMs = 15000 } = {}) {` — skills/ppx-selfheal/scripts/store.js:116
+- `export function withFileLock(file, fn, { timeoutMs = 3000, pollMs = 20, staleMs = 15000 } = {}) {` — skills/ppx-selfheal/scripts/store.js:125
 - `export function ensureDir(dir) {` — skills/ppx-selfheal/scripts/store.js:10
-- `export function readJson(file, fallback = null) {` — skills/ppx-selfheal/scripts/store.js:36
-- `export function writeJson(file, obj) {` — skills/ppx-selfheal/scripts/store.js:66
-- `export function logicalDay(d = new Date()) {` — skills/ppx-selfheal/scripts/store.js:270
+- `export function readJson(file, fallback = null) {` — skills/ppx-selfheal/scripts/store.js:45
+- `export function writeJson(file, obj) {` — skills/ppx-selfheal/scripts/store.js:75
+- `export function logicalDay(d = new Date()) {` — skills/ppx-selfheal/scripts/store.js:279
 
 ## skills/prompt-depth-kit
 
@@ -2178,15 +2112,17 @@
 
 - `# verify — 完成前核验` — skills/verify/SKILL.md:7
 
+## skills/workspace-inventory-audit
+
 ## src
 
 ### `src/agent-worker.js`
 
-- `async function handleLine(line) {` — src/agent-worker.js:49
+- `async function handleLine(line) {` — src/agent-worker.js:58
 - `const agent = new PPXAgent({` — src/agent-worker.js:14
 - `const root = process.cwd();` — src/agent-worker.js:5
+- `const req = JSON.parse(line);` — src/agent-worker.js:60
 - `const line = buf.slice(0, idx).trim();` — src/agent-worker.js:42
-- `const req = JSON.parse(line);` — src/agent-worker.js:51
 
 ### `src/aml-server.js`
 
@@ -2208,17 +2144,17 @@
 
 - `function check(results, name, ok, note = "") {` — src/cli-doctor.js:12
 - `export async function runDoctor({ net = false } = {}) {` — src/cli-doctor.js:18
-- `const key = keyInline ? p.api_key : envVal;` — src/cli-doctor.js:70
-- `let config = null;` — src/cli-doctor.js:28
-- `const ok = res.ok;` — src/cli-doctor.js:79
+- `const key = keyInline ? p.api_key : envVal;` — src/cli-doctor.js:69
+- `let config = null;` — src/cli-doctor.js:27
+- `const ok = res.ok;` — src/cli-doctor.js:78
 
 ### `src/cli.js`
 
-- `function pkgVersion() {` — src/cli.js:19
-- `const agent = new PPXAgent({ root: ROOT });` — src/cli.js:52
-- `const id = text.replace("/proactive-done", "").trim();` — src/cli.js:128
-- `const text = line.trim();` — src/cli.js:83
-- `const r = await agent.chat(text);` — src/cli.js:136
+- `function pkgVersion() {` — src/cli.js:21
+- `const agent = new PPXAgent({ root: ROOT });` — src/cli.js:59
+- `const agent = new PPXAgent({ root: ROOT });` — src/cli.js:81
+- `const id = text.replace("/proactive-done", "").trim();` — src/cli.js:167
+- `const r = await agent.chat(q);` — src/cli.js:71
 
 ### `src/server.js`
 
@@ -2244,23 +2180,23 @@
 - `function _parseArgs(a) {` — src/agent/evidence.js:32
 - `const a = e.data?.args || {};` — src/agent/evidence.js:278
 - `const id = e.data?.callId ?? `s${e.seq}`;` — src/agent/evidence.js:143
-- `const it = items[evIdx[j]];` — src/agent/evidence.js:195
+- `const r = await this._compactRegion(k, { mode: "deterministic", threshold: false });` — src/agent/evidence.js:339
 
 ### `src/agent/index.js`
 
-- `export class PPXAgent {` — src/agent/index.js:68
-- `const agent = new PPXAgent();` — src/agent/index.js:1502
-- `const name = String(fn || "default");` — src/agent/index.js:997
-- `const s = String(text ?? "");` — src/agent/index.js:860
-- `const s = String(raw ?? "").trim();` — src/agent/index.js:1136
+- `export class PPXAgent {` — src/agent/index.js:81
+- `const agent = new PPXAgent();` — src/agent/index.js:2268
+- `const s = typeof v === "string" ? v : JSON.stringify(v);` — src/agent/index.js:370
+- `const s = String(text ?? "");` — src/agent/index.js:1440
+- `const s = String(raw ?? "").trim();` — src/agent/index.js:1775
 
 ### `src/agent/prompts.js`
 
 - `export function visionUserContent(llm, root, userMsg) {` — src/agent/prompts.js:18
-- `const a = this.personaStore.agentPersona();` — src/agent/prompts.js:220
+- `const a = this.personaStore.agentPersona();` — src/agent/prompts.js:270
 - `const text = String(userMsg);` — src/agent/prompts.js:19
-- `const tools = this.tools.toOpenAI();` — src/agent/prompts.js:205
-- `const p = parts.find((x) => x.key === key);` — src/agent/prompts.js:165
+- `const skills = this._skillsPrompt();` — src/agent/prompts.js:152
+- `const p = parts.find((x) => x.key === key);` — src/agent/prompts.js:215
 
 ## src/ans
 
@@ -2276,8 +2212,8 @@
 
 - `export function status(agent) {` — src/ans/eviction.js:122
 - `export function scan(agent) {` — src/ans/eviction.js:42
-- `export function saveState(agent, state) {` — src/ans/eviction.js:30
 - `export function loadState(agent) {` — src/ans/eviction.js:26
+- `export function saveState(agent, state) {` — src/ans/eviction.js:30
 - `function _recordRun(agent, run) {` — src/ans/eviction.js:35
 
 ### `src/ans/guard.js`
@@ -2285,7 +2221,7 @@
 - `export function installGuardOnCatalog(catalog, guardHandle) {` — src/ans/guard.js:122
 - `export function installGuard(agent, opts = {}) {` — src/ans/guard.js:56
 - `export function dangerVerdict(verb, args = null) {` — src/ans/guard.js:39
-- `export function guardStatus(agent) {` — src/ans/guard.js:157
+- `export function guardStatus(agent) {` — src/ans/guard.js:168
 - `function argsDangerous(name, args) {` — src/ans/guard.js:28
 
 ### `src/ans/lifecycle.js`
@@ -2297,19 +2233,19 @@
 
 ### `src/ans/proactive.js`
 
-- `export async function suggestProactive(agent) {` — src/ans/proactive.js:81
-- `export function saveState(agent, state) {` — src/ans/proactive.js:39
-- `export function markTaskDone(agent, id) {` — src/ans/proactive.js:69
 - `export function loadState(agent) {` — src/ans/proactive.js:35
+- `export function saveState(agent, state) {` — src/ans/proactive.js:39
+- `export async function suggestProactive(agent) {` — src/ans/proactive.js:81
+- `export function markTaskDone(agent, id) {` — src/ans/proactive.js:69
 - `export function pendingTasks(agent, { limit = 5, windowMs = DEFAULT_WINDOW_MS } = {}) {` — src/ans/proactive.js:45
 
 ### `src/ans/reward.js`
 
-- `export function context(agent) {` — src/ans/reward.js:76
 - `export function status(agent) {` — src/ans/reward.js:84
+- `export function context(agent) {` — src/ans/reward.js:76
 - `export function record(agent, { tool, ok }) {` — src/ans/reward.js:34
 - `export function summarize(agent) {` — src/ans/reward.js:65
-- `export function saveState(agent, state) {` — src/ans/reward.js:27
+- `export function loadState(agent) {` — src/ans/reward.js:23
 
 ### `src/ans/values.js`
 
@@ -2320,11 +2256,11 @@
 
 ### `src/audit/audit-chain.js`
 
-- `export class AuditLog {` — src/audit/audit-chain.js:48
-- `export function quarantineBroken(dataDir) {` — src/audit/audit-chain.js:172
-- `export function auditFile(dataDir) {` — src/audit/audit-chain.js:24
-- `export function scrubArgs(args) {` — src/audit/audit-chain.js:30
-- `let s = String(v);` — src/audit/audit-chain.js:35
+- `export class AuditLog {` — src/audit/audit-chain.js:97
+- `export function quarantineBroken(dataDir, { hmacKey = null } = {}) {` — src/audit/audit-chain.js:237
+- `export function loadOrCreateHmacKey(root, { env = process.env } = {}) {` — src/audit/audit-chain.js:58
+- `export function auditFile(dataDir) {` — src/audit/audit-chain.js:51
+- `export function scrubArgs(args) {` — src/audit/audit-chain.js:79
 
 ### `src/audit/verifier.js`
 
@@ -2361,19 +2297,19 @@
 
 ### `src/channels/feishu.js`
 
-- `export class FeishuChannel extends Channel {` — src/channels/feishu.js:6
-- `const text = event.message.content ? JSON.parse(event.message.content).text || "" : "";` — src/channels/feishu.js:108
-- `const r = await fetch("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal", {` — src/channels/feishu.js:31
-- `const r = await fetch("https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id", {` — src/channels/feishu.js:123
-- `const data = await r.json();` — src/channels/feishu.js:37
+- `export class FeishuChannel extends Channel {` — src/channels/feishu.js:29
+- `export function feishuDecrypt(encryptKey, encrypt) {` — src/channels/feishu.js:14
+- `export function feishuSign({ timestamp, nonce, body, encryptKey }) {` — src/channels/feishu.js:23
+- `const r = await fetch("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal", {` — src/channels/feishu.js:56
+- `const r = await fetch("https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id", {` — src/channels/feishu.js:191
 
 ### `src/channels/http.js`
 
-- `export function publicErrorMessage(e) {` — src/channels/http.js:53
-- `export class HttpChannel extends Channel {` — src/channels/http.js:94
-- `export function safeEqual(a, b) {` — src/channels/http.js:44
-- `export function resolveAuthToken({ configured = "", persistedFile = null } = {}) {` — src/channels/http.js:70
-- `const a = (req.socket && req.socket.remoteAddress) || "";` — src/channels/http.js:226
+- `export class HttpChannel extends Channel {` — src/channels/http.js:119
+- `export function publicErrorMessage(e) {` — src/channels/http.js:78
+- `export function safeEqual(a, b) {` — src/channels/http.js:69
+- `export function resolveAuthToken({ configured = "", persistedFile = null } = {}) {` — src/channels/http.js:95
+- `const a = (req.socket && req.socket.remoteAddress) || "";` — src/channels/http.js:280
 
 ### `src/channels/index.js`
 
@@ -2390,19 +2326,19 @@
 
 ### `src/channels/wechat-crypto.js`
 
-- `export function verifySignature(token, timestamp, nonce, encrypt, signature) {` — src/channels/wechat-crypto.js:19
 - `export function encryptReplyXml({ encodingAESKey, token, replyXml, receiveId = "", timestamp = null, nonce = null }) {` — src/channels/wechat-crypto.js:62
 - `export function generateSignature(token, timestamp, nonce, encrypt) {` — src/channels/wechat-crypto.js:13
+- `export function verifySignature(token, timestamp, nonce, encrypt, signature) {` — src/channels/wechat-crypto.js:19
 - `export function decryptMsg(encodingAESKey, encryptedXml) {` — src/channels/wechat-crypto.js:24
 - `function keyOf(encodingAESKey) {` — src/channels/wechat-crypto.js:7
 
 ### `src/channels/wechat.js`
 
-- `export class WechatWebhookChannel extends Channel {` — src/channels/wechat.js:11
-- `const text = g("Content");` — src/channels/wechat.js:146
-- `const r = await fetch(` — src/channels/wechat.js:169
-- `const r = await fetch(`https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=${encodeURIComponent(token)}`, {` — src/channels/wechat.js:188
-- `const data = await r.json();` — src/channels/wechat.js:173
+- `export class WechatWebhookChannel extends Channel {` — src/channels/wechat.js:12
+- `const r = await fetch(` — src/channels/wechat.js:202
+- `const r = await fetch(`https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=${encodeURIComponent(token)}`, {` — src/channels/wechat.js:221
+- `const text = g("Content");` — src/channels/wechat.js:154
+- `const data = await r.json();` — src/channels/wechat.js:206
 
 ### `src/channels/workspace.js`
 
@@ -2417,10 +2353,10 @@
 ### `src/commands/index.js`
 
 - `export function createCommandRegistry({ commands = [] } = {}) {` — src/commands/index.js:10
-- `function parseCommandMd(md) {` — src/commands/index.js:105
-- `export function createRegistryWithUserCommands(dir, { extra = [] } = {}) {` — src/commands/index.js:148
-- `export function createBuiltinRegistry() {` — src/commands/index.js:100
-- `export function loadUserCommands(dir) {` — src/commands/index.js:119
+- `function parseCommandMd(md) {` — src/commands/index.js:120
+- `export function createBuiltinRegistry() {` — src/commands/index.js:115
+- `export function loadUserCommands(dir) {` — src/commands/index.js:134
+- `export function createRegistryWithUserCommands(dir, { extra = [] } = {}) {` — src/commands/index.js:163
 
 ## src/config
 
@@ -2434,11 +2370,11 @@
 
 ### `src/config/index.js`
 
-- `export function loadConfig(root, configFile = null) {` — src/config/index.js:230
-- `export function validateConfig(config) {` — src/config/index.js:196
-- `function parseScalar(v) {` — src/config/index.js:160
-- `function deepMerge(base, override) {` — src/config/index.js:78
-- `function cloneDeep(v) {` — src/config/index.js:100
+- `export function loadConfig(root, configFile = null) {` — src/config/index.js:251
+- `export function validateConfig(config) {` — src/config/index.js:217
+- `function cloneDeep(v) {` — src/config/index.js:122
+- `function parseScalar(v) {` — src/config/index.js:181
+- `function deepMerge(base, override) {` — src/config/index.js:100
 
 ### `src/config/placeholder.js`
 
@@ -2448,18 +2384,18 @@
 
 ### `src/config/providers.js`
 
-- `export function readConfig(root) {` — src/config/providers.js:22
-- `export function sanitizeProvider(p) {` — src/config/providers.js:54
-- `export function listProviders(root) {` — src/config/providers.js:65
-- `export function addProvider(root, raw) {` — src/config/providers.js:78
-- `export function updateProvider(root, id, patch) {` — src/config/providers.js:96
+- `export function readConfig(root) {` — src/config/providers.js:26
+- `export function sanitizeProvider(p) {` — src/config/providers.js:61
+- `export function listProviders(root) {` — src/config/providers.js:72
+- `export function addProvider(root, raw) {` — src/config/providers.js:85
+- `export function updateProvider(root, id, patch) {` — src/config/providers.js:103
 
 ### `src/config/settings.js`
 
-- `export function getSettings(root) {` — src/config/settings.js:85
-- `export function updateSettings(root, patch) {` — src/config/settings.js:94
-- `function sanitizeSettings(cfg) {` — src/config/settings.js:34
-- `function sanitizeMcpServer(s) {` — src/config/settings.js:66
+- `export function getSettings(root) {` — src/config/settings.js:104
+- `export function updateSettings(root, patch) {` — src/config/settings.js:113
+- `function sanitizeSettings(cfg) {` — src/config/settings.js:40
+- `function sanitizeMcpServer(s) {` — src/config/settings.js:85
 - `export function readConfigRaw(root) {` — src/config/settings.js:15
 
 ## src/core
@@ -2470,11 +2406,11 @@
 
 ### `src/core/policy.js`
 
-- `export async function runToolLoop({` — src/core/policy.js:228
-- `export function isOverflowError(e) {` — src/core/policy.js:34
-- `export function trimToolResult(r, budget = DEFAULT_TOOL_RESULT_BUDGET) {` — src/core/policy.js:57
-- `export function toToolContent(result, budget = DEFAULT_TOOL_RESULT_BUDGET) {` — src/core/policy.js:66
-- `export async function callWithTimeoutRetry({` — src/core/policy.js:83
+- `export async function runToolLoop({` — src/core/policy.js:292
+- `export function isOverflowError(e) {` — src/core/policy.js:64
+- `export function trimToolResult(r, budget = DEFAULT_TOOL_RESULT_BUDGET) {` — src/core/policy.js:87
+- `export function toToolContent(result, budget = DEFAULT_TOOL_RESULT_BUDGET) {` — src/core/policy.js:96
+- `export async function callWithTimeoutRetry({` — src/core/policy.js:113
 
 ### `src/core/postcondition.js`
 
@@ -2504,15 +2440,15 @@
 
 ### `src/edit/editblock.js`
 
-- `export function looksLikePath(s) {` — src/edit/editblock.js:390
-- `function shortPreview(s) {` — src/edit/editblock.js:102
-- `export function applyAll(content, blocks) {` — src/edit/editblock.js:227
-- `export function parseCodexPatch(text) {` — src/edit/editblock.js:316
-- `function finalize(block) {` — src/edit/editblock.js:79
+- `export function looksLikePath(s) {` — src/edit/editblock.js:389
+- `function shortPreview(s) {` — src/edit/editblock.js:101
+- `export function parseCodexPatch(text) {` — src/edit/editblock.js:315
+- `function finalize(block) {` — src/edit/editblock.js:78
+- `export function resolvePatchTargets(content, blocks) {` — src/edit/editblock.js:404
 
 ### `src/edit/snapshot.js`
 
-- `const dir = path.dirname(p);` — src/edit/snapshot.js:54
+- `const dir = path.dirname(p);` — src/edit/snapshot.js:59
 - `const entries = new Map();` — src/edit/snapshot.js:12
 - `const stat = fs.statSync(p);` — src/edit/snapshot.js:18
 - `let existed = false;` — src/edit/snapshot.js:14
@@ -2522,21 +2458,45 @@
 
 ### `src/evidence/index.js`
 
-- `function upsert({ explicitId, title, priority, status }) {` — src/evidence/index.js:310
-- `function shortId(prefix = "g_") {` — src/evidence/index.js:166
-- `function writeRows(list) {` — src/evidence/index.js:268
-- `function shortHash(input) {` — src/evidence/index.js:77
+- `function upsert({ explicitId, title, priority, status, budget, spent, nextReviewAt }) {` — src/evidence/index.js:317
+- `function shortId(prefix = "g_") {` — src/evidence/index.js:172
+- `function writeRows(list) {` — src/evidence/index.js:274
 - `export function normalizePriority(v) {` — src/evidence/index.js:127
+- `function shortHash(input) {` — src/evidence/index.js:77
 
 ## src/evolve
+
+### `src/evolve/delta-producer.js`
+
+- `export function categorizeFailure(errorText = "") {` — src/evolve/delta-producer.js:11
+- `export async function recordLesson(playbookStore, lesson, opts = {}) {` — src/evolve/delta-producer.js:35
+- `export function lessonToOps(lesson, { kind = "pitfall", evidenceRef = null } = {}) {` — src/evolve/delta-producer.js:22
+- `const text = String(lesson || "").trim();` — src/evolve/delta-producer.js:23
+- `const t = String(errorText || "").toLowerCase();` — src/evolve/delta-producer.js:12
+
+### `src/evolve/loop.js`
+
+- `export class EvolutionLoop {` — src/evolve/loop.js:28
+- `export function installEvolutionLoop(agent) {` — src/evolve/loop.js:180
+- `const a = this.agent;` — src/evolve/loop.js:60
+- `const a = this.agent;` — src/evolve/loop.js:90
+- `const a = this.agent;` — src/evolve/loop.js:122
 
 ### `src/evolve/playbook.js`
 
 - `function tokenize(s) {` — src/evolve/playbook.js:28
 - `export function lexicalSimilarity(a, b) {` — src/evolve/playbook.js:19
+- `export function growAndRefine(playbook, { pruneAt = 3 } = {}) {` — src/evolve/playbook.js:100
 - `export function applyDelta(playbook, ops = [], { maxBullets = 200 } = {}) {` — src/evolve/playbook.js:52
-- `export function createGate(regressionCheck, { onReject = null } = {}) {` — src/evolve/playbook.js:114
 - `export function renderBullets(playbook, { maxBullets = 30 } = {}) {` — src/evolve/playbook.js:130
+
+### `src/evolve/selfiterate.js`
+
+- `export class SelfIterationEngine {` — src/evolve/selfiterate.js:116
+- `export function runTestFile(testFile, { cwd = process.cwd(), timeoutMs = 60000, extraArgs = [] } = {}) {` — src/evolve/selfiterate.js:56
+- `export function parseTap(tapText) {` — src/evolve/selfiterate.js:32
+- `export function relatedSources(testFile, root) {` — src/evolve/selfiterate.js:80
+- `function safeTarget(p, root, { allowTestEdit = false, testFile = null } = {}) {` — src/evolve/selfiterate.js:92
 
 ## src/hooks
 
@@ -2553,24 +2513,24 @@
 ### `src/llm/client.js`
 
 - `export class LLMClient {` — src/llm/client.js:11
-- `const e = new Error(`LLM HTTP ${resp.status}: ${text.slice(0, 300)}`);` — src/llm/client.js:99
-- `const text = await resp.text().catch(() => "");` — src/llm/client.js:98
-- `const r = await fetch(this.baseUrl + "/models", {` — src/llm/client.js:124
-- `let content = m1?.content;` — src/llm/client.js:33
+- `const e = new Error("LLM 调用已被用户中断");` — src/llm/client.js:182
+- `const e = new Error(`LLM HTTP ${resp.status}: ${text.slice(0, 300)}`);` — src/llm/client.js:203
+- `const e = new Error("LLM 调用已被用户中断");` — src/llm/client.js:251
+- `const e = new Error(`LLM HTTP ${resp.status}: ${txt.slice(0, 300)}`);` — src/llm/client.js:283
 
 ### `src/llm/dsml.js`
 
 - `export function buildDsmlPrompt(tools) {` — src/llm/dsml.js:57
 - `export function parseDsml(text) {` — src/llm/dsml.js:14
-- `const name = m[1];` — src/llm/dsml.js:27
 - `const s = String(text || "");` — src/llm/dsml.js:15
-- `const raw = pm[3].trim();` — src/llm/dsml.js:36
+- `const name = m[1];` — src/llm/dsml.js:27
+- `const body = m[2];` — src/llm/dsml.js:28
 
 ### `src/llm/embedder.js`
 
 - `export function createEmbedder(config = {}) {` — src/llm/embedder.js:6
-- `export function embedderFromConfig(config) {` — src/llm/embedder.js:84
 - `export function embedderWithFallback(external, local, { maxFails = 2 } = {}) {` — src/llm/embedder.js:72
+- `export function embedderFromConfig(config) {` — src/llm/embedder.js:84
 - `const r = await fetch(`${base}/embeddings`, {` — src/llm/embedder.js:49
 - `const model = config.model || "text-embedding-3-small";` — src/llm/embedder.js:44
 
@@ -2596,7 +2556,7 @@
 - `export function buildProvider(id, { apiKey = "", model = "" } = {}) {` — src/llm/presets.js:81
 - `export function applyProviderToConfig(rawConfig, provider) {` — src/llm/presets.js:103
 - `export function getPreset(id) {` — src/llm/presets.js:71
-- `const list = Array.isArray(out.providers) ? out.providers.filter(Boolean) : [];` — src/llm/presets.js:105
+- `const out = rawConfig && typeof rawConfig === "object" ? { ...rawConfig } : {};` — src/llm/presets.js:104
 
 ### `src/llm/pricing.js`
 
@@ -2616,10 +2576,10 @@
 
 ### `src/llm/router.js`
 
-- `export function resolveLLM(config) {` — src/llm/router.js:68
-- `function isLocal(p) {` — src/llm/router.js:33
 - `export function isUsableProvider(prov) {` — src/llm/router.js:38
-- `export function resolveAllLLMs(config) {` — src/llm/router.js:62
+- `export function resolveLLM(config) {` — src/llm/router.js:87
+- `function isLocal(p) {` — src/llm/router.js:33
+- `export function resolveAllLLMs(config) {` — src/llm/router.js:80
 - `function hasRealKey(p) {` — src/llm/router.js:22
 
 ## src/mcp
@@ -2635,10 +2595,10 @@
 ### `src/mcp/client.js`
 
 - `function hasXMcpHeader(node) {` — src/mcp/client.js:110
+- `export class McpClient {` — src/mcp/client.js:267
 - `function parseXMcpHeaders(toolName, schema) {` — src/mcp/client.js:69
 - `export function extractToolResult(result) {  if (result == null) return { text: "", isError: false };` — src/mcp/client.js:453
 - `export function extractResourceText(result) {` — src/mcp/client.js:474
-- `export class McpClient {` — src/mcp/client.js:267
 
 ### `src/mcp/http.js`
 
@@ -2666,8 +2626,8 @@
 
 ### `src/mcp/tasks.js`
 
-- `export function createTaskBoard(root) {` — src/mcp/tasks.js:131
 - `export class TaskBoard {` — src/mcp/tasks.js:12
+- `export function createTaskBoard(root) {` — src/mcp/tasks.js:131
 - `const id = shortId("t_", 5);` — src/mcp/tasks.js:56
 - `const t = this._normalize({` — src/mcp/tasks.js:57
 - `const t = this.get(id);` — src/mcp/tasks.js:82
@@ -2709,16 +2669,16 @@
 - `export class Experience {` — src/memory/experience.js:23
 - `function _isTemplateLike(a, b) {` — src/memory/experience.js:19
 - `const n = Number(limit) || 0;` — src/memory/experience.js:107
+- `const q = String(taskDesc || "").toLowerCase();` — src/memory/experience.js:76
 - `const existing = this.lessons.find((l) => String(l.lesson || "").trim().replace(/\s+/g, " ") === normKey);` — src/memory/experience.js:48
-- `const l = this.lessons.find((x) => x.id === id);` — src/memory/experience.js:93
 
 ### `src/memory/fact-store.js`
 
-- `export class FactStore {` — src/memory/fact-store.js:39
-- `function cryptoRandomId() {` — src/memory/fact-store.js:1180
-- `export function rrfFuse(lists, { k = 60 } = {}) {` — src/memory/fact-store.js:1188
-- `const f = this.facts.find((x) => x.id === id);` — src/memory/fact-store.js:338
-- `const f = this.facts.find((x) => x.id === id);` — src/memory/fact-store.js:864
+- `export class FactStore {` — src/memory/fact-store.js:47
+- `export function rrfFuse(lists, { k = 60, weights = null } = {}) {` — src/memory/fact-store.js:1352
+- `function cryptoRandomId() {` — src/memory/fact-store.js:1340
+- `const s = fn(c, f.content);` — src/memory/fact-store.js:791
+- `let s = bm * 10 * (0.4 + 0.6 * recency);` — src/memory/fact-store.js:841
 
 ### `src/memory/failure-episode.js`
 
@@ -2726,7 +2686,23 @@
 - `const r = mutateJsonCollection(` — src/memory/failure-episode.js:37
 - `const d = readJson(this.file, null);` — src/memory/failure-episode.js:28
 - `const g = readJson(this.file, null);` — src/memory/failure-episode.js:57
-- `const ids = new Set(scored.map((s) => s.id));` — src/memory/failure-episode.js:107
+- `const q = String(error || "");` — src/memory/failure-episode.js:92
+
+### `src/memory/fork.js`
+
+- `export function exportMemorySnapshot({ agent, toDataDir, factsLimit = 50, experienceLimit = 10 } = {}) {` — src/memory/fork.js:14
+- `export function mergeSnapshotBack({ agent, fromDataDir, dryRun = false } = {}) {` — src/memory/fork.js:66
+- `export function hasSnapshot(dataDir) {` — src/memory/fork.js:87
+- `const a = typeof ps.agentPersona === "function" ? ps.agentPersona() : "";` — src/memory/fork.js:39
+- `const text = readText(factsFile) || "";` — src/memory/fork.js:72
+
+### `src/memory/hash-embedder.js`
+
+- `function tokenize(text) {` — src/memory/hash-embedder.js:22
+- `function fnv1a(str, seed = 0x811c9dc5) {` — src/memory/hash-embedder.js:12
+- `export function hashEmbed(text, role = "query") {` — src/memory/hash-embedder.js:41
+- `const s = String(text || "").toLowerCase();` — src/memory/hash-embedder.js:23
+- `const code = ch.codePointAt(0);` — src/memory/hash-embedder.js:29
 
 ## 模块依赖图 (top 40)
 
@@ -2735,12 +2711,14 @@ graph LR
   bench_falsify --> bench_tasks
   bench_team_longrun --> s_orchestrator_room
   bench_team_longrun --> s_orchestrator_teams
+  bin_ppx_desktop --> s_utils_winutf8
   bin_ppx_serve --> s_server
   bin_ppx_setup --> s_llm_presets
   bin_ppx_setup --> s_llm_client
   bin_ppx_web --> s_utils_winutf8
   bin_ppx_web --> s_utils_crashguard
   bin_ppx_web --> s_server
+  bin_ppx_web --> s_utils_banner
   plugins_amem_memory_amem_backend --> s_memory_index
   scripts_acceptance --> s_utils_pii
   scripts_acceptance --> scripts_lib_tmp_agent
@@ -2760,13 +2738,10 @@ graph LR
   scripts_eval --> s_config_index
   scripts_eval --> scripts_lib_tmp_agent
   scripts_eval --> s_llm_client
+  scripts_evolution_loop --> s_agent_index
+  scripts_evolution_loop --> s_evolve_loop
   scripts_expert_drill --> s_agent_index
   scripts_legion_e2e --> s_agent_index
-  scripts_mcp_smoke --> s_mcp_client
-  scripts_memory_benchmark --> s_agent_index
-  scripts_memory_benchmark --> s_llm_client
-  scripts_memory_benchmark --> scripts_lib_tmp_agent
-  scripts_multimodal_smoke --> s_llm_client
   scripts_lib_cache_audit_core --> s_agent_index
   scripts_lib_cache_audit_core --> scripts_lib_tmp_agent
   scripts_lib_tmp_agent --> s_agent_index
@@ -2776,6 +2751,7 @@ graph LR
   s_agent_index --> s_utils_winutf8
   s_agent_index --> s_utils_pii
   s_agent_index --> s_config_index
+  s_agent_index --> s_evolve_loop
   s_memory_fact_store --> s_utils_pii
 ```
 

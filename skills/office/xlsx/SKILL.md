@@ -1,101 +1,65 @@
 ---
 name: xlsx
-description: Use this skill any time a spreadsheet file is the primary input or output. This means any task where the user wants to: open, read, edit, or fix an existing .xlsx, .xlsm, .xltx, .csv, or .tsv file (e.g., adding columns, computing formulas, formatting, charting, cleaning messy data); create a new spr
+name_zh: 表格文件
+description: 生成、读取、校验 .xlsx: CSV/JSON 转工作簿、提取多工作表与公式、检查公式缓存与结构完整性。用于"导出 Excel/读这个表/把 CSV 转成 xlsx/查表里的数和公式"。
 domain: office
-tags: imported, skills
-source: anthropics/skills
-imported_at: 2026-10-07
+tags: Excel, xlsx, CSV, 工作表, 公式, 数据
+risk: medium
 ---
-# XLSX creation, editing, and analysis
 
-| Task | Approach |
+# 表格文件
+
+## 适用
+- 把 CSV/TSV/JSON 数据落成 `.xlsx`, 或把已有工作簿读成表格文本核对内容。
+- 交付前检查工作簿能否被打开、公式是否缺缓存值、单元格引用是否合法。
+- 不适用: 透视表、图表、复杂条件格式、宏 (`.xlsm` 的 VBA)、多表联合建模。这些在 Excel 里做, 本技能不硬造。
+
+## 核心事实
+`.xlsx` 是 ZIP 包: `xl/workbook.xml` 管工作表清单, `xl/worksheets/sheetN.xml` 存单元格, `xl/styles.xml` 存样式。数字存 `<v>`, 文本存 `<is><t>`, 公式存 `<f>`。
+
+**公式没有缓存值**: 工具写公式时只写 `<f>`, 不编造结果, 并设置 `fullCalcOnLoad="1"` 让 Excel/LibreOffice 打开时重算。因此任何按"缓存值"读取的程序 (包括本工具的 `read`) 在重算前只能看到 `=SUM(...)` 本身 —— 这不是缺陷, 是如实反映文件状态。
+
+## 工具
+脚本目录 `scripts/`, 只用 Python 3.9+ 标准库:
+
+| 命令 | 用途 |
 |---|---|
-| **Create** or **edit** with formulas/formatting | `openpyxl` — see gotchas below |
-| **Bulk data** in or out | `pandas` (`read_excel`, `to_excel`) |
-| **Quick look** at a sheet | `markitdown file.xlsx` — `## SheetName` per sheet; reads `.xlsm` too. No cell coordinates, so don't plan edits from it |
-| **Read** a model (formulas *and* values) | two `load_workbook` passes — see gotchas |
+| `python scripts/xlsx_tool.py create --from-csv in.csv --sheet 名称 --out out.xlsx` | CSV/TSV → xlsx; 首行加粗、冻结、加筛选; 数字识别; `=` 开头写成公式; 列宽按内容自适应 |
+| `python scripts/xlsx_tool.py create --from-json rows.json --out out.xlsx` | 二维数组或对象数组 → xlsx (对象数组自动取键做表头) |
+| `python scripts/xlsx_tool.py read out.xlsx [--sheet 名称或序号] [--formulas] [--json]` | 读成 TSV 或 JSON; 多表默认全部输出并标注表名 |
+| `python scripts/xlsx_tool.py validate out.xlsx` | ZIP CRC、XML 良构、工作表部件存在、单元格引用、公式缓存状态 |
 
-> `openpyxl`, `pandas`, and `markitdown` are preinstalled — do not run `pip install` first; write the script and import directly. Only if an import fails (or the `markitdown` command is missing): `pip install` the missing package.
+## 流程
 
-> Script paths below are relative to this skill's directory.
+1. **先定表格设计, 再生成文件**。字段名、类型、单位、是否必填、口径说明先写清楚 (设计规范见 `xlsx-workbook` 技能)。工具只负责把已定好的数据落盘, 不替你想字段。
+2. **数据准备成 CSV/TSV/JSON**, 用 `--text` 也行。编码统一 UTF-8; 首行默认当表头, 纯数据表加 `--no-header`。
+3. **数值陷阱先排除**: 工号、电话、邮编、身份证等**前导零**字段会被工具自动保留为文本; 超过 15 位的长数字也按文本存。百分比字符串 `12%` 按文本存, 要参与计算就改成 `0.12`。
+4. **派生列用公式**: CSV 单元格写 `=SUM(B2:B9)`, 工具会写成真公式, 源头改动后整表联动。不要先算好再写死。
+5. **生成后立即回读**: `read` 对照源数据抽查首尾行、字段数、特殊字符。再跑 `validate`, 必须 `ok: true`; 有公式时 `formulas_without_cache > 0` 属预期, 但要在交付说明里写明"打开后由 Excel 重算"。
+6. **重算与误差确认**: 本机有 LibreOffice 时, 用 `soffice --headless --convert-to xlsx --outdir recalc/ out.xlsx` 让它算一遍, 再 `read` 核对结果; 没有则明确告知未做数值核对。
+7. **改已有工作簿时只改值不改结构**: 目前工具不提供单元格级编辑, 正确做法是 `read` 出数据 → 在 CSV 里改 → 重新 `create` 成新文件, 或由用户用 Excel 改。不要为了改一格手工拆 ZIP。
+8. **交付说明**: 文件路径、工作表名、行列数、公式数量与"打开后重算"提示、未支持的能力 (图表/透视/合并单元格)。
 
-## Requirements for every output
+## 边界与限制
+- **一次只生成一张工作表**; 多表工作簿请分文件交付, 或在 Excel 中合并。
+- **不写合并单元格、图表、图片、透视表、条件格式、数据验证、批注**。
+- **日期按文本存**: 工具不生成日期序列号与日期格式, 避免时区与 1900/1904 基准混淆。需要日期参与计算时, 在 Excel 里改为真日期。
+- **格式只做到"可读"**: 表头底色/边框/列宽/冻结/筛选。不承诺企业模板级排版。
+- **读取支持**共享字符串、内联字符串、数字、布尔、错误值、公式; 不解析富文本片段的多格式与批注。
+- 超大表 (>50 万行) 全量读入内存会吃紧, 请分表或先过滤。
 
-- **Professional font** (Arial, Times New Roman) throughout, unless the user says otherwise.
-- **Zero formula errors.** Never ship while `recalc.py` reports `errors_found`. If you think an error predates you, prove it: load the *original* with `data_only=True` and look at that cell. An error you introduced looks exactly like one you inherited.
-- **Use formulas, never hardcoded results.** Write `sheet['B10'] = '=SUM(B2:B9)'`, not the Python-computed total. The sheet must recalculate when its inputs change.
-- **Follow the user's spec literally.** Exact tab names, exact column headers, and the formula they spelled out. A redesign that computes something else fails, however elegant.
-- **Document every assumption and hardcoded number** where the reader will see it — a cell comment, or an adjacent cell at a table's end. Cite a real source when one exists (`Source: Company 10-K, FY2024, Page 45, Revenue Note, [SEC EDGAR URL]`); when the number came from the user, say so plainly.
-- **A workbook *you create* for someone to fill in** needs a short legend naming which cells to edit, and one example row of realistic values showing the expected format. Never add such a row to a file you were asked to edit.
-- **Editing an existing file: match its conventions exactly.** They override every guideline here. Find its designated input cells first — a distinct font color, fill, or shading marks them — write only there, and leave every existing formula untouched.
+## 反合理化
+- "先导出一版, 数不对再改" → 表格一旦发出, 收件人会基于它做决策。导出前先把源数据口径对齐。
+- "公式太麻烦, 直接写结果" → 写死的结果在源头更新后必然过期, 且没人知道它过期了。
+- "前导零丢了无所谓" → 工号/电话/编码丢零就是数据事故, 工具已做保护, 不要用 `--no-header` 之类的手段绕开。
+- "validate 有 warning 也能用" → warning 要逐条读: 公式无缓存是预期, 空表/引用异常不是。分不清就不能交付。
+- "打开 Excel 看一眼就知道对不对" → 你看的是渲染结果, 不是数据。用 `read` 对源数据逐列比对。
 
-## Recalculate (mandatory whenever the file contains formulas)
-
-openpyxl writes formulas as strings with **no cached values**. Until you recalculate, every
-formula cell reads back as `None` to anything reading cached values — `pandas`,
-`load_workbook(data_only=True)`, and most previewers.
-
-```bash
-python scripts/recalc.py output.xlsx [timeout_seconds]   # default 30
-```
-
-LibreOffice computes every formula, the file is **rewritten in place**, and you get JSON:
-`status` (`success` | `errors_found`), `total_formulas`, `total_errors`, and an
-`error_summary` naming up to 100 cells per error type (`locations_truncated` says how many it
-withheld — trust `total_errors`, not the length of the list). Fix what it names and run it
-again. **JSON with an `error` key instead of a `status` means nothing was recalculated**, and
-only that case exits non-zero — `errors_found` exits 0, so never treat a clean exit as a clean
-workbook.
-
-**A green recalc proves your formulas *evaluate*, not that they are *right*.** An off-by-one
-range or a reference to the wrong row yields a clean, error-free file with wrong numbers.
-Write 2–3 formulas first and check they pull the values you expect, before building out a grid.
-
-**A workbook that links to another file loses those links** if you re-save it with openpyxl and
-then recalculate. Such a formula reads `='[1]Returns Analysis'!$B$2` — the `[1]` is an index
-into the workbook's external-reference list, naming a *separate file on disk*, not a sheet.
-That file is rarely present here, so the cell's cached value is the only thing holding its
-data. openpyxl strips that value on save; LibreOffice then has to resolve the reference for
-real, fails, writes `#NAME?`, and deletes every link. `recalc.py` refuses to run in that state
-— copy those cells' values out of the original before you save over them (`--force` overrides,
-and accepts the loss).
-
-## Choosing formulas that survive verification
-
-LibreOffice implements fewer functions than Excel, and one it cannot evaluate becomes a
-literal `#NAME?` baked into the file you deliver.
-
-- **Prefer Excel-2007-era functions** — `SUMIFS`, `INDEX`, `MATCH`, `IFERROR`, `SUMPRODUCT` — which need no prefix.
-- **Six post-2007 functions work, but only with an `_xlfn.` prefix**, because openpyxl writes your formula into the XML verbatim and Excel stores post-2007 names prefixed (its UI hides the prefix): `_xlfn.TEXTJOIN`, `_xlfn.CONCAT`, `_xlfn.IFS`, `_xlfn.SWITCH`, `_xlfn.MAXIFS`, `_xlfn.MINIFS`. Written bare, each yields `#NAME?`.
-- **Never use `XLOOKUP`, `XMATCH`, `SORT`, `FILTER`, `UNIQUE`, or `SEQUENCE`.** The runtime's LibreOffice cannot evaluate them under *any* prefix. Newer builds do evaluate them, but they are spilling array functions and an openpyxl-written file has no spill metadata, so only the top-left cell of the range gets a value — and `recalc.py` reports `total_errors: 0` on the truncated result. Use `INDEX`/`MATCH` for lookups, and sort, filter, and de-duplicate in Python before writing the cells.
-- A formula LibreOffice could not parse is written back **lowercased** — a quick tell beside a `#NAME?`.
-
-## openpyxl gotchas
-
-- **Reading a model takes two loads.** `data_only=True` yields cached values with the formulas gone; the default yields formula strings with no values. One pass cannot give you both.
-- **`data_only=True` is destructive if you save.** That workbook has no formulas left, so saving replaces every one with a literal — permanently.
-- **`data_only=True` on a file openpyxl just wrote returns `None` everywhere** — run `recalc.py` first. (A formula whose result is `""` also reads back as `None`.)
-- **Merged cells: write the top-left anchor only.** Every other cell in the range is a `MergedCell` whose `.value` is read-only.
-- **`.xlsm` loses its macros unless you pass `keep_vba=True`** to `load_workbook`.
-- **A sheet name containing a space must be quoted** in a cross-sheet reference: `='Assumptions Inputs'!$B$5`. Unquoted, it evaluates to `#VALUE!`.
-
-## Financial models
-
-Unless the user says otherwise, or the existing file already does something else.
-
-**Color:** blue text (`0,0,255`) for hardcoded inputs and scenario levers · black for formulas ·
-green (`0,128,0`) for links to another sheet · red (`255,0,0`) for links to another file ·
-yellow fill (`255,255,0`) for key assumptions and cells the user should fill in.
-
-**Numbers:** currency `$#,##0`, with the unit named in the header (`Revenue ($mm)`) · zeros
-render as `-`, including in percentages (`$#,##0;($#,##0);-`) · negatives in parentheses ·
-percentages `0.0%`, **stored as fractions** (`0.15` renders `15.0%`; storing `15` renders
-`1500.0%`) · valuation multiples `0.0x` · years as text (`"2024"`, never `2,024`).
-
-**Structure:** every assumption in its own labeled cell, referenced by the formulas that use it
-(`=B5*(1+$B$6)`, never `=B5*1.05`) · formulas consistent across every projection period, since a
-lone edited cell mid-row is the commonest silent error · guard denominators that can be zero.
-
-## Dependencies
-
-`openpyxl`, `pandas`, `markitdown` (pip, preinstalled — install only if an import fails or the command is missing) · LibreOffice (`soffice`, auto-configured for sandboxed environments via `scripts/office/soffice.py`)
+## 验证
+- [ ] 字段设计与口径在生成文件之前已确定
+- [ ] 源数据编码 UTF-8, 表头/纯数据的模式选对 (`--no-header`)
+- [ ] 前导零与长数字字段回读仍是文本, 未被转成数字
+- [ ] 派生列是公式, 不是写死的结果
+- [ ] `read` 抽查首尾行与字段数与源数据一致
+- [ ] `validate` 返回 `ok: true`; 公式缓存 warning 已在交付说明中解释
+- [ ] 回复中写明路径、表名、行列数、公式数与未支持能力

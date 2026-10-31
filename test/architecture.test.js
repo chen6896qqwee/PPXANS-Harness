@@ -110,6 +110,7 @@ test("channels: 支持注入自定义通道类型 (更换实现)", async () => {
   assert.ok(ch instanceof FakeChannel);
   assert.equal(ch.cfg.tag, "x", "config 透传给通道");
   await mgr.broadcast("hi");
+  await mgr.delivery.idle(); // 队列⑦: 广播经投递队列, 等排空再断言
   assert.equal(ch.sent.text, "hi");
   await mgr.stop();
   agent.shutdown();

@@ -298,7 +298,10 @@ import { startServer } from "../src/server.js";
 async function bootLegacy(opts = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ppx-legacy-"));
   fs.mkdirSync(path.join(root, "config"), { recursive: true });
-  fs.writeFileSync(path.join(root, "config", "ppx.json"), JSON.stringify({ providers: [], channels: { http: { mcp: { legacy_rest: opts.legacyRest } } } }));
+  fs.writeFileSync(path.join(root, "config", "ppx.json"), JSON.stringify({
+    providers: [],
+    channels: { http: { mcp: { legacy_rest: opts.legacyRest }, cors_origin: opts.corsOrigin } },
+  }));
   const svc = await startServer({ root, port: 0, host: "127.0.0.1" });
   const port = svc.server.address().port;
   const token = svc.http.authToken;
@@ -336,8 +339,10 @@ test("REST 兼容: 默认 (legacy_rest 缺省) 时 /api/* 与 /message 仍可用
   }
 });
 
-test("CORS: /mcp 响应带 Access-Control-Allow-Origin + OPTIONS 预检", async () => {
-  const svc = await bootLegacy({ legacyRest: undefined });
+test("CORS: /mcp 响应带 Access-Control-Allow-Origin + OPTIONS 预检 (跨源客户端需配置白名单)", async () => {
+  // 2026-10-31: CORS 默认收紧为 same-origin —— 浏览器型跨源 MCP 客户端 (如 web 版 Inspector)
+  //   现在需要显式配置 channels.http.cors_origin 白名单。本测试钉住白名单路径的形状。
+  const svc = await bootLegacy({ legacyRest: undefined, corsOrigin: ["http://localhost:3000"] });
   try {
     // 实际 POST (带 Origin) 应有 ACAO 头
     const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping", params: { _meta: { "io.modelcontextprotocol/protocolVersion": MODERN_PROTOCOL_VERSION, "io.modelcontextprotocol/clientInfo": { name: "x", version: "1" }, "io.modelcontextprotocol/clientCapabilities": {} } } });
@@ -356,6 +361,25 @@ test("CORS: /mcp 响应带 Access-Control-Allow-Origin + OPTIONS 预检", async 
     assert.equal(o.status, 204);
     const ah = (o.headers.get("access-control-allow-headers") || "").toLowerCase();
     assert.ok(ah.includes("mcp-protocol-version"), `Allow-Headers 应含 MCP 头: ${ah}`);
+  } finally {
+    await new Promise((res) => svc.server.close(res));
+    svc.agent.shutdown();
+    try { fs.rmSync(svc.root, { recursive: true, force: true }); } catch {}
+  }
+});
+
+// 2026-10-31 回归: 默认 same-origin 模式下, 非回环跨源 /mcp 在 CORS 层被 403 (mcp 层
+// 自己的 origin 白名单不再被请求到达) —— 外部站点必须显式配置 cors_origin 白名单。
+// 注: 回环主机名 (localhost:任意端口) 在 strict 模式本就受信 (_originTrusted 语义), 不在此列。
+test("CORS: 未配置白名单时非回环跨源 /mcp 被 403 (same-origin 默认)", async () => {
+  const svc = await bootLegacy({ legacyRest: undefined });
+  try {
+    const r = await fetch(`http://127.0.0.1:${svc.port}/mcp`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "origin": "https://evil.example.com" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping", params: {} }),
+    });
+    assert.equal(r.status, 403, "非回环跨源请求在 CORS 层被拒");
   } finally {
     await new Promise((res) => svc.server.close(res));
     svc.agent.shutdown();

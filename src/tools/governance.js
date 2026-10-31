@@ -18,7 +18,76 @@ export function registerGovernanceTools(catalog, deps = {}) {
   registerMemoryGovernanceTools(catalog, deps);
   registerAuditTools(catalog, deps);
   registerOpsTools(catalog, deps);
+  registerWorkStackTool(catalog, deps);
   return catalog;
+}
+
+// ---- 组 4: 跨轮任务栈 (2026-10-30, P1) ----
+// 「手头的事」这一层此前不存在: 每轮 _context 重新拼人格/画像/记忆, 却没有"我正在干什么"。
+// 工具只提供增改查; 真正的价值在于上下文注入 (prompts._workStackPrompt) —— 模型每轮都能看到栈,
+// 所以它不必靠 memory/turns 归档去猜"上一件事做到哪了"。
+// 栈实例由 agent 装配 (this.workStack), 这里通过 catalog.call 的 ctx.agent 取, 不新增依赖注入路径。
+function registerWorkStackTool(catalog) {
+  const noStack = () => JSON.stringify({ error: "任务栈未初始化 (agent.workStack 缺失)" });
+  const brief = (r) => {
+    if (!r || r.ok === false) return JSON.stringify(r || { ok: false });
+    const it = r.item || r.removed;
+    return JSON.stringify({
+      ok: true,
+      id: it?.id,
+      goal: it?.goal,
+      status: it?.status,
+      steps: it?.steps,
+      reused: r.reused === true || undefined,
+      stack: r.stack,
+    });
+  };
+  catalog.register({
+    name: "task_stack",
+    capability: { readOnly: false, riskLevel: "low", sideEffect: "workspace" },
+    description: "跨轮任务栈: 记「手头有哪几件事、各停在哪一步」。多步任务开工前 push, 每推进一步 update —— 被打断或上下文压缩后还能接上。",
+    parameters: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["list", "push", "update", "done", "remove", "clear"], description: "list/push/update/done/remove/clear" },
+        goal: { type: "string", description: "push 必填: 目标一句话" },
+        steps: { type: "array", items: { type: "string" }, description: "push/update 可选: 步骤清单" },
+        id: { type: "string", description: "update/done/remove 的条目 id (缺省=活跃条目)" },
+        note: { type: "string", description: "update 可选: 卡在哪/等什么" },
+        status: { type: "string", enum: ["active", "blocked", "done"], description: "update 可选: 状态" },
+        step_index: { type: "number", description: "勾选第几步 (0 起)" },
+        step_done: { type: "boolean", description: "配合 step_index, 默认 true" },
+      },
+      required: ["action"],
+    },
+    category: "governance",
+    power: "user",
+    idempotent: false,
+    execute: async (args, ctx) => {
+      const st = ctx?.agent?.workStack;
+      if (!st) return noStack();
+      const action = String(args.action || "").toLowerCase();
+      if (action === "list") return JSON.stringify({ ok: true, stack: st.status() });
+      if (action === "clear") return JSON.stringify({ ok: true, ...st.clear() });
+      if (action === "push") {
+        if (!String(args.goal || "").trim()) return JSON.stringify({ ok: false, error: "push 需要 goal" });
+        return brief(st.push(args.goal, { steps: args.steps, note: args.note }));
+      }
+      if (action === "update") {
+        const patch = {};
+        if (args.status) patch.status = args.status;
+        if (typeof args.note === "string") patch.note = args.note;
+        if (Array.isArray(args.steps)) patch.steps = args.steps;
+        if (Number.isInteger(args.step_index)) {
+          patch.step = { index: args.step_index, done: args.step_done !== false };
+        }
+        return brief(st.update(args.id, patch));
+      }
+      if (action === "done") return brief(st.complete(args.id));
+      if (action === "remove") return brief(st.remove(args.id));
+      return JSON.stringify({ ok: false, error: `未知 action: ${args.action}` });
+    },
+  });
 }
 
 // ---- 组 1: 记忆治理 (forget / restore / list_deleted / export / import / clear_layer) ----

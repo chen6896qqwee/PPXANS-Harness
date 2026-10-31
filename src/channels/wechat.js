@@ -8,6 +8,8 @@
 import crypto from "node:crypto";
 import { Channel } from "./base.js";
 import { decryptMsg, verifySignature, encryptReplyXml } from "./wechat-crypto.js";
+import { triggerFromWechatFields } from "./trigger.js";
+import { admitThroughPolicy } from "./policy.js";
 
 export class WechatWebhookChannel extends Channel {
   constructor(agent, {
@@ -162,7 +164,13 @@ export class WechatWebhookChannel extends Channel {
       return ""; // 重发消息: 回 200 空体 (微信协议语义 = 本次不回复, 平台自行停止重投)
     }
     this._seenMsgs.set(msgId, Date.now());
-    const reply = await this.agent.chat(text);
+    // 2026-10-31 (Super-agent 一期): 构造 Trigger 走两级过滤门 + 四段式会话键归组。
+    //   被动回包协议特殊 (5 秒内必须回 XML, 回复走返回值而非主动推送), 因此不走
+    //   handleTrigger (那会经 send() 主动推送二次发送); 被过滤时回空体让平台停止重投。
+    const trigger = triggerFromWechatFields({ from: g("FromUserName"), messageId: msgId, text, createTime: g("CreateTime") });
+    const gate = await admitThroughPolicy(trigger, this.agent);
+    if (!gate.ok) return "";
+    const reply = await this.agent.chat(text, gate.sessionKey ? { sessionKey: gate.sessionKey } : undefined);
     const toUser = g("FromUserName");
     if (toUser) this.lastUser = toUser; // 记录最近联系人, 供主动提醒回发
     const fromUser = g("ToUserName");

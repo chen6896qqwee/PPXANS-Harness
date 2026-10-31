@@ -32,7 +32,7 @@
 
 ### 1. 一切皆插件（吸收 dsh Cordis 理念）
 
-`src/plugin/context.js` 提供轻量容器：`provide(key, value)` 注册、`consume(key)` 消费（父子查找）、`onDispose` 可逆效果。`src/plugin/builtin.js` 的 14 个内置插件（bus/healer/persona/facts/experience/session/memory/llm/memoryLayers/traces/audit/tools/evolve/mode）按「依赖在前」的顺序装配，任何模块都可被用户插件替换。
+`src/plugin/context.js` 提供轻量容器：`provide(key, value)` 注册、`consume(key)` 消费（父子查找）、`onDispose` 可逆效果。`src/plugin/builtin.js` 的 15 个内置插件（bus/healer/persona/facts/experience/legionBoard/session/memory/llm/memoryLayers/traces/audit/tools/evolve/mode）按「依赖在前」的顺序装配，任何模块都可被用户插件替换。
 
 ### 2. 会话即唯一事实源（吸收 dsh「Model-visible ⟺ logged」）
 
@@ -98,7 +98,7 @@ src/
 ├── services/    业务服务（memory-service 记忆协调 / learning-service 自我学习，agent 薄委托）
 ├── agent/       Agent 引擎（编排薄委托 + 多模型回退；工具循环/记忆/学习已抽 core/services）
 ├── ans/         ANS 模块（values 价值对齐 / proactive 主动任务 / lifecycle 生命周期 / guard 免疫闸门，可更换）
-├── plugin/      插件装配（Context + 14 个内置插件）
+├── plugin/      插件装配（Context + 15 个内置插件）
 ├── memory/      五层记忆存储 + 会话事件日志 + 压缩层
 ├── tools/       工具系统（catalog + seam + builtin/advanced/methods/selfmod/document/ocr）
 ├── seam/        服务层能力 seam（shell 等）

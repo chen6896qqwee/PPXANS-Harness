@@ -4,6 +4,7 @@
 //
 // 输入: 一次任务的执行轨迹 (最终回复 + 工具调用序列 + 耗时 + 判分结果)
 // 输出: { cause, confidence, evidence[], action } —— action 直接对应"按症状下药"表的处方
+import { stableJson } from "../utils/canonical.js";
 
 export const CAUSE = {
   /** 卡在 LLM 侧: 单次调用悬挂, 任务时限先到 */
@@ -40,9 +41,11 @@ const PRESCRIPTION = {
 };
 
 // 工具调用签名 (同工具同参数视为重复)
+// 2026-10-30: 改走键序无关的稳定序列化 —— 同一组参数换键序重发, 不再被当成两次不同调用
+//   (漏判的后果是 LOOP 归因判不出来, 处方也就下错)。
 function sig(c) {
   try {
-    return `${c.tool}::${JSON.stringify(c.args || {}).slice(0, 120)}`;
+    return `${c.tool}::${stableJson(c.args || {}, 120)}`;
   } catch {
     return String(c.tool);
   }

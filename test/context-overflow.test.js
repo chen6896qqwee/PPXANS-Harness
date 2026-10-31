@@ -43,7 +43,7 @@ test("窗口感知预算: 按 provider context_window 收紧历史预算", () =>
     // config 覆盖作用窗口时生效
     a.config.memory.context_window_ratio = 0.5;
     assert.equal(a._histTokenCap(), Math.floor(8192 * 0.5));
-  } finally { cleanup(dir); }
+  } finally { a.shutdown(); cleanup(dir); }
 });
 
 test("硬裁剪兜底: 即使预算配置极大也压回窗口安全比例 (不依赖 LLM)", () => {
@@ -59,7 +59,7 @@ test("硬裁剪兜底: 即使预算配置极大也压回窗口安全比例 (不�
     const total = out.reduce((s, m) => s + estimateTokens(String(m.content)), 0);
     assert.ok(total <= a._histTokenCap(), `历史总 token 应在窗口比例内, 实际 ${total} vs ${a._histTokenCap()}`);
     assert.equal(out[out.length - 1], hist[hist.length - 1], "必保最近一条");
-  } finally { cleanup(dir); }
+  } finally { a.shutdown(); cleanup(dir); }
 });
 
 test("溢出降档: 保留 system + 最后 user 起完整单元(含 in-flight 工具配对), 只剪中间历史", () => {
@@ -75,7 +75,7 @@ test("溢出降档: 保留 system + 最后 user 起完整单元(含 in-flight �
     // 历史被裁剪到预算内
     const total = out.reduce((s, m) => s + Math.ceil(String(m.content).length / 1.6), 0);
     assert.ok(total <= 400, "重建后应落在预算内");
-  } finally { cleanup(dir); }
+  } finally { a.shutdown(); cleanup(dir); }
 });
 
 test("溢出降档-工具配对完整: 不剪成孤立 tool 消息", () => {
@@ -91,7 +91,7 @@ test("溢出降档-工具配对完整: 不剪成孤立 tool 消息", () => {
     assert.ok(out.some((m) => m.role === "tool"), "tool 配对不丢失");
     const lastTool = out[out.length - 1];
     assert.equal(lastTool.role, "tool", "末尾保持 in-flight 工具消息");
-  } finally { cleanup(dir); }
+  } finally { a.shutdown(); cleanup(dir); }
 });
 
 test("集成: _llmWithTools 首次溢出 → 降档重试成功返回", async () => {
@@ -113,7 +113,7 @@ test("集成: _llmWithTools 首次溢出 → 降档重试成功返回", async ()
     const r = await a._llmWithTools([{ role: "user", content: "问题" }], stub);
     assert.equal(r, "降档后成功");
     assert.equal(calls, 2, "溢出后应重试一次");
-  } finally { cleanup(dir); }
+  } finally { a.shutdown(); cleanup(dir); }
 });
 
 test("集成: 非溢出错误不吞 (透传给 provider 回退/调用方)", async () => {
@@ -121,5 +121,5 @@ test("集成: 非溢出错误不吞 (透传给 provider 回退/调用方)", asyn
     const stub = { context_window: 2000, apiChat: async () => { const e = new Error("boom"); e.status = 500; throw e; } };
     a.llm = stub;
     await assert.rejects(async () => a._llmWithTools([{ role: "user", content: "x" }], stub), /boom/);
-  } finally { cleanup(dir); }
+  } finally { a.shutdown(); cleanup(dir); }
 });

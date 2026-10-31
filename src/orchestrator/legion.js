@@ -7,6 +7,7 @@ import { EventEmitter } from "node:events";
 import { info, error } from "../utils/logger.js";
 import { createLineReader, writeLine } from "../utils/ndjson.js";
 import { runDag } from "./dag.js";
+import { getGovernor } from "./governor.js";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 // 2026-10-10 修复: 原先 spaw n 的是 src/orchestrator/agent-worker.js —— 那是 2026-10-07
@@ -25,6 +26,10 @@ export class Legion extends EventEmitter {
     this.maxConcurrent = maxConcurrent; // 军团整体并发上限: 防止大 DAG/广播瞬间 spawn 海量子进程
     this.defaultTimeout = Math.max(1000, Number(defaultTimeout) || 600000);
     this.agents = new Map(); // { name: { proc, pending: Map<id,{resolve,reject}>, counter } }
+    // 并发治理器 (2026-10-31 一期挂接): 此前 governor 写好了却没挂到 Legion 上,
+    //   delegate.js/team-room.js 的 `typeof L.spawnAgents === "function"` 恒 false,
+    //   spawn 实际绕过配额。现在 spawnAgents 走 acquire(1), 进程生命周期内持有许可。
+    this.governor = getGovernor();
   }
 
   // 有界并发执行器: 以固定并发度跑一批 async 任务, 超出上限的排队 (背压而非一次性 Promise.all)
@@ -40,6 +45,40 @@ export class Legion extends EventEmitter {
       }
     }));
     return results;
+  }
+
+  // 整批 spawn (配额治理入口, 2026-10-31 一期): delegate.js runTeam / team-room
+  //   makeLegionExecutor 早已按 `typeof L.spawnAgents === "function"` 预留调用口, 此前
+  //   Legion 没有该方法 → 恒退回逐个 spawnAgent 绕过配额。现在每个 spawn 先经
+  //   governor.acquire(1) 拿许可 (排队/拒绝由 governor 语义决定), 许可随进程生命周期
+  //   持有, 进程 exit/error 时归还 (release 幂等, 重复调不泄漏额度)。
+  //   specs 形态 = [{ name, opts }] —— 与两处既有调用点逐字段对齐。
+  async spawnAgents(specs = []) {
+    return this._mapBounded(specs, async (s) => {
+      const name = s?.name;
+      if (!name) return { ok: false, error: "spawnAgents: 缺 name" };
+      const existed = this.agents.has(name); // 复用场景 (team-room 稳定名) 不占新许可
+      let release = null;
+      if (!existed) {
+        try {
+          release = await this.governor.acquire(1, { tag: String(name) });
+        } catch (e) {
+          return { ok: false, name, error: `配额治理拒绝: ${e.message}` };
+        }
+      }
+      try {
+        if (existed) return { ok: true, name, reused: true }; // 复用场景不重 spawn、不占新许可
+        this.spawnAgent(name, s.opts || {});
+        const entry = this.agents.get(name);
+        const onDone = () => { try { release?.(); } catch {} };
+        if (entry?.proc) { entry.proc.once("exit", onDone); entry.proc.once("error", onDone); }
+        else onDone(); // spawnAgent 已登记失败进程等极端情况: 立即归还
+        return { ok: true, name };
+      } catch (e) {
+        try { release?.(); } catch {}
+        return { ok: false, name, error: e.message };
+      }
+    });
   }
 
   // 创建一个 agent 子进程

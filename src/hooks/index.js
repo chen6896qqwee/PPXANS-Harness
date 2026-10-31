@@ -55,8 +55,16 @@ export function createHookRegistry() {
     let blocked = false;
     let blockReason = null;
     const additionalContext = [];
+    // 2026-10-31: PreToolUse 改参闭环 —— 钩子返回 { args: {...} } 即修改工具参数,
+    //   后续钩子看到的是**改后**的参数 (链式语义); emit 返回值带出最终 args 供 agent 落地。
+    //   此前 agent/index.js 消费 h.args 但 emit 从不返回 → "可改参"一直是死代码。
+    let curArgs = payload.args;
 
     for (const h of list) {
+      // PreToolUse 且参数被前序钩子改过时, 用改后参数构造本钩子的 payload (不改调用方的原对象)
+      const hookPayload = (event === "PreToolUse" && curArgs !== undefined)
+        ? { ...payload, args: curArgs }
+        : payload;
       let res = null;
       let err = null;
       let timedOut = false;
@@ -68,7 +76,7 @@ export function createHookRegistry() {
           timer = setTimeout(() => reject(new Error("hook timeout")), h.timeoutMs);
         });
         try {
-          res = await Promise.race([Promise.resolve().then(() => h.fn(payload)), timeout]);
+          res = await Promise.race([Promise.resolve().then(() => h.fn(hookPayload)), timeout]);
         } finally { clearTimeout(timer); }
       } catch (e) {
         err = e && e.message ? e.message : String(e);
@@ -96,13 +104,20 @@ export function createHookRegistry() {
         blocked = true;
         if (!blockReason) blockReason = res.reason || "被钩子否决";
       }
+      // PreToolUse: 可改参 (仅接受非空对象; 与 decision=block 可同返回, block 时改参无意义)
+      if (event === "PreToolUse" && res && res.args && typeof res.args === "object") {
+        curArgs = res.args;
+      }
       // PostToolUse: 收集附加上下文
       if (event === "PostToolUse" && res && res.additionalContext != null) {
         additionalContext.push(res.additionalContext);
       }
     }
 
-    return { blocked, reason: blockReason, results, additionalContext };
+    const out = { blocked, reason: blockReason, results, additionalContext };
+    // 无改动时 curArgs === payload.args (同引用), agent 侧赋值是无害 no-op —— 返回形状恒稳定
+    if (event === "PreToolUse" && payload.args !== undefined) out.args = curArgs;
+    return out;
   }
 
   return { on, onSecurity, emit, events: HOOK_EVENTS.slice() };

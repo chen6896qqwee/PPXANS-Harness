@@ -6,7 +6,9 @@ import fs from "node:fs";
 import path from "node:path";
 
 // 默认跳过的目录 (与既有 .gitignore/构建产物约定一致)
-export const DEFAULT_IGNORE = [".git", "node_modules", "dist", "build", ".next", "tmp", "data", ".workbuddy"];
+// .ppx / uploads / dist-desktop 是本地运行态 (计划、附件、打包产物), 不是源码;
+//   漏掉它们会把本机草稿写进生成的 WIKI / 仓库地图。
+export const DEFAULT_IGNORE = [".git", "node_modules", "dist", "dist-desktop", "build", ".next", "tmp", "data", ".ppx", "uploads", ".workbuddy"];
 
 // 参与扫描的扩展名族: js/ts/mjs/cjs/py/md/json/go/java
 const SCAN_EXT = [".js", ".mjs", ".cjs", ".ts", ".py", ".md", ".json", ".go", ".java"];

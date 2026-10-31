@@ -1,16 +1,16 @@
 {
   "$comment": "可信上游技能源清单 (离线随包分发)。用途: skill_import 不给 repo 时列出可装来源, 或按 name (源 id / 技能名) 解析出仓库引用 —— 让'装技能'从'你得先知道 GitHub 上有个 repo'变成'说个名字'。零依赖: 这个文件是手工维护 + 逐个验证过的白名单, 不做任何在线搜索 (在线搜索意味着任意第三方代码可被一句话拉进来)。",
   "version": 1,
-  "updated": "2026-10-08",
+  "updated": "2026-10-31",
   "sources": [
     {
       "id": "anthropics",
       "name": "Anthropic 官方技能库",
       "repo": "anthropics/skills",
-      "license": "MIT",
+      "license": "Apache-2.0 (13 skills) / missing (doc-coauthoring)",
       "verified": true,
-      "imported": 18,
-      "note": "官方目录式 SKILL.md 技能包, 覆盖文档/设计/测试/前端。本项目已内置导入 18 个 (见 skills/office|content|code 等域)。"
+      "imported": 14,
+      "note": "官方目录式 SKILL.md 技能包, 覆盖文档/设计/测试/前端。本项目已内置导入 14 个 (见 skills/content|code|business 等域)。office 域的 docx/pdf/pptx/xlsx 已改为仓库内自研实现 (Apache-2.0), 不再从上游导入, 因此不在此清单。"
     },
     {
       "id": "addyosmani",
@@ -43,10 +43,6 @@
   "known_skills": {
     "mcp-builder": "anthropics",
     "webapp-testing": "anthropics",
-    "docx": "anthropics",
-    "pdf": "anthropics",
-    "pptx": "anthropics",
-    "xlsx": "anthropics",
     "canvas-design": "anthropics",
     "frontend-design": "anthropics",
     "theme-factory": "anthropics",

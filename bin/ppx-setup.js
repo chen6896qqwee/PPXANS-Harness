@@ -10,21 +10,21 @@
 // MCP 统一接口说明: 配置完成后, Claude Desktop / Cursor / 任何 MCP 客户端可直接连
 //   http://127.0.0.1:8899/mcp 使用全部能力 (见 docs/MODEL-SETUP.md)。
 import readline from "node:readline";
-import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { listPresets, getPreset, buildProvider, applyProviderToConfig } from "../src/llm/presets.js";
+import { configFilePath, readPpxConfig, writeConfigAtomic } from "../src/utils/config-file.js";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
-const CONFIG_FILE = path.join(ROOT, "config", "ppx.json");
+const CONFIG_FILE = configFilePath(ROOT);
 const args = process.argv.slice(2);
 
+// 配置位置与运行时同源: 源码目录写 config/ppx.json, npm 安装写 <数据目录>/config.json
 function readConfig() {
-  try { return JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8")); } catch { return {}; }
+  return readPpxConfig(ROOT, {});
 }
 function writeConfig(raw) {
-  fs.mkdirSync(path.dirname(CONFIG_FILE), { recursive: true });
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(raw, null, 2) + "\n", "utf8");
+  writeConfigAtomic(ROOT, raw);
 }
 async function probe(provider) {
   try {
@@ -38,7 +38,7 @@ async function probe(provider) {
 }
 async function finish(provider, preset) {
   writeConfig(applyProviderToConfig(readConfig(), provider));
-  console.log(`\n✓ 已写入 ${path.relative(ROOT, CONFIG_FILE)} (provider: ${provider.id}, model: ${provider.model || "(默认)"})`);
+  console.log(`\n✓ 已写入 ${CONFIG_FILE} (provider: ${provider.id}, model: ${provider.model || "(默认)"})`);
   if (preset && preset.api_key_env && !provider.api_key) {
     console.log(`  提示: 未填 Key, 运行时会从环境变量 ${preset.api_key_env} 读取`);
   }

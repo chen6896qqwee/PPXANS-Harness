@@ -15,13 +15,45 @@ import { LLMClient } from "./client.js";
 // 原先此处自带一份正则且漏了 `YOUR_*_MODEL` 形态, 导致模板里的 lmstudio
 // (model=YOUR_LOCAL_MODEL_NAME, base_url=127.0.0.1) 被判为"零配置可用"并选为主模型。
 import { isPlaceholder } from "../config/placeholder.js";
+import { execFileSync } from "node:child_process";
 
 // 本地推理服务地址特征
 const LOCAL_HOST_RE = /127\.0\.0\.1|localhost|lm-studio|ollama/i;
 
+// api_key_cmd (2026-10-31): 密钥不落盘的第三条路 —— 配一条命令, 启动时取其 stdout 作为 key。
+// 典型用法: PowerShell DPAPI 解密 / Windows 凭据管理器 / `pass show` / `op read` 等。
+// 同步执行一次 (5s 上限); 失败按"无 key"处理 (provider 退化为不可用, 与未配置同语义, 不炸启动)。
+// 命令由配置文件所有者编写, 与 config 本身同信任级别, 允许经 shell 解释。
+export function resolveApiKeyCmd(p) {
+  const cmd = String(p?.api_key_cmd || "").trim();
+  if (!cmd) return undefined;
+  try {
+    const out = execFileSync(cmd, {
+      shell: true,
+      encoding: "utf8",
+      timeout: 5000,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"], // 吞掉子进程 stderr 噪音, 只取 stdout
+    });
+    const key = String(out || "").trim();
+    return key || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// api_key 优先级: 显式明文 > api_key_cmd 结果 > api_key_env (env 由 LLMClient 自行读取)
+function withResolvedKey(p) {
+  if (p.api_key || !p.api_key_cmd) return p;
+  const k = resolveApiKeyCmd(p);
+  return k ? { ...p, api_key: k } : p;
+}
+
 function hasRealKey(p) {
   // 显式 api_key 且非占位 -> 真 key
   if (p.api_key && !isPlaceholder(String(p.api_key))) return true;
+  // 命令通道 (执行结果是否为空在 resolveApiKeyCmd 里判, 配了就算一路可用来源)
+  if (p.api_key_cmd) return true;
   // env 引用且 env 里设了非空值 -> 真 key
   if (p.api_key_env && process.env[p.api_key_env]) {
     const v = String(process.env[p.api_key_env]);
@@ -81,7 +113,8 @@ export function resolveAllLLMs(config) {
   const provs = (config && config.providers) || [];
   const pref = resolvePreference(config);
   const ro = reasoningOpts(config);
-  return orderProviders(provs.filter(isUsableProvider), pref).map((p) => new LLMClient({ ...p, ...ro }));
+  return orderProviders(provs.filter(isUsableProvider), pref)
+    .map((p) => new LLMClient({ ...withResolvedKey(p), ...ro }));
 }
 
 export function resolveLLM(config) {
@@ -89,16 +122,16 @@ export function resolveLLM(config) {
   const ro = reasoningOpts(config);
   // 显式选择 (Web UI 模型切换): config.llm.provider 优先, 可用才生效
   const explicit = explicitProvider(config);
-  if (explicit) return new LLMClient({ ...explicit, ...ro });
+  if (explicit) return new LLMClient({ ...withResolvedKey(explicit), ...ro });
   // 强制指定: PPX_PROVIDER=<id> (测试/用户显式选择)
   const forced = process.env.PPX_PROVIDER;
   if (forced) {
     const t = provs.find((x) => x.id === forced || x.id === String(forced).toLowerCase());
-    if (t && isUsableProvider(t)) return new LLMClient({ ...t, ...ro });
+    if (t && isUsableProvider(t)) return new LLMClient({ ...withResolvedKey(t), ...ro });
   }
   const pref = resolvePreference(config);
   const ordered = orderProviders(provs.filter(isUsableProvider), pref);
-  return ordered.length ? new LLMClient({ ...ordered[0], ...ro }) : null;
+  return ordered.length ? new LLMClient({ ...withResolvedKey(ordered[0]), ...ro }) : null;
 }
 
 // 异步健康排序: 启动时探测各候选 /models, 能连的排前 (只读, 不改配置)

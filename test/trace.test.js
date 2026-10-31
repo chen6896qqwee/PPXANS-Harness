@@ -111,10 +111,13 @@ test("EventTracer.span: 成功记录耗时+ok, 失败记录 error 并重抛", as
 
 test("runToolLoop onEvent: 工具失败路径发出策略事件", async () => {
   const events = [];
+  // 探索熔断默认阈值 5 轮 (2026-10-30 从 3 放宽) —— 这里就跑满 5 轮只读来触发事件
   const plan = [
     { tool_calls: [{ id: "t1", type: "function", function: { name: "read_file", arguments: '{"p":"a"}' } }], content: null },
     { tool_calls: [{ id: "t2", type: "function", function: { name: "read_file", arguments: '{"p":"b"}' } }], content: null },
     { tool_calls: [{ id: "t3", type: "function", function: { name: "read_file", arguments: '{"p":"c"}' } }], content: null },
+    { tool_calls: [{ id: "t4", type: "function", function: { name: "read_file", arguments: '{"p":"d"}' } }], content: null },
+    { tool_calls: [{ id: "t5", type: "function", function: { name: "read_file", arguments: '{"p":"e"}' } }], content: null },
     { tool_calls: [], content: "done" },
   ];
   let i = 0;

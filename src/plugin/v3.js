@@ -2,6 +2,7 @@
 // codex 对齐升级: 权限引擎 + 钩子链 + 斜杠命令 + 目标看板, 全部走「一切皆插件」装配, 可被用户插件替换。
 import path from "node:path";
 import { createHookRegistry } from "../hooks/index.js";
+import { registerUserHooks } from "../hooks/user-hooks.js";
 import {
   createPermissionEngine,
   AskForApproval,
@@ -13,8 +14,26 @@ import { createProtocolBus } from "../protocol/index.js";
 import { info } from "../utils/logger.js";
 
 // 钩子链插件: claude-code 六事件 (PreToolUse/PostToolUse/PreCompact/SessionStart/...)
+// 2026-10-31: 用户配置钩子接线 —— config/ppx.json 的 hooks 键 + 项目级 .ppx/settings.json
+//   (白名单制防仓库投毒, 见 src/hooks/user-hooks.js)。无效条目 fail-visible, 不阻断启动。
 export const hooksPlugin = (ctx) => {
-  ctx.provide("hooks", createHookRegistry());
+  const registry = createHookRegistry();
+  try {
+    const summary = registerUserHooks(registry, {
+      config: ctx.consume("config"),
+      root: ctx.consume("root"),
+    });
+    if (summary.registered || summary.errors.length || summary.skipped.length) {
+      let msg = `[v3] 用户钩子: ${summary.registered} 条已注册`;
+      if (summary.errors.length) msg += `, ${summary.errors.length} 条无效跳过 (hooks 配置校验)`;
+      for (const e of summary.errors) info(`[v3] ${e}`);
+      for (const s of summary.skipped) msg += `; ${s}`;
+      info(msg);
+    }
+  } catch (e) {
+    info(`[v3] 用户钩子装配失败 (不阻断): ${e.message}`);
+  }
+  ctx.provide("hooks", registry);
 };
 
 // 权限引擎插件: codex AskForApproval 四档 + SandboxPolicy 三档 + opencode 规则链

@@ -55,6 +55,13 @@ export class MemoryTicker {
   static TURN_ARCHIVE_ITEMS = 12;         // 每类条目最多存条数
   static TURN_ARCHIVE_ITEM_CHARS = 600;   // 单条折叠上限 (与 src/agent/context.js foldText 同形)
   static TURN_ARCHIVE_LINE_BYTES = 8192;  // 单轮 JSON 行硬上限
+  // 归档合批 (2026-10-30, L1): turns 归档是"重建得出来"的结构化档 —— 它的唯一输入就是
+  //   session 事件日志, 丢了能从 events 重放。所以它不必每轮加锁写一次:
+  //   攒够 TURN_ARCHIVE_BATCH 条、或距上次落盘超过 TURN_ARCHIVE_FLUSH_MS、或遇到强制点
+  //   (跨天 / 读取 / 进程收口) 才真写一次, 一次锁写多行。
+  //   并发压测里 _archiveTurnContext 占 22% (20 会话 60 请求, 关掉它 2344ms → 1821ms)。
+  static TURN_ARCHIVE_BATCH = 5;          // 攒够几条就落盘
+  static TURN_ARCHIVE_FLUSH_MS = 3000;    // 或距上次落盘多久 (惰性, 下次写入时才判)
 
   // ==== F9 (2026-10-04, 与 src 同源) 长期记忆热路径尾窗 + 保留期 ====
   // longterm.md 是追加型归档, 可达数 MB。热路径 (每轮 context()) 绝不能整文件读 ——
@@ -82,6 +89,16 @@ export class MemoryTicker {
     this.stateFile = path.join(this.dir, "daily-state.json");
     this.state = { day: null, turnCount: 0 };
     this._lastCompactAt = 0; // 压缩节流时间戳 (v1.0.7)
+    // 2026-10-30: 检查节流时间戳 (**与压缩节流分开**)。原实现只有 _lastCompactAt, 而它仅在
+    //   "真压缩完成"后才更新 —— 于是当天事件数没到阈值 (<COMPACT_THRESHOLD) 时, 每轮 recordTurn
+    //   都会重新 replayDay 读一遍当天全部分片并逐行解析, 节流形同虚设。
+    //   并发压测实测: 关掉 _compactIfNeeded 使 20 会话 60 请求从 2344ms 降到 1948ms (-17%)。
+    this._lastCompactCheckAt = 0;
+    // 归档合批队列 (见 TURN_ARCHIVE_BATCH 注释): {file, text} 累积到阈值再一次性加锁追加。
+    //   崩溃语义: 硬杀进程最多丢最近 <TURN_ARCHIVE_BATCH 条**归档行**, 可由 session 事件重建;
+    //   事实库 (facts.json) 与会话原文两条真源不受影响。
+    this._archiveQueue = [];
+    this._archiveFlushedAt = 0;
     // F9a 可观测: 最近一次 context() 实际读了 longterm.md 多少字节
     this._lastContextTailBytes = 0;
     this._loadState();
@@ -104,6 +121,9 @@ export class MemoryTicker {
   _rollDay() {
     const today = logicalDay();
     if (this.state.day !== today) {
+      // 跨天前先把队列里的归档写完 —— 否则昨天的行会被写进今天的分片路径判断之外的时序里,
+      //   也让"日终归档"读到的是缺最后几轮的 turns (合批后必须显式收口)。
+      this.flushTurnArchive();
       if (this.state.day) this._compileDaily();
       this.state.day = today;
       this._saveState();
@@ -226,7 +246,25 @@ ${_scrub(lines.join("\n"))}\n`);
   async recordTurn(user, assistant, opts = {}) {
     this._rollDay();
     this.state.turnCount += 1;
-    this._saveState();
+    // OPT-3 (2026-10-30): "纯 turnCount 递增"的状态保存不再每轮落盘 —— 此前每轮都
+    //   withFileLock + writeJson 全量原子写 (~1.7ms/轮, stub LLM 下单轮内核开销的 ~10%),
+    //   而 turnCount 的全部消费方只有两处: 下面按 TURNS_PER_SUMMARY 触发的滚动归档节奏,
+    //   以及 _archiveTurnContext 的轮次标签 (纯标注, 不是索引/游标)。因此它只需在
+    //   "滚动归档的检查点"落盘, 不必每轮落盘:
+    //     · turnCount % TURNS_PER_SUMMARY === 0 时写一次 —— 同一轮紧接着的
+    //       _compileDaily_Rolling 也会强制落盘 (游标推进必须落, 见 ②), 这里先写一次是为了
+    //       即使 longterm 追加失败/抛错, 计数器也已经持久化 (代价仅 1/10 轮)。
+    //   **以下时机一律强制落盘, 不经过本闸门** (每个都比 turnCount 重要, 一个都不能丢/回退):
+    //     ① 跨天 _rollDay: state.day / lastRetentionDay / 日终归档游标 → 内部直接 _saveState。
+    //     ② _compileDaily_Rolling 推进 lastRolledDay/lastRolledSeq → 内部无条件 _saveState
+    //        (防止整日原文被重复追加)。
+    //     ③ _compactIfNeeded 的 rollup 游标前移 (lastRolledDay/lastRolledSeq) → 内部无条件写。
+    //     ④ _runRetention 清扫结果 (retention 统计 + lastRetentionDay) → 挂在 _rollDay 边界强制写。
+    //     ⑤ 进程收口: agent.shutdown() 已调 this.memory._saveState?.() —— 这是既有的 flush 收口,
+    //        无需新增 flushState 符号, 也不需要改 src/agent (优雅退出时最后一次计数也落盘)。
+    //   崩溃语义: 硬杀进程最多丢最近 <TURNS_PER_SUMMARY 次纯计数递增, 只是让滚动归档晚几轮;
+    //   会话原文在 SessionStore, 游标全部由上面 ①②③④ 强制落盘 —— 不存在游标回退/重复归档路径。
+    if (this.state.turnCount % TURNS_PER_SUMMARY === 0) this._saveState();
     // 来源分级 (v2026-10-XX, 与 src 同口径): 本轮 tier = 声明级 与 证据级 的**最弱**者 ——
     //   抓过外部内容的轮次里, 蒸馏出的任何事实都只能是 tool-fetched (隔离带), 无论调用方怎么声明。
     //   判定只看证据里的工具名 (调用点事实), 不看文本。
@@ -350,11 +388,47 @@ ${_scrub(lines.join("\n"))}\n`);
       line = lineOf(body, dropped);
     }
     const file = path.join(this.dir, "turns", `${rec.day}.jsonl`);
+    // 2026-10-30 (L1 合批): 不再每轮 ensureDir + 加锁 + append —— 入队, 由阈值/强制点批量落盘。
+    //   落档失败不阻塞蒸馏主链 (与原来单条写入的容忍度一致)。
+    this._enqueueArchive(file, _scrub(line) + "\n");
+    return { file, bytes: Buffer.byteLength(line, "utf8"), items: body.length, dropped, queued: true };
+  }
+
+  // 归档入队 (调用方: _archiveTurnContext)。达阈值或超时即落盘, 否则留到强制点。
+  _enqueueArchive(file, text) {
     try {
-      ensureDir(path.dirname(file));   // 锁文件与数据文件同目录, 缺目录时 wx 抢锁必失败
-      withFileLock(file, () => appendText(file, _scrub(line) + "\n"));
-    } catch { return null; }           // 落档失败不影响蒸馏主链
-    return { file, bytes: Buffer.byteLength(line, "utf8"), items: body.length, dropped };
+      this._archiveQueue.push({ file, text });
+      const now = Date.now();
+      if (this._archiveQueue.length >= MemoryTicker.TURN_ARCHIVE_BATCH
+        || now - (this._archiveFlushedAt || 0) >= MemoryTicker.TURN_ARCHIVE_FLUSH_MS) {
+        this.flushTurnArchive();
+      }
+    } catch { /* 入队异常不阻塞主链 */ }
+  }
+
+  // 批量落盘队列 (强制点: 跨天 / turnArchive 读取 / 进程收口 / 队列达阈值)。
+  // 同一文件的多个行合成一次锁 + 一次 append; 逐文件 try/catch, 单文件失败不拖累其他文件。
+  // 返回真正落盘的行数 (供测试与可观测)。
+  flushTurnArchive() {
+    const q = this._archiveQueue;
+    if (!Array.isArray(q) || !q.length) return 0;
+    this._archiveQueue = [];
+    const byFile = new Map();
+    for (const it of q) {
+      if (!it || !it.file) continue;
+      if (!byFile.has(it.file)) byFile.set(it.file, []);
+      byFile.get(it.file).push(it.text);
+    }
+    let n = 0;
+    for (const [file, lines] of byFile) {
+      try {
+        ensureDir(path.dirname(file));   // 锁文件与数据文件同目录, 缺目录时 wx 抢锁必失败
+        withFileLock(file, () => appendText(file, lines.join("")));
+        n += lines.length;
+      } catch { /* 单文件落档失败: 丢弃该批 (与单条写入失败的容忍度一致) */ }
+    }
+    this._archiveFlushedAt = Date.now();
+    return n;
   }
 
   // 读回某天的轮次上下文 (尾窗读 + 逐行解析, 坏行跳过不抛)。结果从不注入 prompt。
@@ -377,6 +451,8 @@ ${_scrub(lines.join("\n"))}\n`);
   }
 
   turnArchive({ day = null, sessionKey = null, limit = 20, tailBytes = 65536 } = {}) {
+    // 读取前先落盘队列 —— 合批后最近几轮可能还在内存里, 不 flush 会让读取方"看不见刚发生的对话"
+    this.flushTurnArchive();
     const d = day ? String(day).slice(0, 10) : logicalDay();
     const file = path.join(this.dir, "turns", `${d}.jsonl`);
     const TAIL = Math.max(1024, Number(tailBytes) || 65536);
@@ -451,9 +527,14 @@ ${_scrub(lines.join("\n"))}\n`);
 
   // 滚动压缩: 今日事件超量时, 把最旧对话聚合压缩进 longterm, 只留近期
   // v1.0.7 节流: 压缩后 COMPACT_MIN_INTERVAL_MS 内不重复, 防每轮对话都付 LLM 压缩成本
+  // 2026-10-30 修: 检查本身也要节流 —— 否则"还没到压缩阈值"的日子里, 每轮都在 replayDay 读全天分片
   async _compactIfNeeded() {
     const now = Date.now();
     if (now - (this._lastCompactAt || 0) < COMPACT_MIN_INTERVAL_MS) return;
+    // 检查节流 (与压缩节流分开): 60s 内已查过就不必再读一遍当天事件。
+    // 代价: 压缩最多延迟到下一次检查 (原语义本来就是"晚几轮才压", 这里只把"每轮读盘"变成"每 60s 读一次")。
+    if (now - (this._lastCompactCheckAt || 0) < COMPACT_MIN_INTERVAL_MS) return;
+    this._lastCompactCheckAt = now;
     const today = logicalDay();
     const evs = _dayEvents(this.sessionStore, today);
     if (evs.length < COMPACT_THRESHOLD) return;

@@ -34,7 +34,9 @@ async function main() {
       return;
     }
     const summary = await loop.cycle({
-      targetFiles: files,
+      // 无 CLI 参数时回落到 config agent.self_iteration.target_files —— 与文档 (第 10 行) 和
+      // 每日定时路径一致; 传 [] 会短路掉配置目标 (targetFiles || cfg 走不到 cfg)
+      targetFiles: files.length ? files : null,
       onEvent: (t) => console.log(`  · ${t}`),
     });
     console.log("\n==== 进化周期结果 ====");

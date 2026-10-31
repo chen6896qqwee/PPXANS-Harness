@@ -137,6 +137,7 @@ test("主动提醒: broadcast 把文本广播到所有已启用通道", async ()
   const mgr = new ChannelManager(agent, { fake: { enabled: true }, http: { enabled: false } }, { fake: FakeChannel });
   await mgr.start();
   await mgr.broadcast("【主动提醒】明天提交周报");
+  await mgr.delivery.idle(); // 队列⑦: 广播经投递队列, 等排空再断言
   assert.deepEqual(mgr.get("fake").sent, [{ to: "*", text: "【主动提醒】明天提交周报" }]);
   await mgr.stop();
   agent.shutdown();

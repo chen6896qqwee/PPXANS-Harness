@@ -6,6 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { readJson, readText } from "../utils/store.js";
 import { warn } from "../utils/logger.js";
+import { configFilePath, legacyConfigFilePath } from "../utils/config-file.js";
 import { isPlaceholder } from "./placeholder.js";
 
 // ---- 默认配置 (用户未写的字段用这些兜底) ----
@@ -31,10 +32,32 @@ export const DEFAULT_CONFIG = {
     //   都读 config.agent.legion.max_concurrent_agents —— 此前默认配置里没有这个键,
     //   工具一执行就 "Cannot read properties of undefined"。
     legion: { max_concurrent_agents: 8, max_concurrent_per_call: 4 },
+    // Watchdog 控制回路 (2026-10-31 Super-agent 一期): 独立定时心跳会话, 既看基础设施体征
+    //   (SQ 死轮/内存) 也看任务进展 (工作栈卡死/故障病历头部); 低打扰 —— 异常才广播。
+    //   默认关, config.agent.watchdog.enabled=true 显式开启。
+    watchdog: { enabled: false, interval_minutes: 30 },
+    // Trigger 两级事件过滤 (2026-10-31 Super-agent 一期): 渠道入站事件先过程序级 Fast Path
+    //   (渠道/群/发送者黑白名单, first-match-wins, deny 恒胜), 可选 LLM 语义 Slow Path。
+    //   mode:"all" = 不过滤 (行为不变); session_mapping:
+    //   "chat" = 每群/每人独立会话 (推荐, 群聊话题不再混进 default);
+    //   "shared" = 回退旧行为 (全部消息共用 default 会话)。
+    trigger_policy: { mode: "all", semantic: false, semantic_prompt: "", session_mapping: "chat",
+      deny_groups: [], allow_groups: [], deny_senders: [], allow_senders: [] },
     // 工具循环阈值 (可调): 最大工具轮次 / 工具结果裁剪预算 / 工具错误重试次数
     max_tool_rounds: 8,
     tool_result_budget: 4000,
     max_tool_error_retry: 2,
+    // 同轮工具并发上限 (2026-10-30): 一轮 N 个 tool_calls 不再全部同时起跑。
+    //   0 = 不限 (旧行为); 默认 4 与 legion.max_concurrent_per_call 同量级。
+    max_parallel_tools: 4,
+    // 轮次耗尽强制收口 (2026-10-30): 跑满 max_tool_rounds 后补一次无工具调用做总结,
+    //   而不是直接把"轮次过多"甩给用户; false = 保留旧行为。
+    exhausted_finalize: true,
+    // 工具曝光策略 (2026-10-30): "all" = 全部工具下发完整 schema (默认, 行为不变);
+    //   "core" = 只下发 CORE_TOOL_EXPOSURE 名单, 其余降级为 system prompt 里的名字 +
+    //   tool_schema 按需取参数 (实测 96 个 schema 占 11.2k tok/请求, 收窄后约 3k);
+    //   也可传字符串数组自定义名单 (会自动并入 tool_schema / list_capabilities)。
+    tool_exposure: "all",
     // v1.6.0 (第四刀): 全局默认工具超时预算 (工具未声明 timeoutMs 时兑底, 防单个慢工具卡死对话)
     // 保守默认, 先跑一周采集 P50/P95/P99 再调 (第五刀自适应预算的数据基础); 0 = 不限时
     tool_timeout_ms: 30000,
@@ -76,13 +99,37 @@ export const DEFAULT_CONFIG = {
   plugins: { dir: "plugins" },
   mcp: { servers: [], auto_connect: false },
   channels: {
-    // cors_origin: CORS 来源白名单 (数组)。空数组/未配置 = 默认 * (兼容); 配置后仅放行白名单浏览器来源 (v1.0.7)
-    http: { enabled: true, port: 8899, auth_token: "", cors_origin: [] },
+    // cors_origin (v1.0.7): CORS 来源策略。2026-10-31 默认收紧为 "same-origin" 严格模式
+    //   (跨源带 Origin 的一律 403); 显式放开: "*" / [] / 白名单数组 ["http://localhost:3000"]
+    http: { enabled: true, port: 8899, auth_token: "", cors_origin: "same-origin" },
     feishu: { enabled: false, appId: "", appSecret: "", verifyToken: "" },
     wechat: { enabled: false, path: "/wechat/webhook", token: "", encodingAESKey: "", corpId: "", corpSecret: "", agentId: "" },
     log: { enabled: false, target: "console" },
+    // 2026-10-31 (队列⑦): 渠道投递队列 —— 主动提醒/广播的可靠投递。失败指数退避重试,
+    //   入队超 ttl 丢弃 (提醒过期即噪音), 积压超上限丢最旧; WAL 落 <dataDir>/channels/
+    //   delivery.wal.jsonl, 重启 replay 续投。enabled=false 回退旧同步直发。
+    delivery: { enabled: true, retry_max: 3, backoff_ms: 2000, ttl_ms: 3600000, max_queue: 200, wal: true },
   },
-  security: { allow_all: false, command_timeout_ms: 30000, code_act: false, deny: [] },
+  // 2026-10-31: shell 执行环境 seam —— "local" (默认, 宿主直执行) | "docker" (容器沙箱)。
+  // docker 模式: workspace 挂到容器 /workspace, 断网 + cap-drop ALL + no-new-privileges +
+  //   资源上限; Docker 不可用时按 docker.missing 回退本地或报错。细节见 src/seam/shell.js。
+  security: {
+    allow_all: false, command_timeout_ms: 30000, code_act: false, deny: [],
+    shell_provider: "local",
+    docker: {
+      image: "node:22-bookworm",   // 官方 node 镜像自带 git/python3/g++, 覆盖常见构建命令
+      network: "none",             // "none"=断网 (默认); "bridge"=容器可联网
+      memory: "1g", cpus: "2", pids_limit: 256,
+      user: "",                    // 容器内 uid (如 "1000:1000"); 空=镜像默认
+      env_pass: ["LANG", "LC_ALL", "TZ"], // 宿主环境变量白名单 (默认零透传, 防密钥入容器)
+      missing: "fallback",         // docker 不可用: "fallback"=回退本地+告警 | "error"=命令报错
+      bin: "docker",
+    },
+  },
+  // 2026-10-31: 用户配置钩子 (吸收 claude-code settings.json hooks 格式, 见 src/hooks/user-hooks.js)。
+  //   事件数组 (PreToolUse/PostToolUse/...) 由用户按需添加, 不进默认值; 这里只落元配置:
+  //   trust_project_roots = 允许加载 .ppx/settings.json 钩子的项目根白名单 (默认空, 防仓库投毒)
+  hooks: { trust_project_roots: [] },
 };
 
 // 深度合并: override 优先, base 缺字段用默认值 (数组/标量直接覆盖)
@@ -240,7 +287,8 @@ export function validateConfig(config) {
 export function loadConfig(root, configFile = null) {
   const candidates = [
     configFile,
-    path.join(root, "config", "ppx.json"),
+    configFilePath(root),
+    legacyConfigFilePath(root),
     path.join(root, "config", "ppx.yaml"),
   ].filter(Boolean);
 

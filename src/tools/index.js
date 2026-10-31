@@ -1,5 +1,5 @@
 ﻿// src/tools/index.js - 工具系统统一出口
-export { ToolCatalog, TOOL_ERROR_PREFIX } from "./catalog.js";
+export { ToolCatalog, TOOL_ERROR_PREFIX, CORE_TOOL_EXPOSURE, META_TOOLS_ALWAYS } from "./catalog.js";
 export { normalizeMeta, runWithPolicy, toDescriptor } from "./seam.js";
 export { registerBuiltinTools } from "./builtin.js";
 export { registerAdvancedTools, Scheduler } from "./advanced.js";

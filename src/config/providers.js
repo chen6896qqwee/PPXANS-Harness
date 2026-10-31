@@ -12,7 +12,10 @@ import { isPlaceholder } from "./placeholder.js";
 // 提供方字段白名单 (写入磁盘时的过滤)
 const PROVIDER_KEYS = [
   "id", "backend", "base_url", "api_key", "api_key_env",
-  "model", "models", "vision", "timeout_ms",
+  // 2026-10-31: 密钥命令通道 —— 不把 key 明文落盘的第三条路: 配一条命令, 启动时取其
+  //   stdout 作为 key (PowerShell DPAPI / pass / 凭据管理器均可)。命令本身不是机密, 可明文。
+  "api_key_cmd",
+  "model", "models", "vision", "timeout_ms", "retry_max",
   "dsml",
   // 2026-10-24 (R16): 补两个此前被白名单静默丢弃的字段 ——
   //   context_window: UI 表单一直有输入框且卡片展示, 但写盘被过滤 (填了等于没填);
@@ -43,6 +46,7 @@ export function validateProvider(p) {
   if (p.vision != null && typeof p.vision !== "boolean") return "vision 必须是布尔";
   if (p.dsml != null && typeof p.dsml !== "boolean") return "dsml 必须是布尔";
   if (p.timeout_ms != null && (!Number.isFinite(p.timeout_ms) || p.timeout_ms < 1000)) return "timeout_ms 至少 1000ms";
+  if (p.retry_max != null && (!Number.isInteger(p.retry_max) || p.retry_max < 0 || p.retry_max > 10)) return "retry_max 需为 0-10 的整数";
   if (p.enabled != null && typeof p.enabled !== "boolean") return "enabled 必须是布尔";
   if (p.context_window != null && (!Number.isFinite(p.context_window) || p.context_window < 1024)) return "context_window 至少 1024";
   // 占位符校验: 模板残留 (如 REPLACE_WITH_YOUR_ENDPOINT / YOUR_LOCAL_MODEL_NAME) 视为未配置,

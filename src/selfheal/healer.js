@@ -28,19 +28,51 @@ export class Healer {
       const d = path.join(this.dataDir, sub);
       if (!fs.existsSync(d)) { fs.mkdirSync(d, { recursive: true }); fixes.push(`created dir: ${sub}`); }
     }
-    // 校验关键 JSON 可解析
-    const facts = path.join(this.dataDir, "memory", "facts.json");
-    if (fs.existsSync(facts)) {
-      const parsed = readJson(facts, null);
-      if (parsed === null) {
-        // 损坏: 备份后重建
-        const bak = facts + ".corrupt-" + Date.now();
-        fs.renameSync(facts, bak);
-        fs.writeFileSync(facts, "[]", "utf8");
-        fixes.push(`facts.json corrupt -> backed up to ${path.basename(bak)}, reset`);
-      }
+    // 2026-10-30: 体检从"只有 facts.json"扩展到所有单文件 JSON 存储。
+    //   以前 scenes.json / jobs.json / profile.json 损坏只会被各自的下一次写盘静默覆盖成空,
+    //   用户看到的是"记忆/任务莫名消失", 日志里没有任何记录。
+    const stores = [
+      { rel: "memory/facts.json", fallback: [] },
+      { rel: "memory/l2/scenes.json", fallback: [] },
+      { rel: "memory/l3/meta.json", fallback: {} },
+      { rel: "scheduler/jobs.json", fallback: [] },
+      { rel: "bots/profile.json", fallback: {} },
+    ];
+    for (const s of stores) {
+      const fix = this._checkJsonStore(s.rel, s.fallback);
+      if (fix) fixes.push(fix);
     }
     return fixes;
+  }
+
+  // 校验单个 JSON 存储; 损坏时优先从同名备份 (.bak* / .backup* / .corrupt-*) 恢复,
+  // 无可用备份才重置为空结构。返回修复描述或 null。
+  _checkJsonStore(rel, fallback) {
+    const file = path.join(this.dataDir, rel);
+    if (!fs.existsSync(file)) return null;
+    if (readJson(file, null) !== null) return null;
+    const dir = path.dirname(file);
+    const base = path.basename(file);
+    let restored = null;
+    try {
+      const cands = fs.readdirSync(dir)
+        .filter((f) => f.startsWith(base + ".") && /(bak|backup|corrupt)/i.test(f))
+        .map((f) => { const p = path.join(dir, f); return { p, m: fs.statSync(p).mtimeMs }; })
+        .sort((a, b) => b.m - a.m);
+      for (const c of cands) {
+        if (readJson(c.p, null) !== null) { restored = c.p; break; }
+      }
+    } catch { /* 备份枚举失败按无备份处理 */ }
+    const quarantine = file + ".corrupt-" + Date.now();
+    try { fs.renameSync(file, quarantine); } catch { /* 改名失败则下方直接覆盖 */ }
+    if (restored) {
+      try {
+        fs.copyFileSync(restored, file);
+        return `${rel} corrupt -> restored from ${path.basename(restored)} (bad copy kept as ${path.basename(quarantine)})`;
+      } catch { /* 恢复失败 → 走重置 */ }
+    }
+    fs.writeFileSync(file, JSON.stringify(fallback), "utf8");
+    return `${rel} corrupt -> backed up to ${path.basename(quarantine)}, reset`;
   }
 
   // 崩溃恢复: 检查上次是否干净退出

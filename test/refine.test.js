@@ -25,6 +25,7 @@ test("refine: 回放失败轨迹, LLM 提炼经验进经验库", async () => {
   assert.ok(r.lesson.includes("引号"), "应提炼出教训");
   assert.ok(learned && learned.lesson.includes("引号"), "经验库应收到教训");
   assert.deepEqual(learned.tags, ["auto-refine"]);
+  a.shutdown();
 });
 
 test("refine: 失败轨迹不足则跳过", async () => {
@@ -34,6 +35,7 @@ test("refine: 失败轨迹不足则跳过", async () => {
   const r = await a.refine({ limit: 10 });
   assert.equal(r.distilled, 0);
   assert.ok(r.reason);
+  a.shutdown();
 });
 
 test("refine: 无 LLM 跳过", async () => {
@@ -42,6 +44,7 @@ test("refine: 无 LLM 跳过", async () => {
   const r = await a.refine();
   assert.equal(r.distilled, 0);
   assert.equal(r.reason, "无 LLM");
+  a.shutdown();
 });
 
 test("refineSkill: 高频成功工具 → 提炼并落盘 SKILL.md", async () => {
@@ -55,8 +58,9 @@ test("refineSkill: 高频成功工具 → 提炼并落盘 SKILL.md", async () =>
   const r = await a.refineSkill({ limit: 10, minFreq: 2 });
   assert.equal(r.created, 1);
   assert.equal(r.name, "file-reader");
-  const skillPath = path.join(a.root, "skills", "file-reader", "SKILL.md");
-  assert.ok(fs.existsSync(skillPath), "SKILL.md 应已落盘");
+  // 2026-10-31 (队列⑥): create_skill 落可写根 = 项目 .ppx/skills (不再写内置 <root>/skills)
+  const skillPath = path.join(a.root, ".ppx", "skills", "file-reader", "SKILL.md");
+  assert.ok(fs.existsSync(skillPath), "SKILL.md 应已落盘 (项目可写根)");
   const content = fs.readFileSync(skillPath, "utf8");
   assert.ok(content.includes("file-reader"), "frontmatter 应含 name");
   a.shutdown();
@@ -70,6 +74,7 @@ test("refineSkill: 成功轨迹不足则跳过", async () => {
   const r = await a.refineSkill({ minFreq: 2 });
   assert.equal(r.created, 0);
   assert.equal(r.reason, "成功轨迹不足");
+  a.shutdown();
 });
 
 test("refineSkill: 无重复成功工具模式则跳过", async () => {
@@ -82,6 +87,7 @@ test("refineSkill: 无重复成功工具模式则跳过", async () => {
   const r = await a.refineSkill({ minFreq: 2 });
   assert.equal(r.created, 0);
   assert.equal(r.reason, "无重复成功工具模式");
+  a.shutdown();
 });
 
 test("refine 工具已注册 (失败→经验闭环接线)", () => {

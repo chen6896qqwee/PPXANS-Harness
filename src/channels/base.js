@@ -2,6 +2,8 @@
 // 统一通道接口: 每个通道实现 connect/send/disconnect
 // 可选能力: test() 连通性探测 (配置是否可用), mount(server) 把 webhook 路由挂到 HTTP server
 import { readBody, sendJson } from "../utils/http.js";
+import { createTrigger } from "./trigger.js";
+import { admitThroughPolicy } from "./policy.js";
 
 export class Channel {
   constructor(name, agent) {
@@ -49,10 +51,18 @@ export class Channel {
     sendJson(res, code, obj);
   }
 
-  // 收到消息 → 调 agent 处理 → 回发
-  async handleMessage(from, text) {
-    const reply = await this.agent.chat(text);
-    await this.send(from, reply);
+  // 收到结构化 Trigger → 两级过滤门 → 会话键归组 → agent 处理 → 回发
+  // (2026-10-31 Super-agent 一期: 入站主路径升级为 Trigger 对象; 全渠道共享过滤语义于 policy.js)
+  async handleTrigger(trigger) {
+    const gate = await admitThroughPolicy(trigger, this.agent);
+    if (!gate.ok || !trigger?.text) return null;
+    const reply = await this.agent.chat(trigger.text, gate.sessionKey ? { sessionKey: gate.sessionKey } : undefined);
+    await this.send(trigger.from || "*", reply);
     return reply;
+  }
+
+  // 兼容壳: 老签名 (from, text) 包成最小 Trigger 走 Trigger 主路径
+  async handleMessage(from, text) {
+    return this.handleTrigger(createTrigger({ source: this.name, from, text }));
   }
 }

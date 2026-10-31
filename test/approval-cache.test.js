@@ -25,10 +25,17 @@ function makeAgent(mode = "approve", cfgExtra = {}) {
   return { agent, count: () => asks };
 }
 
-test("approval-cache: _approvalCacheKey 只认命令类工具 + 规范化命令", () => {
+test("approval-cache: _approvalCacheKey 只认命令类工具, key 与人类看到的命令逐字节一致", () => {
   const { agent } = makeAgent();
-  assert.equal(agent._approvalCacheKey("run_command", { command: "echo  a" }), "run_command:echo a");
-  assert.equal(agent._approvalCacheKey("run_command", { command: "echo  \"a\"" }), "run_command:echo a");
+  // 2026-10-30 安全修复: 不再去引号/合并空白 —— 归一化会让语义不同的命令共用一次批准。
+  assert.equal(agent._approvalCacheKey("run_command", { command: "echo  a" }), "run_command:echo  a");
+  assert.equal(agent._approvalCacheKey("run_command", { command: "echo  \"a\"" }), "run_command:echo  \"a\"");
+  assert.notEqual(
+    agent._approvalCacheKey("run_command", { command: "echo \"rm -rf /\"" }),
+    agent._approvalCacheKey("run_command", { command: "echo rm -rf /" }),
+    "引号内外的命令语义不同, 不得共用审批缓存",
+  );
+  assert.equal(agent._approvalCacheKey("run_command", { command: "  npm run build  " }), "run_command:npm run build");
   assert.equal(agent._approvalCacheKey("code_act", { code: "print(1)" }), "code_act:print(1)");
   // 非命令工具不缓存
   assert.equal(agent._approvalCacheKey("read_file", { path: "x" }), null);

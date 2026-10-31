@@ -2,10 +2,11 @@
 // 借鉴 deepseek-harness 的 "everything is a plugin": 每个模块是一个插件, 通过 ctx.provide 注册服务。
 // 装配顺序即依赖顺序 (依赖在前), 任何插件都可被用户插件替换或扩展。
 import path from "node:path";
-import { info } from "../utils/logger.js";
+import { info, warn } from "../utils/logger.js";
 import { Healer } from "../selfheal/healer.js";
 import { Persona } from "../persona/index.js";
 import { FactStore, MemoryTicker, Experience, L0Recorder, SceneStore, PersonaStore, LegionBoard } from "../memory/index.js";
+import { SqliteFactStore } from "../memory/sqlite-store.js";
 import { SessionStore } from "../memory/session.js";
 import {
   ToolCatalog, registerBuiltinTools, registerAdvancedTools, Scheduler,
@@ -14,7 +15,8 @@ import {
 } from "../tools/index.js";
 import { embedderFromConfig } from "../llm/embedder.js";
 import { hashEmbed, HASH_EMBEDDER_ID } from "../memory/hash-embedder.js";
-import { LocalShellProvider } from "../seam/shell.js";
+import { LocalShellProvider, DockerShellProvider } from "../seam/shell.js";
+import { skillRootsFromConfig } from "../skills/registry.js";
 import { registerDelegateTools } from "../tools/delegate.js";
 // 自主迭代进化 (2026-10-25): 测试→诊断→补丁→验证→沉淀/回滚 的自改进闭环工具
 import { registerSelfIterateTools, registerEvolutionStatusTool } from "../tools/selfiterate.js";
@@ -89,7 +91,25 @@ export const personaPlugin = (ctx) => {
 
 export const factsPlugin = (ctx) => {
   const config = ctx.consume("config");
-  ctx.provide("facts", new FactStore(ctx.consume("dataDir"), config.memory || {}));
+  const backend = String(config?.memory?.backend || "").trim().toLowerCase();
+  let facts = null;
+  // 2026-10-30: memory.backend=sqlite 此前只在文档/CHANGELOG 里存在 —— factsPlugin 永远
+  //   new FactStore (JSON), SqliteFactStore 只有测试在用, 用户切了配置也静默无效。
+  //   这里按配置真正装配; 运行时不支持 node:sqlite (需 Node >=22.5) 或打开失败时
+  //   回退 JSON 并告警, 绝不让记忆不可用/agent 起不来 (与 applyMemoryBackend 的 fail-safe 同口径)。
+  if (backend === "sqlite") {
+    try {
+      facts = new SqliteFactStore(ctx.consume("dataDir"), config.memory || {});
+    } catch (e) {
+      warn(`[memory] backend=sqlite 不可用 (需 Node >=22.5 且 node:sqlite 可用), 已回退 JSON: ${e?.message || e}`);
+    }
+  }
+  if (!facts) facts = new FactStore(ctx.consume("dataDir"), config.memory || {});
+  ctx.provide("facts", facts);
+  // SQLite 持有数据库句柄, 退出时关闭 (JSON 后端没有 close, 可选链兼容)
+  if (typeof facts.close === "function") {
+    ctx.onDispose(() => { try { facts.close(); } catch { /* 已关闭 */ } });
+  }
 };
 
 export const experiencePlugin = (ctx) => {
@@ -207,7 +227,15 @@ export const toolsPlugin = (ctx) => {
   ctx.provide("scheduler", scheduler);
   registerAdvancedTools(tools, { dataDir, scheduler, onMemoryNote: (note) => facts.add(note, { source: "schedule" }) });
   registerMethodTools(tools);
-  registerSelfmodTools(tools, { skillsDir: path.join(root, "skills") });
+  // 2026-10-31 (队列⑥): selfmod 与 agent 同一 roots 口径 (项目 > 用户 > 内置) —— 此前这里
+  //   只传内置单根, list_capabilities / load_skill / search_skills 看不见用户级与项目级技能;
+  //   create_skill 落盘改为可写根 (项目 .ppx/skills 优先, 用户级兜底), 用户产物不再写进代码树
+  //   (内置根在 npm 装机时位于 node_modules, 升级替换包目录即冲掉)。
+  const skillRoots = skillRootsFromConfig(config, root);
+  registerSelfmodTools(tools, {
+    roots: skillRoots,
+    writeDir: (skillRoots.find((r) => r.writable) || skillRoots[0])?.dir,
+  });
   // 用户自定义工具 (不改源码扩展能力)
   const customDir = path.join(root, (config.tools && config.tools.custom_dir) || "custom-tools");
   registerCustomTools(tools, customDir);
@@ -273,8 +301,28 @@ export const toolsPlugin = (ctx) => {
       },
     });
   }
-  // Shell 能力 seam: 命令执行解耦为可替换 provider (本地/未来沙箱/Docker)
-  ctx.provide("shell", new LocalShellProvider());
+  // Shell 能力 seam: 命令执行解耦为可替换 provider (local 默认 / docker 容器沙箱)
+  // 2026-10-31: DockerShellProvider 落地 —— security.shell_provider="docker" 时命令在容器内
+  //   执行 (workspace bind-mount 到 /workspace, 默认断网 + cap-drop ALL + 资源上限),
+  //   Docker 不可用按 security.docker.missing 回退本地或报错; 判定遗漏由内核边界兜底。
+  const shellProviderName = String(config?.security?.shell_provider || "local").toLowerCase();
+  if (shellProviderName === "docker") {
+    const d = (config.security && config.security.docker) || {};
+    ctx.provide("shell", new DockerShellProvider({
+      root,
+      image: d.image,
+      network: d.network,
+      memory: d.memory,
+      cpus: d.cpus,
+      pidsLimit: d.pids_limit,
+      user: d.user,
+      envPass: d.env_pass,
+      missing: d.missing,
+      dockerBin: d.bin,
+    }));
+  } else {
+    ctx.provide("shell", new LocalShellProvider());
+  }
   // 审计哈希链接入工具执行收口 (未启用时为 null, catalog 内部零开销跳过)
   tools.setAudit(ctx.consume("audit"));
   // 记忆治理 + 审计校验 + 运维工具 (吸收自 ppx-v2, 共 10 个)

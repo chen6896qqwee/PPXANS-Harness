@@ -1,5 +1,7 @@
 // scripts/package.js - PC 端打包: Windows 便携版 zip + 单文件自解压安装器 (.cmd)
-// 零依赖: 仅用 Node 内置模块 + 系统 zip/python3 (构建机) + 目标机 Windows 内置 PowerShell。
+// 零依赖: 仅用 Node 内置模块 + 构建机 Windows 自带 PowerShell/tar (Win10 1803+)。
+//   · zip 写入: System32\tar.exe (bsdtar, 条目使用标准正斜杠)
+//   · node.exe 抽取: PowerShell .NET ZipFile (只取运行时入口, 不解全包)
 // 安装器不写注册表: 解压到 %LOCALAPPDATA%\PPXANS-Harness + 桌面/开始菜单快捷方式 + 卸载器。
 //
 // 用法:
@@ -7,7 +9,7 @@
 //   node scripts/package.js portable     # 仅便携版
 //   node scripts/package.js installer    # 仅安装器 (内嵌与便携版同一 payload)
 //   node scripts/package.js --node v22.14.0   # 指定内置 Node 版本 (默认 v22.14.0 LTS)
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -24,8 +26,11 @@ const args = process.argv.slice(2);
 let nodeVer = "v22.14.0";
 let targets = [];
 for (let i = 0; i < args.length; i++) {
-  if (args[i] === "--node") nodeVer = args[++i].startsWith("v") ? args[++i] : args[i];
-  else if (["portable", "installer", "all"].includes(args[i])) targets.push(args[i]);
+  if (args[i] === "--node") {
+    const v = args[++i] || "";
+    if (!v) die("--node 需要一个版本号, 例如 --node v22.14.0");
+    nodeVer = v.startsWith("v") ? v : `v${v}`;
+  } else if (["portable", "installer", "all"].includes(args[i])) targets.push(args[i]);
 }
 if (!targets.length) targets = ["portable", "installer"];
 const NODE_ZIP_URL = `https://nodejs.org/dist/${nodeVer}/node-${nodeVer}-win-x64.zip`;
@@ -35,8 +40,11 @@ const log = (s) => console.log(s);
 const die = (s) => { console.error(`[package] 错误: ${s}`); process.exit(1); };
 
 // ---- 打包内容清单 (排除源仓运行数据/测试/构建机专用) ----
-const APP_DIRS = ["src", "bin", "config", "public", "skills"];
-const APP_FILES = ["package.json", "README.md", "LICENSE",
+// 2026-10-30: config 不再整目录复制 —— 本机 ppx.json 可能含 API Key / apply 模式自改开关,
+//   ppx.json.bak-* 还带历史密钥。只发模板与身份文件。
+const APP_DIRS = ["src", "bin", "public", "skills"];
+const CONFIG_FILES = ["ppx.json.example", "identity.md", "ishiki.md"];
+const APP_FILES = ["package.json", "README.md", "LICENSE", "NOTICE", "THIRD-PARTY-NOTICES.md",
   "启动皮皮虾.bat", "停止皮皮虾.bat", "高级菜单.bat",
   "启动皮皮虾.vbs", "皮皮虾 Web.vbs",
   "start-ppx-server.bat", "start-ppx-chat.bat", "双击启动皮皮虾.bat"];
@@ -45,6 +53,30 @@ function run(cmd, cmdArgs, opts = {}) {
   const r = spawnSync(cmd, cmdArgs, { stdio: opts.capture ? ["ignore", "pipe", "inherit"] : "inherit", cwd: ROOT, ...opts });
   if (r.status !== 0) die(`${cmd} 退出码 ${r.status}`);
   return r.stdout ? r.stdout.toString() : "";
+}
+
+// Windows 自带 bsdtar (Win10 1803+): 写 zip 时条目用正斜杠, 兼容各解压工具。
+// 注意: Git Bash 的 /usr/bin/tar 是 GNU tar, 不支持写 zip, 必须走 System32。
+const TAR = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "tar.exe");
+
+function powershell(script, extraEnv = {}) {
+  const r = spawnSync("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], {
+    stdio: "inherit", env: { ...process.env, ...extraEnv },
+  });
+  if (r.status !== 0) die(`PowerShell 退出码 ${r.status}`);
+}
+
+// 从 zip 里按后缀抽单个文件 (node.exe / LICENSE), 不解整包
+function extractZipEntry(zipPath, entryPattern, outPath) {
+  powershell([
+    "Add-Type -AssemblyName System.IO.Compression.FileSystem",
+    "$z=[IO.Compression.ZipFile]::OpenRead($env:PPX_ZIP)",
+    "try {",
+    "  $e=$z.Entries | Where-Object { $_.FullName -like $env:PPX_ENTRY } | Select-Object -First 1",
+    "  if(-not $e){ Write-Error ('压缩包内找不到 ' + $env:PPX_ENTRY); exit 2 }",
+    "  [IO.Compression.ZipFileExtensions]::ExtractToFile($e,$env:PPX_OUT,$true)",
+    "} finally { if($z){ $z.Dispose() } }",
+  ].join("; "), { PPX_ZIP: zipPath, PPX_ENTRY: entryPattern, PPX_OUT: outPath });
 }
 
 // ---- 1. 下载并校验 Windows Node 运行时 (SHA-256 对官网上比对) ----
@@ -69,20 +101,29 @@ function ensureNodeRuntime() {
 
 // ---- 2. 组装应用目录 ----
 function stageApp(zipPath) {
-  log("[2/5] 组装应用目录 (src/bin/config/public/skills + 启动器)");
+  log("[2/5] 组装应用目录 (src/bin/public/skills + 配置模板 + 启动器)");
   const stage = path.join(DIST, ".stage");
   fs.rmSync(stage, { recursive: true, force: true });
   fs.mkdirSync(stage, { recursive: true });
   for (const d of APP_DIRS) fs.cpSync(path.join(ROOT, d), path.join(stage, d), { recursive: true });
+  fs.mkdirSync(path.join(stage, "config"), { recursive: true });
+  for (const f of CONFIG_FILES) {
+    const from = path.join(ROOT, "config", f);
+    if (fs.existsSync(from)) fs.copyFileSync(from, path.join(stage, "config", f));
+    else log(`      警告: 配置模板不存在, 跳过 config/${f}`);
+  }
   for (const f of APP_FILES) {
     if (fs.existsSync(path.join(ROOT, f))) fs.copyFileSync(path.join(ROOT, f), path.join(stage, f));
     else log(`      警告: 清单文件不存在, 跳过 ${f}`);
   }
-  // 内置运行时: 从 node zip 抽出 node.exe → runtime/node.exe (python3 解压, 构建机通用)
-  fs.mkdirSync(path.join(stage, "runtime"), { recursive: true });
-  execFileSync("python3", ["-c",
-    `import zipfile,sys; z=zipfile.ZipFile(sys.argv[1]); [open(sys.argv[2],'wb').write(z.read(n)) for n in z.namelist() if n.endswith('/node.exe')]`,
-    zipPath, path.join(stage, "runtime", "node.exe")]);
+  // 产物安全扫描: 任何用户配置/备份/明文凭据都会在这里中止打包
+  const scan = spawnSync(process.execPath, [path.join(ROOT, "scripts", "package-scan.js"), stage], { stdio: "inherit" });
+  if (scan.status !== 0) die("产物安全扫描未通过, 已中止打包");
+  // 内置运行时 + Node 许可证: 只从 zip 抽两个文件, 满足再分发合规
+  const runtimeDir = path.join(stage, "runtime");
+  fs.mkdirSync(runtimeDir, { recursive: true });
+  extractZipEntry(zipPath, "*/node.exe", path.join(runtimeDir, "node.exe"));
+  extractZipEntry(zipPath, "*/LICENSE", path.join(runtimeDir, "LICENSE.node.txt"));
   // 打包专属启动器: 运行时优先的 Web 启动入口 (快捷方式指向它)
   fs.writeFileSync(path.join(stage, "ppx-web.cmd"), [
     "@echo off",
@@ -95,24 +136,26 @@ function stageApp(zipPath) {
   return stage;
 }
 
-// ---- 3. zip 打包 (系统 zip; withTopDir=便携版带顶层目录, 安装器 payload 平铺) ----
+// ---- 3. zip 打包 (Windows 内置 tar; withTopDir=便携版带顶层目录, 安装器 payload 平铺) ----
 function makeZip(stage, outPath, withTopDir) {
-  const args = ["-r", "-q", "-X", outPath];
+  if (!fs.existsSync(TAR)) die(`缺少 ${TAR}; 需要 Windows 10 1803+ 自带的 tar.exe`);
+  fs.rmSync(outPath, { force: true });
   if (withTopDir) {
     // 便携版: 顶层目录 PPXANS-Harness/
-    fs.rmSync(path.join(path.dirname(outPath), "PPXANS-Harness"), { recursive: true, force: true });
     const tmpTop = path.join(path.dirname(outPath), "PPXANS-Harness");
+    fs.rmSync(tmpTop, { recursive: true, force: true });
     fs.cpSync(stage, tmpTop, { recursive: true });
-    args.push("PPXANS-Harness");
+    try {
+      run(TAR, ["-a", "-c", "-f", outPath, "-C", path.dirname(outPath), "PPXANS-Harness"]);
+    } finally {
+      fs.rmSync(tmpTop, { recursive: true, force: true });
+    }
   } else {
     // 安装器 payload: 平铺 (解压目标目录即安装根)
-    for (const e of fs.readdirSync(stage, { withFileTypes: true })) {
-      if (e.isDirectory()) args.push(e.name + "/");
-      else args.push(e.name);
-    }
+    // 目录不要带尾斜杠: bsdtar 会自行补目录条目, 传 "dir/" 反而报 Couldn't visit directory
+    const names = fs.readdirSync(stage);
+    run(TAR, ["-a", "-c", "-f", outPath, "-C", stage, ...names]);
   }
-  fs.rmSync(outPath, { force: true });
-  run("zip", args, { cwd: withTopDir ? path.dirname(outPath) : stage });
 }
 
 // ---- 4. 安装器: payload base64 内嵌进自解压 .cmd ----

@@ -25,6 +25,13 @@ const CHECKS = [
   { name: "缓存前缀审计",                   file: "scripts/cache-audit.js",          args: ["--check"] },
   { name: "上下文预算检查",                 file: "scripts/ctx-profile.js",          args: ["--check"] },
   { name: "本地能力评测",                   file: "scripts/eval.js",                 args: [] },
+  // 痛觉闸门 (2026-10-30): 20 个确定性判分任务走真实工具循环, 离线零 LLM, 约 4s。
+  //   它拦的是"harness 把正确计划执行错了" —— 路径解析/参数校验/超时/落盘/记忆写入。
+  //   注意 --strict: 有任务红就非零退出, 否则它只是个报表。
+  { name: "离线任务基准",                   file: "scripts/taskbench-offline.js",    args: ["--strict"] },
+  // 记忆召回闸门 (2026-10-30): holdout 集 recall@3 低于 90% 即失败。
+  //   防的是"改检索/分词/RRF 权重把召回打回去" —— 这条以前完全没人看着。
+  { name: "记忆召回质量",                   file: "scripts/memory-recall.js",        args: ["--check"] },
   { name: "静默 catch 守卫",                file: "scripts/silent-catch-guard.mjs",  args: [] },
 ];
 

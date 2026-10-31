@@ -18,10 +18,12 @@ export function readConfigRaw(root) {
 
 // 通用设置字段白名单 (GET 返回 + PUT 可改的顶层键)
 // 每个键对应 config 里的一个可编辑分区, 值里的字段再细分
+// 2026-10-31: security.allow_all 移出 HTTP 可写白名单 —— 拿到 bearer token 就能
+//   整体放开命令白名单是权限模型里最软的一块板子; 现在只能编辑 config/ppx.json 后重启生效。
 export const SETTINGS_FIELDS = {
   user: ["name"],
   http: ["port", "auth_token"],
-  security: ["allow_all", "command_timeout_ms", "code_act", "deny"],
+  security: ["command_timeout_ms", "code_act", "deny"],
   agent: ["name", "mode", "citation_rule", "system_extra", "values"],
   mcp: ["servers", "auto_connect"],
   tools: ["disabled"],
@@ -136,6 +138,10 @@ export function updateSettings(root, patch) {
     }
 
     // 校验
+    // 2026-10-31: allow_all 不在白名单内被 pick() 静默丢弃 —— 显式报错让调用方知道去哪改
+    if (patch.security && typeof patch.security === "object" && "allow_all" in patch.security) {
+      throw new Error("security.allow_all 不能通过 HTTP API 修改 — 请编辑 config/ppx.json 后重启");
+    }
     const port = cfg.channels.http.port;
     if (port != null && (!Number.isInteger(port) || port < 1 || port > 65535)) throw new Error("HTTP 端口必须是 1-65535 的整数");
     const timeout = cfg.security.command_timeout_ms;

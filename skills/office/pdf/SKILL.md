@@ -1,316 +1,63 @@
 ---
 name: pdf
-description: Use this skill whenever the user wants to do anything with PDF files. This includes reading or extracting text/tables from PDFs, combining or merging multiple PDFs into one, splitting PDFs apart, rotating pages, adding watermarks, creating new PDFs, filling PDF forms, encrypting/decrypting PDFs, ext
+name_zh: PDF 文件
+description: 检查与读取 PDF: 版本/页数/元数据/加密状态、判断文本型还是扫描件、尽力提取文本层。用于"看看这个 PDF 多少页/有没有加密/是不是扫描件/把文字抠出来"。
 domain: office
-tags: imported, skills
-source: anthropics/skills
-imported_at: 2026-10-07
+tags: PDF, 文档, 页数, 元数据, 文本提取, OCR
+risk: low
 ---
-# PDF Processing Guide
 
-## Overview
-
-This guide covers essential PDF processing operations using Python libraries and command-line tools. For advanced features, JavaScript libraries, and detailed examples, see REFERENCE.md. If you need to fill out a PDF form, read FORMS.md and follow its instructions.
-
-## Quick Start
-
-```python
-from pypdf import PdfReader, PdfWriter
-
-# Read a PDF
-reader = PdfReader("document.pdf")
-print(f"Pages: {len(reader.pages)}")
-
-# Extract text
-text = ""
-for page in reader.pages:
-    text += page.extract_text()
-```
-
-## Python Libraries
-
-### pypdf - Basic Operations
-
-#### Merge PDFs
-```python
-from pypdf import PdfWriter, PdfReader
-
-writer = PdfWriter()
-for pdf_file in ["doc1.pdf", "doc2.pdf", "doc3.pdf"]:
-    reader = PdfReader(pdf_file)
-    for page in reader.pages:
-        writer.add_page(page)
-
-with open("merged.pdf", "wb") as output:
-    writer.write(output)
-```
-
-#### Split PDF
-```python
-reader = PdfReader("input.pdf")
-for i, page in enumerate(reader.pages):
-    writer = PdfWriter()
-    writer.add_page(page)
-    with open(f"page_{i+1}.pdf", "wb") as output:
-        writer.write(output)
-```
-
-#### Extract Metadata
-```python
-reader = PdfReader("document.pdf")
-meta = reader.metadata
-print(f"Title: {meta.title}")
-print(f"Author: {meta.author}")
-print(f"Subject: {meta.subject}")
-print(f"Creator: {meta.creator}")
-```
-
-#### Rotate Pages
-```python
-reader = PdfReader("input.pdf")
-writer = PdfWriter()
-
-page = reader.pages[0]
-page.rotate(90)  # Rotate 90 degrees clockwise
-writer.add_page(page)
-
-with open("rotated.pdf", "wb") as output:
-    writer.write(output)
-```
-
-### pdfplumber - Text and Table Extraction
-
-#### Extract Text with Layout
-```python
-import pdfplumber
-
-with pdfplumber.open("document.pdf") as pdf:
-    for page in pdf.pages:
-        text = page.extract_text()
-        print(text)
-```
-
-#### Extract Tables
-```python
-with pdfplumber.open("document.pdf") as pdf:
-    for i, page in enumerate(pdf.pages):
-        tables = page.extract_tables()
-        for j, table in enumerate(tables):
-            print(f"Table {j+1} on page {i+1}:")
-            for row in table:
-                print(row)
-```
-
-#### Advanced Table Extraction
-```python
-import pandas as pd
-
-with pdfplumber.open("document.pdf") as pdf:
-    all_tables = []
-    for page in pdf.pages:
-        tables = page.extract_tables()
-        for table in tables:
-            if table:  # Check if table is not empty
-                df = pd.DataFrame(table[1:], columns=table[0])
-                all_tables.append(df)
-
-# Combine all tables
-if all_tables:
-    combined_df = pd.concat(all_tables, ignore_index=True)
-    combined_df.to_excel("extracted_tables.xlsx", index=False)
-```
-
-### reportlab - Create PDFs
-
-#### Basic PDF Creation
-```python
-from reportlab.lib.pagesizes import letter
-from reportlab.pdfgen import canvas
-
-c = canvas.Canvas("hello.pdf", pagesize=letter)
-width, height = letter
-
-# Add text
-c.drawString(100, height - 100, "Hello World!")
-c.drawString(100, height - 120, "This is a PDF created with reportlab")
-
-# Add a line
-c.line(100, height - 140, 400, height - 140)
-
-# Save
-c.save()
-```
-
-#### Create PDF with Multiple Pages
-```python
-from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
-from reportlab.lib.styles import getSampleStyleSheet
-
-doc = SimpleDocTemplate("report.pdf", pagesize=letter)
-styles = getSampleStyleSheet()
-story = []
-
-# Add content
-title = Paragraph("Report Title", styles['Title'])
-story.append(title)
-story.append(Spacer(1, 12))
-
-body = Paragraph("This is the body of the report. " * 20, styles['Normal'])
-story.append(body)
-story.append(PageBreak())
-
-# Page 2
-story.append(Paragraph("Page 2", styles['Heading1']))
-story.append(Paragraph("Content for page 2", styles['Normal']))
-
-# Build PDF
-doc.build(story)
-```
-
-#### Subscripts and Superscripts
-
-**IMPORTANT**: Never use Unicode subscript/superscript characters (₀₁₂₃₄₅₆₇₈₉, ⁰¹²³⁴⁵⁶⁷⁸⁹) in ReportLab PDFs. The built-in fonts do not include these glyphs, causing them to render as solid black boxes.
-
-Instead, use ReportLab's XML markup tags in Paragraph objects:
-```python
-from reportlab.platypus import Paragraph
-from reportlab.lib.styles import getSampleStyleSheet
-
-styles = getSampleStyleSheet()
-
-# Subscripts: use <sub> tag
-chemical = Paragraph("H<sub>2</sub>O", styles['Normal'])
-
-# Superscripts: use <super> tag
-squared = Paragraph("x<super>2</super> + y<super>2</super>", styles['Normal'])
-```
-
-For canvas-drawn text (not Paragraph objects), manually adjust font the size and position rather than using Unicode subscripts/superscripts.
-
-## Command-Line Tools
-
-### pdftotext (poppler-utils)
-```bash
-# Extract text
-pdftotext input.pdf output.txt
-
-# Extract text preserving layout
-pdftotext -layout input.pdf output.txt
-
-# Extract specific pages
-pdftotext -f 1 -l 5 input.pdf output.txt  # Pages 1-5
-```
-
-### qpdf
-```bash
-# Merge PDFs
-qpdf --empty --pages file1.pdf file2.pdf -- merged.pdf
-
-# Split pages
-qpdf input.pdf --pages . 1-5 -- pages1-5.pdf
-qpdf input.pdf --pages . 6-10 -- pages6-10.pdf
-
-# Rotate pages
-qpdf input.pdf output.pdf --rotate=+90:1  # Rotate page 1 by 90 degrees
-
-# Remove password
-qpdf --password=mypassword --decrypt encrypted.pdf decrypted.pdf
-```
-
-### pdftk (if available)
-```bash
-# Merge
-pdftk file1.pdf file2.pdf cat output merged.pdf
-
-# Split
-pdftk input.pdf burst
-
-# Rotate
-pdftk input.pdf rotate 1east output rotated.pdf
-```
-
-## Common Tasks
-
-### Extract Text from Scanned PDFs
-```python
-# Requires: pip install pytesseract pdf2image
-import pytesseract
-from pdf2image import convert_from_path
-
-# Convert PDF to images
-images = convert_from_path('scanned.pdf')
-
-# OCR each page
-text = ""
-for i, image in enumerate(images):
-    text += f"Page {i+1}:\n"
-    text += pytesseract.image_to_string(image)
-    text += "\n\n"
-
-print(text)
-```
-
-### Add Watermark
-```python
-from pypdf import PdfReader, PdfWriter
-
-# Create watermark (or load existing)
-watermark = PdfReader("watermark.pdf").pages[0]
-
-# Apply to all pages
-reader = PdfReader("document.pdf")
-writer = PdfWriter()
-
-for page in reader.pages:
-    page.merge_page(watermark)
-    writer.add_page(page)
-
-with open("watermarked.pdf", "wb") as output:
-    writer.write(output)
-```
-
-### Extract Images
-```bash
-# Using pdfimages (poppler-utils)
-pdfimages -j input.pdf output_prefix
-
-# This extracts all images as output_prefix-000.jpg, output_prefix-001.jpg, etc.
-```
-
-### Password Protection
-```python
-from pypdf import PdfReader, PdfWriter
-
-reader = PdfReader("input.pdf")
-writer = PdfWriter()
-
-for page in reader.pages:
-    writer.add_page(page)
-
-# Add password
-writer.encrypt("userpassword", "ownerpassword")
-
-with open("encrypted.pdf", "wb") as output:
-    writer.write(output)
-```
-
-## Quick Reference
-
-| Task | Best Tool | Command/Code |
-|------|-----------|--------------|
-| Merge PDFs | pypdf | `writer.add_page(page)` |
-| Split PDFs | pypdf | One page per file |
-| Extract text | pdfplumber | `page.extract_text()` |
-| Extract tables | pdfplumber | `page.extract_tables()` |
-| Create PDFs | reportlab | Canvas or Platypus |
-| Command line merge | qpdf | `qpdf --empty --pages ...` |
-| OCR scanned PDFs | pytesseract | Convert to image first |
-| Fill PDF forms | pdf-lib or pypdf (see FORMS.md) | See FORMS.md |
-
-## Next Steps
-
-- For advanced pypdfium2 usage, see REFERENCE.md
-- For JavaScript libraries (pdf-lib), see REFERENCE.md
-- If you need to fill out a PDF form, follow the instructions in FORMS.md
-- For troubleshooting guides, see REFERENCE.md
+# PDF 文件
+
+## 适用
+- 拿到一个未知 PDF 时先做体检: 页数、版本、是否加密、是否有文本层、是否扫描件。
+- 文本型 PDF 的快速取字 (拉丁字符为主), 以及为后续 OCR/解析选路。
+- 不适用: 生成 PDF、合并/拆分/旋转/水印、填写表单、解密。这些需要专用库或外部工具, 本技能不假装支持。
+
+## 核心事实
+PDF 由"对象 + 交叉引用表 + 页面树"组成, 文字画在内容流里 (`BT ... ET` 之间的 `Tj`/`TJ` 操作符)。两条硬约束:
+
+1. **文字编码不一定等于 Unicode**。很多中文 PDF 用 CID 字体 + 自定义编码, 要读 `ToUnicode` CMap 才能还原; 本工具不解析 CMap, 因此这类文件会取出乱码。看到 `printable_ratio` 偏低就是这种情况。
+2. **扫描件没有文本层**, 只有图片。任何"提取文字"的工具对它都无能为力, 必须先 OCR。
+
+## 工具
+脚本目录 `scripts/`, 只用 Python 3.9+ 标准库:
+
+| 命令 | 用途 |
+|---|---|
+| `python scripts/pdf_tool.py validate file.pdf` | 结构校验: 文件头、%%EOF、startxref、页面树、页数、加密、文本层、扫描件特征; `ok: false` 表示文件本身坏了 |
+| `python scripts/pdf_tool.py info file.pdf` | 只读体检: 版本/页数/对象数/图片数/字体数/元数据 (Title/Author/Producer 等) |
+| `python scripts/pdf_tool.py text file.pdf [--out text.txt]` | 尽力提取文本层; 同时输出字符数与可打印字符比例 |
+
+## 流程
+
+1. **先 `validate`, 不要先提字**。它一次给出文件是否完整、多少页、是否加密、有没有文本层。跳步直接提字, 遇到扫描件会得到空文本, 然后误判"文件没内容"。
+2. **看 `encrypted`**: 为 `true` 时不要尝试破解, 直接向用户要口令或要一份未加密副本。加密文件的结构检查只能做到"外壳"。
+3. **看 `has_text_layer` 与 `images`**:
+   - 有文本层 → `text` 提字, 并检查 `printable_ratio`; ≥0.9 才可直接用。
+   - 无文本层、有图片 → 判定为扫描件, 走 OCR (本机有 OCR 时用, 没有就明确告知用户并建议提供文字版)。
+4. **提字后核对**: 页数与 `info` 一致; 首尾各抽 3 行与原文对照; 表格类 PDF 的 `text` 输出会丢列结构, 需要表格就说明"只取到行文本, 列关系需人工核对"。
+5. **元数据不要当事实**: `Title`/`Author` 由生成工具写入, 可能是导出软件名或空, 不能作为文件归属证据。
+6. **交付说明**: 页数、是否加密、文本层状态、提取字符数与可打印比例、以及未覆盖的能力 (表单/合并/OCR 质量)。
+
+## 边界与限制
+- **只读**: 不生成、不修改、不合并、不拆分、不旋转、不加水印、不填表单、不解密。
+- **不解析 ToUnicode CMap**: CID 编码的中文/日文/韩文 PDF 可能取到乱码; 这是有意的取舍 (保持零依赖与可审计), 不是 bug。
+- **页数与顺序按对象扫描统计**: 极少数使用对象流 (Object Stream) 的 PDF 页数可能偏低; 与阅读器显示不一致时以阅读器为准并说明。
+- **不做版面还原**: 多栏、表格、脚注会按内容流顺序拼接, 阅读顺序可能与视觉顺序不同。
+- **加密 PDF** 无法读取内容流; 只报告加密事实。
+
+## 反合理化
+- "直接跑 text 就行" → 扫描件和 CID 编码都会给你空文本或乱码, 然后你会把"没提出来"当成"文件没内容"。先 validate。
+- "乱码就多试几次" → 乱码是编码问题, 重试不会变好。换 OCR 或专用解析工具。
+- "元数据写着作者是 X, 那就是 X 写的" → 元数据可以随意填写, 也可能被导出工具覆盖。不把它当证据。
+- "顺手把两个 PDF 拼一下" → 本技能没有写能力, 拼接属于越界。改用专用工具并说明。
+- "加密文件试几个常见口令" → 不做口令猜测。向用户要授权与口令。
+
+## 验证
+- [ ] 已先跑 `validate`, 并记录页数/加密/文本层状态
+- [ ] 文本型: `text` 的 `printable_ratio` ≥ 0.9, 首尾抽样与原文一致
+- [ ] 扫描件: 已明确告知需 OCR, 未把空文本当作结论
+- [ ] 加密: 已停止并索取口令/未加密副本, 未尝试破解
+- [ ] 页数与阅读器一致, 不一致时已说明统计口径
+- [ ] 回复中写明页数、文本层状态、提取字符数与未支持能力

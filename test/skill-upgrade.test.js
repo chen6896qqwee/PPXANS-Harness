@@ -38,7 +38,6 @@ test('verifyUpgradeSkill: 正文太短 → 拦', () => {
 });
 // === agent 级集成: upgradeSkill 全链路 ===
 import { PPXAgent } from '../src/agent/index.js';
-import { SkillLoader } from '../src/skills/loader.js';
 
 function makeAgent() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ppx-upg-'));
@@ -47,13 +46,13 @@ function makeAgent() {
 
 test('upgradeSkill 集成: 用满次数→LLM升级→过闸门→写回→reset', async () => {
   const a = makeAgent();
-  // 建一个真实技能供 loader 读取
-  const sdir = path.join(a.root, 'skills', 'file-reader');
+  // 2026-10-31 (队列⑥): 技能种在项目根 .ppx/skills (agent 多根 loader 可见);
+  //   learningSvc 持有 boot 时的 agent.skills 引用, 计数/读取必须走同一实例 —— 不可再替换 a.skills。
+  //   create_skill 落盘可写根 = 项目根, 断言也随之走到 .ppx/skills。
+  const sdir = path.join(a.root, '.ppx', 'skills', 'file-reader');
   fs.mkdirSync(sdir, { recursive: true });
   fs.writeFileSync(path.join(sdir, 'SKILL.md'), '---\nname: file-reader\ndescription: 批量读文件\n---\n\n## 流程\n1. 读文件\n2. 验证\n\n## 验证\n返回内容', 'utf8');
-  // 重新初始化 skills loader 指向同目录
-  a.skills = new SkillLoader(path.join(a.root, 'skills'));
-  // 攒够使用次数
+  // 攒够使用次数 (走 agent 真实 loader, 计数落 <writeDir>/.usage.json)
   for (let i=0;i<5;i++) a.skills.trackUse('file-reader');
   assert.equal(a.skills.useOf('file-reader').uses, 5, '应先用满5次');
   // mock LLM 返回升级版 (更长更完整, 引用工具)
@@ -72,10 +71,9 @@ test('upgradeSkill 集成: 用满次数→LLM升级→过闸门→写回→reset
 
 test('upgradeSkill 集成: 使用次数不足→跳过', async () => {
   const a = makeAgent();
-  const sdir = path.join(a.root, 'skills', 'file-reader');
+  const sdir = path.join(a.root, '.ppx', 'skills', 'file-reader');
   fs.mkdirSync(sdir, { recursive: true });
   fs.writeFileSync(path.join(sdir, 'SKILL.md'), '---\nname: file-reader\ndescription: x\n---\n\n## 流程\n1. 读\n\n## 验证\ny', 'utf8');
-  a.skills = new SkillLoader(path.join(a.root, 'skills'));
   a.skills.trackUse('file-reader'); // 只用 1 次
   a.llm = { chat: async () => ({ content: '升级版\n## 流程\n1. 读\n2. 写\n## 验证\nz'  }) };
   const r = await a.upgradeSkill('file-reader', { minUses: 3 });
@@ -87,11 +85,10 @@ test('upgradeSkill 集成: 使用次数不足→跳过', async () => {
 
 test('upgradeSkill 集成: LLM 产出退化版→被闸门拦, 不写回', async () => {
   const a = makeAgent();
-  const sdir = path.join(a.root, 'skills', 'file-reader');
+  const sdir = path.join(a.root, '.ppx', 'skills', 'file-reader');
   fs.mkdirSync(sdir, { recursive: true });
   const good = '---\nname: file-reader\ndescription: x\n---\n\n## 流程\n1. 读文件并解析内容逐行输出检查编码正确性\n2. 校验行尾\n3. 验证\n\n## 反合理化\n别偷懒\n\n## 验证\n返回完整内容';
   fs.writeFileSync(path.join(sdir, 'SKILL.md'), good, 'utf8');
-  a.skills = new SkillLoader(path.join(a.root, 'skills'));
   for (let i=0;i<5;i++) a.skills.trackUse('file-reader');
   // mock LLM 返回缺"验证"段 → 应被拦
   a.llm = { chat: async () => ({ content: '## 流程\n1. 读\n' }) };

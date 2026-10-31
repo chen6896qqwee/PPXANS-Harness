@@ -46,11 +46,25 @@ test("isPrivateIP: IPv6 回环/链路本地/唯一本地/映射地址全部判�
   assert.equal(isPrivateIP("fd12:3456::ab"), true);
   assert.equal(isPrivateIP("::ffff:127.0.0.1"), true);
   assert.equal(isPrivateIP("::ffff:10.0.0.5"), true);
+  // 2026-10-30: URL 规范化后的十六进制 IPv4-mapped 写法 (旧实现漏判)
+  assert.equal(isPrivateIP("::ffff:7f00:1"), true);
+  assert.equal(isPrivateIP("::ffff:a00:5"), true);
+  // NAT64 / 6to4 / IPv4-compatible 内嵌私网
+  assert.equal(isPrivateIP("64:ff9b::7f00:1"), true);
+  assert.equal(isPrivateIP("2002:7f00:1::"), true);
+  assert.equal(isPrivateIP("::7f00:1"), true);
+  // 文档 / 基准 / 组播 / 云元数据
+  assert.equal(isPrivateIP("2001:db8::1"), true);
+  assert.equal(isPrivateIP("ff02::1"), true);
+  assert.equal(isPrivateIP("100.100.100.200"), true);
   assert.equal(isPrivateIP("169.254.169.254"), true);
   assert.equal(isPrivateIP("192.168.1.1"), true);
   // 公网地址不误伤
   assert.equal(isPrivateIP("8.8.8.8"), false);
   assert.equal(isPrivateIP("2001:4860:4860::8888"), false);
+  assert.equal(isPrivateIP("::ffff:8.8.8.8"), false);
+  assert.equal(isPrivateIP("64:ff9b::808:808"), false);
+  assert.equal(isPrivateIP("2002:808:808::"), false);
 });
 
 test("http_request 拒绝 IPv6 回环目标", async () => {

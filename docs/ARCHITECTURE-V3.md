@@ -44,7 +44,7 @@ v3.0 在 v2.x「一切皆插件 + 会话即事实源」之上，引入 codex 的
 | 模块 | 出处 | 职责 |
 |---|---|---|
 | `src/protocol/` | codex core | **SQ/EQ 双队列**：`SubmissionQueue`（用户操作入队，Id::UnixMs 唯一）与 `EventQueue`（结构化事件出队 + WAL 回放）。通道层与内核解耦的唯一总线 |
-| `src/session/` | codex + opencode | **Session→Task→Turn 状态机**：taskTurn/aborted/complete；`rollout.js` JSONL 追加式持久化（ResponseItem 流，按 id fork/rewind）；`parts.js` 结构化消息部件（text/file/image/reasoning/agent嘯声，opencode 风格）。**⚠️ standalone 未接入运行时**（仅实现+测试引用，无生产 import，见「集成现状」，v3.1 集成） |
+| `src/session/` | codex + opencode | **Session→Task→Turn 状态机**：taskTurn/aborted/complete；`rollout.js` JSONL 追加式持久化（ResponseItem 流，按 id fork/rewind）；`parts.js` 结构化消息部件（text/file/image/reasoning/agent嘯声，opencode 风格）。**TurnProjection 投影层已接入主链路**（`agent/index.js` 每轮 begin/end + SQ/EQ 推 TURN_*）；`turn.js` / `rollout.js` / `parts.js` 仍为 standalone（仅实现+测试引用，待 v3.1 集成） |
 | `src/permissions/` | codex + opencode + CASDK | **三合一权限引擎**：①`AskForApproval` 四档（UnlessTrusted/OnFailure/OnRequest/Never）；②`SandboxPolicy` 三档（ReadOnly/WorkspaceWrite/DangerFullAccess + 网络开关）；③opencode 通配符规则链（`*` / `git *` / `git push`，last-match-wins）+ CASDK `canUseTool` 回调 + 审批请求对象（Bash/Edit/Plan 三类模板） |
 | `src/hooks/` | claude-code | **钩子链**：PreToolUse（可否决/改参）/ PostToolUse（可附加上下文）/ PreCompact / SessionStart / SessionStop / SubagentStop。事件驱动注册，超时熔断，纯 JS 无进程钩子 |
 | `src/edit/` | aider + opencode | **SR 编辑块**：SEARCH/REPLACE 块解析与应用（多候选匹配、空白容错、失败块回灌 LLM 修复循环 ≤2 次）；`snapshot.js` 编辑前快照 + 逐文件回滚 |

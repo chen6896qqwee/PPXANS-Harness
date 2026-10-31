@@ -89,7 +89,9 @@ test("P0-1: 端到端 —— 跨源 GET /api/bootstrap 返回 401 且无 token",
   const port = svc.server.address().port;
   try {
     const evil = await fetch(`http://127.0.0.1:${port}/api/bootstrap`, { headers: { Origin: "https://evil.example.com" } });
-    assert.equal(evil.status, 401, "跨源请求必须 401 (修复前是 200 + 明文 token)");
+    // 2026-10-31: CORS 默认 same-origin 后, 跨源请求在 CORS 层即被 403 拦截 (比 401 更早、更严)
+    assert.ok(evil.status === 403 || evil.status === 401, "跨源请求必须被拒 (CORS 403 / 鉴权 401)");
+    assert.notEqual(evil.status, 200, "修复前是 200 + 明文 token");
     const body = await evil.text();
     assert.ok(!body.includes(svc.http.authToken), "响应体不得出现真实 token");
 

@@ -65,7 +65,7 @@ export function registerSkillHubTools(catalog, { getAgent = () => null, skillsRo
     capability: { riskLevel: "medium", readOnly: false, destructive: false, sideEffect: "workspace+network" },
     category: "selfmod",
     power: "agent",
-    description: "从 GitHub 导入通用 Agent Skill 包 (SKILL.md 目录式) 到本地技能库, 自动归类到 <域>/<技能>/。用法: repo=owner/repo 直接导; from=可信源 id/技能名 (如 anthropics/pdf, 走内置白名单); 都不给则列出可装源。只写文件不执行内容; 单文件 512KB/单技能 4MB/最多 40 附随文件。dry_run=true 先预览。",
+    description: "从 GitHub 导入 Agent Skill 包 (SKILL.md 目录式) 到本地技能库, 自动归类到 <域>/<技能>/。repo=owner/repo 直接导; from=内置白名单源 (如 anthropics/pdf); 都不给则列可装源。只写文件不执行内容; 单文件 512KB/技能 4MB/最多 40 附随文件; dry_run=true 先预览。",
     parameters: {
       type: "object",
       properties: {

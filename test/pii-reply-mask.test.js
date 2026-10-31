@@ -41,14 +41,18 @@ function makeAgent(extraConfig, root) {
 test("pii_reply_mask=false (默认) → 回复保持原文 (开发工作流不破坏)", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ppx-pii-off-"));
   const agent = makeAgent({}, root);
-  const reply = await agent.chat("记住我的邮箱 zhangsan@example.com");
-  assert.match(reply, /zhangsan@example\.com/, "默认不掩码");
+  try {
+    const reply = await agent.chat("记住我的邮箱 zhangsan@example.com");
+    assert.match(reply, /zhangsan@example\.com/, "默认不掩码");
+  } finally { await agent.shutdown(); }
 });
 
 test("pii_reply_mask=true → 回复中 PII 被脱敏", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ppx-pii-on-"));
   const agent = makeAgent({ security: { pii_reply_mask: true } }, root);
-  const reply = await agent.chat("记住我的邮箱 zhangsan@example.com");
-  assert.doesNotMatch(reply, /zhangsan@example\.com/, "原文不得出现在回复");
-  assert.match(reply, /\[REDACTED\]/, "应显示脱敏占位");
+  try {
+    const reply = await agent.chat("记住我的邮箱 zhangsan@example.com");
+    assert.doesNotMatch(reply, /zhangsan@example\.com/, "原文不得出现在回复");
+    assert.match(reply, /\[REDACTED\]/, "应显示脱敏占位");
+  } finally { await agent.shutdown(); }
 });

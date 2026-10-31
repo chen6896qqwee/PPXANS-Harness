@@ -1,4 +1,4 @@
-// src/orchestrator/session-key.js - 会话键编码 scheme (2026-10-07 吸收自 TencentCloud/Octop)
+// src/utils/session-key.js - 会话键编码 scheme (2026-10-07 吸收自 TencentCloud/Octop)
 //
 // 吸收来源: Octop `docs/architecture.md` 的 "Conversation surfaces" 表。
 //   它把每个入口的会话键编码成同一套形状:

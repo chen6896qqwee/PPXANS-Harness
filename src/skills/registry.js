@@ -2,7 +2,8 @@
 //
 // 定位: 在 SkillLoader (负责"读") 之上补一层"知道有什么、缺什么、从哪来"。
 //   ① 12 个领域域目录 (11 个能力域 + 1 个元能力域): 技能内置进 PPX 后的**能力面坐标**
-//   ② 多源装配: 内置 (随包) → 用户级 (~/.ppx/skills) → 项目级, 顺序即优先级
+//   ② 多源装配: 项目级 (.ppx/skills) > 用户级 (~/.ppx/skills) > 内置 (随包) > 附加目录,
+//      roots 顺序即优先级 (2026-10-31 队列⑥反转, 旧序为内置优先)
 //   ③ coverage(): 每个领域覆盖了几个技能 —— "全能超级 Agent"的自证材料, 也是缺口清单
 //
 // 与 loader 的分工: 本模块不碰文件读取细节, 只做归一与统计。任何 loader 兼容的目录都能装配。
@@ -42,24 +43,33 @@ export function userSkillsDir() {
 }
 
 // 依配置装配技能源。config.skills:
-//   { builtin: true, user_dir: "~/.ppx/skills", project_dir: "", extra_dirs: [], max_depth: 2 }
-// extra_dirs: 任意附加根 (团队共享盘 / 下载的 GitHub 技能包), 优先级最低。
+//   { builtin: true, user_dir: "~/.ppx/skills", project_dir: "<root>/.ppx/skills", extra_dirs: [], max_depth: 2 }
+// 优先级 (2026-10-31 队列⑥反转): **项目级 > 用户级 > 内置 > 附加目录**。
+//   项目技能 (.ppx/skills, 与 .ppx/commands 同锚点) 是对当前仓库的定制, 必须压过全局用户
+//   技能与随包内置 (项目里放同 id 技能 = 有意覆盖); 附加目录 (extra_dirs: 团队共享盘/下载
+//   的技能包) 优先级最低。语义由 roots 顺序表达, loader 端同 id 先到的根胜出 (first-wins)。
+//   此前顺序是 [builtin, user, project] + first-wins = **内置压住一切** —— 与 v2 文档宣称的
+//   "用户覆盖内置"直接相反, 用户级/项目级放同 id 技能形同虚设。
+// 可写根: 项目 > 用户。create_skill / 技能导入落这里 —— 用户产物不写进代码树
+//   (内置根在 npm 装机时位于 node_modules, 升级替换包目录即冲掉), 内置根只读。
 export function skillRootsFromConfig(config, root) {
   const c = config?.skills || {};
   const roots = [];
-  if (c.builtin !== false) {
-    roots.push({ id: "builtin", dir: builtinSkillsDir(root), kind: "builtin", writable: true });
-  }
+  // 项目根默认 <root>/.ppx/skills; project_dir: "" 显式关闭 (与 user_dir 同款三态: 未设=默认 / ""=关 / 值=自定义)
+  const projectDir = c.project_dir === "" ? "" : expandHome(c.project_dir || path.join(root, ".ppx", "skills"));
+  if (projectDir) roots.push({ id: "project", dir: projectDir, kind: "project", writable: true });
   const userDir = c.user_dir === "" ? "" : expandHome(c.user_dir || userSkillsDir());
   if (userDir) roots.push({ id: "user", dir: userDir, kind: "user", writable: true });
-  if (c.project_dir) roots.push({ id: "project", dir: expandHome(c.project_dir), kind: "project", writable: true });
+  if (c.builtin !== false) {
+    roots.push({ id: "builtin", dir: builtinSkillsDir(root), kind: "builtin", writable: false });
+  }
   for (const [i, d] of (Array.isArray(c.extra_dirs) ? c.extra_dirs : []).entries()) {
     if (!d) continue;
     roots.push({ id: `extra${i}`, dir: expandHome(d), kind: "extra" });
   }
-  // 兜底: 全关也至少留内置 (否则技能系统整体失效, 属配置误用)
+  // 兜底: 全关也至少留内置 (否则技能系统整体失效, 属配置误用); 兜底根可写, 否则 create_skill 无处落盘
   if (!roots.length) roots.push({ id: "builtin", dir: builtinSkillsDir(root), kind: "builtin", writable: true });
-  // 去重 (同目录多 id 只留第一个)
+  // 去重 (同目录多 id 只留先到者 —— 先到者优先级更高)
   const seen = new Set();
   return roots.filter((r) => {
     const k = path.resolve(r.dir).toLowerCase();

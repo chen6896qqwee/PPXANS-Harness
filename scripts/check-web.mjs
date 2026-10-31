@@ -11,8 +11,12 @@ const js = fs.readFileSync(path.join(root, "public", "app.js"), "utf8");
 // 2026-10-27: 前端拆成 app.js (对话/工作台) + bot.js (本体/设置/轨迹) 两个文件。
 // 自检必须都扫, 否则 bot.js 的 id 引用与图标调用全成盲区。
 const bot = fs.readFileSync(path.join(root, "public", "bot.js"), "utf8");
+// 2026-10-31: 「使用统计」页 (stats.js) 与它自带的样式表 (stats.css) 一并纳入自检 ——
+// 不进扫描清单就等于给新页面开了个盲区, 和当初 bot.js 漏检是同一类问题。
+const stats = fs.readFileSync(path.join(root, "public", "stats.js"), "utf8");
 const css = fs.readFileSync(path.join(root, "public", "app.css"), "utf8")
-  + fs.readFileSync(path.join(root, "public", "bot.css"), "utf8");
+  + fs.readFileSync(path.join(root, "public", "bot.css"), "utf8")
+  + fs.readFileSync(path.join(root, "public", "stats.css"), "utf8");
 
 let bad = 0;
 const fail = (m) => { console.log("  ✗ " + m); bad++; };
@@ -23,7 +27,7 @@ const defined = new Set([...html.matchAll(/<g id="(i-[a-z-]+)"/g)].map((m) => m[
 const used = new Set([...(html + js + bot).matchAll(/href="#(i-[a-z-]+)"/g)].map((m) => m[1]));
 // app.js 里大量图标是 ico("name") 运行时拼出来的, 扫不到 href → 单独识别调用名,
 // 否则这类图标会被误报成"未使用"(自检输出失去信噪比)
-for (const m of (js + bot).matchAll(/\bico\(\s*["']([a-z-]+)["']/g)) used.add("i-" + m[1]);
+for (const m of (js + bot + stats).matchAll(/\bico\(\s*["']([a-z-]+)["']/g)) used.add("i-" + m[1]);
 const missIcon = [...used].filter((u) => !defined.has(u));
 if (missIcon.length) fail("引用了未定义的图标: " + missIcon.join(", "));
 else ok(`图标定义 ${defined.size} 个, 引用 ${used.size} 个, 全部命中`);
@@ -35,9 +39,9 @@ if (unusedIcon.length) console.log(`  · 备用图标 ${unusedIcon.length} 个 (
 
 // 2) id: HTML 里声明的 + JS 模板里生成的
 const htmlIds = new Set([...html.matchAll(/\bid="([A-Za-z][\w-]*)"/g)].map((m) => m[1]));
-const jsIds = new Set([...(js + bot).matchAll(/\bid="([A-Za-z][\w-]*)"/g)].map((m) => m[1]));
+const jsIds = new Set([...(js + bot + stats).matchAll(/\bid="([A-Za-z][\w-]*)"/g)].map((m) => m[1]));
 const allIds = new Set([...htmlIds, ...jsIds]);
-const refs = [...(js + bot).matchAll(/\$\("([\w-]+)"\)/g)].map((m) => m[1]);
+const refs = [...(js + bot + stats).matchAll(/\$\("([\w-]+)"\)/g)].map((m) => m[1]);
 const missId = [...new Set(refs)].filter((r) => !allIds.has(r));
 if (missId.length) fail("$() 引用了不存在的 id: " + missId.join(", "));
 else ok(`$() 引用 ${new Set(refs).size} 个 id, 全部存在于 DOM 或 JS 模板`);
@@ -55,7 +59,7 @@ else ok(`$() 引用 ${new Set(refs).size} 个 id, 全部存在于 DOM 或 JS 模
 }
 
 // 3) 两个脚本都真解析一遍 (替代旧的括号计数粗检)
-for (const [name, src] of [["app.js", js], ["bot.js", bot]]) {
+for (const [name, src] of [["app.js", js], ["bot.js", bot], ["stats.js", stats]]) {
   try {
     new Function(src);
     ok(`${name} 语法解析通过`);
@@ -72,7 +76,9 @@ const need = ["side", "brand", "newchat", "ghead", "topbar", "hero", "stream",
   "setrow", "toast", "btn",
   // bot 形态 (2026-10-27)
   "view", "botbar", "avavt", "bmeta", "bsub", "panes", "ptab", "bwrap", "bcard",
-  "brows", "swrap", "ssec", "srow", "titem"];
+  "brows", "swrap", "ssec", "srow", "titem",
+  // 使用统计页 (2026-10-31)
+  "st-wrap", "st-kpis", "st-card", "st-heat", "st-cell", "st-legend", "st-models"];
 const missCls = need.filter((c) => !cssClasses.has(c));
 if (missCls.length) fail("样式表缺少类: " + missCls.join(", "));
 else ok(`样式表覆盖全部关键类 (${need.length} 个)`);
@@ -85,7 +91,8 @@ else ok(`样式表覆盖全部关键类 (${need.length} 个)`);
  ["审查面板", 'id="pane-review"'], ["设置面板", 'id="pane-settings"'],
  ["本体首页", 'id="view-home"'], ["对话视图", 'id="view-chat"'],
  ["本体设置", 'id="view-settings"'], ["本体设置容器", 'id="botSettings"'],
- ["轨迹页签", 'id="pane-trace"'], ["本体列表", 'id="botList"']].forEach(([n, s]) => {
+ ["轨迹页签", 'id="pane-trace"'], ["本体列表", 'id="botList"'],
+ ["使用统计视图", 'id="view-stats"'], ["使用统计容器", 'id="statsWrap"']].forEach(([n, s]) => {
   if (!html.includes(s)) fail(`缺少结构: ${n} (${s})`);
 });
 if (bad) console.log("  · 结构断言未全部通过"); else ok("关键结构齐全");

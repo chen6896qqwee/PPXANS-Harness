@@ -127,6 +127,10 @@ export class McpServer {
     this.extraPrompts = opts.prompts || [];
     // 工具名 -> 实现映射 (虚拟工具), 冲突时优先内置工具 (工具名唯一性在 server 内)
     this._virtualTools = new Map(this.extraTools.map((t) => [safeToolName(t.name), t]));
+    // tools/list 真分页 (2026-10-31): 每页工具数。默认 128 —— 当前全量 ~120 个工具单页装得下,
+    //   不发 nextCursor, 存量客户端零感知; 列表更大 (MCP 外接 + admin 虚拟工具) 时客户端按
+    //   nextCursor 翻页 (官方客户端语义)。cursor = base64url(起始偏移)。
+    this.pageSize = Math.max(1, Number(opts.pageSize) || 128);
   }
 
   // ---- 对外分发入口: 接收 JSON-RPC 消息, 返回 { result } 或抛 McpError ----
@@ -166,15 +170,29 @@ export class McpServer {
       // ---- tools ----
       case "tools/list": {
         const tools = await this._listTools();
-        // 分页: 单页返回全部 (cursor 非空时返回空, 表示无更多页)
+        // 2026-10-31 真分页 (此前占位: 单页全量 + cursor 非空仅回 nextCursor:null):
+        //   cursor = base64url(起始偏移); 每页 pageSize 个; 有剩余才发 nextCursor。
+        //   默认 pageSize=128 时现有列表单页装满 → 不发 nextCursor → 存量客户端零感知。
+        let start = 0;
         const cursor = msg.params && msg.params.cursor;
+        if (cursor != null && cursor !== "") {
+          let n = Number.NaN;
+          try { n = Number(Buffer.from(String(cursor), "base64url").toString("utf8")); } catch { /* 落 NaN */ }
+          if (!Number.isInteger(n) || n < 0) {
+            throw new McpError(MCP_ERROR.INVALID_PARAMS, `无效 cursor: ${String(cursor).slice(0, 40)}`);
+          }
+          start = n;
+        }
+        const page = tools.slice(start, start + this.pageSize);
         const result = {
           resultType: "complete",
-          tools,
+          tools: page,
           ttlMs: 300000,      // 工具列表 5 分钟缓存 (2026-07-28 缓存语义)
           cacheScope: "public",
         };
-        if (cursor) result.nextCursor = null;
+        const next = start + page.length;
+        // 末页不发 nextCursor (官方客户端以 nextCursor 缺失为终止信号); 越界 cursor → 空页
+        if (next < tools.length) result.nextCursor = Buffer.from(String(next), "utf8").toString("base64url");
         return { result: stampServerInfo(result, this.serverInfo) };
       }
       case "tools/call": {

@@ -83,7 +83,7 @@
         "  PASS  clean_run_no_fixes  - fixes=0",
         "Self-heal score: 7/7 (100.0%)",
         "All self-heal scenarios passed.",
-        "[utils/store] JSON 解析失败, 返回 fallback (文件保留): C:\\Users\\chen\\AppData\\Local\\Temp\\ppx-shb-2-kafgf9\\data\\memory\\facts.json (Expected property name or '}' in JSON at position 2 (line 1 column 3))"
+        "[utils/store] JSON 解析失败, 返回 fallback (文件保留): C:\\Users\\<user>\\AppData\\Local\\Temp\\ppx-shb-2-kafgf9\\data\\memory\\facts.json (Expected property name or '}' in JSON at position 2 (line 1 column 3))"
       ]
     },
     {
@@ -97,7 +97,7 @@
         "signed": "启用"
       },
       "tail": [
-        "审计日志: C:\\Users\\chen\\Desktop\\PPXANS-Harness\\data\\logs\\audit.ndjson",
+        "审计日志: C:\\Users\\<user>\\Desktop\\PPXANS-Harness\\data\\logs\\audit.ndjson",
         "链完整性: 完整 | 条数: 127 | 断裂点: 无 | HMAC: 启用 | 未签名历史: 127 条",
         "详情: 审计链完整 (127 条, 127 条未签名历史)"
       ]

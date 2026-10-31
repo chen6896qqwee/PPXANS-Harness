@@ -18,7 +18,7 @@ const _pc = loadConfig(process.cwd());
 const _pp = (_pc.providers || [])[0];
 const config = _pp
   ? { id: _pp.id, base_url: _pp.base_url, api_key: _pp.api_key || "lm-studio", model: _pp.model, vision: true, timeout_ms: 120000 }
-  : { id: "lmstudio", base_url: "http://127.0.0.1:1234/v1", api_key: "lm-studio", model: MODEL, vision: true, timeout_ms: 120000 };
+  : { id: "lmstudio", base_url: process.env.PPX_LOCAL_BASE_URL || "http://127.0.0.1:1234/v1", api_key: process.env.PPX_LOCAL_API_KEY || "lm-studio", model: MODEL, vision: true, timeout_ms: 120000 };
 
 const tools = [
   { type: "function", function: { name: "get_time", description: "获取当前日期和时间", parameters: { type: "object", properties: {}, required: [] } } },
@@ -125,8 +125,8 @@ async function agentLoop() {
   const client = new LLMClient(config);
   // 先探活
   const healthy = await client.health();
-  if (!healthy) { console.error("✗ LM Studio 不可达 (http://127.0.0.1:1234/v1), 请先启动 LM Studio"); process.exit(1); }
-  console.log(`→ 响应质量端到端实测 | 后端: LM Studio ${MODEL} | 时间 ${YYYY}-${now.toISOString().slice(5, 10)} ${HH}:xx\n`);
+  if (!healthy) { console.error(`✗ 模型端点不可达 (${config.base_url}), 请先启动本地服务或配置 PPX_E2E_*`); process.exit(1); }
+  console.log(`→ 响应质量端到端实测 | 后端: ${config.id} ${MODEL} | 时间 ${YYYY}-${now.toISOString().slice(5, 10)} ${HH}:xx\n`);
 
   const r1 = await llmDirect(client);
   const r2 = await agentLoop();

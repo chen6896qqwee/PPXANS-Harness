@@ -6,9 +6,9 @@
 //
 // 本测试钉住三件事:
 //   1) 所有响应 (静态页/API/SSE 前的 401) 都带齐四个安全头
-//   2) CSP 是严格模式: script-src 无 'unsafe-inline', 内联脚本只允许 sha256 白名单
-//   3) CSP 里的 sha256 哈希与 public/index.html 实际内联脚本一致
-//      (改内联脚本不同步哈希 → 首屏主题脚本被 CSP 拦 → 本测试红)
+//   2) CSP 是严格模式: script-src 无 'unsafe-inline', 只允许同源脚本
+//   3) 首屏主题脚本已外置为 /theme.js, 页面没有任何可执行内联脚本
+//      (2026-10-30 起不再需要 sha256 白名单; 内联脚本回潮 → 本测试红)
 import test from "node:test";
 import assert from "node:assert";
 import crypto from "node:crypto";
@@ -63,25 +63,23 @@ test("安全响应头: 静态首页与 API 响应均带 CSP/nosniff/X-Frame/Refe
   });
 });
 
-test("CSP 严格性: script-src 无 unsafe-inline/unsafe-eval, 外域一律拒绝", () => {
+test("CSP 严格性: script-src 无 unsafe-inline/unsafe-eval/哈希白名单, 外域一律拒绝", () => {
   const scriptSrc = /script-src ([^;]+)/.exec(SECURITY_CSP)?.[1] || "";
   assert.ok(scriptSrc.includes("'self'"), "script-src 应含 'self'");
   assert.ok(!scriptSrc.includes("'unsafe-inline'"), "script-src 不得放行任意内联脚本");
   assert.ok(!scriptSrc.includes("'unsafe-eval'"), "script-src 不得放行 eval");
-  const hash = /'sha256-([A-Za-z0-9+/=]+)'/.exec(scriptSrc)?.[1];
-  assert.ok(hash, "script-src 应有内联脚本 sha256 白名单");
+  assert.ok(!/'sha256-/.test(scriptSrc), "首屏脚本已外置, CSP 不应再依赖内容哈希白名单");
   // connect-src 只允许同源: 拦截注入脚本外传数据
   assert.ok(/connect-src 'self'/.test(SECURITY_CSP), "connect-src 应仅 'self'");
 });
 
-test("CSP 哈希与 index.html 内联脚本一致 (改脚本必须同步 SECURITY_CSP)", () => {
+test("首屏主题脚本已外置: index.html 无可执行内联脚本, 通过 /theme.js 加载", () => {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const html = fs.readFileSync(path.join(root, "public", "index.html"), "utf8");
-  const m = /<script>([\s\S]*?)<\/script>/.exec(html);
-  assert.ok(m, "index.html 应有内联主题脚本");
-  const actual = crypto.createHash("sha256").update(m[1], "utf8").digest("base64");
-  const pinned = /'sha256-([A-Za-z0-9+/=]+)'/.exec(SECURITY_CSP)?.[1];
-  assert.equal(actual, pinned, "SECURITY_CSP 里的 sha256 与实际内联脚本不符 —— 首屏主题脚本会被 CSP 拦截");
+  assert.ok(/<script src="\/theme\.js"><\/script>/.test(html), "index.html 应在 head 同步加载 /theme.js");
+  const executable = html.match(/<script(?![^>]*\bsrc=)(?![^>]*type="application\/json")[^>]*>/gi) || [];
+  assert.equal(executable.length, 0, `页面不应再有可执行内联脚本, 实际 ${executable.length} 个`);
+  assert.ok(fs.existsSync(path.join(root, "public", "theme.js")), "public/theme.js 必须存在");
 });
 
 // 2026-10-27: 首页原先由服务端注入 `<script>window.__PPX_BOOTSTRAP__={...}</script>`。
@@ -89,7 +87,27 @@ test("CSP 哈希与 index.html 内联脚本一致 (改脚本必须同步 SECURIT
 // 症状极隐蔽: window.__PPX_BOOTSTRAP__ 恒为 undefined, 首屏所有 /api/* 先吃一次 401,
 // 靠 app.js 的 401 兜底再取一遍才恢复 —— 看起来「能用」, 实际上每次都多绕一圈。
 // 现在改成 type="application/json" 的数据节点 (不可执行, 不受 script-src 约束)。这条钉住它。
-test("首页引导数据是不可执行的 JSON 节点, 页面只剩一个内联脚本", { timeout: 20000 }, async () => {
+test("健康检查: 桌面壳 HMAC 挑战应答 (防本机服务冒充)", { timeout: 20000 }, async () => {
+  const prev = process.env.PPX_DESKTOP_SECRET;
+  process.env.PPX_DESKTOP_SECRET = "desk-secret-for-test";
+  try {
+    await withChannel(async (base) => {
+      const challenge = "abc123";
+      const res = await fetch(base + "/health", { headers: { "x-ppx-desktop-challenge": challenge } });
+      const proof = res.headers.get("x-ppx-desktop-proof");
+      const want = crypto.createHmac("sha256", "desk-secret-for-test").update(challenge).digest("hex");
+      assert.equal(proof, want, "带挑战时应返回正确的 HMAC 证明");
+      // 不带挑战不泄露任何证明
+      const plain = await fetch(base + "/health");
+      assert.equal(plain.headers.get("x-ppx-desktop-proof"), null);
+    });
+  } finally {
+    if (prev == null) delete process.env.PPX_DESKTOP_SECRET;
+    else process.env.PPX_DESKTOP_SECRET = prev;
+  }
+});
+
+test("首页引导数据是不可执行的 JSON 节点, 页面没有可执行内联脚本", { timeout: 20000 }, async () => {
   // 临时 root 里没有 public/, 这里把 publicDir 指回仓库真实的 public —— 与部署时一致
   const projectPublic = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "public");
   const root = tmpRoot();
@@ -104,8 +122,9 @@ test("首页引导数据是不可执行的 JSON 节点, 页面只剩一个内联
     assert.ok(html.includes('id="ppx-boot"'), "首页应注入 #ppx-boot 引导数据节点");
     assert.ok(/<script type="application\/json" id="ppx-boot">/.test(html), "引导数据节点必须是 application/json");
     assert.ok(!/window\.__PPX_BOOTSTRAP__\s*=/.test(html), "不应再注入赋值式内联脚本");
-    const inline = html.match(/<script>/g) || [];
-    assert.equal(inline.length, 1, `可执行内联脚本只应有首屏主题脚本一个, 实际 ${inline.length} 个`);
+    const inline = html.match(/<script(?![^>]*\bsrc=)(?![^>]*type="application\/json")[^>]*>/gi) || [];
+    assert.equal(inline.length, 0, `页面不应有可执行内联脚本, 实际 ${inline.length} 个`);
+    assert.ok(html.includes('src="/theme.js"'), "首屏主题脚本应外置为 /theme.js");
   } finally {
     await ch.disconnect();
     agent.shutdown();

@@ -9,6 +9,7 @@
 //   常量已下沉到 core(L1), 这里接上即可断环 (2026-10-10 arch-guard 检出 core → tools → core)。
 import { TOOL_ERROR_PREFIX } from "./errors.js";
 import { warn } from "../utils/logger.js";
+import { stableJson } from "../utils/canonical.js";
 import { runPostChecks, buildVerifyFeedback, formatGateFailure } from "./postcondition.js";
 
 // ---- 阈值默认值 (config.agent.* 可覆盖) ----
@@ -27,8 +28,30 @@ export const DEFAULT_OVERFLOW_SHRINK_MAX = 2;
 export const DEFAULT_MAX_POSTCHECK_RETRY = 2;
 
 // P0③ harness 融断: 探索连击 / 重复命令 阈值 (config.agent.explore_break_limit / repeat_flag_limit 可调)
-export const DEFAULT_EXPLORE_BREAK = 3;   // 连续 3 轮只有只读/查询无产出 -> 融断
+export const DEFAULT_EXPLORE_BREAK = 5;   // 连续 5 轮只读/查询无产出 -> 融断 (2026-10-30: 3 轮太紧, 见构造器注释)
 export const DEFAULT_REPEAT_FLAG = 2;     // 同一工具+args 命中 2 次 -> 警告重复
+
+// 同轮工具并发上限 (2026-10-30): 一轮里 LLM 可能一次吐出 N 个 tool_calls, 旧实现无条件
+//   Promise.all 全放 —— N 个 run_command 就是 N 个 shell 子进程同时 spawn, Windows 上直接卡死,
+//   内存/句柄也不设防。军团侧早有 max_concurrent_agents 背压, 工具侧一直没有。
+//   默认 4 与 config.agent.legion.max_concurrent_per_call 同量级; 0 = 不限 (保留旧行为)。
+export const DEFAULT_MAX_PARALLEL_TOOLS = 4;
+
+// 轮次耗尽的收尾文案 (保持原有字节, 调用方/测试的口径不动)
+export const EXHAUSTED_STOP_TEXT = "[皮皮虾] 工具调用轮次过多, 已停止。";
+
+// 轮次耗尽的强制收口 (2026-10-30): 旧行为是 8 轮用完后直接甩一句"轮次过多, 已停止" ——
+//   前 7 轮读过的文件、改过的代码、跑过的测试全部作废, 用户拿到的是零信息。
+//   这里补一次**不带工具**的收口调用, 让模型基于已有轨迹给出结论。代价是 +1 次 LLM 调用,
+//   换的是"任务做了一半但用户至少知道做到了哪"。关掉用 config.agent.exhausted_finalize=false。
+export const EXHAUSTED_FINALIZE_PROMPT = [
+  "工具调用轮次已达上限, 现在开始不允许再调用任何工具。",
+  "请只基于上面已经产生的工具结果, 直接给出最终收口:",
+  "1) 已完成且已验证的事实/操作 (必须有工具结果支撑, 不要凭印象补);",
+  "2) 未完成的部分, 以及卡在哪一步、缺什么信息;",
+  "3) 用户可以立即执行的下一步建议。",
+  "纪律: 不要编造没做过的检查, 不要宣称未验证的成功, 不确定就写不确定。",
+].join("\n");
 
 // 探索类工具集 (read-only/发现; 不算"产出或修改")
 export const EXPLORE_TOOLS = new Set([
@@ -135,6 +158,14 @@ export class ToolLoopPolicy {
     this.postCheckRetries = 0;
     // 同轮独立工具调用并发执行 (2026-10-01 优化): 默认开, agent.parallel_tool_calls=false 回退串行
     this.parallelToolCalls = c.parallel_tool_calls !== false;
+    // 同轮并发上限 (2026-10-30): 默认 4; 0 = 不限 (旧行为); 脏配置回落默认而不是 NaN
+    const parallelCap = Number(c.max_parallel_tools);
+    this.maxParallelTools = Number.isFinite(parallelCap) && parallelCap >= 0
+      ? Math.trunc(parallelCap)
+      : DEFAULT_MAX_PARALLEL_TOOLS;
+    // 轮次耗尽收口 (2026-10-30): 默认开 —— "做了一半"比"什么都没给"值钱, 不藏在默认关里
+    this.exhaustedFinalize = c.exhausted_finalize !== false;
+
     // 运行时状态 (每轮循环实例持有, 重启归零)
     this.errorRetries = 0;
     this.exploreStreak = 0;
@@ -154,7 +185,7 @@ export class ToolLoopPolicy {
   }
 
   // 记录本轮工具调用, 返回需要注入模型的方向盘消息 (无则 null)
-  // 两种熔断: 连续探索无产出 / 重复执行相同工具+参数
+  // 两种熔断: 连续探索无新目标 / 重复执行相同工具+参数
   recordTurn(toolCalls) {
     const called = (toolCalls || []).filter((tc) => tc.type === "function" && tc.function);
     if (!called.length) return null;
@@ -166,15 +197,20 @@ export class ToolLoopPolicy {
     for (const tc of called) {
       let a = {};
       try { a = JSON.parse(tc.function.arguments || "{}"); } catch {}
-      const sig = (tc.function?.name || "") + "::" + JSON.stringify(a).slice(0, 120);
+      // 2026-10-30: 签名键序无关 —— 同一组参数换键序重发, 旧实现算作"新调用"漏判重复
+      const sig = (tc.function?.name || "") + "::" + stableJson(a, 120);
       this.seenSig.set(sig, (this.seenSig.get(sig) || 0) + 1);
       if (this.seenSig.get(sig) >= this.repeatFlag) repeatHit = true;
     }
+    // 探索熔断 (2026-10-30 校正阈值): 原阈值 3 轮太紧 —— "读 5 个文件再动手"是最常见的
+    //   合法工作流, 却在第 3 轮被当成空转叫停, 直接把任务做一半掐了 (成功率受损)。
+    //   连续只读轮数提到 5, 并保持 repeat 检测作为"重复同一调用"的独立短周期告警。
     if (allExplore) this.exploreStreak++; else this.exploreStreak = 0;
     if (repeatHit) { this.exploreStreak = 0; this.seenSig.clear(); }
     if (allExplore && this.exploreStreak >= this.exploreBreak) {
       this.exploreStreak = 0; this.seenSig.clear();
-      return "检测到连续探索循环: 连续 " + this.exploreBreak + " 轮只有只读/查询工具, 未产生任何产出或修改。请停止继续探测, 基于已获得的信息直接给出结论或交付物; 若确实缺少关键信息, 明确说明并结束本轮, 不要空转。";
+      return "检测到连续探索循环: 连续 " + this.exploreBreak + " 轮只有只读/查询工具, 未产生任何产出或修改。"
+        + "请停止继续探测, 基于已获得的信息直接给出结论或交付物; 若确实缺少关键信息, 明确说明并结束本轮, 不要空转。";
     }
     if (repeatHit) {
       return "检测到重复执行相同工具与参数。请不要再重复该调用, 换一条不同路径推进, 或直接基于现有信息产出结论。";
@@ -216,6 +252,27 @@ export class ToolLoopPolicy {
     this.postCheckRetries++;
     return true;
   }
+}
+
+// ---- 有界并发 (2026-10-30) ----
+// 保序 + 有上限地跑一组异步任务: 结果数组下标与输入一致 (下游按 tool_calls 顺序回传/配对,
+// 顺序不能变)。limit <= 0 视为不限 (由调用方决定是否走这里)。任一项抛错 → 整体 reject,
+// 与 Promise.all 语义一致 (其他已启动的任务无法取消, 与旧实现同)。
+export async function mapBounded(items, limit, fn) {
+  const list = Array.isArray(items) ? items : [];
+  if (!list.length) return [];
+  const cap = Math.max(1, Math.min(Math.trunc(Number(limit)) || 1, list.length));
+  const out = new Array(list.length);
+  let cursor = 0;
+  const worker = async () => {
+    for (;;) {
+      const i = cursor++;
+      if (i >= list.length) return;
+      out[i] = await fn(list[i], i);
+    }
+  };
+  await Promise.all(Array.from({ length: cap }, () => worker()));
+  return out;
 }
 
 // ---- 工具循环主驱动 (原 PPXAgent._llmWithTools) ----
@@ -436,7 +493,15 @@ export async function runToolLoop({
       turnCalls.push({ name: tc.function?.name || "", args: a, result });
     };
     if (policy.parallelToolCalls) {
-      const settled = await Promise.all(callable.map(execOne));
+      // 2026-10-30: 有界并发 — cap>0 且本轮调用数超限时按批跑; 未超限保持原来的全并发
+      const cap = policy.maxParallelTools;
+      let settled;
+      if (cap > 0 && callable.length > cap) {
+        ev("tool/parallel_bounded", { round, calls: callable.length, cap });
+        settled = await mapBounded(callable, cap, execOne);
+      } else {
+        settled = await Promise.all(callable.map(execOne));
+      }
       for (const { tc, result } of settled) collect(tc, result);
     } else {
       // 串行回退路径 (旧行为): 逐个执行 + 逐个回传
@@ -474,5 +539,52 @@ export async function runToolLoop({
       continue;
     }
   }
-  return "[皮皮虾] 工具调用轮次过多, 已停止。";
+  // ---- 轮次耗尽: 强制收口 (2026-10-30) ----
+  // 旧行为: 循环跑满 maxRounds 就 return 一句"轮次过多, 已停止", 中间几轮的工作全丢。
+  // 新行为: 若确实执行过工具 (有轨迹)、用户没叫停、预算没烧穿, 补一次**无工具**的调用
+  //   让模型基于已有结果收口; 收口失败/空回复/无轨迹时仍回落到原文案 (绝不假装成功)。
+  const finalizeNote = await exhaustedFinalizeText({
+    llm, messages, policy, turnCalls, isInterrupted, budgetBlocked, ev, onDelta,
+  });
+  if (finalizeNote) return finalizeNote;
+  return EXHAUSTED_STOP_TEXT;
+}
+
+// 轮次耗尽收口: 返回「收口正文 + 诚实标注」或 null (= 调用方回落硬停止文案)。
+// 边界: 无工具轨迹不收口 (没有可总结的东西, 多花一次调用纯亏); 中断/预算优先。
+async function exhaustedFinalizeText({
+  llm, messages, policy, turnCalls, isInterrupted, budgetBlocked, ev, onDelta,
+}) {
+  if (!policy.exhaustedFinalize) return null;
+  if (!turnCalls || !turnCalls.length) return null;                    // 没有实际动作, 不编总结
+  try { if (isInterrupted && isInterrupted()) return null; } catch { return null; }
+  if (budgetBlocked) {
+    // 预算已烧穿时再补一次调用 = 明知没钱还点单, 直接放弃收口
+    try { if (budgetBlocked()) return null; } catch { /* 闸门本身异常: 不当作已耗尽 */ }
+  }
+  if (!llm || typeof llm.apiChat !== "function") return null;
+  ev("tool/exhausted_finalize", { rounds: policy.maxRounds, calls: turnCalls.length });
+  const okCalls = turnCalls.filter((c) => !String(c.result || "").startsWith(TOOL_ERROR_PREFIX)).length;
+  try {
+    const resp = await llm.apiChat(
+      [...messages, { role: "user", content: EXHAUSTED_FINALIZE_PROMPT }],
+      { tools: [] }, // 关键: 不给工具 —— 否则模型会继续调用, 收口变成第 9 轮
+    );
+    const text = String(resp?.message?.content || "").trim();
+    if (!text) return null;
+    if (typeof onDelta === "function") {
+      // 流式通道: 收口正文同样要给用户看到 (此前只在非流式返回里)
+      try { onDelta(text, { finalize: true }); } catch { /* 推送失败不影响返回值 */ }
+    }
+    return [
+      text,
+      "",
+      "---",
+      `⚠️ 工具轮次上限已用尽 (${policy.maxRounds} 轮 / ${turnCalls.length} 次工具调用, 其中 ${okCalls} 次成功)。` +
+        "以上是基于已完成步骤的收口总结, 本轮未再执行任何新操作; 未完成的部分见上文第 2 条。",
+    ].join("\n");
+  } catch (e) {
+    warn(`轮次耗尽收口失败, 回落硬停止: ${String(e?.message || e).slice(0, 120)}`);
+    return null;
+  }
 }

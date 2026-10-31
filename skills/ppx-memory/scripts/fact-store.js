@@ -1,12 +1,14 @@
 // src/memory/fact-store.js - 记忆存储 (高斯衰减遗忘)
 // 架构参考 openhanako: 每条记忆有 importance, 高斯衰减, 命中加分
 import path from "node:path";
+import fs from "node:fs";
 import crypto from "node:crypto";
 import { ensureDir, readJson, readJsonGuarded, writeJson, nowISO, withFileLock } from "./store.js";
 import { migrateData, writeSchema } from "./schema.js";
 import { setJaccard, setOverlap } from "./similarity.js";
 import { scrubPII } from "./pii.js";
 import { walFileOf, appendWal, readWal, truncateWal, walSizeBytes } from "./wal.js";
+import { expandedTerms } from "./lexicon.js";
 // v2026-10-04 (同步 src 2026-10-04 治理批次): 独立版刻意不依赖主项目 ——
 //   src/memory/backend-migrate.js (sqlite→json 一次性导入, 需 node:sqlite) 与 utils/logger.js
 //   都不在扁平化范围内, 故此处不导入 importSqliteIntoJson, warn 降级为 console.warn。
@@ -31,6 +33,10 @@ export const LAYER_L1 = 1;
 export const LAYER_L4 = 4;
 // facts.json 当前 schema 版本 (纯数组基线 = 1); 未来数据结构变更时 +1 并注册迁移 (见 src/utils/schema.js)
 export const FACTS_SCHEMA_VERSION = 1;
+
+// 文件时间戳粒度 (Windows NTFS 约 16ms, FAT 可达 2s): 同一 tick 内两次同大小写入的
+//   mtimeNs 完全相同。签名相等只在戳已落定 (距今超过该窗口) 时才可作为"未变"的证据。
+const SIG_SETTLE_MS = 250;
 
 export class FactStore {
   // facts.json.wal 的字节水位 (F7, 2026-10-05, 与 src/memory/fact-store.js 同值同语义):
@@ -104,6 +110,11 @@ export class FactStore {
     this.facts = mig.data;
     // 倒排索引: token -> Set<factId>, 检索 O(n) -> O(候选)
     this._index = new Map();
+    // 去重键索引 (2026-10-30, L2, 与 src 同源): 归一化内容键 (含 scope) -> fact[]。
+    //   add() 的去重原本对全部 facts 线性跑 _normKey (每条一次正则); 换成 Map 后 O(1)。
+    this._byKey = new Map();
+    // 磁盘签名 (mtimeNs:size): 锁内 _reload 先校验再决定要不要重读。null = 未知, 必须重读。
+    this._diskSig = null;
     // BM25 作用域统计缓存 (facts 内容不可变, add 时失效即可), 避免每查询 O(N) 重算
     this._statsCache = new Map();
     // 可插拔 embedder (dense 语义检索, 默认 null = 纯 BM25); _embedCache 内存缓存不落盘
@@ -125,6 +136,9 @@ export class FactStore {
     if (!this.wal) {
       writeJson(this.file, this.facts);
       writeSchema(this.file, "facts", FACTS_SCHEMA_VERSION);
+      // 写盘后刷新磁盘签名 (2026-10-30, L2): 否则下一次 _reload 会把"自己的写"当成"磁盘变了"
+      const d = this._diskSignature();
+      this._diskSig = d ? d.sig : null;
       return;
     }
     this.flush();
@@ -138,6 +152,12 @@ export class FactStore {
   // 锁内重读最新状态。WAL 模式下磁盘快照滞后, 必须重放 WAL 增量才是完整状态
   // (非 WAL 模式: 每次变更已落盘, 磁盘即最新, 保持旧行为)
   _reload() {
+    // 2026-10-30 (L2): 先看磁盘签名, 没变就不重读 (锁内串行已保证读到的是最新;
+    //   同进程刚写完时内存就是那份内容, 再解析一遍全量 JSON + 重建索引纯属浪费)。
+    //   2026-10-31 修: mtimeNs+size 在同 tick 同大小重写下会相同 (NTFS 粒度约 16ms);
+    //   现在应用写入靠 ino 变化识别, 原地手改靠"戳未落定就重读"兜住 (SIG_SETTLE_MS)。
+    const cur = this._diskSignature();
+    if (cur && cur.sig === this._diskSig && Date.now() - cur.mtimeMs > SIG_SETTLE_MS) return this.facts;
     this.facts = readJson(this.file, []);
     if (this.wal) this.facts = this._applyWalTo(this.facts);
     // 来源分级: 磁盘/他进程写来的行可能没 provenance 字段 (旧版本写入或外部手改),
@@ -145,7 +165,26 @@ export class FactStore {
     //   而不是在若干处各写一遍回退逻辑。纯内存补齐, 不额外写盘 (落盘由调用方的变更顺带完成)。
     this._stampProvenance();
     this.rebuildIndex();
+    this._diskSig = cur ? cur.sig : null;
     return this.facts;
+  }
+
+  // 当前磁盘签名 (ino + mtimeNs + size, WAL 模式附带 WAL 文件签名)。文件不存在 → null (= 必须重读)。
+  // ino 是关键: writeJson 走「临时文件 + rename」, 每次应用内写入都会换 inode, 即使落在
+  //   同一时间戳 tick、字节数也相同也能识别; 原地手改则由 mtimeMs 落定窗口兜住。
+  // 返回 mtimeMs 供 _reload 判断戳是否落定 (见 SIG_SETTLE_MS)。
+  _diskSignature() {
+    try {
+      const st = fs.statSync(this.file, { bigint: true });
+      let sig = String(st.ino) + ":" + String(st.mtimeNs) + ":" + String(st.size);
+      if (this.wal) {
+        try {
+          const ws = fs.statSync(this.walFile, { bigint: true });
+          sig += "|" + String(ws.ino) + ":" + String(ws.mtimeNs) + ":" + String(ws.size);
+        } catch { sig += "|0:0:0"; }
+      }
+      return { sig, mtimeMs: Number(st.mtimeNs) / 1e6 };
+    } catch { return null; }
   }
 
   // 给缺 provenance 字段的行按 source 登记表补上 tier (幂等, 全同步)
@@ -217,6 +256,8 @@ export class FactStore {
     if (!this.wal) {
       writeJson(this.file, this.facts);
       writeSchema(this.file, "facts", FACTS_SCHEMA_VERSION);
+      const d = this._diskSignature(); // 与 save() 同款: 写后刷新签名, 免得下次白读
+      this._diskSig = d ? d.sig : null;
       return;
     }
     const disk = readJson(this.file, []);
@@ -229,6 +270,8 @@ export class FactStore {
     truncateWal(this.walFile);
     this._walPending = 0;
     writeSchema(this.file, "facts", FACTS_SCHEMA_VERSION);
+    const d = this._diskSignature();
+    this._diskSig = d ? d.sig : null;
   }
 
   // 单条事件变更记录 (调用方必须已持有文件锁):
@@ -444,10 +487,12 @@ export class FactStore {
         //   _live(scope) 精确匹配作用域, 那条全局事实对 sA 根本不可见。结果既没建起
         //   sA 的记忆, 又莫名抬高了另一作用域的分数。同语义检索去重 (findSimilar) 的口径。
         const normKey = this._normKey(safe);
-        const existing = this.facts.find((f) =>
-          f.status !== "deleted" && f.status !== "archived"
-          && (f.scope ?? null) === (scope ?? null)
-          && this._normKey(f.content) === normKey);
+        // 2026-10-30 (L2, 与 src 同源): 走 _byKey 索引 O(1); 语义不变 (同 scope + 跳过墓碑)
+        const existing = (this._byKey && this._byKey.size ? this._findLiveByKey(scope, normKey) : null)
+          || this.facts.find((f) =>
+            f.status !== "deleted" && f.status !== "archived"
+            && (f.scope ?? null) === (scope ?? null)
+            && this._normKey(f.content) === normKey);
         if (existing) return this._onDedupeHit(existing, tier, now);
         // 语义相似去重: similarThreshold>0 时, 与现有事实相似度达标则命中加分
         // 双保险: 先 Jaccard (模板类变体), 未命中再 overlap (词序变化大的松散变体)
@@ -602,6 +647,28 @@ export class FactStore {
       if (!this._index.has(k)) this._index.set(k, new Set());
       this._index.get(k).add(fact.id);
     }
+    // 去重键索引 (2026-10-30, L2): 与倒排索引同生命周期 (只建在活跃集上),
+    //   供 add() 的 O(1) 去重查找; 软删/归档不在其中 = 与"去重跳过墓碑"的语义一致。
+    if (!this._byKey) this._byKey = new Map();
+    const dk = this._dedupeKey(fact);
+    const bucket = this._byKey.get(dk);
+    if (bucket) bucket.push(fact);
+    else this._byKey.set(dk, [fact]);
+  }
+
+  // 去重键: scope + 归一化内容键 (与 add() 里原线性查找的判定条件逐项对齐)
+  _dedupeKey(fact) {
+    return (fact.scope ?? "\u0000") + "\u0001" + this._normKey(fact.content);
+  }
+
+  // O(1) 去重查找: 归一化键命中后仍按 status 过滤 (与原 facts.find 完全同语义)
+  _findLiveByKey(scope, normKey) {
+    const bucket = this._byKey && this._byKey.get((scope ?? "\u0000") + "\u0001" + normKey);
+    if (!bucket) return null;
+    for (const f of bucket) {
+      if (f.status !== "deleted" && f.status !== "archived") return f;
+    }
+    return null;
   }
 
   // 重建索引 (facts 外部变更后调用)
@@ -609,6 +676,7 @@ export class FactStore {
   //   否则"遗忘越勤, 索引越大", 检索还得从墓碑里筛。软删后索引里一个 key 都不该留下。
   rebuildIndex() {
     this._index = new Map();
+    this._byKey = new Map(); // 去重键索引同步重建 (与倒排索引同生命周期)
     this._statsCache.clear();
     for (const fact of this._live()) this._indexFact(fact);
     return this._index.size;
@@ -636,13 +704,17 @@ export class FactStore {
   _queryStats(scoped) {
     const N = scoped.length;
     const df = new Map();
+    // 每条文档的 bigram 集合一并缓存 (2026-10-30, 与 src 同源): BM25 打分与概念路都要它,
+    //   原先同一个事实在一轮检索里被重算多次。
+    const grams = new Map();
     let totalLen = 0;
     for (const f of scoped) {
       const bg = this._bigramSet(f.content);
+      grams.set(f.id, bg);
       totalLen += bg.size;
       for (const t of bg) df.set(t, (df.get(t) || 0) + 1);
     }
-    return { N, avgdl: N ? totalLen / N : 1, df };
+    return { N, avgdl: N ? totalLen / N : 1, df, grams };
   }
 
   // 单查询词 IDF: ln(1 + (N - df + 0.5)/(df + 0.5))
@@ -729,7 +801,7 @@ export class FactStore {
       }
     }
     // BM25 参数在作用域内计算, 按 scope 缓存 (facts 不可变, add 时失效)
-    const scopeKey = scope == null ? "__all__" : "s:" + scope;
+    const scopeKey = (scope == null ? "__all__" : "s:" + scope) + (includeExpired ? "|exp" : "");
     let stats = this._statsCache.get(scopeKey);
     if (!stats) { stats = this._queryStats(scoped); this._statsCache.set(scopeKey, stats); }
     const scored = [];
@@ -825,23 +897,70 @@ export class FactStore {
     return dot / (Math.sqrt(na) * Math.sqrt(nb));
   }
 
-  // 语义检索: embedder 有则 dense cosine 排序 + 与 BM25 RRF 融合; 无则退化为 BM25
+  // 概念路 (2026-10-30, 与 src 同源): 用 lexicon 的"概念簇"把查询扩成同族词, 按命中度排序。
+  //   存在的理由: dense (字符 n-gram 余弦) 与 BM25 (bigram) **都是字面信号**, 字面零交集时
+  //   两路全空 —— "什么操作系统" 找不到 "用户用 Windows 11"。概念路补这一段。
+  // 打分: 命中扩展 bigram 的 IDF 加权和 / sqrt(扩展集大小) —— 长查询扩展集大, 不归一会天然占优。
+  _conceptRank(q, scoped, stats, limit) {
+    const exp = expandedTerms(q);
+    if (!exp.size || !scoped.length) return [];
+    const norm = Math.sqrt(exp.size);
+    const out = [];
+    for (const f of scoped) {
+      const fg = (stats.grams && stats.grams.get(f.id)) || this._bigramSet(f.content);
+      let s = 0;
+      let hitN = 0;
+      let minDf = Infinity;
+      for (const t of exp) {
+        if (!fg.has(t)) continue;
+        hitN += 1;
+        s += this._idf(t, stats) || 0.1;
+        const df = stats.df.get(t) || 0;
+        if (df < minDf) minDf = df;
+      }
+      if (!hitN) continue;
+      // 只命中 1 个扩展 token 时必须是**稀有词**才算信号: "windows" 命中一次是强证据,
+      //   "系统" 命中一次只是巧合。判据用 df 而非绝对 IDF: 小库 (N=2) 时 df=1 的 idf 只有 0.69,
+      //   绝对阈值会把真正的强命中一起误杀。
+      const rareLimit = Math.max(1, Math.floor(stats.N * 0.2));
+      if (hitN < 2 && minDf > rareLimit) continue;
+      out.push({ ...f, concept: s / norm });
+    }
+    out.sort((a, b) => b.concept - a.concept);
+    return out.slice(0, limit);
+  }
+
+  // 语义检索: dense + BM25 + 概念 三路 RRF 加权融合; 无 embedder 时 BM25 + 概念两路
   async querySemantic(q, { limit = 5, scope = null, includeExpired = false } = {}) {
-    if (!this.embedder) return this.query(q, { limit, scope, includeExpired });
     const liveAll = this._live(scope);
     const scoped = includeExpired ? liveAll : liveAll.filter((f) => this._isCurrent(f)); // v3.1 时效过滤
+    const scopeKey = (scope == null ? "__all__" : "s:" + scope) + (includeExpired ? "|exp" : "");
+    let stats = this._statsCache.get(scopeKey);
+    if (!stats || !stats.grams) { stats = this._queryStats(scoped); this._statsCache.set(scopeKey, stats); }
+    const concept = this._conceptRank(q, scoped, stats, Math.max(limit * 3, 12));
+    const bm25 = this.query(q, { limit, scope, includeExpired });
+    if (!this.embedder) {
+      if (!concept.length) return bm25;
+      return rrfFuse([bm25, concept], { weights: [1.0, 0.9] }).slice(0, limit);
+    }
     const qv = await this._embed(q, "query").catch(() => null);
-    if (!qv) return this.query(q, { limit, scope });
+    if (!qv) {
+      return concept.length ? rrfFuse([bm25, concept], { weights: [1.0, 0.9] }).slice(0, limit) : bm25;
+    }
     // 懒加载每条事实的 embedding (内存缓存, 不落盘避免 facts.json 膨胀)
     const dense = [];
     for (const f of scoped) {
       const ev = await this._embedFor(f);
-      if (ev) dense.push({ ...f, dense: this._cosine(qv, ev) });
+      if (!ev) continue;
+      const sim = this._cosine(qv, ev);
+      // dense 准入门槛 0.08: 实测内置哈希向量的弱语义命中落在 0.088~0.275, 噪声在 0~0.074。
+      //   margin 很薄, 但宁可多放一条噪声 (权重 0.45 压着) 也不要误杀唯一的弱语义桥。
+      if (sim >= 0.08) dense.push({ ...f, dense: sim });
     }
     dense.sort((a, b) => b.dense - a.dense);
-    // dense 与 BM25 双路 RRF 融合
-    const bm25 = this.query(q, { limit, scope });
-    return rrfFuse([dense, bm25]).slice(0, limit);
+    // 三路权重: BM25 (可靠字面) 1.0 / 概念 (受控词典桥) 0.9 / dense (哈希兜底, 噪声大) 0.45。
+    //   旧实现三路等权, dense 噪声与 BM25 准确命中同票 —— 那是召回上不去的直接原因。
+    return rrfFuse([bm25, concept, dense], { weights: [1.0, 0.9, 0.45] }).slice(0, limit);
   }
 
   hit(id) {
@@ -1171,17 +1290,22 @@ function cryptoRandomId() {
 
 // RRF (Reciprocal Rank Fusion): 融合多个排序列表 (每项按 rank 倒数加权求和)。
 // 用于多查询变体/多信号检索的融合, 纯函数零依赖。
-export function rrfFuse(lists, { k = 60 } = {}) {
+// weights (2026-10-30, 与 src 同源): 每路的可信度系数, 与该路的 1/(k+rank) 相乘。
+//   三路等权时噪声路会与准确路同票, 融合结果被拉平 —— 这是"多路融合反而更差"的典型成因。
+//   缺省全 1 = 旧行为。
+export function rrfFuse(lists, { k = 60, weights = null } = {}) {
   const score = new Map(); // id -> fused score
   const items = new Map(); // id -> item (保留首个出现的对象)
-  for (const list of lists) {
+  lists.forEach((list, li) => {
+    const w = weights && weights[li] != null ? Number(weights[li]) : 1;
+    if (!w || !Array.isArray(list)) return;
     list.forEach((item, rank) => {
       const id = item && item.id;
       if (id == null) return;
       if (!items.has(id)) items.set(id, item);
-      score.set(id, (score.get(id) || 0) + 1 / (k + rank + 1));
+      score.set(id, (score.get(id) || 0) + (w / (k + rank + 1)));
     });
-  }
+  });
   return [...score.entries()]
     .sort((a, b) => b[1] - a[1])
     .map(([id]) => items.get(id));

@@ -1,6 +1,6 @@
 {
   "name": "ppxans-harness",
-  "version": "3.5.0",
+  "version": "4.0.0",
   "description": "PPXANS-Harness - 皮皮虾神经系 (ANS) + Harness 一体化智能体内核. 零运行时依赖纯Node. 自愈 + 自学习 + 五层记忆 + SHA-256 审计哈希链 + 多 Agent 军团 + 治理内核(deny-wins/熔断/seam) + 进化内核(Playbook/故障记忆) + 符号画布 + supervisor. 自研底座: 仅 OpenAI 兼容 HTTP 直连, 无外部引擎依赖. Agent Nervous System harness in pure Node, zero runtime dependencies.",
   "type": "module",
   "license": "Apache-2.0",
@@ -15,7 +15,8 @@
     "ppx-web": "bin/ppx-web.js",
     "ppx-serve": "bin/ppx-serve.js",
     "ppx-channels": "bin/ppx-channels.js",
-    "ppx-setup": "bin/ppx-setup.js"
+    "ppx-setup": "bin/ppx-setup.js",
+    "ppx-mcp": "bin/ppx-mcp.js"
   },
   "repository": {
     "type": "git",
@@ -29,11 +30,21 @@
     "start": "node bin/ppx-web.js",
     "web": "node bin/ppx-web.js",
     "web:noopen": "node bin/ppx-web.js --no-open",
+    "desktop": "electron electron/main.js",
+    "desktop:dev": "electron electron/main.js",
+    "desktop:edge": "node bin/ppx-desktop.js",
+    "desktop:pack": "node scripts/desktop-pack.js",
+    "desktop:pack:dir": "node scripts/desktop-pack.js --dir",
+    "desktop:pack:mac": "node scripts/desktop-pack.js --mac",
+    "desktop:pack:linux": "node scripts/desktop-pack.js --linux",
     "web:check": "node scripts/check-web.mjs",
     "chat": "node src/cli.js",
     "serve": "node src/server.js",
+    "mcp:serve": "node bin/ppx-mcp.js",
     "release": "node scripts/release.js",
     "eval": "node scripts/eval.js",
+    "taskbench:offline": "node scripts/taskbench-offline.js",
+    "memory:recall": "node scripts/memory-recall.js",
     "selfheal": "node scripts/selfheal-bench.js",
     "selfiterate": "node scripts/selfiterate.js",
     "selfcode": "node scripts/selfcode.js",
@@ -46,15 +57,20 @@
     "test:coverage": "node --test --experimental-test-coverage --test-force-exit test/*.test.js",
     "coverage:gate": "node scripts/coverage-gate.js",
     "verify": "node scripts/verify.js",
-    "verify:full": "npm run verify && npm test",
+    "verify:full": "npm run verify && npm run lint && npm test",
+    "gate:release": "npm run verify && npm run lint && node scripts/readme-sync-check.js --with-tests",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "depcheck": "node scripts/depcheck.js .",
-    "prepublishOnly": "npm run depcheck && npm run selfheal && npm test",
+    "checksums": "node scripts/checksums.js",
+    "signature:check": "node scripts/verify-signature.js",
+    "signature:check:strict": "node scripts/verify-signature.js --require",
+    "prepublishOnly": "npm run gate:release",
     "package": "node scripts/package.js",
     "package:portable": "node scripts/package.js portable",
     "package:installer": "node scripts/package.js installer",
-    "setup": "node bin/ppx-setup.js"
+    "setup": "node bin/ppx-setup.js",
+    "doctor": "node bin/ppx.js doctor"
   },
   "keywords": [
     "agent",
@@ -75,7 +91,9 @@
     "public/",
     "config/ppx.json.example",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "NOTICE",
+    "THIRD-PARTY-NOTICES.md"
   ],
   "exports": {
     ".": "./src/agent/index.js",
@@ -83,7 +101,86 @@
     "./cli": "./src/cli.js",
     "./audit": "./src/audit/audit-chain.js"
   },
+  "build": {
+    "appId": "com.ppxans.harness",
+    "productName": "PPXANS-Harness",
+    "copyright": "Copyright © 2026 chen6896qqwee",
+    "directories": {
+      "output": "dist-desktop",
+      "buildResources": "electron"
+    },
+    "asar": false,
+    "extraMetadata": {
+      "main": "electron/main.js"
+    },
+    "files": [
+      "electron/**",
+      "bin/**",
+      "src/**",
+      "public/**",
+      "skills/**",
+      "experts/**",
+      "plugins/**",
+      "references/**",
+      "config/ppx.json.example",
+      "config/identity.md",
+      "config/ishiki.md",
+      "scripts/**",
+      "test/**",
+      "bench/**",
+      "fixtures/**",
+      "package.json",
+      "README.md",
+      "LICENSE",
+      "NOTICE",
+      "THIRD-PARTY-NOTICES.md",
+      "CHANGELOG.md"
+    ],
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] }
+      ],
+      "icon": "electron/icon.ico",
+      "requestedExecutionLevel": "asInvoker",
+      "artifactName": "PPXANS-Harness-Setup-${version}-${arch}.${ext}"
+    },
+    "mac": {
+      "target": [
+        { "target": "dmg", "arch": ["x64", "arm64"] },
+        { "target": "zip", "arch": ["x64", "arm64"] }
+      ],
+      "icon": "electron/icon.png",
+      "category": "public.app-category.productivity",
+      "artifactName": "PPXANS-Harness-${version}-mac-${arch}.${ext}"
+    },
+    "linux": {
+      "target": [
+        { "target": "AppImage", "arch": ["x64"] },
+        { "target": "deb", "arch": ["x64"] }
+      ],
+      "icon": "electron/icon.png",
+      "category": "Utility",
+      "maintainer": "chen6896qqwee <chen6896qqwee@users.noreply.github.com>",
+      "artifactName": "PPXANS-Harness-${version}-linux-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "皮皮虾",
+      "uninstallDisplayName": "皮皮虾 (PPXANS-Harness)",
+      "deleteAppDataOnUninstall": false
+    },
+    "portable": {
+      "artifactName": "PPXANS-Harness-${version}-portable-${arch}.${ext}"
+    },
+    "compression": "normal"
+  },
   "devDependencies": {
+    "electron": "^45.1.0",
+    "electron-builder": "^26.18.0",
     "eslint": "^9.39.5",
     "globals": "^17.13.0"
   }

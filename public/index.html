@@ -4,25 +4,12 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
-<script>
-// 主题首屏防闪烁 (FOUC): 在首次绘制前按 localStorage/系统偏好设 data-theme,
-// 与 app.js 的 themePref() 同一套判定口径 (ppx_theme_pref ∈ system/light/dark, 旧 key ppx_theme 兼容)。
-(function () {
-  var p = null;
-  try { p = localStorage.getItem("ppx_theme_pref"); } catch (e) {}
-  if (p !== "system" && p !== "light" && p !== "dark") {
-    var old = null;
-    try { old = localStorage.getItem("ppx_theme"); } catch (e) {}
-    p = old === "light" ? "light" : "dark";
-  }
-  var dark = p === "system" ? (window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches) : p === "dark";
-  document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
-})();
-</script>
+<script src="/theme.js"></script>
 <title>皮皮虾 · PPX Agent</title>
 <link rel="icon" href="/favicon.svg">
 <link rel="stylesheet" href="/app.css">
 <link rel="stylesheet" href="/bot.css">
+<link rel="stylesheet" href="/stats.css">
 </head>
 <body>
 
@@ -88,6 +75,10 @@
       <span class="mark"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><use href="#i-mark"/></svg></span>
       <span class="bname">皮皮虾</span>
       <span class="btag" id="brandTag">v3</span>
+      <button class="icobtn" id="btnBody" title="身体 (体征总览)" aria-label="身体">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12h4l2-5 3 10 2.5-7 1.5 2h7"/></svg>
+        <span class="bdot t-unknown" id="bodyDot" aria-hidden="true"></span>
+      </button>
       <button class="icobtn" id="btnCollapse" title="收起侧栏" aria-label="收起侧栏" aria-controls="side" aria-expanded="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-collapse"/></svg></button>
     </div>
 
@@ -125,6 +116,16 @@
 
       <div class="group">
         <div class="ghead">
+          <span class="lab">插件</span>
+          <span class="gacts">
+            <button class="icobtn sm" id="btnPluginAdd" title="新建插件" aria-label="新建插件"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-plus"/></svg></button>
+          </span>
+        </div>
+        <div class="gbody" id="pluginList"><div class="empty">加载中…</div></div>
+      </div>
+
+      <div class="group">
+        <div class="ghead">
           <span class="lab">对话</span>
           <span class="gacts">
             <button class="icobtn sm" id="btnSessSearch" title="搜索会话" aria-label="搜索会话"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-search"/></svg></button>
@@ -146,6 +147,7 @@
           <button class="cap" id="capMemory"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-brain"/></svg>记忆</button>
           <button class="cap" id="capModels"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><use href="#i-cube"/></svg>模型配置</button>
           <button class="cap" id="capSettings"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-settings"/></svg>本体设置</button>
+          <button class="cap" id="capStats"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><use href="#i-bars"/></svg>使用统计</button>
         </div>
       </div>
     </div>
@@ -282,8 +284,8 @@
         <label class="setrow">外观
           <select id="setTheme">
             <option value="system">跟随系统</option>
-            <option value="light">浅色</option>
-            <option value="dark">深色</option>
+            <option value="light">白色界面</option>
+            <option value="dark">深色界面</option>
           </select>
         </label>
         <div class="setgroup">语音识别 (云端 ASR · OpenAI 兼容 /audio/transcriptions)
@@ -408,44 +410,50 @@
     <!-- 事件时间线 -->
     <div class="stream" id="stream" role="log" aria-live="polite" aria-label="对话消息" hidden></div>
 
-    <!-- 输入区 -->
+    <!-- 输入区 (图一风格: 上输入 / 下工具栏; 模型+思考强度合并为一个座椅) -->
     <div class="composer-wrap">
       <div class="palette" id="palette" role="dialog" aria-modal="true" aria-label="命令面板" hidden></div>
       <div class="composer" id="composer">
         <div class="attchips" id="attChips" hidden></div>
-        <textarea id="inp" rows="1" placeholder="给皮皮虾发消息…  (/ 唤起命令)"></textarea>
+        <textarea id="inp" rows="1" placeholder="发消息或创建任务，/ 调用指令"></textarea>
         <div class="crow">
           <div class="tleft">
-            <button class="icobtn att" id="btnAttach" title="上传文件 (图片 / 文档 / 代码 / 压缩包等)" aria-label="上传文件"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><use href="#i-clip"/></svg></button>
+            <button class="icobtn att" id="btnAttach" title="上传文件 (图片 / 文档 / 代码 / 压缩包等)" aria-label="上传文件"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><use href="#i-plus"/></svg></button>
             <input type="file" id="fileInput" multiple hidden>
           </div>
           <div class="tright">
-            <div class="tpillwrap">
-              <button class="tpill" id="pillModel" aria-haspopup="menu" aria-expanded="false" title="切换模型">
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-cube"/></svg>
+            <div class="seatwrap">
+              <button class="seat" id="pillModel" aria-haspopup="dialog" aria-expanded="false" title="模型与思考强度">
                 <em id="pillModelTxt">—</em>
+                <span class="seat-badge lv-0" id="pillReasonTxt">自动</span>
                 <svg class="chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><use href="#i-chev-d"/></svg>
               </button>
-              <div class="popmenu popModel" id="popModel" hidden></div>
-            </div>
-            <div class="tpillwrap">
-              <button class="tpill tpill-zap" id="pillReason" aria-haspopup="menu" aria-expanded="false" title="思考强度">
-                <svg width="13" height="13" viewBox="0 0 24 24" class="zap"><use href="#i-zap"/></svg>
-                <em id="pillReasonTxt">自动</em>
-                <svg class="chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><use href="#i-chev-d"/></svg>
-              </button>
-              <div class="popmenu popReason" id="popReason" hidden></div>
             </div>
             <button class="icobtn mic" id="btnMic" title="语音输入 (轻点开始/结束)" aria-label="语音输入"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><use href="#i-mic"/></svg></button>
             <button class="send" id="btnSend" disabled title="发送 (Enter)" aria-label="发送 (Enter)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><use href="#i-send"/></svg></button>
           </div>
         </div>
       </div>
+      <div class="seatcard" id="seatCard" role="dialog" aria-label="模型与思考强度" hidden></div>
       <div class="footNote" id="footNote">
         <span id="footHint">Enter 发送 · Shift+Enter 换行 · Esc 停止生成</span>
-        <span class="ctxbar" id="ctxBar" hidden title="当前会话最近一次模型调用的用量 (来源: usage 统计)">
-          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-activity"/></svg>
-          <em id="ctxTxt"></em>
+        <span class="statbar" id="statBar" hidden>
+          <span class="stat" id="statRun" hidden title="当前会话最近一次生成的轮次 / 工具步数 / 输出速度">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-clock"/></svg>
+            <em id="statRunTxt"></em>
+          </span>
+          <span class="ctxbar stat" id="ctxBar" hidden title="当前会话最近一次模型调用的用量 (来源: usage 统计)">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-activity"/></svg>
+            <em id="ctxTxt"></em>
+          </span>
+          <span class="stat" id="statCtx" hidden title="上下文占用 = 最近一次调用的输入 token ÷ 模型上下文窗口 (在「模型」页可配置)">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><use href="#i-target"/></svg>
+            <em id="statCtxTxt"></em>
+          </span>
+          <span class="stat" id="statSum" hidden title="累计用量: 本进程启动以来的模型调用次数 / token / 缓存命中率 (重启后从用量账本恢复)">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#i-bars"/></svg>
+            <em id="statSumTxt"></em>
+          </span>
         </span>
       </div>
     </div>      </div>
@@ -462,6 +470,98 @@
       </div>
     </section>
 
+    <!-- ---------- 身体页 (2026-10-30) ---------- -->
+    <!-- 不是"设置"的一部分: 设置是旋钮, 这里是体征 —— 痛觉(离线任务成功率)/记忆(召回质量)/
+         手头的事(任务栈)/负荷。数据全部来自真实产物, 没跑过就显示 unknown, 不编数。 -->
+    <section class="view" id="view-body">
+      <header class="botbar">
+        <button class="icobtn" id="bodyBack" title="返回" aria-label="返回"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-back"/></svg></button>
+        <div class="bhead-t">
+          <div class="bhead-n">身体</div>
+          <div class="bhead-s" id="bodyOverall">—</div>
+        </div>
+        <button class="btn xs" id="btnBodyRefresh">刷新</button>
+      </header>
+      <div class="bodywrap">
+        <div class="bodygrid">
+          <!-- 躯干: 四个器官点对应四项体征。状态靠**呼吸节奏**传达 ——
+               ok 慢悠悠 / warn 偏快 / bad 急促抖动 / unknown 不动。
+               "不跳"就是"没量过", 这一条比任何文案都省事。 -->
+          <aside class="bfig">
+            <svg viewBox="0 0 140 258" class="bsvg" aria-hidden="true">
+              <g class="bline">
+                <circle cx="70" cy="28" r="15"/>
+                <path d="M57 47 Q70 42 83 47 L86 112 Q70 122 54 112 Z"/>
+                <path d="M55 53 L42 88 L39 114"/>
+                <path d="M85 53 L98 88 L101 114"/>
+                <path d="M61 118 L59 170 L57 216"/>
+                <path d="M79 118 L81 170 L83 216"/>
+              </g>
+              <g class="borgan" data-organ="pain" data-state="unknown">
+                <circle class="bhalo" cx="70" cy="26" r="11"/>
+                <circle class="bdot2" cx="70" cy="26" r="5.5"/>
+              </g>
+              <g class="borgan" data-organ="memory" data-state="unknown">
+                <circle class="bhalo" cx="70" cy="70" r="11"/>
+                <circle class="bdot2" cx="70" cy="70" r="5.5"/>
+              </g>
+              <g class="borgan" data-organ="load" data-state="unknown">
+                <circle class="bhalo" cx="70" cy="98" r="10"/>
+                <circle class="bdot2" cx="70" cy="98" r="4.5"/>
+              </g>
+              <g class="borgan" data-organ="work" data-state="unknown">
+                <circle class="bhalo" cx="101" cy="112" r="10"/>
+                <circle class="bdot2" cx="101" cy="112" r="4.5"/>
+              </g>
+            </svg>
+            <p class="bfigcap" id="bodyVerdict">正在摸脉…</p>
+          </aside>
+
+          <div class="bcards">
+            <article class="bcard" id="cardPain" data-state="unknown">
+              <div class="bcard-h"><span class="bdot t-unknown"></span><span class="bcard-t">痛觉 · 能不能干成事</span><span class="bval" id="painVal">—</span></div>
+              <p class="bfeel" id="painFeel">—</p>
+              <div class="bcard-b" id="painBody">加载中…</div>
+            </article>
+            <article class="bcard" id="cardMemory" data-state="unknown">
+              <div class="bcard-h"><span class="bdot t-unknown"></span><span class="bcard-t">记忆 · 认不认得你</span><span class="bval" id="memVal">—</span></div>
+              <p class="bfeel" id="memFeel">—</p>
+              <div class="bcard-b" id="memBody">加载中…</div>
+            </article>
+            <article class="bcard" id="cardWork" data-state="unknown">
+              <div class="bcard-h"><span class="bdot t-unknown"></span><span class="bcard-t">手头的事 · 记得住进度</span><span class="bval" id="workVal">—</span></div>
+              <p class="bfeel" id="workFeel">—</p>
+              <div class="bcard-b" id="workBody">加载中…</div>
+            </article>
+            <article class="bcard" id="cardLoad" data-state="unknown">
+              <div class="bcard-h"><span class="bdot t-unknown"></span><span class="bcard-t">负荷 · 身上挂着多少</span><span class="bval" id="loadVal">—</span></div>
+              <p class="bfeel" id="loadFeel">—</p>
+              <div class="bcard-b" id="loadBody">加载中…</div>
+            </article>
+          </div>
+        </div>
+        <p class="bodyfoot">
+          痛觉和记忆两项靠离线探针产出：<code>node scripts/taskbench-offline.js</code> ·
+          <code>node scripts/memory-recall.js</code>。没跑过就是 unknown —— 器官不动，也不编数。
+        </p>
+      </div>
+    </section>
+
+    <!-- ---------- 插件页 ---------- -->
+    <section class="view" id="view-plugins">
+      <header class="botbar">
+        <button class="icobtn" id="plugBack" title="返回" aria-label="返回"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-back"/></svg></button>
+        <div class="avavt sm" data-tone="ok">插</div>
+        <div class="bmeta">
+          <div class="bname2">插件</div>
+          <div class="bsub" id="plugSub">用户插件 · 保存后重启应用生效</div>
+        </div>
+        <span class="flex1"></span>
+        <button class="icobtn" id="plugRefresh" title="刷新" aria-label="刷新"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><use href="#i-refresh"/></svg></button>
+      </header>
+      <div class="swrap" id="pluginWrap"><div class="empty">加载中…</div></div>
+    </section>
+
     <!-- ---------- 设置页 ---------- -->
     <section class="view" id="view-settings">
       <header class="botbar">
@@ -474,6 +574,28 @@
         <button class="icobtn" id="btnSetRefresh" title="刷新" aria-label="刷新"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><use href="#i-refresh"/></svg></button>
       </header>
       <div class="swrap" id="botSettings"><div class="empty">加载中…</div></div>
+    </section>
+
+    <!-- ---------- 使用统计 (2026-10-31) ----------
+         数据全部来自 /api/usage/stats: 按天 token 账本 (data/usage-stats.json 的 days) +
+         会话事件流 (data/sessions/*.jsonl)。按天分桶之前的历史只有累计值, 趋势图不拿累计值
+         补柱子 —— 没数就是空, 页脚写清从哪天开始有数。 -->
+    <section class="view" id="view-stats">
+      <header class="botbar">
+        <button class="icobtn" id="statsBack" title="返回" aria-label="返回"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><use href="#i-back"/></svg></button>
+        <div class="bmeta">
+          <div class="bname2">使用统计</div>
+          <div class="bsub" id="statsSub">正在读取用量账本…</div>
+        </div>
+        <span class="flex1"></span>
+        <span class="seg" id="statsRange" role="group" aria-label="时间范围">
+          <button type="button" data-range="7">近 7 日</button>
+          <button type="button" data-range="30" class="on">近 30 日</button>
+          <button type="button" data-range="0">全部</button>
+        </span>
+        <button class="icobtn" id="statsRefresh" title="刷新" aria-label="刷新"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><use href="#i-refresh"/></svg></button>
+      </header>
+      <div class="st-wrap" id="statsWrap"><div class="empty">加载中…</div></div>
     </section>
 
   </main>
@@ -505,7 +627,9 @@
 </div>
 
 
+<script src="/ui.js"></script>
 <script src="/bot.js"></script>
 <script src="/app.js"></script>
+<script src="/stats.js"></script>
 </body>
 </html>

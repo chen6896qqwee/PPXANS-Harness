@@ -36,6 +36,8 @@
     activeSpace: null, // 当前选中的空间名 (新会话自动归入)
     wsSub: "",         // 工作区子目录 (相对路径; 空 = 整个工作区)
     llm: null,         // /api/llm 状态快照 (模型/思考强度/语音能力)
+    run: null,         // 最近一次生成的运行统计 {rounds,maxRounds,steps,t0,tokps} (底部状态条)
+    ctxWindow: 0,      // 当前模型上下文窗口 (底部状态条算"上下文占用 %"兜底; /api/run.state 注入)
   };
 
   var $ = function (id) { return document.getElementById(id); };
@@ -139,13 +141,18 @@
   }
   function askToken(boot) {
     var need = boot && boot.tokenRequired === false ? "服务端未启用令牌, 请检查服务是否正常" : "请在服务端启动日志或 data/http-token 中查看访问令牌";
-    var t = prompt("需要访问令牌。\n" + need);
-    if (t && t.trim()) {
-      try { localStorage.setItem("ppx_token", t.trim()); } catch (e) {}
-      location.reload();
-    } else {
-      toast("未提供令牌, 已停留在只读状态", true);
-    }
+    // 2026-10-30: 原生 prompt 换成站内弹窗 (样式/焦点/Esc 可控, 见 public/ui.js)
+    var ask = (window.PPXUI && window.PPXUI.prompt)
+      ? window.PPXUI.prompt("需要访问令牌。\n" + need, { title: "访问令牌", placeholder: "粘贴 Bearer token", okText: "保存并刷新" })
+      : Promise.resolve(prompt("需要访问令牌。\n" + need));
+    ask.then(function (t) {
+      if (t && t.trim()) {
+        try { localStorage.setItem("ppx_token", t.trim()); } catch (e) {}
+        location.reload();
+      } else {
+        toast("未提供令牌, 已停留在只读状态", true);
+      }
+    });
   }
   function req(path, opts) {
     opts = opts || {};
@@ -189,20 +196,25 @@
     });
   }
 
-  /* ================= 主题 (三态: system / light / dark) ================= */
-  var THEME_LABEL = { system: "跟随系统", light: "浅色", dark: "深色" };
+  /* ================= 主题 (三态: system / light / dark) =================
+   * 2026-10-30: 外壳/对话分离。data-theme 恒为 dark —— 对话页的 NEON 样式一个像素不动;
+   * 侧栏、首页、设置、体征、插件页通过 html.ppx-white-shell 套白色外壳。
+   * light 值在界面上的名字是「白色界面」, dark 是「深色界面」。 */
+  var THEME_LABEL = { system: "跟随系统", light: "白色界面", dark: "深色界面" };
   function themePref() {
     var p = localStorage.getItem("ppx_theme_pref");
     if (p === "system" || p === "light" || p === "dark") return p;
-    // 兼容旧版单值 key (ppx_theme)
+    // 兼容旧版单值 key (ppx_theme): 只有用户显式选过深色才保持深色, 其余默认白色外壳
     var old = localStorage.getItem("ppx_theme");
-    return old === "light" ? "light" : "dark";
+    if (old === "dark") return "dark";
+    return "light";
   }
   function applyTheme() {
     var pref = themePref();
-    var dark = pref === "system" ? matchMedia("(prefers-color-scheme: dark)").matches : pref === "dark";
-    document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
-    $("btnTheme").innerHTML = ico(pref === "system" ? "monitor" : (dark ? "sun" : "moon"), 16);
+    var white = pref === "system" ? !matchMedia("(prefers-color-scheme: dark)").matches : pref === "light";
+    document.documentElement.setAttribute("data-theme", "dark");
+    document.documentElement.classList.toggle("ppx-white-shell", white);
+    $("btnTheme").innerHTML = ico(pref === "system" ? "monitor" : (white ? "moon" : "sun"), 16);
     $("btnTheme").title = "主题: " + THEME_LABEL[pref] + " (点击切换)";
     if ($("setTheme")) $("setTheme").value = pref;
   }
@@ -333,7 +345,12 @@
     });
   }
   function delSession(key) {
-    if (!confirm("删除该会话?")) return;
+    if (!window.PPXUI || !window.PPXUI.confirm) { if (!confirm("删除该会话?")) return; return doDelSession(key); }
+    window.PPXUI.confirm("删除后该会话的事件日志会从列表移除, 但不会影响其他会话。", {
+      title: "删除会话?", okText: "删除", danger: true,
+    }).then(function (ok) { if (ok) doDelSession(key); });
+  }
+  function doDelSession(key) {
     // 字段名必须与后端一致 (http.js /sessions/delete 读 data.key)。
     // 曾因这里发 sessionKey、后端读 key, 导致"删某个会话"实际删掉 default 主会话 (误删数据)。
     post("/sessions/delete", { key: key }).then(function () {
@@ -476,10 +493,18 @@
       b.title = "目录: " + (rel ? rootName() + " / " + rel : rootName() + " (根目录)") + "\n点击进入该空间 (切工作区 + 复用会话)";
       b.onclick = function (e) {
         if (e.target.closest(".del")) {
-          if (!confirm("删除空间「" + sp.name + "」? (会话不会被删除)")) return;
-          list.splice(i, 1); saveSpaces(list);
-          if (S.activeSpace === sp.name) S.activeSpace = null;
-          renderSpaces();
+          var remove = function () {
+            list.splice(i, 1); saveSpaces(list);
+            if (S.activeSpace === sp.name) S.activeSpace = null;
+            renderSpaces();
+          };
+          if (!window.PPXUI || !window.PPXUI.confirm) {
+            if (confirm("删除空间「" + sp.name + "」? (会话不会被删除)")) remove();
+            return;
+          }
+          window.PPXUI.confirm("「" + sp.name + "」只是从空间列表移除, 会话与目录都不会删除。", {
+            title: "删除空间?", okText: "删除", danger: true,
+          }).then(function (ok) { if (ok) remove(); });
           return;
         }
         S.activeSpace = sp.name;
@@ -499,6 +524,7 @@
   function openDirModal(mode, preset) {
     dirPick.mode = mode;
     dirPick.rel = String(preset || "");
+    dirPick.prevFocus = document.activeElement;
     $("dirTitle").textContent = mode === "space" ? "新建空间" : "选择工作区目录";
     $("dirNameRow").hidden = mode !== "space";
     $("dirOk").textContent = mode === "space" ? "创建" : "确定";
@@ -507,8 +533,15 @@
     $("dirModal").hidden = false;
     loadDirModal();
     if (mode === "space") setTimeout(function () { $("dirName").focus(); }, 30);
+    else setTimeout(function () { $("dirOk").focus(); }, 30);
   }
-  function closeDirModal() { $("dirMask").hidden = true; $("dirModal").hidden = true; }
+  function closeDirModal() {
+    $("dirMask").hidden = true;
+    $("dirModal").hidden = true;
+    var f = dirPick.prevFocus;
+    dirPick.prevFocus = null;
+    if (f && typeof f.focus === "function") { try { f.focus(); } catch (e) { /* 元素可能已被重绘 */ } }
+  }
   function loadDirModal() {
     var rel = dirPick.rel;
     var parts = rel ? rel.split("/").filter(Boolean) : [];
@@ -563,19 +596,23 @@
   /* ================= 侧栏: 会话 ================= */
   $("btnSessRefresh").onclick = loadSessions;
   $("btnSessSearch").onclick = function () {
-    var q = prompt("搜索会话:");
-    if (q == null) return;
-    q = q.trim().toLowerCase();
-    var items = $("sessList").querySelectorAll(".sess");
-    var hit = 0;
-    items.forEach(function (it) {
-      var t = it.querySelector(".t");
-      var txt = t ? t.textContent.toLowerCase() : "";
-      var show = !q || txt.indexOf(q) !== -1;
-      it.style.display = show ? "" : "none";
-      if (show) hit++;
+    var ask = (window.PPXUI && window.PPXUI.prompt)
+      ? window.PPXUI.prompt("输入关键词过滤左侧会话 (清空 = 恢复全部)。", { title: "搜索会话", placeholder: "标题关键词" })
+      : Promise.resolve(prompt("搜索会话:"));
+    ask.then(function (q) {
+      if (q == null) return;
+      q = q.trim().toLowerCase();
+      var items = $("sessList").querySelectorAll(".sess");
+      var hit = 0;
+      items.forEach(function (it) {
+        var t = it.querySelector(".t");
+        var txt = t ? t.textContent.toLowerCase() : "";
+        var show = !q || txt.indexOf(q) !== -1;
+        it.style.display = show ? "" : "none";
+        if (show) hit++;
+      });
+      if (q) toast("匹配 " + hit + " 个会话" + (hit ? "" : " · 清空搜索框可恢复全部"));
     });
-    if (q) toast("匹配 " + hit + " 个会话" + (hit ? "" : " · 清空搜索框可恢复全部"));
   };
 
   /* ================= 时间线渲染 ================= */
@@ -779,8 +816,25 @@
     evUser(t);
     var body = evAgent();
     var full = "";
+    // 2026-10-30 流式渲染节流: 旧实现每收到一个 delta 就 renderMd(全文) + innerHTML,
+    //   长回答时等于 O(n²) 的 Markdown 解析与整块 DOM 重建 (几千 token 后会明显掉帧)。
+    //   这里把重绘合并到 ~60ms 一次; done/error 立即收口并取消待执行的重绘, 不会被节流拖尾。
+    var renderTimer = null, lastRenderAt = 0;
+    function cancelRender() { if (renderTimer) { clearTimeout(renderTimer); renderTimer = null; } }
+    function scheduleRender() {
+      if (renderTimer) return;
+      var wait = Math.max(0, 60 - (Date.now() - lastRenderAt));
+      renderTimer = setTimeout(function () {
+        renderTimer = null;
+        lastRenderAt = Date.now();
+        if (S.interrupted) return; // 已点停止: 等 done/error 收口, 不再为旧内容重绘
+        body.innerHTML = renderMd(full) + '<span class="caret"></span>';
+        toBottom();
+      }, wait);
+    }
     setBusy(true);
     S.interrupted = false;
+    S.run = { rounds: 0, maxRounds: 0, steps: 0, t0: Date.now(), tokps: 0 }; // 底部状态条统计
 
     fetch(S.base + "/message/stream", {
       method: "POST",
@@ -805,20 +859,27 @@
               if (line.indexOf("data:") !== 0) return;
               var j;
               try { j = JSON.parse(line.slice(5).trim()); } catch (e) { return; }
-              if (j.type === "delta") { full += j.content; body.innerHTML = renderMd(full) + '<span class="caret"></span>'; toBottom(); }
+              if (j.type === "delta") { full += j.content; scheduleRender(); }
               else if (j.type === "done") {
+                cancelRender();
                 full = j.content || full;
                 clearStep();
                 body.innerHTML = renderMd(full);
                 if (j.tokens) { S.lastTokens = j.tokens; updTokPill(); updCtxBar(j.tokens); }
+                if (S.run) {
+                  var out = j.tokens && (j.tokens.completion != null ? j.tokens.completion : j.tokens.total);
+                  var secs = (Date.now() - S.run.t0) / 1000;
+                  if (out != null && secs > 0.3) S.run.tokps = out / secs; // 输出 token/秒 (粗粒度: 含推理全程)
+                  updStatRun();
+                }
                 if (j.diff) evDiff(j.diff);
               }
-              else if (j.type === "tool") { if (j.status === "start") addTool(j); else finishTool(j); }
-              else if (j.type === "step") setStep(j);
+              else if (j.type === "tool") { if (j.status === "start") { if (S.run) { S.run.steps++; updStatRun(); } addTool(j); } else finishTool(j); }
+              else if (j.type === "step") { if (S.run && typeof j.round === "number") { S.run.rounds = Math.max(S.run.rounds || 0, j.round + 1); if (j.maxRounds) S.run.maxRounds = j.maxRounds; updStatRun(); } setStep(j); }
               else if (j.type === "approval") evApproval(j);
               else if (j.type === "plan") evPlan(j.content || j.text || "");
               else if (j.type === "diff") evDiff(j.content || j.diff || "");
-              else if (j.type === "error") { clearStep(); evError(j.error || "未知错误"); }
+              else if (j.type === "error") { cancelRender(); clearStep(); evError(j.error || "未知错误"); }
             });
           }
           toBottom();
@@ -827,8 +888,10 @@
       }
       return pump();
     }).catch(function (e) {
+      cancelRender();
       evError(e.message);
     }).finally(function () {
+      cancelRender();
       clearStep();
       setBusy(false);
       loadSessions();
@@ -867,15 +930,71 @@
   function updCtxBar(t) {
     if (!t) return;
     var bits = [];
-    if (t.prompt != null) bits.push("上下文 " + fmtTok(t.prompt) + " tok");
+    if (t.prompt != null) bits.push(fmtTok(t.prompt) + " tok");
     var pct = (t.cacheHitPct != null) ? t.cacheHitPct
       : (t.cacheHit != null && t.prompt > 0 ? Math.round((t.cacheHit / t.prompt) * 100) : null);
     if (pct != null) bits.push("缓存命中 " + pct + "%");
-    if (t.completion != null) bits.push("输出 " + fmtTok(t.completion));
+    if (t.completion != null && !bits.length) bits.push("输出 " + fmtTok(t.completion));
     if (!bits.length) return;
     var el = $("ctxBar"); if (!el) return; // (R13) 元素缺失时静默跳过, 不让用量条异常进对话
     el.hidden = false;
     $("ctxTxt").textContent = bits.join(" · ");
+    updStatCtx(t);
+    footVis();
+  }
+
+  /* ---- 底部统计条 (图一风格): N 轮 M 步 · X tok/s | 上下文 tok · 缓存命中 | 上下文占用 % ---- */
+  function updStatRun() {
+    var r = S.run, el = $("statRun");
+    if (!r || !el) return;
+    var txt = "";
+    if (r.rounds) txt += r.rounds + " 轮 ";
+    if (r.steps) txt += r.steps + " 步";
+    txt = txt.trim();
+    if (r.tokps >= 0.05) txt += (txt ? " · " : "") + (r.tokps >= 10 ? Math.round(r.tokps) : r.tokps.toFixed(1)) + " tok/s";
+    if (!txt) return;
+    el.hidden = false;
+    $("statRunTxt").textContent = txt;
+    footVis();
+  }
+  function updStatCtx(t) {
+    var el = $("statCtx");
+    if (!el) return;
+    var win = (S.llm && S.llm.current && Number(S.llm.current.context_window)) || S.ctxWindow || 0;
+    if (!t || !t.prompt || !win || win < 1024) { el.hidden = true; return; }
+    var pct = (t.prompt / win) * 100;
+    el.hidden = false;
+    $("statCtxTxt").textContent = (pct < 1 ? "<1" : Math.round(pct)) + "%";
+    footVis();
+  }
+  // 累计用量 (2026-10-30): 本进程启动以来调用次数 / token / 缓存命中率 (底部状态条常驻项)
+  function updStatSum(j) {
+    var el = $("statSum"); if (!el) return;
+    var t = j && j.totals;
+    if (!t || !t.calls) { el.hidden = true; return; }
+    var bits = ["累计 " + t.calls + " 次"];
+    if (t.tokens) bits.push(fmtTok(t.tokens) + " tok");
+    if (t.cacheHitPct != null) bits.push("缓存 " + t.cacheHitPct + "%");
+    el.hidden = false;
+    $("statSumTxt").textContent = bits.join(" · ");
+    footVis();
+  }
+  // 2026-10-30: 启动/进入对话时拉取最近一次运行态 + 累计用量, 让底部状态条常驻 (刷新不丢,
+  //   不必等下一次生成才有数)。生成进行中不覆盖内存里的实时 S.run。
+  function loadRunState() {
+    get("/api/run.state").then(function (j) {
+      if (!j) return;
+      if (j.context_window) S.ctxWindow = j.context_window;
+      if (j.run && !S.streaming) { S.run = j.run; updStatRun(); }
+      if (j.usage) updCtxBar(j.usage);
+      updStatSum(j);
+    }).catch(function () {});
+  }
+  // 有任一统计可见时收起键位提示, 让位给统计条 (图一同款布局)
+  function footVis() {
+    var any = ($("statRun") && !$("statRun").hidden) || ($("ctxBar") && !$("ctxBar").hidden) || ($("statCtx") && !$("statCtx").hidden) || ($("statSum") && !$("statSum").hidden);
+    if ($("statBar")) $("statBar").hidden = !any;
+    if ($("footHint")) $("footHint").hidden = !!any;
   }
 
   /* ================= 命令面板 ================= */
@@ -1325,12 +1444,20 @@
     $("rtPref").value = rt.preference || "local";
   }
   function delModel(p) {
-    if (!confirm("删除模型服务「" + p.id + "」?\n配置文件会先留一份 .bak 备份。")) return;
-    req("/api/providers", { method: "DELETE", body: JSON.stringify({ id: p.id }) }).then(function () {
-      toast("已删除 " + p.id);
-      if (S.editingId === p.id) closeModelForm();
-      loadModels();
-    }).catch(function (e) { toast(e.message, true); });
+    var go = function () {
+      req("/api/providers", { method: "DELETE", body: JSON.stringify({ id: p.id }) }).then(function () {
+        toast("已删除 " + p.id);
+        if (S.editingId === p.id) closeModelForm();
+        loadModels();
+      }).catch(function (e) { toast(e.message, true); });
+    };
+    if (!window.PPXUI || !window.PPXUI.confirm) {
+      if (confirm("删除模型服务「" + p.id + "」?\n配置文件会先留一份 .bak 备份。")) go();
+      return;
+    }
+    window.PPXUI.confirm("配置文件会先留一份 .bak 备份, 之后可从设置里重新添加。", {
+      title: "删除模型服务「" + p.id + "」?", okText: "删除", danger: true,
+    }).then(function (ok) { if (ok) go(); });
   }
 
   /* --- 表单 --- */
@@ -1503,17 +1630,40 @@
         : "○ 未配置 — 未配置时语音输入回退浏览器识别";
     }).catch(function () { /* 设置读取失败不影响主流程 */ });
   }
+  // 权限放宽二次确认 (2026-10-31): 放宽类变更服务端只出一次性确认码到控制台,
+  //   必须凭码重新提交才生效 —— 确认码不进 HTTP 响应, 自动化角色无法自行闭环。
+  function askPermConfirm(payload, label) {
+    var code = window.prompt(
+      label + " 放宽需要二次确认。\n" +
+      "服务端控制台已输出 6 位确认码 (60 秒内有效, 一次性), 请输入:",
+      "");
+    if (code == null) { toast("已取消 — 权限未变更", true); return; }
+    post("/api/permissions", Object.assign({}, payload, { confirm_token: String(code).trim() }))
+      .then(function (j2) {
+        if (j2 && j2.ok) toast(label + "已生效");
+        else toast(label + "确认失败: " + ((j2 && j2.error) || "确认码无效或已过期"), true);
+      })
+      .catch(function (e) { toast(label + "确认失败: " + (e && e.message || "未知错误"), true); });
+  }
   $("setApproval").onchange = function () {
     S.perm = $("setApproval").value;
     $("modeTxt").textContent = S.perm;
-    post("/api/permissions", { approvalMode: S.perm }).then(function () { toast("审批模式已生效"); })
+    post("/api/permissions", { approvalMode: S.perm }).then(function (j) {
+      if (j && j.ok === false && j.need_confirm) { askPermConfirm({ approvalMode: S.perm }, "审批模式"); return; }
+      if (j && j.ok === false) { toast(j.error || "审批模式未生效", true); return; }
+      toast("审批模式已生效");
+    })
       .catch(function () { toast("已切换本地显示 (服务端模式未变)", false); });
   };
   $("setSandbox").onchange = function () {
     var v = $("setSandbox").value;
     // 2026-10-11 补: 此前失败时 catch 空吞, 切换失败无任何提示; 成功文案也不带模式名
     post("/api/permissions", { sandbox: v })
-      .then(function () { toast("沙箱已切换: " + v); })
+      .then(function (j) {
+        if (j && j.ok === false && j.need_confirm) { askPermConfirm({ sandbox: v }, "沙箱"); return; }
+        if (j && j.ok === false) { toast(j.error || "沙箱未生效", true); return; }
+        toast("沙箱已切换: " + v);
+      })
       .catch(function (e) { toast("沙箱切换失败: " + (e && e.message || "未知错误"), true); });
   };
   $("setTheme").onchange = function () {
@@ -1710,93 +1860,262 @@
     Array.prototype.forEach.call((e.dataTransfer && e.dataTransfer.files) || [], uploadFile);
   });
 
-  /* ================= 模型切换 + 思考强度 (对接 /api/llm) ================= */
-  var REASON_LABELS = { auto: "自动", off: "关闭", low: "低", medium: "中", high: "High", max: "极高" };
+  /* ================= 模型 + 思考强度座椅 (对接 /api/llm) =================
+     风格对齐 dsh-plugin-reasoning-seat: 一个座椅 = 模型名 + 强度徽章;
+     卡片内: 模型行 (→ 模型列表) + 分段变色滑杆 (低段蓝/中段紫/高段品红,
+     闪光粒子 + 白色圆角方块拇指), 指针拖拽 + 方向键微调, 提交走 POST /api/llm。 */
+  var REASON_LABELS = { auto: "自动", off: "关闭", low: "低", medium: "中", high: "高", max: "Max" };
+  // 填充区闪光粒子 (定位相对填充盒, 超出部分被裁掉): [left %, top %, 尺寸 px (0 = 十字星), 周期 s, 相位 s, 十字?]
+  var SEAT_SPARKS = [
+    [12, 34, 2.2, 3.4, 0.0, false], [19, 63, 1.5, 4.1, 0.5, false], [26, 27, 2.6, 3.1, 0.9, false],
+    [33, 55, 1.9, 3.8, 0.2, false], [40, 74, 1.4, 4.4, 1.3, false], [47, 32, 2.4, 3.3, 0.7, false],
+    [54, 61, 1.7, 4.2, 1.7, false], [61, 41, 2.8, 3.6, 0.4, false], [68, 69, 1.5, 3.9, 1.1, false],
+    [75, 33, 2.1, 3.2, 0.25, false], [82, 57, 2.5, 4.0, 1.5, false], [89, 45, 1.6, 4.5, 0.8, false],
+    [43, 44, 0, 3.5, 0.6, true], [71, 52, 0, 4.3, 1.2, true]
+  ];
+  function seatLevels() {
+    return (S.llm && S.llm.reasoning_levels) || ["auto", "off", "low", "medium", "high", "max"];
+  }
+  // 档位配色: auto / 关闭 无填充 (灰 0), 低段蓝 (1), 中段紫 (2), 高段品红 (3)
+  function reasonTone(levels, idx) {
+    if (idx <= 0 || levels[idx] === "off" || levels.length <= 1) return 0;
+    var r = idx / (levels.length - 1);
+    return r <= 0.5 ? 1 : r < 0.85 ? 2 : 3;
+  }
   function llmPillRender() {
     var cur = S.llm && S.llm.current;
     $("pillModelTxt").textContent = cur ? (cur.model || cur.id) : "未配置模型";
-    $("pillModel").title = cur ? ("当前: " + cur.model + " (" + cur.id + ") · 点击切换") : "点击配置模型";
-    $("pillReasonTxt").textContent = REASON_LABELS[S.llm && S.llm.reasoning] || "自动";
+    $("pillModel").title = cur ? ("当前: " + cur.model + " (" + cur.id + ") · 点击调整模型与思考强度") : "点击配置模型";
+    var levels = seatLevels();
+    var lv = (S.llm && S.llm.reasoning) || "auto";
+    var badge = $("pillReasonTxt");
+    badge.textContent = REASON_LABELS[lv] || lv;
+    badge.className = "seat-badge lv-" + reasonTone(levels, Math.max(0, levels.indexOf(lv)));
   }
   function loadLlm() {
     return get("/api/llm").then(function (j) {
       if (j && j.ok) { S.llm = j; llmPillRender(); }
       return j;
-    }).catch(function () { /* 端点不可用: 胶囊保持默认文案 */ });
+    }).catch(function () { /* 端点不可用: 座椅保持默认文案 */ });
   }
-  function closePop() {
-    ["popModel", "popReason"].forEach(function (id) { if ($(id)) $(id).hidden = true; });
-    var a = document.querySelectorAll(".tpill"); a.forEach(function (b) { b.setAttribute("aria-expanded", "false"); });
+
+  var seat = { pane: "root", dragging: false, preview: -1, width: 320 };
+  function closeSeat() {
+    var card = $("seatCard");
+    if (card) card.hidden = true;
+    seat.pane = "root"; seat.dragging = false; seat.preview = -1;
+    $("pillModel").setAttribute("aria-expanded", "false");
   }
-  function renderPopModel() {
-    var j = S.llm || {};
-    var provs = j.providers || [];
-    var html = '<div class="pop-title">选择模型服务</div>';
-    if (!provs.length) html += '<div class="empty">未配置任何 provider · 到右栏「模型」页新增</div>';
-    html += provs.map(function (p) {
-      return '<button class="pop-item' + (p.current ? " on" : "") + '" data-id="' + esc(p.id) + '"' + (p.usable ? "" : " disabled") + ">" +
-        '<span class="pmain"><b>' + esc(p.model || "(未设模型)") + "</b><i>" + esc(p.id) + (p.vision ? " · 视觉" : "") + "</i></span>" +
-        (p.usable ? (p.current ? '<span class="pbadge on">使用中</span>' : '<span class="pbadge">可用</span>') : '<span class="pbadge off">未配置 Key</span>') +
-        "</button>";
+  function seatSparks() {
+    return SEAT_SPARKS.map(function (spk) {
+      var cross = spk[5] === true;
+      var size = cross ? 7 : spk[2];
+      return '<span class="rs-spark' + (cross ? " rs-spark-cross" : "") + '" style="left:' + spk[0] + "%;top:" + spk[1] +
+        "%;width:" + size + "px;height:" + size + "px;animation-duration:" + spk[3] + "s;animation-delay:-" + spk[4] + 's"></span>';
     }).join("");
-    $("popModel").innerHTML = html;
-    $("popModel").querySelectorAll(".pop-item").forEach(function (b) {
+  }
+  // 轨道几何 (参考实现同款): 拇指 26px, 可用区 = 宽 - 30; 填充比拇指位置多探出 27px
+  function seatTrackHtml(levels, idx) {
+    var maxIdx = Math.max(1, levels.length - 1);
+    var pct = idx / maxIdx;
+    var usable = Math.max(1, seat.width - 30);
+    var tone = reasonTone(levels, idx);
+    var fill = (idx <= 0 || levels[idx] === "off") ? 0 : 27 + pct * usable;
+    var dots = "";
+    for (var di = 1; di < levels.length; di++) {
+      dots += '<i class="rs-dot" style="left:' + (6 + (di / maxIdx) * 88).toFixed(2) + '%"></i>';
+    }
+    return '<div class="rs-track" id="rsTrack" data-level="' + tone + '" role="slider" tabindex="0"' +
+      ' aria-label="思考强度" aria-valuemin="0" aria-valuemax="' + maxIdx + '" aria-valuenow="' + idx + '"' +
+      ' aria-valuetext="' + esc(REASON_LABELS[levels[idx]] || levels[idx]) + '">' +
+      '<div class="rs-dots" aria-hidden="true">' + dots + "</div>" +
+      '<div class="rs-fill" data-level="' + tone + '" style="width:' + fill.toFixed(1) + 'px" aria-hidden="true">' + (fill > 0 ? seatSparks() : "") + "</div>" +
+      '<div class="rs-thumb" style="left:' + (1 + pct * usable).toFixed(1) + 'px" aria-hidden="true"></div>' +
+      "</div>";
+  }
+  function renderSeatRoot() {
+    var levels = seatLevels();
+    var cur = (S.llm && S.llm.reasoning) || "auto";
+    var idx = Math.max(0, levels.indexOf(cur));
+    var modelName = S.llm && S.llm.current ? (S.llm.current.model || S.llm.current.id) : "未配置模型";
+    $("seatCard").innerHTML =
+      '<button class="rs-row" id="rsModelRow"><span class="rs-row-label">模型</span>' +
+      '<span class="rs-row-value"><span class="rs-row-name">' + esc(modelName) + "</span></span>" +
+      ico("chev-r", 13).replace("<svg ", '<svg class="rs-row-chev" ') +
+      "</button>" +
+      '<div class="rs-effort"><div class="rs-effort-head">' +
+      '<span class="rs-effort-title">思考强度</span>' +
+      '<span class="rs-effort-value lv-' + reasonTone(levels, idx) + '" id="rsVal">' + esc(REASON_LABELS[cur] || cur) + "</span>" +
+      "</div>" + seatTrackHtml(levels, idx) + "</div>" +
+      '<div class="pop-hint">按厂商能力注入: 智谱/方舟 thinking、通义 enable_thinking、OpenAI reasoning_effort; 未支持的模型自动忽略。</div>';
+    wireSeatSlider(levels);
+    $("rsModelRow").onclick = function () { seat.pane = "model"; renderSeatModel(); };
+  }
+  function renderSeatModel() {
+    var provs = (S.llm && S.llm.providers) || [];
+    var html = '<button class="rs-back" id="rsBack">' + ico("chev-r", 13).replace("<svg ", '<svg class="rs-back-chev" ') + "<span>模型</span></button>";
+    if (!provs.length) html += '<div class="rs-status">未配置任何 provider · 到右栏「模型」页新增</div>';
+    provs.forEach(function (p) {
+      html += '<div class="rs-group">' + esc(p.id) + "</div>";
+      html += '<button class="rs-model' + (p.current ? " selected" : "") + '" data-id="' + esc(p.id) + '"' + (p.usable ? "" : " disabled") + ">" +
+        '<span class="rs-model-name">' + esc(p.model || "(未设模型)") + (p.vision ? " · 视觉" : "") + "</span>" +
+        (p.usable ? "" : '<span class="rs-model-off">未配置 Key</span>') +
+        (p.current ? ico("check", 13).replace("<svg ", '<svg class="rs-check" ') : "") +
+        "</button>";
+    });
+    $("seatCard").innerHTML = html;
+    $("rsBack").onclick = function () { seat.pane = "root"; renderSeatRoot(); };
+    $("seatCard").querySelectorAll(".rs-model").forEach(function (b) {
       b.onclick = function () {
         var id = b.getAttribute("data-id");
         post("/api/llm", { provider: id }).then(function (r) {
-          S.llm = r; llmPillRender(); closePop();
+          S.llm = r; llmPillRender(); closeSeat();
           var c = r && r.current;
           toast("已切换到 " + (c ? c.model + " (" + c.id + ")" : id));
         }).catch(function (e) { toast("切换失败: " + e.message, true); });
       };
     });
   }
-  function renderPopReason() {
-    var levels = (S.llm && S.llm.reasoning_levels) || ["auto", "off", "low", "medium", "high", "max"];
-    var cur = (S.llm && S.llm.reasoning) || "auto";
-    var idx = Math.max(0, levels.indexOf(cur));
-    var pct = (idx / (levels.length - 1)) * 100;
-    $("popReason").innerHTML =
-      '<div class="pop-title">思考强度<span class="rval" id="rvalTxt">' + esc(REASON_LABELS[cur] || cur) + "</span></div>" +
-      '<div class="rwrap"><div class="rtrack"><div class="rdots">' +
-      levels.map(function () { return "<i></i>"; }).join("") +
-      '</div><div class="rthumb" id="rthumb" style="left:calc(' + pct + '% - ' + (pct * 0.24).toFixed(1) + 'px)"></div></div>' +
-      '<input type="range" id="rrange" min="0" max="' + (levels.length - 1) + '" step="1" value="' + idx + '"></div>' +
-      '<div class="pop-hint">按厂商能力注入: 智谱/方舟 thinking、通义 enable_thinking、OpenAI reasoning_effort; 未支持的模型自动忽略。</div>';
-    var r = $("rrange");
-    var onMove = function () {
-      var v = Number(r.value), lv = levels[v], p2 = (v / (levels.length - 1)) * 100;
-      $("rthumb").style.left = "calc(" + p2 + "% - " + (p2 * 0.24).toFixed(1) + "px)";
-      $("rvalTxt").textContent = REASON_LABELS[lv] || lv;
-    };
-    r.oninput = onMove;
-    r.onchange = function () {
-      var lv = levels[Number(r.value)];
+  function wireSeatSlider(levels) {
+    var track = $("rsTrack");
+    if (!track) return;
+    var activeIdx = Math.max(0, levels.indexOf((S.llm && S.llm.reasoning) || "auto"));
+    var sparksOn = !(activeIdx <= 0 || levels[activeIdx] === "off");
+    function idxFromX(clientX) {
+      var rect = track.getBoundingClientRect();
+      var ratio = (clientX - rect.left - 1) / Math.max(1, rect.width - 30);
+      if (ratio < 0) ratio = 0;
+      if (ratio > 1) ratio = 1;
+      return Math.round(ratio * (levels.length - 1));
+    }
+    function paint(idx) {
+      var maxIdx = Math.max(1, levels.length - 1);
+      var pct = idx / maxIdx;
+      var usable = Math.max(1, track.offsetWidth - 30);
+      var tone = reasonTone(levels, idx);
+      var fill = (idx <= 0 || levels[idx] === "off") ? 0 : 27 + pct * usable;
+      var fel = track.querySelector(".rs-fill");
+      var th = track.querySelector(".rs-thumb");
+      fel.setAttribute("data-level", String(tone));
+      fel.style.width = fill.toFixed(1) + "px";
+      if (fill > 0 && !sparksOn) { fel.innerHTML = seatSparks(); sparksOn = true; }
+      else if (fill <= 0 && sparksOn) { fel.innerHTML = ""; sparksOn = false; }
+      th.style.left = (1 + pct * usable).toFixed(1) + "px";
+      track.setAttribute("data-level", String(tone));
+      track.setAttribute("aria-valuenow", String(idx));
+      track.setAttribute("aria-valuetext", REASON_LABELS[levels[idx]] || levels[idx]);
+      var val = $("rsVal");
+      if (val) {
+        val.textContent = REASON_LABELS[levels[idx]] || levels[idx];
+        val.className = "rs-effort-value lv-" + tone;
+      }
+    }
+    function commit(idx) {
+      var lv = levels[idx];
+      if (lv === ((S.llm && S.llm.reasoning) || "auto")) return;
       post("/api/llm", { reasoning: lv }).then(function (res) {
         S.llm = res; llmPillRender();
+        activeIdx = Math.max(0, levels.indexOf((S.llm && S.llm.reasoning) || lv));
         toast("思考强度: " + (REASON_LABELS[lv] || lv) + (lv === "auto" ? " (跟随模型默认)" : ""));
-      }).catch(function (e) { toast("设置失败: " + e.message, true); });
-    };
+      }).catch(function (e) { toast("设置失败: " + e.message, true); paint(activeIdx); });
+    }
+    track.addEventListener("pointerdown", function (e) {
+      if (e.pointerType === "mouse" && e.button !== 0) return;
+      e.preventDefault();
+      try { track.setPointerCapture(e.pointerId); } catch (err) { /* pointer capture 可选 */ }
+      try { track.focus({ preventScroll: true }); } catch (err) { track.focus(); }
+      seat.dragging = true;
+      track.classList.add("dragging");
+      seat.preview = idxFromX(e.clientX);
+      paint(seat.preview);
+    });
+    track.addEventListener("pointermove", function (e) {
+      if (!seat.dragging) return;
+      var idx = idxFromX(e.clientX);
+      if (idx !== seat.preview) { seat.preview = idx; paint(idx); }
+    });
+    track.addEventListener("pointerup", function (e) {
+      if (!seat.dragging) return;
+      seat.dragging = false;
+      track.classList.remove("dragging");
+      var idx = seat.preview;
+      seat.preview = -1;
+      try { track.releasePointerCapture(e.pointerId); } catch (err) { /* 同上 */ }
+      if (idx != null && idx >= 0) commit(idx);
+    });
+    track.addEventListener("pointercancel", function () {
+      seat.dragging = false;
+      track.classList.remove("dragging");
+      seat.preview = -1;
+      paint(activeIdx);
+    });
+    track.addEventListener("keydown", function (e) {
+      var next = activeIdx;
+      if (e.key === "ArrowLeft" || e.key === "ArrowDown") next = Math.max(0, activeIdx - 1);
+      else if (e.key === "ArrowRight" || e.key === "ArrowUp") next = Math.min(levels.length - 1, activeIdx + 1);
+      else if (e.key === "Home") next = 0;
+      else if (e.key === "End") next = levels.length - 1;
+      else return;
+      e.preventDefault();
+      if (next === activeIdx) return;
+      activeIdx = next;
+      paint(next);
+      commit(next);
+    });
+  }
+  // 卡片固定定位于座椅正上方 (视口内夹紧), 参考 dsh-rs 的 measure 逻辑
+  function seatPlace() {
+    var card = $("seatCard");
+    if (card.hidden) return;
+    var r = $("pillModel").getBoundingClientRect();
+    var margin = 8;
+    var w = card.offsetWidth || 360;
+    var h = card.offsetHeight;
+    var left = Math.min(Math.max(margin, r.left), window.innerWidth - w - margin);
+    if (left < margin) left = margin;
+    var bottom = window.innerHeight - r.top + 10;
+    if (bottom > window.innerHeight - margin) bottom = window.innerHeight - margin;
+    if (bottom < margin) bottom = margin;
+    if (h > 0 && window.innerHeight - bottom - h < margin) bottom = Math.max(margin, window.innerHeight - margin - h);
+    card.style.left = left + "px";
+    card.style.bottom = bottom + "px";
+  }
+  function openSeat() {
+    var card = $("seatCard");
+    seat.pane = "root";
+    loadLlm().then(function () {
+      card.hidden = false;
+      card.style.visibility = "hidden";
+      card.style.left = "0px"; card.style.bottom = "0px";
+      renderSeatRoot();
+      var w = $("rsTrack") ? $("rsTrack").offsetWidth : 0;
+      if (w > 30 && Math.abs(w - seat.width) > 1) { seat.width = w; renderSeatRoot(); } // 量出真实轨道宽后重画填充/拇指
+      seatPlace();
+      card.style.visibility = "";
+      $("pillModel").setAttribute("aria-expanded", "true");
+      var t = $("rsTrack");
+      if (t) { try { t.focus({ preventScroll: true }); } catch (e2) { t.focus(); } }
+    });
   }
   $("pillModel").onclick = function (e) {
     e.stopPropagation();
-    var open = $("popModel").hidden;
-    closePop();
-    if (open) {
-      loadLlm().then(function () { renderPopModel(); $("popModel").hidden = false; $("pillModel").setAttribute("aria-expanded", "true"); });
-    }
+    var wasOpen = !$("seatCard").hidden;
+    closeSeat();
+    if (!wasOpen) openSeat();
   };
-  $("pillReason").onclick = function (e) {
-    e.stopPropagation();
-    var open = $("popReason").hidden;
-    closePop();
-    if (open) {
-      loadLlm().then(function () { renderPopReason(); $("popReason").hidden = false; $("pillReason").setAttribute("aria-expanded", "true"); });
-    }
-  };
-  document.addEventListener("click", function (e) {
-    if (!e.target.closest || !e.target.closest(".tpillwrap")) closePop();
+  document.addEventListener("pointerdown", function (e) {
+    if ($("seatCard").hidden) return;
+    if ($("seatCard").contains(e.target) || $("pillModel").contains(e.target)) return;
+    closeSeat();
   });
+  document.addEventListener("keydown", function (e) {
+    if (e.key !== "Escape" || $("seatCard").hidden) return;
+    e.preventDefault();
+    e.stopPropagation();
+    closeSeat();
+  }, true);
+  window.addEventListener("resize", function () { if (!$("seatCard").hidden) seatPlace(); });
+  window.addEventListener("scroll", function () { if (!$("seatCard").hidden) seatPlace(); }, true);
 
   /* ================= 语音输入 (媒体录音 → /api/voice/transcribe; 无配置时回退浏览器识别) ================= */
   var rec = { active: false, media: null, chunks: [], stream: null, t0: 0, timer: 0, sr: null };
@@ -1916,6 +2235,7 @@
   });
   document.addEventListener("keydown", function (e) {
     if (e.key === "Escape") {
+      if (!$("dirModal").hidden) { closeDirModal(); return; }
       if (!$("palette").hidden) { hidePalette(); return; }
       if (!$("drawer").hidden && matchMedia("(max-width: 980px)").matches && !$("modelForm").hidden) { closeModelForm(); return; }
       if (S.streaming) stopGen();
@@ -1984,6 +2304,7 @@
     loadTasks();
     renderSpaces();
     loadLlm();
+    loadRunState();   // 底部状态条常驻 (最近一次运行态 + 累计用量), 刷新后仍有数
     pollApprovals();
     S.lifeTimer = setInterval(function () { loadLifecycle(); loadHealth(); }, 30000);
     // 2026-10-27: 8s → 15s。bot.js 那边每 5 秒还会打一次 /api/bot.state, 两路叠加会撞限流(60/分/IP)。

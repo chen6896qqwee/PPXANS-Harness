@@ -37,17 +37,30 @@ test("updateSettings: 更新用户名/端口/安全, 校验生效", () => {
   const s = updateSettings(root, {
     user: { name: "老板" },
     http: { port: 9999 },
-    security: { allow_all: true, command_timeout_ms: 5000 },
+    security: { command_timeout_ms: 5000 },
   });
   assert.equal(s.user.name, "老板");
   assert.equal(s.http.port, 9999);
-  assert.equal(s.security.allow_all, true);
   assert.equal(s.security.command_timeout_ms, 5000);
   // 落盘验证
   const onDisk = JSON.parse(fs.readFileSync(path.join(root, "config", "ppx.json"), "utf8"));
   assert.equal(onDisk.user.name, "老板");
   assert.equal(onDisk.channels.http.port, 9999);
-  assert.equal(onDisk.security.allow_all, true);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+// 2026-10-31 安全收紧: allow_all 移出 HTTP 可写白名单 (拿到 bearer token 就能整体放开
+//   命令白名单太软) —— 只能编辑 config/ppx.json 后重启生效。
+test("updateSettings: security.allow_all 拒绝经 API 修改 (显式报错, 不落盘)", () => {
+  const root = tmpRoot("allowall");
+  fs.writeFileSync(path.join(root, "config", "ppx.json"), JSON.stringify({}));
+  assert.throws(
+    () => updateSettings(root, { security: { allow_all: true } }),
+    /allow_all/,
+    "显式报错而非静默丢弃",
+  );
+  const onDisk = JSON.parse(fs.readFileSync(path.join(root, "config", "ppx.json"), "utf8"));
+  assert.ok(!onDisk.security?.allow_all, "未写入磁盘");
   fs.rmSync(root, { recursive: true, force: true });
 });
 
@@ -120,7 +133,7 @@ test("/api/settings PUT 更新 + 热重载生效", async () => {
   const s = await serve(root);
   const j = await request(s.port, "/api/settings", {
     method: "PUT", token: s.token,
-    body: { patch: { user: { name: "新老板" }, security: { allow_all: true } } },
+    body: { patch: { user: { name: "新老板" }, security: { command_timeout_ms: 8000 } } },
   });
   assert.equal(j.ok, true, "更新成功");
   assert.equal(j.settings.user.name, "新老板");
@@ -128,6 +141,21 @@ test("/api/settings PUT 更新 + 热重载生效", async () => {
   // 重新 GET 确认持久化
   const g = await request(s.port, "/api/settings", { token: s.token });
   assert.equal(g.settings.user.name, "新老板");
+  s.agent.shutdown();
+  await stop(s);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+// 2026-10-31: allow_all 移出 HTTP 可写白名单 → PUT 返回 400 (配置文件直改才生效)
+test("/api/settings PUT security.allow_all 返回 400", async () => {
+  const root = tmpRoot("httpallowall");
+  const s = await serve(root);
+  const r = await fetch(`http://127.0.0.1:${s.port}/api/settings`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${s.token}` },
+    body: JSON.stringify({ patch: { security: { allow_all: true } } }),
+  });
+  assert.equal(r.status, 400, "allow_all 经 API 修改被拒");
   s.agent.shutdown();
   await stop(s);
   fs.rmSync(root, { recursive: true, force: true });

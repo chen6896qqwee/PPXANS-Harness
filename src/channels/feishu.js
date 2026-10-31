@@ -7,6 +7,7 @@
 //   ③ 防重放: event_id 去重缓存 (TTL 5 分钟), 重投递不再触发对话
 import crypto from "node:crypto";
 import { Channel } from "./base.js";
+import { triggerFromFeishuEvent } from "./trigger.js";
 
 // 官方算法: base64 解码 → 前 16 字节为 IV, 其余为密文; key = sha256(encrypt_key)
 // 2026-10-24 (R2) 修正: Node 的 decipher.final() 已自动去除 PKCS7 填充 (auto-padding 默认开),
@@ -160,13 +161,14 @@ export class FeishuChannel extends Channel {
     // 事件: 消息
     const event = data.event;
     if (event && event.type === "im.message.receive_v1" && event.message) {
-      const text = event.message.content ? JSON.parse(event.message.content).text || "" : "";
+      // 2026-10-31 (Super-agent 一期): 不再把消息退化成裸字符串 —— 完整读出 chat_id/
+      //   chat_type/root_id/parent_id/message_id/sender 构造 Trigger, 走两级过滤门 +
+      //   四段式会话键归组 (群聊/话题各自独立会话, 不再全混进 default)。回发目标仍是
+      //   open_id (send 走 receive_id_type=open_id, 群内回复通道升级留二期)。
       const openId = event.sender?.sender_id?.open_id || "";
       if (openId) this.lastUser = openId; // 记录最近联系人, 供主动提醒回发
-      if (text) {
-        const reply = await this.agent.chat(text);
-        await this.send(openId || "*", reply);
-      }
+      const trigger = triggerFromFeishuEvent(event); // 内含容错解析 (content 非 JSON 不炸)
+      if (trigger.text) await this.handleTrigger(trigger);
     }
     return { code: 0 };
   }

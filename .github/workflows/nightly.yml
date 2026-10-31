@@ -19,6 +19,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      # README 里的测试总数/通过数只有跑完整个套件才拿得到, 白天 CI 不重复跑;
+      # 放到 nightly 兜底, 避免锚点长期漂移 (2026-10-30)。
+      - name: README test counts sync
+        run: node scripts/readme-sync-check.js --with-tests
+        timeout-minutes: 15
       - name: 运行 nightly 基准
         run: node scripts/nightly-bench.js
       - name: 提交报告 (有变化才提交)

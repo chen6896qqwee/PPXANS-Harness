@@ -89,15 +89,38 @@ test("混沌: 工具错误喂回模型重试后成功", async () => {
   fs.rmSync(a.root, { recursive: true, force: true });
 });
 
-test("混沌: 工具轮次上限 (8 轮后停止)", async () => {
+test("混沌: 工具轮次上限 (8 轮工具 + 1 次无工具收口)", async () => {
   const a = makeAgent();
+  const toolCounts = [];
+  const client = fakeLLM({
+    name: "loop",
+    onCall: (messages, opts) => {
+      const n = Array.isArray(opts?.tools) ? opts.tools.length : -1;
+      toolCounts.push(n);
+      // 收口轮 (不给工具) 才吐正文; 其余轮次照旧死循环调工具
+      if (n === 0) return { message: { role: "assistant", content: "收口: 本轮只查到时间, 别的事没做", tool_calls: null } };
+      return { message: { role: "assistant", content: null, tool_calls: [{ id: "t", type: "function", function: { name: "get_time", arguments: "{}" } }] } };
+    },
+  });
+  const r = await a._llmWithTools([{ role: "user", content: "x" }], client);
+  assert.match(r, /收口: 本轮只查到时间/, "轮次用尽应带出收口正文, 不是一句冷冰冰的停止");
+  assert.match(r, /工具轮次上限已用尽 \(8 轮/, "必须诚实标注轮次用尽");
+  assert.equal(client.calls, 9, "8 轮工具 + 1 次收口");
+  assert.equal(toolCounts.at(-1), 0, "收口调用不得携带工具");
+  a.shutdown();
+  fs.rmSync(a.root, { recursive: true, force: true });
+});
+
+test("混沌: 关掉收口后轮次上限仍是硬停止 (exhausted_finalize=false)", async () => {
+  const a = makeAgent();
+  a.config.agent.exhausted_finalize = false;
   const client = fakeLLM({
     name: "loop",
     onCall: () => ({ message: { role: "assistant", content: null, tool_calls: [{ id: "t", type: "function", function: { name: "get_time", arguments: "{}" } }] } }),
   });
   const r = await a._llmWithTools([{ role: "user", content: "x" }], client);
   assert.equal(r, "[皮皮虾] 工具调用轮次过多, 已停止。");
-  assert.equal(client.calls, 8, "达到 8 轮上限即停止");
+  assert.equal(client.calls, 8, "达到 8 轮上限即停止, 不再补收口调用");
   a.shutdown();
   fs.rmSync(a.root, { recursive: true, force: true });
 });

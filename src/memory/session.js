@@ -60,6 +60,21 @@ export class SessionStore {
     this._dayCacheAt = 0;               // 生成该缓存时的 _version
     // deriveCompacted 增量缓存: key -> { arrRef, msgs, lastCompSeq }
     this._compactedCache = new Map();
+    // OPT-2 (2026-10-30) 批次内磁盘尾读缓存: key -> 本批次开始时读到的磁盘最大 seq。
+    //   append() 的尾读 (_diskMaxSeq: existsSync + open/fstat/read末8KB/close) 只是**乐观预读**,
+    //   目的是缩小跨进程撞号窗口; 一次 _pushTurn (set/多事件轮) 有 2~4 条 skipFlush append,
+    //   每条都重读同一份磁盘末行是纯浪费。同一批未落盘事件之间磁盘尾行不会因本进程变化, 故
+    //   每个 key 只读一次; 权威判定仍是 _flush 锁内的 _ensureUniqueSeq 重排 —— 本缓存绝不参与
+    //   唯一性判定, 乐观值撞号/过期都只会被锁内重排纠正 (缓存过期 = 碰撞窗口回到优化前大小)。
+    // 失效: 每个 _flush 结尾清空 (下一批必须重新读盘); set/delete 这类"磁盘内容作废"的路径
+    //   在入口也清空, 防上一批的残值被带进重建。
+    this._tailCache = new Map();
+    // _ensureUniqueSeq 在锁内实际读到的磁盘最大 seq (最近一次), 供 _flushLegacy 判定
+    //   "磁盘上有没有行 (追加 or 整文件写)" 复用同一次锁内尾读, 不再重复读一遍。
+    this._ensureDiskMax = 0;
+    // _diskMaxSeq 最近一次尾读命中的文件 (default 的锚分片), 供 _flushDaily 在逐日尾读时
+    //   复用同一个读数 (同一把锁内, 同一文件不会变)。
+    this._diskMaxFile = null;
   }
 
   _bump() { this._version += 1; }
@@ -160,7 +175,17 @@ export class SessionStore {
     //   现在 append 前读目标文件末行拿磁盘真实最大 seq, 取 max(内存, 磁盘) 再递增。
     //   但这只是乐观预读 (缩小碰撞窗口): 读完到写盘之间别的进程仍可读到同一 diskMax。
     //   权威兜底在 _flushLegacy/_flushDaily 的锁内 —— 序列化前经 _ensureUniqueSeq 重排撞号批次。
-    const diskMax = this._diskMaxSeq(k);
+    //
+    // OPT-2 (2026-10-30): 乐观预读按"未落盘批次"缓存, 同批每个 key 只读一次盘。
+    //   乐观预读只是缩小碰撞窗口, 权威在锁内重排 (_ensureUniqueSeq); 因此这里读到的是本批
+    //   第一次读到的盘面, 本批后续 append 复用它 —— 期间别的进程再写只会让碰撞窗口略大,
+    //   锁内重排会把整批 seq 抬到真实盘面之上, 唯一性不依赖本缓存。_flush 结束时清空缓存,
+    //   下一批必须重新读盘 (上一批落盘后的盘面才是下一批的起点)。
+    let diskMax = this._tailCache.get(k);
+    if (diskMax === undefined) {
+      diskMax = this._diskMaxSeq(k);
+      this._tailCache.set(k, diskMax);
+    }
     if (diskMax > (this._nextSeq.get(k) || 0)) this._nextSeq.set(k, diskMax);
     const seq = (this._nextSeq.get(k) || 0) + 1;
     const ev = { seq, ts: Number.isFinite(ts) ? ts : Date.now(), type, data };
@@ -194,6 +219,7 @@ export class SessionStore {
     try {
       if (k !== "default") return this._tailMaxSeq(this._file(k));
       const anchor = this._defaultAnchorFile();
+      this._diskMaxFile = anchor; // OPT-2: 记下本次尾读命中的分片 (读失败时为 null, 不复用)
       return anchor ? this._tailMaxSeq(anchor) : 0;
     } catch { return 0; }
   }
@@ -392,6 +418,7 @@ export class SessionStore {
     //   旧写法 (锁外 rmSync + 每条消息一次独立落盘) 有两处可见的坏结果: 并发写者的行可以落进
     //   "已删文件、未写新行"的缝隙里, 使重建后的会话以非 1 开头并夹着旧行 (半重建态); 而本进程
     //   的 N 条消息又分 N 次落盘, 别的进程读到的是只重建了一半的历史。default 同理 (所有分片)。
+    this._tailCache.clear(); // OPT-2: 重建意图 = 上一批的乐观盘面作废, 下面 append 必须重新读盘
     this._logs.delete(k); this._nextSeq.set(k, 0); this._flushedSeq.delete(k);
     const fresh = [];
     for (const m of (history || [])) {
@@ -423,6 +450,7 @@ export class SessionStore {
   }
   delete(key) {
     const k = this._safe(key);
+    this._tailCache.clear(); // OPT-2: 磁盘内容被删, 缓存里的旧盘面对后续 append 不再成立
     this._logs.delete(k); this._nextSeq.delete(k); this._flushedSeq.delete(k);
     try {
       if (k === "default") {
@@ -593,6 +621,10 @@ export class SessionStore {
     } catch (e) {
       // v1.0.9: 落盘失败不再静默 (磁盘满/权限丢失消息不可见), 至少留日志
       try { console.warn(`[session] 会话 ${k} 落盘失败: ${e.message}`); } catch {}
+    } finally {
+      // OPT-2: 本批已落盘 (无论成功/失败), 乐观尾读缓存一律作废 —— 下一批必须重新读盘:
+      //   成功时盘面已因本批追加而前进; 失败时更不能再拿旧盘面当起点。
+      this._tailCache.clear();
     }
   }
 
@@ -630,6 +662,9 @@ export class SessionStore {
     const map = remap || new Map();
     if (!pending.length) return map;
     const diskMax = Number.isFinite(floor) ? floor : this._diskMaxSeq(k);
+    // 记下锁内实际读到的盘面 (OPT-2): 调用方 (_flushLegacy) 还要判断"磁盘上有没有行",
+    //   这里复用同一次锁内尾读, 避免同一把锁内对同一文件读两遍。判定点是锁内真实盘面, 不是缓存。
+    this._ensureDiskMax = diskMax;
     let low = pending[0].seq;
     for (const e of pending) if (e.seq < low) low = e.seq;
     if (low > diskMax) return map; // 整段已在磁盘序列之上, 无碰撞
@@ -684,7 +719,9 @@ export class SessionStore {
       }
       // 序列化必须在锁内重排之后: 锁外 stringify 写进盘的还是过期的 seq 字节
       const line = pending.map((e) => JSON.stringify(e)).join("\n") + "\n";
-      if (!rebuild && this._diskMaxSeq(k) > 0) fs.appendFileSync(file, line, "utf8");
+      // OPT-2: 上面 _ensureUniqueSeq 已在同一把锁内读过本文件的末行 (_ensureDiskMax),
+      //   这里直接复用该盘面判定"追加 or 整文件写", 不再对同一文件重复尾读一遍。
+      if (!rebuild && this._ensureDiskMax > 0) fs.appendFileSync(file, line, "utf8");
       else fs.writeFileSync(file, line, "utf8");
     });
   }
@@ -704,6 +741,7 @@ export class SessionStore {
     const batchFiles = days.map((d) => this._shardFile(d));
     // 重建要作废"该 key 的全部磁盘内容", 所以锁集 = 现存全部分片 ∪ 本批要写的分片;
     // 增量路径再加上锚分片 (withFileLocks 去重, 单天常见批次仍只一把锁)
+    // OPT-2: 锚分片路径留一份 —— 锁内游标播种读的就是它的末行, 逐日尾读遇到同一文件时直接复用。
     const lockFiles = rebuild
       ? [...this._defaultFiles(), ...batchFiles]
       : [...batchFiles, this._defaultAnchorFile()];
@@ -719,9 +757,15 @@ export class SessionStore {
       } else {
         const remap = new Map();
         let cursor = this._diskMaxSeq(k);
+        // OPT-2: _diskMaxSeq 刚读过的那个分片 (= 游标播种来源), 逐日尾读遇到它时无需再读一遍。
+        //   注意用 "_diskMaxFile" 而不是锁外取的 anchorFile: 两者之间并发进程可能刚建出新的
+        //   今日分片, 用错文件会低估真实末行 —— 只复用"确实刚读过"的那一个。
+        const seededFile = this._diskMaxFile;
         for (const d of days) {
           const g = groups.get(d);
-          const tail = this._tailMaxSeq(this._shardFile(d));
+          const shard = this._shardFile(d);
+          // 权威仍是锁内读到的磁盘末行 (cursor 的播种值); append 的乐观缓存不参与本判定。
+          const tail = shard === seededFile ? cursor : this._tailMaxSeq(shard);
           if (tail > cursor) cursor = tail;
           this._ensureUniqueSeq(k, g, cursor, remap);
           for (const e of g) if (e.seq > cursor) cursor = e.seq;
@@ -731,8 +775,11 @@ export class SessionStore {
       for (const d of days) {
         const file = this._shardFile(d);
         const line = groups.get(d).map((e) => JSON.stringify(e)).join("\n") + "\n";
-        if (!rebuild && fs.existsSync(file)) fs.appendFileSync(file, line, "utf8");
-        else fs.writeFileSync(file, line, "utf8"); // 新的一天文件首次写入 / 重建整批覆盖
+        // OPT-2: 非重建路径一律 appendFileSync —— 目标文件不存在/为空时它与 writeFileSync 逐字节
+        //   等价 (都以本批内容建出文件), 原先的 existsSync 分支是每批多一次系统调用。
+        //   重建路径必须 writeFileSync (整文件覆盖, 兜 Windows rmSync 失败留下的残存行)。
+        if (rebuild) fs.writeFileSync(file, line, "utf8");
+        else fs.appendFileSync(file, line, "utf8");
       }
     });
   }

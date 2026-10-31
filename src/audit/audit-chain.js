@@ -25,6 +25,28 @@ export const AUDIT_SEQ_FILE = "audit.seq";
 export const AUDIT_FILE = "audit.ndjson";
 export const AUDIT_HMAC_KEY_FILE = ".ppx/audit-hmac-key";
 
+// 2026-10-30: 追加时只需要最后一行 (prevHash/seq), 不再每次整文件读入内存 ——
+//   审计日志随运行时长线性增长, 全量读取会让每次工具调用都付 O(文件大小) 的代价。
+// 尾部读取上限 64KB; 单行正常 < 2KB, 足够容纳最长 error/args。
+function readLastLine(file, maxBytes = 64 * 1024) {
+  let fd = null;
+  try {
+    fd = fs.openSync(file, "r");
+    const size = fs.fstatSync(fd).size;
+    if (!size) return "";
+    const len = Math.min(size, maxBytes);
+    const buf = Buffer.alloc(len);
+    fs.readSync(fd, buf, 0, len, size - len);
+    const text = buf.toString("utf8");
+    const last = text.trim().split("\n").pop() || "";
+    return last.trim();
+  } catch {
+    return "";
+  } finally {
+    if (fd != null) { try { fs.closeSync(fd); } catch { /* ignore */ } }
+  }
+}
+
 // 审计文件路径: <dataDir>/logs/audit.ndjson
 export function auditFile(dataDir) {
   return path.join(dataDir, "logs", AUDIT_FILE);
@@ -91,8 +113,8 @@ export class AuditLog {
     } catch {
       // 无 seq 文件 → 从日志尾部推断 (防并行进程计数漂移)
       try {
-        const lines = fs.readFileSync(this.file, "utf8").trim().split("\n").filter(Boolean);
-        if (lines.length) return Number(JSON.parse(lines[lines.length - 1]).seq) || 0;
+        const last = readLastLine(this.file);
+        if (last) return Number(JSON.parse(last).seq) || 0;
       } catch {}
       return 0;
     }
@@ -150,12 +172,12 @@ export class AuditLog {
     };
   }
 
-  // 读最后一条 hash (链头)
+  // 读最后一条 hash (链头) —— 只读文件尾部一行, 不再全量加载 (2026-10-30)
   lastHash() {
     try {
-      const lines = fs.readFileSync(this.file, "utf8").trim().split("\n").filter(Boolean);
-      if (!lines.length) return null;
-      return JSON.parse(lines[lines.length - 1]).hash || null;
+      const line = readLastLine(this.file);
+      if (!line) return null;
+      return JSON.parse(line).hash || null;
     } catch {
       return null;
     }

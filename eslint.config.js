@@ -14,6 +14,7 @@ export default [
     ignores: [
       "node_modules/**",
       "dist/**",
+      "dist-desktop/**", // electron-builder 产物 (内含打包后的源码副本, 不应重复 lint)
       "build/**",
       ".ppxtest/**",
       "data/**",

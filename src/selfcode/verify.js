@@ -21,6 +21,18 @@ const execFileP = promisify(execFile);
 const DENY_SEGMENTS = ["node_modules", ".git", ".ppx-cache"];
 
 // allowTestEdit=false 时, 目标是已知测试文件就拒 (自改代码不能自己改考卷过关)
+// 2026-10-30 修复: 旧实现只认调用方显式传入的 testFiles, 而 engine 每次传的是空数组 ——
+//   保护等于不存在, 模型可以自改 test/*.test.js 让红变绿。现在按路径特征自动识别测试文件,
+//   不依赖调用方自觉; allowTestEdit 仅保留给程序化内部调用, 工具面不再暴露该开关。
+const TEST_DIR_RE = /(^|[\\/])(test|tests|__tests__|spec|specs)([\\/]|$)/i;
+const TEST_FILE_RE = /(\.test\.|\.spec\.|^test[-_])[^\\/]*$/i;
+
+export function isTestFile(relPath) {
+  const rel = String(relPath || "");
+  if (TEST_DIR_RE.test(rel)) return true;
+  return TEST_FILE_RE.test(path.basename(rel));
+}
+
 export function guardPath(root, relPath, { testFiles = [], allowTestEdit = false } = {}) {
   const rootAbs = path.resolve(root);
   const abs = path.resolve(rootAbs, String(relPath || ""));
@@ -38,8 +50,11 @@ export function guardPath(root, relPath, { testFiles = [], allowTestEdit = false
     return { ok: false, error: `不允许自改该类型文件: ${path.basename(abs)} (仅 js/mjs/cjs/json/md/txt)` };
   }
   if (!allowTestEdit) {
+    const relNorm = path.relative(rootAbs, abs);
     const tset = new Set((testFiles || []).map((p) => path.resolve(rootAbs, p)));
-    if (tset.has(abs)) return { ok: false, error: `拒绝改测试文件: ${relPath} (修代码不修考卷; 确需改测试请 allow_test_edit=true)` };
+    if (tset.has(abs) || isTestFile(relNorm)) {
+      return { ok: false, error: `拒绝改测试文件: ${relNorm} (修代码不修考卷; 测试保护不可由工具参数关闭)` };
+    }
   }
   return { ok: true, abs, rel: path.relative(rootAbs, abs) };
 }

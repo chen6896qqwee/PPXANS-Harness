@@ -219,6 +219,9 @@ test("追加不变量: 第二轮的写入不改第一轮的任何一个字节", 
     const file = turnsPath(dir, day);
     const before = fs.readFileSync(file);
     await ticker.recordTurn("第二轮", "答二", { sessionKey: "s1", drafts: ["草稿二"] });
+    // 2026-10-30: turns 归档改为合批落盘 (阈值 5 条 / 3s / 强制点)。要直接读文件就必须先
+    //   显式收口 —— 真实进程在 shutdown 里做同一件事; 读接口 turnArchive() 内部也会自动 flush。
+    ticker.flushTurnArchive();
     const after = fs.readFileSync(file);
     assert.ok(after.length > before.length, "文件只增长");
     assert.equal(after.subarray(0, before.length).toString("utf8"), before.toString("utf8"),
@@ -248,6 +251,7 @@ for (let i = 0; i < n; i++) {
     drafts: ["草稿 " + tag + "-" + i],
   });
 }
+t.flushTurnArchive();   // 进程收口 (真实 CLI 在 agent.shutdown() 里做; 合批后必须显式收口)
 console.log("done " + tag);
 `, "utf8");
   try {

@@ -107,7 +107,7 @@ export class SelfCodeEngine {
     const plans = [];
     const failed = [];
     for (const [rel, bs] of groups) {
-      const g = guardPath(this.root, rel, { testFiles: [], allowTestEdit: this.allowTestEdit });
+      const g = guardPath(this.root, rel, { allowTestEdit: this.allowTestEdit });
       if (!g.ok) { failed.push({ path: rel, error: g.error }); continue; }
       let before = "";
       try { before = fs.readFileSync(g.abs, "utf8"); } catch {

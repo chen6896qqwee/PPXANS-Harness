@@ -35,13 +35,14 @@ function cleanup(svc) {
 
 test("HTTP 通道: 启动 + /health", async () => {
   const svc = await boot();
-  const { server, port } = svc;
+  const { server, agent, port } = svc;
   try {
     const r = await fetch(`http://127.0.0.1:${port}/health`);
     const data = await r.json();
     assert.equal(r.status, 200);
     assert.equal(data.status, "ok");
   } finally {
+    agent.shutdown(); // boot() 起的是完整 agent: 构造期挂的定时器必须显式回收, 否则进程挂住
     await new Promise((res) => server.close(res));
     cleanup(svc);
   }
@@ -94,15 +95,40 @@ function corsBoot() {
   return root;
 }
 
-test("CORS: 未配置默认放行任意来源 (*)", async () => {
+// 2026-10-31 安全默认收紧: 未配置 cors_origin = same-origin 严格模式 (此前默认 *)
+test("CORS: 未配置默认 same-origin 严格模式 (跨源 403, 非浏览器放行)", async () => {
   const root = corsBoot();
   const agent = new PPXAgent({ root });
   const ch = new HttpChannel(agent, { port: 0, host: "127.0.0.1" });
   await ch.connect();
   const port = ch.server.address().port;
   try {
+    const evil = await fetch(`http://127.0.0.1:${port}/health`, { headers: { Origin: "http://evil.example.com" } });
+    assert.equal(evil.status, 403, "跨源 Origin 一律 403");
+    // 本机页面 (如 Web UI 自己) 不受影响: 回环 Origin 放行
+    const local = await fetch(`http://127.0.0.1:${port}/health`, { headers: { Origin: `http://127.0.0.1:${port}` } });
+    assert.equal(local.status, 200, "回环来源放行");
+    const noOrigin = await fetch(`http://127.0.0.1:${port}/health`);
+    assert.equal(noOrigin.status, 200, "非浏览器请求 (无 Origin) 放行");
+    assert.equal(noOrigin.headers.get("access-control-allow-origin"), null, "严格模式不下发 ACAO:*");
+  } finally {
+    await ch.disconnect();
+    agent.shutdown();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// 显式放开仍支持: cors_origin: "*" (旧写法兼容, 交由用户自担风险)
+test("CORS: 显式 cors_origin:\"*\" 恢复放行任意来源", async () => {
+  const root = corsBoot();
+  const agent = new PPXAgent({ root });
+  agent.config.channels.http.cors_origin = "*";
+  const ch = new HttpChannel(agent, { port: 0, host: "127.0.0.1" });
+  await ch.connect();
+  const port = ch.server.address().port;
+  try {
     const r = await fetch(`http://127.0.0.1:${port}/health`, { headers: { Origin: "http://evil.example.com" } });
-    assert.equal(r.status, 200, "默认放行");
+    assert.equal(r.status, 200, "显式 * 放行");
     assert.equal(r.headers.get("access-control-allow-origin"), "*");
   } finally {
     await ch.disconnect();

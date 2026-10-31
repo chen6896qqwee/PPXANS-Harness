@@ -76,13 +76,13 @@ export function registerSandboxTools(catalog, { rootDir = process.cwd() } = {}) 
   void rootDir;
   catalog.register({
     name: "code_run",
-    description: "在内置 JS 沙箱里执行一段 JavaScript 并返回结果 (纯计算: 数学/字符串/数组变换/JSON 处理)。沙箱无网络/文件/进程访问, 限时 10s, 线程堆上限默认 128MB (超限直接终止, 不影响宿主)。适合精确计算、数据转换、格式化 —— 比手算可靠, 比 shell 干净。",
+    description: "在内置 JS 沙箱执行一段 JavaScript 并返回结果 (纯计算: 数学/字符串/数组/JSON 处理)。沙箱无网络/文件/进程访问。适合精确计算与数据转换, 比手算可靠、比 shell 干净。",
     parameters: {
       type: "object",
       properties: {
-        code: { type: "string", description: "JS 代码 (表达式或语句)。最后一条表达式的值或显式变量为返回值; 用 console.log 输出中间信息" },
+        code: { type: "string", description: "JS 代码; 最后一条表达式的值为返回值, console.log 打中间信息" },
         timeout_ms: { type: "number", description: "超时毫秒 (默认 3000, 上限 10000)" },
-        max_heap_mb: { type: "number", description: "沙箱线程堆上限 MB (默认 128, 下限 16; 仅可调大或收紧上限, 不支持关闭)" },
+        max_heap_mb: { type: "number", description: "沙箱线程堆上限 MB (默认 128, 下限 16)" },
       },
       required: ["code"],
     },

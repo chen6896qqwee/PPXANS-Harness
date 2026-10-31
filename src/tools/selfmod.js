@@ -10,8 +10,11 @@ function capErr(name, msg) {
   return `[工具错误] ${name}: ${msg}`;
 }
 
-export function registerSelfmodTools(catalog, { skillsDir }) {
-  const loader = new SkillLoader(skillsDir);
+// 2026-10-31 (队列⑥): 多根装配 —— 传 roots (项目>用户>内置) 走全量技能面; writeDir 为可写根
+//   (create_skill 落盘处)。兼容旧 skillsDir 单根入参 (内部唯一调用方已切 roots, 参数保留防外部误用)。
+export function registerSelfmodTools(catalog, { roots, writeDir, skillsDir }) {
+  const loader = roots?.length ? new SkillLoader({ roots }) : new SkillLoader(skillsDir);
+  const destDir = writeDir || skillsDir;
 
   // 1. 枚举全部能力: 工具 + 技能
   catalog.register({
@@ -41,7 +44,47 @@ export function registerSelfmodTools(catalog, { skillsDir }) {
     },
   });
 
-  // 2. 启用能力
+  // 2. 取单个工具的完整参数定义 (2026-10-30, 按需工具模式的配套件)
+  // 背景: 收窄 agent.tool_exposure 后, 长尾工具的 schema 不再随请求下发, 只在 system prompt
+  //   留名字。模型需要它时得有一条**明确的路**把 schema 取回来 —— 否则按需模式等于"名字可见、
+  //   参数全靠猜", 比全量下发更糟。本工具就是那条路: 名字 → JSON Schema。
+  // 全量曝光模式下它同样可用 (行为不变, 只是没人需要叫它)。
+  catalog.register({
+    name: "tool_schema",
+    capability: { readOnly: true, riskLevel: "low", sideEffect: "none" },
+    description: "取工具完整参数定义 (JSON Schema)。【按需工具】名单里的工具先取参数再调, 不要凭猜; name 可逗号分隔多个。",
+    parameters: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "工具名, 可逗号分隔多个 (如 read_file,apply_patch)" },
+      },
+      required: ["name"],
+    },
+    category: "selfmod",
+    power: "agent",
+    idempotent: true,
+    execute: async (args) => {
+      const names = String(args?.name || "").split(/[,\s]+/).map((s) => s.trim()).filter(Boolean).slice(0, 10);
+      if (!names.length) return capErr("tool_schema", "需要 name (工具名, 可用 list_capabilities 枚举)");
+      const out = [];
+      for (const n of names) {
+        const m = catalog.metaOf(n);
+        if (!m) {
+          out.push(`# ${n}\n[未知工具] 用 list_capabilities 枚举可用工具名。`);
+          continue;
+        }
+        out.push([
+          `# ${m.name} (${m.category}/${m.power}${m.enabled === false ? ", 当前已禁用" : ""})`,
+          m.description || "(无描述)",
+          "参数定义:",
+          JSON.stringify(m.parameters || { type: "object", properties: {} }, null, 2),
+        ].join("\n"));
+      }
+      return out.join("\n\n");
+    },
+  });
+
+  // 3. 启用能力
   catalog.register({
     name: "enable_capability",
     capability: { readOnly: false, riskLevel: "medium", sideEffect: "system" },
@@ -130,11 +173,16 @@ export function registerSelfmodTools(catalog, { skillsDir }) {
       // v1.0.8: 长度上限, 防写超大文件/垃圾内容
       if (desc.length > 300) return "[工具错误] create_skill: description 超长 (最大 300 字符)";
       if (content.length > 50000) return "[工具错误] create_skill: content 超长 (最大 50000 字符)";
-      const dir = path.join(skillsDir, name);
+      // 2026-10-31 (队列⑥): 落盘到可写根 (项目 .ppx/skills 优先, 用户级 ~/.ppx/skills 兜底) ——
+      //   此前写死 <root>/skills (内置根): npm 装机时位于 node_modules, 升级替换包目录即冲掉用户产物;
+      //   且项目里放同 id 技能本是有意覆盖, 写进被压死的内置根等于白写。
+      if (!destDir) return capErr("create_skill", "无可写技能根 (全部技能源只读)");
+      fs.mkdirSync(destDir, { recursive: true });
+      const dir = path.join(destDir, name);
       fs.mkdirSync(dir, { recursive: true });
       const frontmatter = "---" + "\n" + "name: " + name + "\n" + "description: " + desc + "\n" + "---" + "\n" + "\n";
       fs.writeFileSync(path.join(dir, "SKILL.md"), frontmatter + content, "utf8");
-      return "已创建技能: " + name + " (skills/" + name + "/SKILL.md)";
+      return "已创建技能: " + name + " (" + path.basename(destDir) + "/" + name + "/SKILL.md)";
     },
   });
 

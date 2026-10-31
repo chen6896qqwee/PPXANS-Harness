@@ -75,6 +75,8 @@ export function loadPlugins(pluginsDir) {
     try { man = JSON.parse(fs.readFileSync(mf, "utf8")); }
     catch (e) { warn(`[plugins] ${name} 清单解析失败, 跳过: ${e.message}`); continue; }
 
+    // 用户插件管理页可停用插件 (enabled=false) —— 不删代码、不进装配链。
+    if (man && man.enabled === false) continue;
     const access = man && man.access ? String(man.access) : PLUGIN_ACCESS.RESTRICTED;
     if (!VALID_ACCESS.has(access)) {
       warn(`[plugins] ${name} access 非法 (${access}), fail-closed 整插件跳过`);
