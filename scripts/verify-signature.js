@@ -59,6 +59,21 @@ for (const input of inputs) {
 }
 files.sort((a, b) => path.basename(a).localeCompare(path.basename(b)));
 
+// Authenticode 是 Windows 专属概念。mac/linux 上没有 Get-AuthenticodeSignature,
+// 逐文件只会全 Error 并把发布误杀 (dmg/AppImage 属 codesign/gpg 体系, 另行接入)。
+// 当前默认 pattern 只匹配 Windows Setup exe, 非平台本就空匹配跳过 —— 这里是防御:
+// 将来 pattern 放宽时, 别让 mac/linux 的打包死在签名校验上。
+if (process.platform !== "win32") {
+  if (files.length) {
+    console.log(`[signature] 非 Windows 平台 (${process.platform}), Authenticode 不适用, 跳过 ${files.length} 个文件`);
+    if (out) {
+      fs.mkdirSync(path.dirname(path.resolve(out)), { recursive: true });
+      fs.writeFileSync(path.resolve(out), `Authenticode: not applicable on ${process.platform}\n`, "utf8");
+    }
+  }
+  process.exit(0);
+}
+
 if (!files.length) {
   console.log("[signature] 没有匹配的可执行文件, 跳过");
   process.exit(requireSignature ? 1 : 0);
@@ -113,30 +128,52 @@ foreach ($f in @($files)) {
 }
 `;
 
-const ps = spawnSync(
-  "powershell",
-  ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", PS_SCRIPT],
-  {
-    encoding: "utf8",
-    windowsHide: true,
-    maxBuffer: 8 * 1024 * 1024,
-    env: { ...process.env, PPX_SIGN_FILES: JSON.stringify(files) },
-  },
-);
-
-const records = [];
-for (const line of `${ps.stdout || ""}`.split(/\r?\n/)) {
-  const text = line.trim();
-  if (!text.startsWith("{")) continue;
-  try {
-    records.push(JSON.parse(text));
-  } catch {
-    // PowerShell 偶发警告行, 忽略
+// 2026-10-31 (首次 release run 实测): GitHub windows-latest 的 workflow shell 是 pwsh,
+//   子进程继承的 PSModulePath 混入 PowerShell 7 的模块目录 —— Windows PowerShell 5.1
+//   加载 Microsoft.PowerShell.Security 直接失败 ("module could not be loaded"),
+//   Get-AuthenticodeSignature 全部 Error → 被当"无法读取"拒绝交付。
+//   对策: 优先 pwsh (7 自带, 模块自洽); 兜底 powershell 5.1 并删除继承的 PSModulePath
+//   (删后 5.1 回退到自身默认模块路径)。哪个能产出与文件数一致的 JSON 记录就用哪个。
+function runPowerShell(exe, envDeletes) {
+  const env = { ...process.env, PPX_SIGN_FILES: JSON.stringify(files) };
+  for (const k of envDeletes) delete env[k];
+  return spawnSync(
+    exe,
+    ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", PS_SCRIPT],
+    { encoding: "utf8", windowsHide: true, maxBuffer: 8 * 1024 * 1024, env },
+  );
+}
+function parseRecords(ps) {
+  const out = [];
+  for (const line of `${ps.stdout || ""}`.split(/\r?\n/)) {
+    const text = line.trim();
+    if (!text.startsWith("{")) continue;
+    try {
+      out.push(JSON.parse(text));
+    } catch {
+      // PowerShell 偶发警告行, 忽略
+    }
   }
+  return out;
+}
+
+const attempts = [
+  ["pwsh", []],
+  ["powershell", ["PSModulePath"]],
+];
+let ps = null;
+let records = [];
+const attemptLog = [];
+for (const [exe, envDeletes] of attempts) {
+  ps = runPowerShell(exe, envDeletes);
+  records = parseRecords(ps);
+  attemptLog.push(`${exe}: exit=${ps.status} records=${records.length}`);
+  if (!ps.error && ps.status === 0 && records.length === files.length) break;
 }
 if (ps.error || ps.status !== 0 || records.length !== files.length) {
   const detail = `${ps.stderr || ""}`.trim() || `${ps.stdout || ""}`.trim();
   console.error(`[signature] 调用 PowerShell 失败 (exit ${ps.status}): ${detail || ps.error?.message || "无输出"}`);
+  console.error(`[signature] 各尝试: ${attemptLog.join(" | ")}`);
   process.exit(1);
 }
 
