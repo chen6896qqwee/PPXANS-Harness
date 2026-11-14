@@ -1,0 +1,40 @@
+name: Lint
+
+# ESLint 静态检查门禁 (2026-10-11 新增, 配合 eslint.config.js)
+#
+# 为什么单独一个 workflow: 本项目是「零运行时依赖」, ci.yml 的 test job 刻意不做
+# npm ci (直接 node --test)。而 eslint 是 devDependency, 必须先安装依赖才能跑,
+# 所以单开一个 job, 走 npm ci + cache, 不干扰 ci.yml 的零依赖测试。
+#
+# 基线 (2026-10-11): 0 error / 92 warning。仅 error 阻塞; warning 为存量历史欠账,
+# 待逐项清零后再收紧。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  eslint:
+    name: eslint (node 22)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dev dependencies
+        run: npm ci
+      - name: Lint
+        run: npm run lint

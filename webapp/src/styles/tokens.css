@@ -1,0 +1,107 @@
+/* webapp/src/styles/tokens.css - v5.0 设计令牌 (视觉翻新)
+ * 真·亮暗双主题: [data-theme] 纯 CSS 变量驱动, 不再有任何硬编码覆盖层。
+ * 口径: 深色为默认; 亮色不是"深色反色", 单独校准过对比度。
+ * 主题切换 = 换一组变量, 组件零改动。 */
+
+:root, [data-theme="dark"] {
+  color-scheme: dark;
+
+  /* 画布与表面 */
+  --bg: #0e0e12;
+  --bg-soft: #121218;
+  --surface: #17171f;
+  --surface-2: #1d1d27;
+  --surface-3: #24242f;
+  --border: #2a2a36;
+  --border-soft: #22222d;
+
+  /* 文本 */
+  --text: #ececf2;
+  --text-2: #b6b6c4;
+  --text-3: #84848f;
+  --text-4: #5c5c68;
+
+  /* 主色: 皮皮虾珊瑚橙 */
+  --accent: #f0653c;
+  --accent-hover: #f97a52;
+  --accent-soft: rgba(240, 101, 60, 0.14);
+  --accent-border: rgba(240, 101, 60, 0.38);
+  --on-accent: #ffffff;
+
+  /* 语义色 */
+  --ok: #3ecf8e;
+  --ok-soft: rgba(62, 207, 142, 0.13);
+  --warn: #e8b33e;
+  --warn-soft: rgba(232, 179, 62, 0.13);
+  --err: #f0564f;
+  --err-soft: rgba(240, 86, 79, 0.13);
+  --info: #5b9df0;
+  --info-soft: rgba(91, 157, 240, 0.13);
+
+  /* 思考强度档位色 (座椅滑杆) */
+  --lv1: #5b9df0;
+  --lv2: #9b6dd6;
+  --lv3: #e05fa8;
+
+  /* 形状与深度 */
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-2: 0 4px 16px rgba(0, 0, 0, 0.36);
+  --shadow-3: 0 12px 40px rgba(0, 0, 0, 0.46);
+
+  /* 动效 */
+  --t-fast: 120ms cubic-bezier(0.2, 0.7, 0.3, 1);
+  --t-med: 200ms cubic-bezier(0.2, 0.7, 0.3, 1);
+
+  /* 布局 */
+  --side-w: 264px;
+  --side-w-collapsed: 0px;
+  --drawer-w: 340px;
+  --topbar-h: 46px;
+
+  /* 图表配色 (使用统计) */
+  --chart-1: #f07a50;
+  --chart-2: #5b9df0;
+  --chart-3: #3ecf8e;
+  --chart-4: #9b6dd6;
+  --chart-5: #e8b33e;
+  --chart-6: #4bb3bd;
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+
+  --bg: #f5f5f7;
+  --bg-soft: #eeeef2;
+  --surface: #ffffff;
+  --surface-2: #f7f7fa;
+  --surface-3: #eff0f4;
+  --border: #e2e3ea;
+  --border-soft: #eaeaef;
+
+  --text: #1b1b22;
+  --text-2: #4c4c58;
+  --text-3: #77777f;
+  --text-4: #a2a2ac;
+
+  --accent: #e0532c;
+  --accent-hover: #c94a26;
+  --accent-soft: rgba(224, 83, 44, 0.1);
+  --accent-border: rgba(224, 83, 44, 0.32);
+  --on-accent: #ffffff;
+
+  --ok: #189d65;
+  --ok-soft: rgba(24, 157, 101, 0.1);
+  --warn: #b07d10;
+  --warn-soft: rgba(176, 125, 16, 0.1);
+  --err: #d13d36;
+  --err-soft: rgba(209, 61, 54, 0.09);
+  --info: #2e6fd0;
+  --info-soft: rgba(46, 111, 208, 0.09);
+
+  --shadow-1: 0 1px 2px rgba(20, 20, 30, 0.07);
+  --shadow-2: 0 4px 16px rgba(20, 20, 30, 0.1);
+  --shadow-3: 0 12px 40px rgba(20, 20, 30, 0.16);
+}

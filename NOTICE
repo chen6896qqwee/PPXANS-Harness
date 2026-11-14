@@ -1,0 +1,15 @@
+PPXANS-Harness (皮皮虾)
+Copyright 2026 chen6896qqwee
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+It includes the following third-party software:
+
+  * Electron (MIT License) — desktop runtime
+  * Chromium and its bundled third-party components (BSD-style and others)
+  * Node.js (MIT License) — only in the standalone portable/Setup packages
+
+The full license texts are installed with the desktop application
+(LICENSE.electron.txt, LICENSES.chromium.html) and summarized in
+THIRD-PARTY-NOTICES.md. If you redistribute this software, keep LICENSE,
+NOTICE, THIRD-PARTY-NOTICES.md and those runtime license files intact.

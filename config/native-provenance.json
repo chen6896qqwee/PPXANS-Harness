@@ -1,0 +1,442 @@
+{
+  "version": 1,
+  "policy": "design-only",
+  "statement": "本仓库不包含任何上游项目的源码副本。下表中的来源仅用于记录设计思想对照；所有实现均为 PPXANS-Harness 自研代码，命名、抽象、数据结构、失败语义与测试均为本项目自有。",
+  "forbiddenImportPrefixes": [
+    "dsh",
+    "deepseek-harness",
+    "deepseek-superagent",
+    "dsh-superagent-prototype",
+    "@deepseek/",
+    "openclaw",
+    "claude-code",
+    "oh-my-hermes",
+    "octop",
+    "aider"
+  ],
+  "forbiddenSourceMarkers": [
+    "Copyright (c) DeepSeek",
+    "dsh-superagent-prototype/src",
+    "deepseek-harness/src"
+  ],
+  "origins": [
+    {
+      "id": "superagent",
+      "label": "DeepSeek《Super-agent 设计探索》",
+      "license": "design-reference",
+      "tokens": [
+        "Super-agent",
+        "Superagent",
+        "Tickets/Assignments"
+      ],
+      "modules": [
+        "src/flow/trigger.js",
+        "src/flow/policy.js",
+        "src/flow/kernel.js",
+        "src/workgraph/store.js",
+        "src/workgraph/service.js",
+        "src/channels/delivery.js",
+        "src/orchestrator/thread-bridge.js",
+        "src/ans/watchdog.js",
+        "src/services/daemon-control.js",
+        "src/protocol/index.js"
+      ],
+      "native": "入站事件归一 → 两级准入 → 工单账本 → 指派 → 投递 outbox 的原生流水线；控制面 /work、HTTP API 与 Web UI 共用同一份事实。",
+      "optimizations": [
+        "决策内核 planIngress 与传输层解耦，六种动作可单测",
+        "工单账本 append-only JSONL 折叠 + 压缩，终态不可覆盖",
+        "admitted 子集安全自动恢复（无执行事实 = 无工具副作用）",
+        "投递按通道分组并行、组内保序；抖动退避 + 死信 + 幂等键",
+        "所有工单事件进入 EQ，ticketId 为顶层引用键"
+      ]
+    },
+    {
+      "id": "dsh",
+      "label": "deepseek-harness / dsh（会话即事实源、Service Seam、spill）",
+      "license": "MIT (design-reference)",
+      "tokens": [
+        "dsh",
+        "deepseek-harness",
+        "DeepSeek Harness"
+      ],
+      "modules": [
+        "src/seam/shell.js",
+        "src/plugin/context.js",
+        "src/agent/plugins/builtin.js",
+        "src/memory/session.js",
+        "src/agent/context.js",
+        "src/tools/spill.js",
+        "src/tools/context.js",
+        "src/tools/seam.js",
+        "src/tools/selfmod.js",
+        "src/utils/trace.js"
+      ],
+      "native": "会话日志为唯一事实源；Service/Provider/Consumer 三分法由 plugin/context 的服务定位器承担（曾在 src/seam/registry.js 实现，2026-11-08 因 src 内无消费者而移除）；超长工具结果 spill + context_read 续读。",
+      "optimizations": [
+        "零依赖、同步、单进程内实现，不引入 Cordis/DI 运行时",
+        "spill 内容永不删除，模型按 locator 分页续读",
+        "服务级替换由 plugin/context 的服务定位器承担，允许单 provider 替换 shell/执行环境"
+      ]
+    },
+    {
+      "id": "claude-code",
+      "label": "claude-code（hooks / commands / settings 格式）",
+      "license": "design-reference",
+      "tokens": [
+        "claude-code",
+        "Claude Code"
+      ],
+      "modules": [
+        "src/hooks/index.js",
+        "src/hooks/user-hooks.js",
+        "src/agent/command-registry.js"
+      ],
+      "native": "六类生命周期钩子链 + 用户可编程钩子配置 + 斜杠命令统一模型。",
+      "optimizations": [
+        "钩子配置白名单读取，不执行任意未声明脚本路径",
+        "命令注册表与工具目录分离，/work 为隐藏别名不扩张名册"
+      ]
+    },
+    {
+      "id": "codex",
+      "label": "Codex（审批/沙箱/任务指针/输出标准化）",
+      "license": "design-reference",
+      "tokens": [
+        "codex",
+        "Codex",
+        "codex-task-pointer"
+      ],
+      "modules": [
+        "src/permissions/index.js",
+        "src/permissions/intersection.js",
+        "src/session/pwf.js",
+        "src/tools/builtin.js"
+      ],
+      "native": "能力门 + 审批流 + 沙箱策略 + 压缩前任务指针 + 工具结果标准化头。",
+      "optimizations": [
+        "deny 恒胜的规则链与能力元数据裁定合并为一处",
+        "委派权限取交集而非并集，避免子代理越权"
+      ]
+    },
+    {
+      "id": "opencode",
+      "label": "OpenCode（通配符规则链 / 分级审查）",
+      "license": "design-reference",
+      "tokens": [
+        "opencode",
+        "OpenCode",
+        "OpenCode-Review"
+      ],
+      "modules": [
+        "src/permissions/index.js",
+        "src/verify/review.js"
+      ],
+      "native": "last-match-wins 通配符规则链；五阶段分级审查流水线。",
+      "optimizations": [
+        "规则链与审批流共享同一归一化入口",
+        "审查按风险分级触发，低风险不阻塞主链路"
+      ]
+    },
+    {
+      "id": "octop",
+      "label": "TencentCloud/Octop（团队房间 / 人格 / 专家包）",
+      "license": "design-reference",
+      "tokens": [
+        "Octop",
+        "TencentCloud/Octop"
+      ],
+      "modules": [
+        "src/orchestrator/room.js",
+        "src/orchestrator/personas.js",
+        "src/orchestrator/expert-pack.js"
+      ],
+      "native": "团队房间运行时、人格模板体系、专家包目录。",
+      "optimizations": [
+        "房间/人格/专家包全部落本地 JSON，不依赖 Python 基础设施",
+        "专家包与技能加载共用多根解析，支持项目覆盖用户"
+      ]
+    },
+    {
+      "id": "openclaw",
+      "label": "OpenClaw（压缩 / 重试 / 通道引导）",
+      "license": "design-reference",
+      "tokens": [
+        "openclaw",
+        "OpenClaw"
+      ],
+      "modules": [
+        "src/llm/retry.js",
+        "src/memory/compaction.js",
+        "src/channels-cli.js"
+      ],
+      "native": "错误重试内核、会话压缩层、通道配置引导 CLI。",
+      "optimizations": [
+        "压缩摘要作为单一 surface node 替换区间，日志本身不可变",
+        "重试与 usage 预算闸门共用同一层包装"
+      ]
+    },
+    {
+      "id": "aider",
+      "label": "aider（仓库地图 PageRank）",
+      "license": "Apache-2.0 (design-reference)",
+      "tokens": [
+        "aider"
+      ],
+      "modules": [
+        "src/repomap/index.js"
+      ],
+      "native": "零依赖仓库地图：符号抽取 + 引用图 + PageRank 排序。",
+      "optimizations": [
+        "纯 JS 实现，无 tree-sitter 运行时依赖",
+        "按 token 预算裁剪输出"
+      ]
+    },
+    {
+      "id": "hermes",
+      "label": "Hermes / oh-my-hermes / OMH（审批、证据边界、shell 解析）",
+      "license": "design-reference",
+      "tokens": [
+        "Hermes",
+        "oh-my-hermes",
+        "OMH"
+      ],
+      "modules": [
+        "src/tools/command-guard.js",
+        "src/seam/shell.js",
+        "src/evidence/index.js"
+      ],
+      "native": "命令守卫、shell 信号可读化、证据边界与目标看板。",
+      "optimizations": [
+        "先分词后分析的零依赖 shell 解析",
+        "证据不足直接拒绝提案"
+      ]
+    },
+    {
+      "id": "zcode",
+      "label": "ZCode（能力门 / Wiki 机制）",
+      "license": "design-reference",
+      "tokens": [
+        "ZCode"
+      ],
+      "modules": [
+        "src/permissions/index.js",
+        "src/repomap/wiki.js"
+      ],
+      "native": "工具声明式能力门；代码库 Wiki 生成器。",
+      "optimizations": [
+        "能力元数据与审批规则同源",
+        "Wiki 生成走本地静态分析，无运行时依赖"
+      ]
+    },
+    {
+      "id": "superpowers",
+      "label": "Superpowers（按需技能加载）",
+      "license": "design-reference",
+      "tokens": [
+        "Superpowers"
+      ],
+      "modules": [
+        "src/agent/prompts.js",
+        "src/skills/loader.js",
+        "src/skills/registry.js"
+      ],
+      "native": "技能清单按需注入、触发后读取全文，节省上下文。",
+      "optimizations": [
+        "多根加载：项目 > 用户 > 内置",
+        "技能覆盖率与格式门禁"
+      ]
+    },
+    {
+      "id": "hanaagent",
+      "label": "HanaAgent / openhanako（fork 基线）",
+      "license": "design-reference",
+      "tokens": [
+        "HanaAgent",
+        "openhanako"
+      ],
+      "modules": [
+        "src/memory/fork.js"
+      ],
+      "native": "记忆 fork 基线。（记忆健康监控模块已于 2026-11-08 精简移除：自注册起零消费方）",
+      "optimizations": [
+        "源会话不可变，派生会话独立演进"
+      ]
+    },
+    {
+      "id": "aegis",
+      "label": "Aegis / HookBus（熔断、deny-wins 治理、故障即知识）",
+      "license": "design-reference",
+      "tokens": [
+        "Aegis",
+        "HookBus"
+      ],
+      "modules": [
+        "src/bus/circuit-breaker.js",
+        "src/tools/catalog.js",
+        "src/memory/failure-episode.js"
+      ],
+      "native": "三态熔断器、deny-wins 策略合并、故障病历。",
+      "optimizations": [
+        "熔断按订阅者隔离，单订阅者故障不拖垮总线",
+        "故障病历可被后续轮检索"
+      ]
+    },
+    {
+      "id": "leizai",
+      "label": "leizai-agent / 雷仔（分层意图、provider 能力位）",
+      "license": "design-reference",
+      "tokens": [
+        "leizai-agent",
+        "雷仔"
+      ],
+      "modules": [
+        "src/intent/funnel.js",
+        "src/llm/protocol.js"
+      ],
+      "native": "L1 规则直答 / L2 上下文提示 / L3 工具循环的意图漏斗；多协议客户端能力位。",
+      "optimizations": [
+        "规则层只注入提示、不接管决策",
+        "层流量统计持久化，可观测漏斗收益"
+      ]
+    },
+    {
+      "id": "ace",
+      "label": "ACE / agentic-context-engineering（playbook / 增量语境）",
+      "license": "design-reference",
+      "tokens": [
+        "ACE",
+        "agentic-context-engineering"
+      ],
+      "modules": [
+        "src/evolve/playbook.js",
+        "src/evolve/delta-producer.js"
+      ],
+      "native": "行为 playbook 合并/裁剪/门禁；经验 delta 生产。",
+      "optimizations": [
+        "合并/裁剪/门禁为纯代码可测，LLM 只做可选提炼",
+        "无 LLM 时自动跳过"
+      ]
+    },
+    {
+      "id": "reloop-vial",
+      "label": "ReLoop / Vial（故障即知识）",
+      "license": "design-reference",
+      "tokens": [
+        "ReLoop",
+        "Vial"
+      ],
+      "modules": [
+        "src/memory/failure-episode.js"
+      ],
+      "native": "工具失败写故障病历，供后续相似场景检索。",
+      "optimizations": [
+        "病历带调用上下文与恢复建议，不只是一条错误文本"
+      ]
+    },
+    {
+      "id": "zep-graphiti",
+      "label": "Zep / Graphiti（事实有效期窗口）",
+      "license": "design-reference",
+      "tokens": [
+        "Zep",
+        "Graphiti"
+      ],
+      "modules": [
+        "src/memory/fact-store.js"
+      ],
+      "native": "事实 TTL、版本链与来源分级。",
+      "optimizations": [
+        "五层记忆统一衰减曲线",
+        "隔离带占比作为投毒观测读数"
+      ]
+    },
+    {
+      "id": "planning-with-files",
+      "label": "OthmanAdi/planning-with-files（三文件持久规划）",
+      "license": "design-reference",
+      "tokens": [
+        "planning-with-files",
+        "OthmanAdi"
+      ],
+      "modules": [
+        "src/session/pwf.js"
+      ],
+      "native": "任务/进度/发现三文件持久规划 + 压缩前任务指针。",
+      "optimizations": [
+        "压缩后从指针恢复现场，不重读整段历史"
+      ]
+    },
+    {
+      "id": "shell-quote-bash-parser",
+      "label": "ljharb/shell-quote 与 vorpaljs/bash-parser（先分词后分析）",
+      "license": "MIT (design-reference)",
+      "tokens": [
+        "shell-quote",
+        "bash-parser",
+        "vorpaljs"
+      ],
+      "modules": [
+        "src/security/shell-parse.js"
+      ],
+      "native": "零依赖 shell 分词与危险命令分析。",
+      "optimizations": [
+        "不执行、不依赖第三方解析器；只做静态判定"
+      ]
+    },
+    {
+      "id": "deepseek-v4-format",
+      "label": "DeepSeek V4 官方工具调用格式（encoding_dsv4）",
+      "license": "protocol-spec",
+      "tokens": [
+        "DeepSeek V4",
+        "encoding_dsv4",
+        "dsv4"
+      ],
+      "modules": [
+        "src/llm/dsml.js"
+      ],
+      "native": "工具调用标记的解析与编码适配。",
+      "optimizations": [
+        "与多协议客户端统一到同一工具循环",
+        "格式错误回退为普通文本"
+      ]
+    },
+    {
+      "id": "theone",
+      "label": "TheOne（自我进化入口 / 长期目标预算）",
+      "license": "design-reference",
+      "tokens": [
+        "TheOne"
+      ],
+      "modules": [
+        "src/channels/http.js",
+        "src/evidence/index.js"
+      ],
+      "native": "进化入口可观测；目标预算与复盘节奏字段。",
+      "optimizations": [
+        "证据不足不出提案",
+        "预算/节奏为可选扩展字段，缺省不写"
+      ]
+    },
+    {
+      "id": "ppx-v2",
+      "label": "ppx-v2 / ppx-tools（本项目前身，自有代码）",
+      "license": "own",
+      "tokens": [
+        "ppx-v2"
+      ],
+      "modules": [
+        "src/audit/audit-chain.js",
+        "src/memory/fact-store.js",
+        "src/agent/plugins/builtin.js",
+        "src/tools/catalog.js",
+        "src/intent/funnel.js"
+      ],
+      "native": "审计哈希链、五层记忆、内置工具、意图规则从 v2 迁移后按 v3/v4 语义重写。",
+      "optimizations": [
+        "SHA-256 链式账本 + 验证写回",
+        "记忆治理字段与 TTL 统一"
+      ]
+    }
+  ]
+}

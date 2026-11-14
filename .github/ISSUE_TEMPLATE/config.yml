@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 安全漏洞（私密上报）
+    url: https://github.com/chen6896qqwee/PPXANS-Harness/security/advisories/new
+    about: 请勿在公开 Issue 中披露安全漏洞
+  - name: 下载与安装
+    url: https://github.com/chen6896qqwee/PPXANS-Harness/releases/latest
+    about: 获取最新 Windows 全量安装包与 SHA256SUMS.txt

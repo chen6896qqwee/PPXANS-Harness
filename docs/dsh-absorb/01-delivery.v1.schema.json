@@ -1,0 +1,221 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ppxans.local/schema/delivery.v1.json",
+  "title": "PPXANS delivery contract v1",
+  "$comment": "Step 0 契约冻结候选。定义一次执行的投递语义：路由、执行预算、投递预算、重试、去重、回执。运行时代码（flow/channels/workgraph）只允许实现本文件，不允许发明字段。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "ticketId", "assignmentId", "route", "origin", "sink", "policy", "createdAt"],
+  "properties": {
+    "version": { "const": "delivery.v1" },
+    "ticketId": { "type": "string", "minLength": 1 },
+    "assignmentId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "每次执行唯一。requeue 生成新 assignmentId，旧 ID 永不复用。"
+    },
+    "route": {
+      "enum": ["sync", "async", "thread"],
+      "description": "由 flow 决策内核给出；DSH 只能收紧（explicit -> async），不得自行升级为 sync。"
+    },
+    "origin": {
+      "enum": ["ingress", "ans", "external", "requeue"],
+      "description": "ingress=用户入站；ans=主动提醒/看门狗；external=DSH 或其它程序调用；requeue=显式重跑。"
+    },
+    "sink": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["channel", "to"],
+      "properties": {
+        "channel": { "type": "string", "minLength": 1 },
+        "to": { "type": "string", "minLength": 1 },
+        "thread": { "type": ["string", "null"], "description": "话题键；null 表示无话题。" },
+        "replyTo": {
+          "type": ["string", "null"],
+          "description": "原消息 ID；非空时通道应回复到该消息（飞书 reply 接口）。"
+        },
+        "meta": {
+          "type": ["object", "null"],
+          "description": "通道透传元数据；不得包含投递语义字段（route/policy 等一律放顶层）。"
+        }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "执行预算（与投递预算分离）。sync 路由下的 send 超时只能占用剩余执行预算。",
+      "properties": {
+        "timeout_ms": { "type": "integer", "minimum": 0, "default": 0, "description": "0 = 不设上限。" },
+        "deadline_at": { "type": ["integer", "null"], "description": "epoch ms；与 timeout_ms 同时存在时取更早者。" }
+      },
+      "default": { "timeout_ms": 0, "deadline_at": null }
+    },
+    "policy": {
+      "oneOf": [
+        {
+          "title": "sync",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "deadline_ms"],
+          "properties": {
+            "kind": { "const": "sync" },
+            "deadline_ms": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "send() 硬超时。实际超时 = min(deadline_ms, 剩余 execution 预算)。"
+            },
+            "on_timeout": { "const": "dead_letter", "default": "dead_letter" }
+          },
+          "description": "同步不重试。失败事件固定为 accepted -> failed(willRetry=false) -> dead_letter(reason=delivery_timeout)。"
+        },
+        {
+          "title": "async",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": {
+            "kind": { "const": "async" },
+            "max_attempts": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10,
+              "default": 4,
+              "description": "总尝试次数（首次 + 重试）。对应现 delivery.retryMax=3。"
+            },
+            "backoff_ms": { "type": "integer", "minimum": 0, "default": 2000 },
+            "backoff_cap_ms": { "type": "integer", "minimum": 0, "default": 60000 },
+            "jitter_ratio": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.1 },
+            "ttl_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 3600000,
+              "description": "入队超过该时长仍未投出即丢弃（reason=delivery_exhausted 的 ttl 变体由 finalError 标注）。"
+            },
+            "retry_on": {
+              "type": "array",
+              "items": { "enum": ["timeout", "network", "rate_limit", "server_error"] },
+              "default": ["timeout", "network", "rate_limit", "server_error"],
+              "description": "只对投递阶段错误生效；4xx 参数错误默认不重试。"
+            }
+          }
+        },
+        {
+          "title": "thread",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "worker"],
+          "properties": {
+            "kind": { "const": "thread" },
+            "worker": { "type": "string", "minLength": 1, "description": "长驻 worker 标识；同一话题串行。" },
+            "busy_policy": {
+              "enum": ["reject"],
+              "default": "reject",
+              "description": "v1 只有拒绝并发转发；排队留给后续版本，不允许实现侧自选。"
+            },
+            "forward_timeout_ms": { "type": "integer", "minimum": 0, "default": 0, "description": "0 = 不设上限。" }
+          },
+          "description": "worker 只回信封，不投递；DELIVERY_* 一律由父进程 thread-bridge 生产，投递固定走 async 队列。"
+        }
+      ]
+    },
+    "dedupe": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "type": ["string", "null"],
+          "description": "最终去重键（workgraph 准入时算定并落账）。空值表示不去重。"
+        },
+        "strategy": {
+          "enum": ["explicit", "external_id", "source_message", "none"],
+          "default": "none",
+          "description": "优先级：explicit（调用方 key）> external_id（origin:externalId）> source_message（source:from:messageId）> none。各段做 percent-encode 后以 ':' 连接。"
+        },
+        "external_id": {
+          "type": ["string", "null"],
+          "description": "外部系统幂等键（DSH 重投通常无平台 messageId，用它与 origin 一起反查工单）。"
+        },
+        "window_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 30000,
+          "description": "仅作用于已终态工单；在途工单不受窗口限制。"
+        }
+      },
+      "default": { "key": null, "strategy": "none", "external_id": null, "window_ms": 30000 }
+    },
+    "receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "稳定格式 <assignmentId>:<attempt>:<state>。seq 只排序，不参与身份。"
+        },
+        "state": { "enum": ["accepted", "delivered", "failed", "dead_letter"] },
+        "attempt": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "createdAt": { "type": "integer", "minimum": 0 }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "route": { "const": "sync" } }, "required": ["route"] },
+      "then": { "properties": { "policy": { "properties": { "kind": { "const": "sync" } } } } }
+    },
+    {
+      "if": { "properties": { "route": { "const": "async" } }, "required": ["route"] },
+      "then": { "properties": { "policy": { "properties": { "kind": { "const": "async" } } } } }
+    },
+    {
+      "if": { "properties": { "route": { "const": "thread" } }, "required": ["route"] },
+      "then": { "properties": { "policy": { "properties": { "kind": { "const": "thread" } } } } }
+    }
+  ],
+  "x-resolution-order": [
+    "1. 调用方显式指定（DSH / 工单 / 请求体）",
+    "2. 入站适配层默认（channels.<name>.async_reply 等）",
+    "3. flow 决策内核默认（planIngress 的 asyncMode / threadRoute）",
+    "4. 全局兜底（sync）",
+    "DSH 只允许向下收紧（sync -> async），不得把 async/thread 改成 sync。"
+  ],
+  "x-dead-letter-reasons": {
+    "delivery_exhausted": "投递重试耗尽或 TTL 过期；PPXANS 已尽责，DSH 不自动重投。",
+    "delivery_timeout": "sync 单次发送超时；DSH 不自动重投，可人工 requeue。",
+    "execution_timeout": "执行阶段超时，尚未开始投递（attempt=0）；DSH 可生成新 assignment。",
+    "cancelled": "显式取消，尚未开始投递（attempt=0）；DSH 不自动重跑。"
+  },
+  "x-event-sequence": {
+    "sync": ["delivery_accepted", "delivery_delivered | delivery_failed(willRetry=false)", "delivery_dead_letter(reason=delivery_timeout, 仅失败时)"],
+    "async": ["delivery_accepted", "delivery_failed(willRetry=true)*", "delivery_delivered | delivery_dead_letter(reason=delivery_exhausted)"],
+    "thread": ["assignment_started(父)", "assignment_progress(父聚合)", "assignment_ended(父)", "delivery_accepted", "delivery_failed*", "delivery_delivered | delivery_dead_letter(reason=delivery_exhausted)"]
+  },
+  "examples": [
+    {
+      "version": "delivery.v1",
+      "ticketId": "wk_01HX",
+      "assignmentId": "as_01HX",
+      "route": "sync",
+      "origin": "ingress",
+      "sink": { "channel": "feishu", "to": "oc_xxx", "thread": "oc_xxx", "replyTo": "om_xxx", "meta": null },
+      "execution": { "timeout_ms": 120000, "deadline_at": null },
+      "policy": { "kind": "sync", "deadline_ms": 15000, "on_timeout": "dead_letter" },
+      "dedupe": { "key": "feishu:ou_x:om_x", "strategy": "source_message", "window_ms": 30000 },
+      "receipt": { "id": "as_01HX:1:accepted", "state": "accepted", "attempt": 1 },
+      "createdAt": 1793800000000
+    },
+    {
+      "version": "delivery.v1",
+      "ticketId": "wk_01HY",
+      "assignmentId": "as_01HY",
+      "route": "async",
+      "origin": "ans",
+      "sink": { "channel": "wechat", "to": "user_1", "thread": null, "replyTo": null, "meta": null },
+      "execution": { "timeout_ms": 0, "deadline_at": null },
+      "policy": { "kind": "async", "max_attempts": 4, "backoff_ms": 2000, "backoff_cap_ms": 60000, "jitter_ratio": 0.1, "ttl_ms": 3600000, "retry_on": ["timeout", "network", "rate_limit", "server_error"] },
+      "dedupe": { "key": "ans:watchdog:2026-11-04T10:00", "strategy": "explicit", "window_ms": 30000 },
+      "receipt": { "id": "as_01HY:1:accepted", "state": "accepted", "attempt": 1 },
+      "createdAt": 1793800000000
+    }
+  ]
+}

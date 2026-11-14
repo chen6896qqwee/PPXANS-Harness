@@ -1,0 +1,225 @@
+{
+  "agent": {
+    "name": "皮皮虾",
+    "yuan": "ppx",
+    "max_tool_rounds": 24,
+    "tool_result_budget": 4000,
+    "max_tool_error_retry": 2,
+    "workspace_prompt_mode": "absolute",
+    "proactive": {
+      "enabled": true,
+      "interval_ms": 3600000
+    },
+    "evolve": {
+      "enabled": true,
+      "every_calls": 20,
+      "min_interval_ms": 30000
+    },
+    "self_iteration": {
+      "mode": "propose",
+      "max_files": 3,
+      "max_attempts": 2,
+      "max_llm_calls": 6,
+      "test_timeout_ms": 60000,
+      "allow_test_edit": false
+    },
+    "self_code": {
+      "mode": "propose",
+      "syntax_timeout_ms": 5000,
+      "test_timeout_ms": 120000
+    },
+    "evolution_loop": {
+      "_note": "持续进化循环默认关闭 (Daily self-evolution loop is OFF by default)。设 enabled:true 后每天 03:30 自动跑「弱点学习→代码迭代→度量落账」; 手动单轮: npm run evolve:loop",
+      "enabled": false,
+      "cron": "03:30",
+      "weakness_threshold": 3,
+      "min_interval_ms": 60000
+    },
+    "watchdog": {
+      "_note": "外部看门狗: 独立会话巡检进程体征与工单/Worker 进展; 只报告不自动重跑。drift_repeat=连续同工具多少次算漂移, drift_rounds=多少轮无工具步算空转。",
+      "enabled": false,
+      "interval_minutes": 30,
+      "stall_minutes": 15,
+      "drift_repeat": 6,
+      "drift_rounds": 18
+    },
+    "router_role": {
+      "_note": "Router = 只分派不执行 (工具面只留委派/检索/提问), 干活走 spawn_agent 委派给热池 worker。v5.0 新装默认开启 = 最强 agent 形态; 主会话需要直接写文件/跑命令时改回 false。开启需重启进程, 子进程恒为 worker。",
+      "enabled": true,
+      "allow": []
+    },
+    "legion": {
+      "_note": "Worker 热池 (v5.0): 预热 N 个常驻委派 worker, spawn_agent 接管热进程免冷启动; 空闲 15 分钟自动回收。0 = 关闭 (每次委派冷启动)。",
+      "pool_size": 2
+    },
+    "delegate_memory_inject": false,
+    "approval_mode": "on-request",
+    "sandbox": "workspace-write",
+    "workspace_allow": [],
+    "auto_approve_high_risk": false
+  },
+  "user": {
+    "name": "用户"
+  },
+  "providers": [
+    {
+      "id": "openai",
+      "base_url": "https://api.openai.com/v1",
+      "api_key_env": "OPENAI_API_KEY",
+      "model": "gpt-4o-mini",
+      "timeout_ms": 180000,
+      "context_window": 128000
+    },
+    {
+      "id": "deepseek",
+      "base_url": "https://api.deepseek.com/v1",
+      "protocol": "openai-completions",
+      "display_name": "DeepSeek 深度求索",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "model": "deepseek-chat",
+      "models": [
+        { "id": "deepseek-chat", "label": "DeepSeek Chat", "context_window": 131072, "max_output": 8192, "inputs": ["text"] },
+        { "id": "deepseek-reasoner", "label": "DeepSeek Reasoner (R1)", "context_window": 131072, "max_output": 65536, "inputs": ["text"] }
+      ],
+      "timeout_ms": 180000,
+      "context_window": 131072
+    },
+    {
+      "id": "dashscope",
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "api_key_env": "DASHSCOPE_API_KEY",
+      "model": "qwen-turbo",
+      "timeout_ms": 180000,
+      "context_window": 131072
+    },
+    {
+      "id": "qwen-vl",
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "api_key_env": "DASHSCOPE_API_KEY",
+      "model": "qwen-vl-max",
+      "vision": true,
+      "timeout_ms": 180000,
+      "context_window": 32768
+    },
+    {
+      "id": "lmstudio",
+      "base_url": "http://127.0.0.1:1234/v1",
+      "api_key": "lm-studio",
+      "_note": "本地模型段: 先启动 LM Studio / Ollama, 再把 model 改成本地实际模型名 (Local model: start LM Studio/Ollama first, then set model to your actual local model name; no real key needed)",
+      "model": "YOUR_LOCAL_MODEL_NAME",
+      "vision": false,
+      "timeout_ms": 180000
+    },
+    {
+      "id": "zhipu",
+      "base_url": "https://open.bigmodel.cn/api/paas/v4",
+      "api_key_env": "ZHIPU_API_KEY",
+      "model": "glm-4v-flash",
+      "vision": true,
+      "timeout_ms": 180000,
+      "context_window": 65536
+    }
+  ],
+  "memory": {
+    "enabled": true,
+    "token_budget": 2500,
+    "decay_per_day": 0.02,
+    "hit_bonus": 5,
+    "base_importance": 10,
+    "compile_threshold": 4.5,
+    "forget_speed": 1,
+    "memory_ttl_days": 90
+  },
+  "budget": {
+    "usd": 0,
+    "model_prices": {},
+    "assume_price": null,
+    "_note": "成本按 src/llm/pricing.js 内置目录价快照折算, 是估算值不是账单。usd=0 不限; 达到上限后 chat 拒绝继续调用。model_prices 覆盖内置表 (键=模型前缀, 值={prompt, completion, cached?, currency?, peak?, tiers?}; 人民币写 currency:'CNY', 支持峰谷 peak / 输入长度阶梯 tiers / 缓存价 cached)。assume_price 是未定价模型的兜底单价 (USD/1M, 形如 {prompt:1, completion:3}) —— 不配则按 $0 记账, 但会在「使用统计」标为未定价并告警一次。全表核对: node scripts/pricing-audit.js"
+  },
+  "audit": {
+    "enabled": true,
+    "lifecycle_events": true,
+    "_note": "工具调用审计哈希链。append-only + SHA-256 链式防篡改, 落 data/logs/audit.ndjson。设 false 可关闭 (性能敏感场景)。校验: ppx 对话里调 audit_verify 工具, 或 npm run audit:verify。lifecycle_events (2026-11-05): 工单/指派/投递生命周期事件也入链 (白名单字段, 不含正文), 默认开。"
+  },
+  "embedding": {
+    "base_url": "http://127.0.0.1:1234/v1",
+    "api_key": "lm-studio",
+    "model": "text-embedding-nomic-embed-text-v1.5"
+  },
+  "experience": {
+    "enabled": true
+  },
+  "selfheal": {
+    "enabled": true,
+    "check_interval_ms": 60000
+  },
+  "tools": {
+    "enabled": true
+  },
+  "channels": {
+    "http": {
+      "enabled": true,
+      "port": 8899,
+      "auth_token": ""
+    },
+    "log": {
+      "enabled": true,
+      "target": "console"
+    },
+    "feishu": {
+      "enabled": false,
+      "appId": "",
+      "appSecret": "",
+      "verifyToken": ""
+    },
+    "wechat": {
+      "enabled": false,
+      "path": "/wechat/webhook",
+      "token": "",
+      "encodingAESKey": "",
+      "corpId": "",
+      "corpSecret": "",
+      "agentId": ""
+    },
+    "telegram": {
+      "enabled": false,
+      "botToken": "",
+      "api_base": "https://api.telegram.org",
+      "poll_timeout_seconds": 50,
+      "poll_interval_ms": 0,
+      "allowed_chats": ""
+    }
+  },
+  "voice": {
+    "asr": {
+      "backend": "local",
+      "bin": "whisper",
+      "flavor": "cli",
+      "model": "small",
+      "language": "zh",
+      "timeout_ms": 120000
+    }
+  },
+  "security": {
+    "allow_all": false,
+    "command_timeout_ms": 30000,
+    "escalation_ttl_minutes": 0,
+    "deny": [],
+    "computer_control": false
+  },
+  "hooks": {
+    "trust_project_roots": [],
+    "PreToolUse": [
+      {
+        "matcher": "run_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node scripts/my-guard.js",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

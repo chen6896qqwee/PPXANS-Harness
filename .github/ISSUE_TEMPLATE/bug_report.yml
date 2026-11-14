@@ -1,0 +1,51 @@
+name: Bug report
+description: 报告可复现的缺陷（请勿在此披露安全漏洞）
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        安全漏洞请走 [SECURITY.md](https://github.com/chen6896qqwee/PPXANS-Harness/blob/main/SECURITY.md) 的私密渠道，不要公开 Issue。
+  - type: textarea
+    id: what
+    attributes:
+      label: 发生了什么
+      description: 实际行为与期望行为
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 启动 ...
+        2. 点击 ...
+        3. 出现 ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: 安装包版本或 git commit
+      placeholder: v4.0.0
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: 系统
+      options:
+        - Windows 11
+        - Windows 10
+        - macOS
+        - Linux
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志 / 截图
+      description: 桌面端日志在 %LOCALAPPDATA%\PPXANS-Harness-Desktop\logs；请先脱敏 API Key/token
+      render: shell

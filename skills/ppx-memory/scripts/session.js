@@ -1,0 +1,1120 @@
+// src/memory/session.js - 会话事件日志 (吸收 dsh "会话即唯一事实源")
+// 新架构: 不可变 append-only 事件日志, 每条 = {seq, ts, type, data}
+//  - 模型可见历史 = deriveMessages() 从日志投影 (无可变状态, 仅从日志重建)
+//  - replay() 回放完整事件流 | fork() 从边界派生新会话
+//  - 兼容旧 get/set/has/delete 接口 (agent 无需全量改动)
+// 吸收自 DeepSeek Harness: "model-visible means logged" (能进模型的必须能从日志重建)
+//
+// v1.1.x 第九轮 review P2: default 主会话按天分片 (default-YYYY-MM-DD.jsonl),
+// 单文件不再无限增长。设计要点:
+//  - 仅 key === "default" 走按天分片; 非 default 会话保持单文件 (不扩散改动面)
+//  - 命名: default-YYYY-MM-DD.jsonl (取事件 ts 所在本地自然日, 与 eventsByDay/logicalDay 一致)
+//  - 兼容旧文件: 若历史遗留 default.jsonl, 读取时纳入合并, 不丢历史
+//  - seq 跨天连续递增: 同一 default 会话所有分片共用一个 seq 序列, 不从 1 重头数
+//    (否则 compaction 的 upToSeq / fork / replay 会错乱)
+//  - 所有读取路径把多天分片合并成按 seq(ts) 升序的单一事件流
+//
+// v2026-10-05 跨进程不变量 (多 OS 进程共用一个 dataDir 写同一批文件, 三条都靠 withFileLock):
+//  ① seq 是"每 key 一个单调游标", 而磁盘末行是该游标的唯一真相: 分配只用乐观值, 落盘前在锁内
+//     重排 (_ensureUniqueSeq); default 的多日批次里**每个被写分片的末行**都参与游标计算 (W2)。
+//  ② 一切 unlink 都在该文件的锁内 (set/rename/fork/delete 的"清盘"与随后的整批写入不可被
+//     并发写者插进中间) (W1)。
+//  ③ 压缩事件的 data.upToSeq 跟着同批 seq 一起重排, 且永不追平自身 seq (W3)。
+import fs from "node:fs";
+import path from "node:path";
+import { ensureDir, logicalDay, atomicWrite, withFileLock, withFileLocks } from "./store.js";
+
+// 元数据落盘/加载统一实现 (2026-11-12): 固定 `.tmp` 名 + 无锁的多进程双写会互相覆盖临时文件、
+// 且整表覆盖丢别进程刚写的键。改为唯一临时名原子写 + 文件锁, 锁内以磁盘现状为底只叠加
+// 本实例自加载以来的 diff (删除通过 base 中消失的键传播)。
+function _applyDiff(base, current, disk) {
+  const out = { ...disk };
+  for (const k of Object.keys(current)) {
+    if (!(k in base) || base[k] !== current[k]) out[k] = current[k];
+  }
+  for (const k of Object.keys(base)) if (!(k in current)) delete out[k];
+  return out;
+}
+function _resetTo(obj, next) {
+  for (const k of Object.keys(obj)) delete obj[k];
+  Object.assign(obj, next);
+}
+
+// 事件类型集 (对齐 dsh 事件域: user/assistant/tool/system)
+export const EVENTS = {
+  USER: "user/message",
+  ASSISTANT: "assistant/message",
+  SYSTEM: "system",
+  TOOL_CALL: "tool/call",
+  TOOL_RESULT: "tool/result",
+  COMPACTION: "compaction/summary",
+};
+
+// default 会话按天分片: default-YYYY-MM-DD.jsonl
+const DEFAULT_SHARD_RE = /^default-\d{4}-\d{2}-\d{2}\.jsonl$/;
+
+// 进程退出兜底: 一个进程只装一个监听器, 写后置实例登记在模块级集合里。
+// 原实现每个实例各挂一个 process.once("exit") —— 构造 N 个 agent 就有 N 个监听器
+// (20 个 agent 的基准就触发了 MaxListenersExceededWarning), 且存的 _exitHandler 从不摘除。
+const LIVE_WRITE_BEHIND = new Set();
+let _exitHookInstalled = false;
+function _trackForExit(store) {
+  LIVE_WRITE_BEHIND.add(store);
+  if (_exitHookInstalled) return;
+  _exitHookInstalled = true;
+  process.once("exit", () => {
+    for (const s of [...LIVE_WRITE_BEHIND]) {
+      try { s.flushAll({ sync: true }); } catch { /* 退出路径不抛 */ }
+    }
+  });
+}
+
+export class SessionStore {
+  // 2026-11-02 (L3 写盘批量化): writeBehind 模式把"请求栈内的同步落盘"推迟到下一个
+  //   setImmediate —— 同一轮 tick 里多个 append/flush 合并成每 key 一次写入, 事件循环
+  //   不再为每条会话记录付一次 appendFileSync + 文件锁。内存日志仍是唯一事实源 (先写内存,
+  //   derive/replay 立即可见); 崩溃窗口 = 最多一个 tick 的会话事件, 优雅退出由 flushAll()
+  //   收口 (agent.shutdown / process exit 均接线)。
+  //   注意: 这不是 worker 线程并行 I/O —— 真正的并行需要重写 withFileLock 为异步锁,
+  //   本模式只消除"调用方等待磁盘"。直接 new SessionStore(dir) 默认仍是同步语义。
+  constructor(dataDir, { writeBehind = false, writeBehindDelayMs = 0 } = {}) {
+    this.dir = path.join(dataDir, "sessions");
+    ensureDir(this.dir);
+    this._writeBehind = writeBehind === true;
+    this._writeBehindDelayMs = Number.isFinite(Number(writeBehindDelayMs)) && Number(writeBehindDelayMs) > 0
+      ? Math.trunc(Number(writeBehindDelayMs)) : 0;
+    this._pendingFlushKeys = new Set();
+    this._flushTimer = null;
+    this._deferredBatches = 0;
+    this._deferredEvents = 0;
+    this._lastDeferredAt = 0;
+    if (this._writeBehind) {
+      // 兜底: 正常退出路径会显式 flushAll, 但 process.exit 可能绕过 agent.shutdown。
+      //   'exit' 里只允许同步操作, 正好复用同步落盘; 监听器进程级唯一, 见 _trackForExit。
+      _trackForExit(this);
+    }
+    this._logs = new Map();    // key -> event[] (不可变, append-only)
+    this._nextSeq = new Map(); // key -> 下一个 seq
+    this._flushedSeq = new Map(); // key -> 已落盘的最大 seq (增量追加用)
+    // 会话归档标记 (2026-10-11): { key: archivedAt }, 独立于事件日志
+    this._archived = this._loadArchive();
+    this._archivedBase = { ...this._archived }; // 加载基线: 落盘只叠加相对基线的变更 (跨进程不吞键)
+    // 会话标题覆盖 (2026-10-11): { key: title }, 独立于事件日志内容 (改名不改内容/归属/排序)
+    this._titles = this._loadTitles();
+    this._titlesBase = { ...this._titles };
+    // 孤儿标题回收 (评测-II P2-3, 与 src 同源): 正文已删的 s_* 标题移出台账 (备份可追溯)
+    this._reconcileOrphanTitles();
+    // 会话置顶 (2026-11-03): { key: pinnedAt }, 只影响列表排序, 不动事件日志
+    this._pinned = this._loadPinned();
+    this._pinnedBase = { ...this._pinned };
+    this._loadAll();
+    // --- 派生缓存 (v1.1.1 性能优化) ---
+    // eventsByDay / deriveCompacted 在每一轮/每一工具轮都被调用, 旧实现每次全量扫描 O(T)。
+    // 事件日志是 append-only 不可变, 一个 key 的 events 数组只增不改（set/rename/fork 会换新数组）。
+    //   · deriveCompacted: 以"数组引用标识"做增量缓存——数组没换就只把尾部新事件追加进 msgs, 命中 O(Δ)；
+    //     数组被替换(重命名/重建)则重算。compaction 事件追加时检测到也整体重算（它会重投影历史）。
+    //   · eventsByDay: 版本门控的全库按天缓存; v4.2 起版本变化不再整库重扫 —— 同样按"数组引用
+    //     游标"增量: append 原地 push → 只索引尾部新事件 O(Δ); set/rename/fork/load 换新数组或
+    //     删键 → purge 该键旧条目后按键重建 (罕见路径)。每轮成本从 O(全库事件数) 降到 O(当日新增)。
+    this._version = 0;                  // 全局版本: 任何 write 递增
+    this._dayCache = new Map();         // day -> 该天结果 (增量演进, 版本只作命中门控)
+    this._dayCacheAt = 0;               // 生成该缓存时的 _version
+    this._dayCursors = new Map();       // key -> { ref, count } 已索引到该 key 事件数组的第几条
+    // deriveCompacted 增量缓存: key -> { arrRef, msgs, lastCompSeq }
+    this._compactedCache = new Map();
+    // OPT-2 (2026-10-30) 批次内磁盘尾读缓存: key -> 本批次开始时读到的磁盘最大 seq。
+    //   append() 的尾读 (_diskMaxSeq: existsSync + open/fstat/read末8KB/close) 只是**乐观预读**,
+    //   目的是缩小跨进程撞号窗口; 一次 _pushTurn (set/多事件轮) 有 2~4 条 skipFlush append,
+    //   每条都重读同一份磁盘末行是纯浪费。同一批未落盘事件之间磁盘尾行不会因本进程变化, 故
+    //   每个 key 只读一次; 权威判定仍是 _flush 锁内的 _ensureUniqueSeq 重排 —— 本缓存绝不参与
+    //   唯一性判定, 乐观值撞号/过期都只会被锁内重排纠正 (缓存过期 = 碰撞窗口回到优化前大小)。
+    // 失效: 每个 _flush 结尾清空 (下一批必须重新读盘); set/delete 这类"磁盘内容作废"的路径
+    //   在入口也清空, 防上一批的残值被带进重建。
+    this._tailCache = new Map();
+    // _ensureUniqueSeq 在锁内实际读到的磁盘最大 seq (最近一次), 供 _flushLegacy 判定
+    //   "磁盘上有没有行 (追加 or 整文件写)" 复用同一次锁内尾读, 不再重复读一遍。
+    this._ensureDiskMax = 0;
+    // _diskMaxSeq 最近一次尾读命中的文件 (default 的锚分片), 供 _flushDaily 在逐日尾读时
+    //   复用同一个读数 (同一把锁内, 同一文件不会变)。
+    this._diskMaxFile = null;
+  }
+
+  _bump() { this._version += 1; }
+
+  _safe(key) { return String(key || "default").replace(/[^\w.-]/g, "_"); }
+  // 旧单文件路径 (仅非 default 会话使用)
+  _file(key) { return path.join(this.dir, this._safe(key) + ".jsonl"); }
+
+  _log(key) {
+    const k = this._safe(key);
+    if (!this._logs.has(k)) { this._logs.set(k, []); this._nextSeq.set(k, 0); }
+    return this._logs.get(k);
+  }
+
+  // 判断文件名是否为 default 的日分片
+  _isShard(fname) { return DEFAULT_SHARD_RE.test(fname); }
+  // default 分片文件路径 (day 形如 YYYY-MM-DD)
+  _shardFile(day) { return path.join(this.dir, `default-${day}.jsonl`); }
+  // 事件 ts 归属的本地自然日 (复用 utils/store.logicalDay, 与 eventsByDay 一致, 避免时区错位;
+  // 2026-09-18 重构: 原先这里手写了一份与 logicalDay 相同的实现, 双份易漂移)
+  _dayOf(ts) {
+    return logicalDay(new Date(ts));
+  }
+  // 列出 default 相关的所有文件 (旧单文件 + 各日分片)
+  _defaultFiles() {
+    let files = [];
+    try {
+      files = fs.readdirSync(this.dir)
+        .filter((f) => f.endsWith(".jsonl") && (f === "default.jsonl" || this._isShard(f)));
+    } catch {}
+    return files.map((f) => path.join(this.dir, f));
+  }
+  _removeDefaultFiles() {
+    // v2026-10-05 (W1): 每把删除都在该文件的锁内做, 且多文件一次性全部持锁 (路径升序) ——
+    // 无锁 rmSync 会与并发写者的"尾读+追加"交错: 它的锁内判定刚看到磁盘末行, 文件就被我们
+    // 删掉了 (Windows 上还会因写入方占用句柄直接 EPERM 让删除静默失败)。
+    withFileLocks(this._defaultFiles(), () => {
+      for (const f of this._defaultFiles()) {
+        this._archivePathLocked(f);
+        try { fs.rmSync(f, { force: true }); } catch {}
+      }
+    });
+  }
+
+  // 读取单个 jsonl 文件的事件序列
+  _readEventsFromFile(file) {
+    const events = [];
+    try {
+      for (const l of fs.readFileSync(file, "utf8").split("\n").filter(Boolean)) {
+        try { const e = JSON.parse(l); if (e && e.seq && e.type && e.data) events.push(e); } catch {}
+      }
+    } catch {}
+    return events;
+  }
+
+  _loadAll() {
+    let files = [];
+    try { files = fs.readdirSync(this.dir).filter((f) => f.endsWith(".jsonl")); } catch { return; }
+    for (const f of files) {
+      // default 的旧单文件 + 日分片 → 归并到同一个 key="default"
+      if (f === "default.jsonl" || this._isShard(f)) {
+        const events = this._readEventsFromFile(path.join(this.dir, f));
+        if (events.length) {
+          const k = "default";
+          const cur = this._logs.get(k) || [];
+          this._logs.set(k, cur.concat(events));
+        }
+        continue;
+      }
+      const k = f.replace(/\.jsonl$/, "");
+      const events = this._readEventsFromFile(path.join(this.dir, f));
+      if (events.length) {
+        events.sort((a, b) => a.seq - b.seq);
+        this._logs.set(k, events);
+        this._nextSeq.set(k, events[events.length - 1].seq);
+        this._flushedSeq.set(k, events[events.length - 1].seq);
+      }
+    }
+    // default: 跨文件合并后按 seq(ts 兜底) 升序 + 统一 next/flushed seq (跨天连续递增)
+    if (this._logs.has("default")) {
+      const evs = this._logs.get("default");
+      evs.sort((a, b) => a.seq - b.seq || a.ts - b.ts);
+      this._nextSeq.set("default", evs[evs.length - 1].seq);
+      this._flushedSeq.set("default", evs[evs.length - 1].seq);
+    }
+  }
+
+  // 追加事件 (唯一写入路径, append-only, 永不重写/裁剪日志文件)
+  // ts 可选: 测试/回溯时可注入固定时间戳; 缺省用 Date.now() (向后兼容)
+  // 追加事件 (唯一写入路径, append-only, 永不重写/裁剪日志文件)
+  // ts 可选: 测试/回溯时可注入固定时间戳; 缺省用 Date.now() (向后兼容)
+  // opts.skipFlush: true 时延后落盘 (调用方需随后显式 flush(key) 或下次 append), 用于一次性批量写入
+  append(key, type, data, ts, { skipFlush = false } = {}) {
+    const k = this._safe(key);
+    // 跨进程 seq 校正 (2026-10-04): _nextSeq 是构造期从磁盘播种的**内存**计数器, 而落盘只在
+    //   _flush 里加锁 —— 军团子 agent / ppx-serve 与 CLI 共用同一 dataDir 时, 两个进程都从
+    //   同一个起点 +1, 写出重复 seq。seq 唯一性是下游一切游标的前提 (memory-ticker 按 seq
+    //   增量消费、deriveCompacted 按 seq 投影、fork 按 seq 截断), 重复即跳过或重复消费。
+    //   现在 append 前读目标文件末行拿磁盘真实最大 seq, 取 max(内存, 磁盘) 再递增。
+    //   但这只是乐观预读 (缩小碰撞窗口): 读完到写盘之间别的进程仍可读到同一 diskMax。
+    //   权威兜底在 _flushLegacy/_flushDaily 的锁内 —— 序列化前经 _ensureUniqueSeq 重排撞号批次。
+    //
+    // OPT-2 (2026-10-30): 乐观预读按"未落盘批次"缓存, 同批每个 key 只读一次盘。
+    //   乐观预读只是缩小碰撞窗口, 权威在锁内重排 (_ensureUniqueSeq); 因此这里读到的是本批
+    //   第一次读到的盘面, 本批后续 append 复用它 —— 期间别的进程再写只会让碰撞窗口略大,
+    //   锁内重排会把整批 seq 抬到真实盘面之上, 唯一性不依赖本缓存。_flush 结束时清空缓存,
+    //   下一批必须重新读盘 (上一批落盘后的盘面才是下一批的起点)。
+    let diskMax = this._tailCache.get(k);
+    if (diskMax === undefined) {
+      diskMax = this._diskMaxSeq(k);
+      this._tailCache.set(k, diskMax);
+    }
+    if (diskMax > (this._nextSeq.get(k) || 0)) this._nextSeq.set(k, diskMax);
+    const seq = (this._nextSeq.get(k) || 0) + 1;
+    const ev = { seq, ts: Number.isFinite(ts) ? ts : Date.now(), type, data };
+    this._log(k).push(ev);
+    this._nextSeq.set(k, seq);
+    // 新会话自动命名 (2026-10-11): 该 key 第一条用户消息、无自定义标题、且非 default 主会话时,
+    //   按 "MMDD|类型|主题" 自动生成标题 (纯规则, 不改内容/归属)。default 豁免 (主会话兜底, 不自动改名)。
+    if (type === EVENTS.USER && k !== "default" && !this._titles[k]) {
+      const hasPriorUser = this._log(k).some((e) => e !== ev && e.type === EVENTS.USER);
+      if (!hasPriorUser) {
+        const auto = this._autoTitleRule(data && data.content, ev.ts);
+        if (auto) { this._titles[k] = auto; this._saveTitles(); }
+      }
+    }
+    // writeBehind: 普通 append 不直接落盘, 排到下一 tick 与同批 flush 合并;
+    // skipFlush 的批量路径仍由调用方 flush(k) 统一收口。
+    if (!skipFlush) {
+      if (this._writeBehind) this._scheduleFlush(k);
+      else this._flush(k);
+    }
+    this._bump(); // 使派生缓存失效
+    return ev;
+  }
+
+  _removeFile(k) { this._removePathLocked(this._file(k)); }
+
+  // 2026-11-14 (评测 P2-3): 删除前先归档 —— 会话轨迹是评测/追责的唯一事实源,
+  //   不该随 delete/清理消失。归档到 <sessions>/archive/ (原名+时间戳+pid 防碰撞),
+  //   归档失败不阻断删除。清盘重写路径 (_rmSyncQuiet) 不归档, 否则会自复制。
+  _archivePathLocked(file) {
+    try {
+      if (!fs.existsSync(file)) return;
+      const archDir = path.join(this.dir, "archive");
+      fs.mkdirSync(archDir, { recursive: true });
+      const stamp = new Date().toISOString().replace(/\D/g, "").slice(0, 14);
+      const dest = path.join(archDir, `${path.basename(file, ".jsonl")}-${stamp}-${process.pid}.jsonl`);
+      // rename 同盘原子优先; 失败 (跨设备/占用) 走 copy+rm 兜底, 数据不丢
+      let renamed = false;
+      try { fs.renameSync(file, dest); renamed = true; } catch { renamed = false; }
+      if (renamed) return;
+      fs.copyFileSync(file, dest);
+    } catch {}
+  }
+
+  // 单个文件的锁内删除 (W1: 所有 unlink 都走这里, 不再裸 rmSync)
+  _removePathLocked(file) {
+    withFileLock(file, () => {
+      this._archivePathLocked(file);
+      try { fs.rmSync(file, { force: true }); } catch {}
+    });
+  }
+
+  // 读磁盘上该会话已落盘的最大 seq (拿不到就返回 0, 退回内存计数器 —— 绝不因此丢写)
+  _diskMaxSeq(k) {
+    try {
+      if (k !== "default") return this._tailMaxSeq(this._file(k));
+      const anchor = this._defaultAnchorFile();
+      this._diskMaxFile = anchor; // OPT-2: 记下本次尾读命中的分片 (读失败时为 null, 不复用)
+      return anchor ? this._tailMaxSeq(anchor) : 0;
+    } catch { return 0; }
+  }
+
+  // default 的"锚分片" = _diskMaxSeq("default") 实际读的那个文件: 今日分片, 今日还没有则名字最新的一片。
+  // 落盘时把它也并进锁集 (W2): 两个各写**互不相交**日分片的并发批次, 只有靠共同的锚才不会各自
+  // 从同一个 seq 起编。常见批次写的就是今日分片, 去重后不多花一把锁。
+  _defaultAnchorFile() {
+    const today = this._shardFile(this._dayOf(Date.now()));
+    if (fs.existsSync(today)) return today;
+    const cand = this._defaultFiles().sort();
+    return cand.length ? cand[cand.length - 1] : null;
+  }
+
+  // 只读文件末尾 8KB 拿最后一行的 seq (会话日志可达数十 MB, 不能整读)
+  // 末行可能是别的进程刚写了一半, 逐行回退到第一条能解析的为止
+  _tailMaxSeq(file) {
+    if (!fs.existsSync(file)) return 0;
+    let fd;
+    try {
+      fd = fs.openSync(file, "r");
+      const size = fs.fstatSync(fd).size;
+      if (!size) return 0;
+      const len = Math.min(size, 8192);
+      const buf = Buffer.alloc(len);
+      fs.readSync(fd, buf, 0, len, size - len);
+      const lines = buf.toString("utf8").split("\n");
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const s = lines[i].trim();
+        if (!s) continue;
+        try {
+          const e = JSON.parse(s);
+          if (Number.isFinite(e.seq)) return e.seq;
+        } catch { /* 半截行/首行残段, 继续往前找 */ }
+      }
+      return 0;
+    } catch { return 0; } finally {
+      if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* 忽略 */ } }
+    }
+  }
+
+  // 显式落盘: 把 skipFlush 延后的待写事件写入磁盘 (供批量写入后调用)。
+  // writeBehind 模式下默认"排到下一 tick"(合并同 tick 的多次 flush), 需要立刻耐久时
+  // 传 { sync: true } —— 压缩/重建等强顺序路径用同步, 普通回合结束用默认。
+  flush(key, { sync = false } = {}) {
+    const k = this._safe(key);
+    if (this._writeBehind && !sync) { this._scheduleFlush(k); return; }
+    this._flush(k);
+  }
+
+  // 排一次写盘: 同一 tick 内可重复调用, 只保留一个 timer 和一组 key。
+  _scheduleFlush(k) {
+    this._pendingFlushKeys.add(k);
+    if (this._flushTimer) return;
+    const run = () => {
+      this._flushTimer = null;
+      this._drainScheduled();
+    };
+    this._flushTimerIsTimeout = this._writeBehindDelayMs > 0;
+    this._flushTimer = this._flushTimerIsTimeout ? setTimeout(run, this._writeBehindDelayMs) : setImmediate(run);
+    if (typeof this._flushTimer?.unref === "function") this._flushTimer.unref(); // 不阻止进程退出
+  }
+
+  // timer 到期: 每个 key 只落盘一次 (内部再按 flushedSeq 增量取整批事件)
+  _drainScheduled() {
+    if (!this._pendingFlushKeys.size) return;
+    const keys = [...this._pendingFlushKeys];
+    this._pendingFlushKeys.clear();
+    const before = keys.reduce((n, k) => n + (this._flushedSeq.get(k) || 0), 0);
+    for (const k of keys) this._flush(k);
+    const after = keys.reduce((n, k) => n + (this._flushedSeq.get(k) || 0), 0);
+    this._deferredBatches += 1;
+    this._deferredEvents += Math.max(0, after - before);
+    this._lastDeferredAt = Date.now();
+  }
+
+  // 优雅收口: 同步落盘后从退出兜底登记里摘除。
+  //   不摘除 = 模块级集合永久强引用旧实例 (长进程里每次 shutdown 都留下整个会话库)。
+  dispose() {
+    LIVE_WRITE_BEHIND.delete(this);
+    return this.flushAll({ sync: true });
+  }
+
+  // 收口: 把所有待写 key 立刻写盘 (优雅退出/测试断言用)。返回处理的 key 数。
+  flushAll({ sync = true } = {}) {
+    if (!this._writeBehind) {
+      for (const [k, evs] of this._logs) {
+        if (evs.length && evs[evs.length - 1].seq > (this._flushedSeq.get(k) || 0)) this._flush(k);
+      }
+      return this._logs.size;
+    }
+    if (!sync) {
+      for (const [k, evs] of this._logs) {
+        if (evs.length && evs[evs.length - 1].seq > (this._flushedSeq.get(k) || 0)) this._scheduleFlush(k);
+      }
+      return this._pendingFlushKeys.size;
+    }
+    if (this._flushTimer) {
+      try {
+        if (this._flushTimerIsTimeout) clearTimeout(this._flushTimer);
+        else clearImmediate(this._flushTimer);
+      } catch { /* 已触发 */ }
+      this._flushTimer = null;
+    }
+    const keys = new Set(this._pendingFlushKeys);
+    for (const [k, evs] of this._logs) {
+      if (evs.length && evs[evs.length - 1].seq > (this._flushedSeq.get(k) || 0)) keys.add(k);
+    }
+    this._pendingFlushKeys.clear();
+    for (const k of keys) this._flush(k);
+    return keys.size;
+  }
+
+  // 诊断 (测试/健康检查): 写盘模式与合并统计
+  stats() {
+    return {
+      writeBehind: this._writeBehind,
+      pendingKeys: this._pendingFlushKeys.size,
+      deferredBatches: this._deferredBatches,
+      deferredEvents: this._deferredEvents,
+      lastDeferredAt: this._lastDeferredAt || null,
+    };
+  }
+
+  // 从日志投影模型可见历史 (user/assistant), 无可变状态
+  deriveMessages(key) {
+    return this._log(this._safe(key))
+      .filter((e) => e.type === EVENTS.USER || e.type === EVENTS.ASSISTANT)
+      .map((e) => ({ role: e.type === EVENTS.USER ? "user" : "assistant", content: e.data?.content }));
+  }
+
+  // 投影「压缩后」的模型可见历史: 最后一条 compaction 事件之前 (seq <= upToSeq) 的消息被摘要替换
+  // 吸收 OpenClaw compaction: 摘要作为单一 surface node 替换被压缩区间, 日志本身不可变
+  // v1.1.1: 增量缓存——数组引用没变时只 O(Δ) 追加尾部消息; 数组被替换或追加 compaction 时整体重算。
+  deriveCompacted(key) {
+    const k = this._safe(key);
+    const evs = this._log(k);
+    const cached = this._compactedCache.get(k);
+    // 数组引用未变 (append-only 稳定), 且无新 compaction: 只把尾部新 user/assistant 追加进 msgs
+    if (cached && cached.arrRef === evs) {
+      if (cached.consumed === evs.length) return cached.msgs; // 无新增, 直接命中
+      // 检查新增区间是否含 compaction (compaction 会重投影历史, 需整体重算)
+      for (let i = cached.consumed; i < evs.length; i++) {
+        if (evs[i].type === EVENTS.COMPACTION) return this._deriveCompactedFrom(evs, k);
+      }
+      // 只有 user/assistant 追加: 把可见的尾部消息追加进 msgs
+      for (let i = cached.consumed; i < evs.length; i++) {
+        const e = evs[i];
+        if (e.type === EVENTS.USER || e.type === EVENTS.ASSISTANT) {
+          cached.msgs.push({ role: e.type === EVENTS.USER ? "user" : "assistant", content: e.data?.content });
+        }
+      }
+      cached.consumed = evs.length;
+      return cached.msgs;
+    }
+    // 无缓存 / 数组被替换 (set/rename/fork/delete): 整体重算
+    return this._deriveCompactedFrom(evs, k);
+  }
+
+  _deriveCompactedFrom(evs, k) {
+    let lastComp = null;
+    for (const e of evs) if (e.type === EVENTS.COMPACTION) lastComp = e;
+    const upToSeq = lastComp?.data?.upToSeq || 0;
+    const msgs = [];
+    let consumed = 0;
+    if (lastComp?.data?.summary) {
+      msgs.push({ role: "system", content: String(lastComp.data.summary) });
+    }
+    for (const e of evs) {
+      consumed++;
+      if (e.seq <= upToSeq) continue;
+      if (e.type === EVENTS.USER || e.type === EVENTS.ASSISTANT) {
+        msgs.push({ role: e.type === EVENTS.USER ? "user" : "assistant", content: e.data?.content });
+      }
+    }
+    this._compactedCache.set(k, { arrRef: evs, msgs, consumed, lastCompSeq: lastComp?.seq || 0 });
+    return msgs;
+  }
+
+  // 完整事件流 (回放/审计/轨迹)
+  replay(key) { return [...this._log(this._safe(key))]; }
+
+  // L0 只读代理 / 按天审计: 遍历所有会话, 派生某天的对话事件 (消除 l0/*.jsonl 重复)
+  // v1.1.1: 全库按天缓存, 版本未变则零成本; 保持"本地自然日"语义 (与 _dayOf/logicalDay 一致, 避免时区错位)
+  // v4.2 (2026-11-01): 版本变化改走增量 —— 依据同 deriveCompacted: append 是原地 push (引用不变),
+  //   索引只存不可变字段 (key/type/ts/content, 不含 seq —— _flush 锁内重排 seq 不影响本索引);
+  //   set/rename/fork/load 换新数组 → purge 该键旧条目后按键重建; 键删除 → purge + 清游标。
+  //   排序不变式 (2026-09-18) 保持: 每个被写入过的天在出缓存前都重排时间序。
+  eventsByDay(day) {
+    const dayStr = String(day).slice(0, 10);
+    const dayMs = new Date(dayStr + "T00:00:00").getTime();
+    if (Number.isNaN(dayMs)) return [];
+    // 缓存命中: 版本未变时按 day 直接返回 (append 后 _bump 失效, 下轮走增量)
+    if (this._dayCacheAt === this._version && this._dayCache.size) {
+      const hit = this._dayCache.get(dayStr);
+      if (hit) return hit;
+    }
+    const fresh = this._dayCacheAt !== this._version || !(this._dayCursors instanceof Map);
+    if (fresh) {
+      // 全库扫描一次 (构造后首次 / 内部状态被弃用), 按"事件 ts 的本地自然日"聚合
+      const byDay = new Map();
+      const cursors = new Map();
+      for (const [key, events] of this._logs) this._indexDayEvents(byDay, cursors, key, events, 0, null);
+      for (const arr of byDay.values()) arr.sort((a, b) => a.timestamp - b.timestamp);
+      this._dayCache = byDay;
+      this._dayCursors = cursors;
+      this._dayCacheAt = this._version;
+      return byDay.get(dayStr) || [];
+    }
+    // 增量: 键消失 → purge + 清游标; 引用未变 → 只索引尾部新增; 引用换新 → purge 后整键重建
+    const byDay = this._dayCache;
+    const cursors = this._dayCursors;
+    const touched = new Set();
+    for (const key of [...cursors.keys()]) {
+      if (!this._logs.has(key)) { this._purgeDayIndex(byDay, key); cursors.delete(key); }
+    }
+    for (const [key, events] of this._logs) {
+      const cur = cursors.get(key);
+      if (cur && cur.ref === events && events.length >= cur.count) {
+        if (events.length > cur.count) this._indexDayEvents(byDay, cursors, key, events, cur.count, touched);
+      } else {
+        if (cur) this._purgeDayIndex(byDay, key);
+        this._indexDayEvents(byDay, cursors, key, events, 0, touched);
+      }
+    }
+    for (const d of touched) {
+      const arr = byDay.get(d);
+      if (arr) arr.sort((a, b) => a.timestamp - b.timestamp);
+    }
+    this._dayCacheAt = this._version;
+    return byDay.get(dayStr) || [];
+  }
+
+  // events[from..] 中的 user/assistant 事件按天索引进 byDay, 游标推进到 events.length
+  // touched (可选): 收集本次新增过条目的天, 供调用方按天重排时间序; null = 全量重建路径 (调用方统一排序)
+  _indexDayEvents(byDay, cursors, key, events, from, touched) {
+    for (let i = from; i < events.length; i++) {
+      const e = events[i];
+      if (e.type !== EVENTS.USER && e.type !== EVENTS.ASSISTANT) continue;
+      const d = this._dayOf(e.ts);
+      let arr = byDay.get(d);
+      if (!arr) { arr = []; byDay.set(d, arr); }
+      arr.push({ sessionKey: key, role: e.type === EVENTS.USER ? "user" : "assistant", content: e.data?.content, timestamp: e.ts });
+      if (touched) touched.add(d);
+    }
+    cursors.set(key, { ref: events, count: events.length });
+  }
+
+  // 把某 key 的旧索引条目从所有天里清出 (set/rename/fork/reset 等换数组/删键的罕见路径)
+  // filter 保序: 幸存条目的时间序不变, 空天直接删除
+  _purgeDayIndex(byDay, key) {
+    for (const [d, arr] of byDay) {
+      const kept = arr.filter((r) => r.sessionKey !== key);
+      if (kept.length !== arr.length) {
+        if (kept.length) byDay.set(d, kept);
+        else byDay.delete(d);
+      }
+    }
+  }
+
+  // 返回某自然日的对话事件(带 seq/type/data), 供 memory-ticker 按 seq 去重滚动归档
+  // (防止 _compileDaily_Rolling 每次把今日全文再次追加, 造成 longterm 内容重复累积)
+  replayDay(day) {
+    const dayStr = String(day).slice(0, 10);
+    const out = [];
+    for (const [, events] of this._logs) {
+      for (const e of events) {
+        if (e.type !== EVENTS.USER && e.type !== EVENTS.ASSISTANT) continue;
+        if (this._dayOf(e.ts) !== dayStr) continue;
+        out.push(e);
+      }
+    }
+    out.sort((a, b) => a.seq - b.seq);
+    return out;
+  }
+
+  // fork: 从 boundarySeq 及更早派生新会话 (吸收 dsh fork 语义, 保留不可变源)
+  fork(fromKey, boundarySeq, toKey) {
+    const keep = this._log(this._safe(fromKey)).filter((e) => e.seq <= boundarySeq);
+    const k = this._safe(toKey);
+    // 目标会话按边界整批重建 (default = 所有分片): 清盘与写入在**同一把锁内**完成 (W1),
+    // 且事件按值复制 —— 目标侧的 seq 重排不得改动源会话正在使用的同一批对象引用
+    const copied = keep.map((e) => this._cloneEvent(e));
+    this._logs.set(k, copied);
+    this._nextSeq.set(k, copied.length ? copied[copied.length - 1].seq : 0);
+    this._flushedSeq.delete(k);
+    this._flush(k, copied, true);
+    this._bump();
+    return keep;
+  }
+
+  // count: 事件条数
+  count(key) { return this._log(this._safe(key)).length; }
+
+  // 列出所有会话: {key, count, lastTs, title, archived, pinned}
+  // 排序: 置顶优先, 其余按最近活跃倒序 (置顶只是排序, 不改归属/标题/归档)
+  // 供 Web UI 多会话管理 (P1#6)
+  _deriveTitle(events, key) {
+    const firstUser = events.find((e) => e.type === EVENTS.USER);
+    return firstUser?.data?.content ? String(firstUser.data.content).slice(0, 20) : key;
+  }
+  list() {
+    const out = [];
+    for (const [key, events] of this._logs) {
+      if (!events.length) continue;
+      // 2026-10-11: 自定义标题覆盖优先 (改名不改内容), 否则回退派生标题
+      const title = this._titles[key] || this._deriveTitle(events, key);
+      out.push({
+        key,
+        count: events.length,
+        lastTs: events[events.length - 1].ts,
+        title,
+        archived: !!this._archived[key], // 2026-10-11: 归档标记随列表下发 (前端分组收起)
+        pinned: !!this._pinned[key],     // 2026-11-03: 置顶标记随列表下发 (前端排序/图标)
+      });
+    }
+    out.sort((a, b) => (Number(b.pinned) - Number(a.pinned)) || ((b.lastTs || 0) - (a.lastTs || 0)));
+    return out;
+  }
+
+  // 全文检索 (2026-11-03): 在 user/assistant 消息正文里找关键词, 每会话取最新一条命中。
+  // 返回 [{ key, title, ts, role, snippet }], 按命中时间倒序。纯本地扫描, 不建索引 ——
+  // 会话事件本来就在内存里, 再加一套倒排索引只会多一份一致性负担。
+  search(query, { limit = 20 } = {}) {
+    const q = String(query || "").trim().toLowerCase();
+    if (!q) return [];
+    const hits = [];
+    for (const [key, events] of this._logs) {
+      if (!events.length) continue;
+      let found = null;
+      for (let i = events.length - 1; i >= 0; i--) {
+        const e = events[i];
+        const isUser = e.type === EVENTS.USER;
+        if (!isUser && e.type !== EVENTS.ASSISTANT) continue;
+        const text = String(e.data?.content ?? "");
+        const idx = text.toLowerCase().indexOf(q);
+        if (idx === -1) continue;
+        // 命中片段: 前后各留 24 字, 折叠换行, 两端用省略号标出截断
+        const start = Math.max(0, idx - 24);
+        const end = Math.min(text.length, idx + q.length + 24);
+        const snip = (start > 0 ? "…" : "") + text.slice(start, end).replace(/\s+/g, " ") + (end < text.length ? "…" : "");
+        found = { ts: e.ts, role: isUser ? "user" : "assistant", snippet: snip };
+        break;
+      }
+      if (!found) continue;
+      hits.push({
+        key,
+        title: this._titles[key] || this._deriveTitle(events, key),
+        ts: found.ts,
+        role: found.role,
+        snippet: found.snippet,
+      });
+    }
+    hits.sort((a, b) => (b.ts || 0) - (a.ts || 0));
+    return hits.slice(0, Math.max(1, Number(limit) || 20));
+  }
+
+  // ---- 兼容旧接口 (agent/CLI 仍可用) ----
+  get(key) { return this.deriveMessages(key); }
+  set(key, history) {
+    const k = this._safe(key);
+    // "重建"意图 = 旧内容作废。W1 (2026-10-05): 清盘不再发生在锁外, 而是先 skipFlush 攒齐
+    //   整批, 再由 _flush(k, batch, explicit=true) 在该 key 的锁内一次性 unlink + 整批写入。
+    //   旧写法 (锁外 rmSync + 每条消息一次独立落盘) 有两处可见的坏结果: 并发写者的行可以落进
+    //   "已删文件、未写新行"的缝隙里, 使重建后的会话以非 1 开头并夹着旧行 (半重建态); 而本进程
+    //   的 N 条消息又分 N 次落盘, 别的进程读到的是只重建了一半的历史。default 同理 (所有分片)。
+    this._tailCache.clear(); // OPT-2: 重建意图 = 上一批的乐观盘面作废, 下面 append 必须重新读盘
+    this._logs.delete(k); this._nextSeq.set(k, 0); this._flushedSeq.delete(k);
+    const fresh = [];
+    for (const m of (history || [])) {
+      fresh.push(this.append(k, m.role === "user" ? EVENTS.USER : EVENTS.ASSISTANT,
+        { content: m.content }, undefined, { skipFlush: true }));
+    }
+    this._flush(k, fresh, true);
+    return history;
+  }
+  has(key) { return this._logs.has(this._safe(key)); }
+  // 重命名会话: 复制事件到新 key 并删除旧 key (保留 seq 顺序) [P1#6]
+  rename(fromKey, toKey) {
+    const f = this._safe(fromKey), t = this._safe(toKey);
+    if (f === t) return false;
+    if (!this._logs.has(f)) return false;
+    if (this._logs.has(t)) return false; // 目标已存在, 拒绝覆盖防数据丢失 [复审 P1]
+    const events = this._logs.get(f);
+    // 按值复制: 目标会话的 seq 重排不能改到源会话仍在使用的同一批对象引用
+    const copied = events.map((e) => this._cloneEvent(e));
+    this._logs.set(t, copied);
+    const lastSeq = copied.length ? copied[copied.length - 1].seq : 0;
+    this._nextSeq.set(t, lastSeq);
+    this._flushedSeq.delete(t);
+    this._compactedCache.delete(t); // 目标键旧投影作废 (防残留消息常驻)
+    // 新键必须从零整批重建 (W1: unlink 与写入同在一把锁内), 别追加到同名旧会话上
+    this._flush(t, copied, true);
+    this.delete(f);
+    this._bump();
+    return true;
+  }
+  delete(key) {
+    const k = this._safe(key);
+    this._tailCache.clear(); // OPT-2: 磁盘内容被删, 缓存里的旧盘面对后续 append 不再成立
+    this._logs.delete(k); this._nextSeq.delete(k); this._flushedSeq.delete(k);
+    this._compactedCache.delete(k); // 删除会话必须同时清投影缓存 (防无界增长/残影)
+    try {
+      if (k === "default") {
+        // 删除 default 所有分片 (旧单文件 + 各日 shard) —— 锁内删 (W1)
+        this._removeDefaultFiles();
+      } else {
+        this._removeFile(k);
+      }
+    } catch {}
+    this._bump();
+  }
+
+  // 清理过期会话: 删除超过 maxAgeDays 天未活跃的非 default 会话文件
+  // 返回删除的会话 key 列表。default 主会话始终保留 (防误删主对话历史)
+  // 分片说明: default 的各日分片在 _logs 中只对应一个 key="default", 不会被误当独立会话删除
+  pruneOld({ maxAgeDays = 30, keep = [] } = {}) {
+    const now = Date.now();
+    const cutoff = now - maxAgeDays * 86400000;
+    const keepSet = new Set([...keep, "default"].map((k) => this._safe(k)));
+    const removed = [];
+    for (const [key, events] of this._logs) {
+      if (keepSet.has(key)) continue;
+      const lastTs = events.length ? events[events.length - 1].ts : 0;
+      if (!lastTs || lastTs < cutoff) {
+        this.delete(key);
+        removed.push(key);
+      }
+    }
+    return removed;
+  }
+
+  // ---- 会话自动归档 (2026-10-11): 不删数据只打标记, 归档会话在列表收起、可随时恢复 ----
+  //   误归档零成本恢复; 事件日志/派生消息不受任何影响, 归档会话点开仍能看完整历史。
+  _archivePath() { return path.join(this.dir, "_archive.json"); }
+  _metaLoad(file) {
+    try {
+      const raw = JSON.parse(fs.readFileSync(file, "utf8"));
+      return (raw && typeof raw === "object" && !Array.isArray(raw)) ? raw : {};
+    } catch (e) {
+      if (e?.code === "ENOENT") return {};
+      try { fs.renameSync(file, `${file}.corrupt-${Date.now()}`); } catch { /* 留档失败不阻塞 */ }
+      return {};
+    }
+  }
+  _metaSave(file, current, base) {
+    try {
+      withFileLock(file, () => {
+        let disk = {};
+        try {
+          const raw = JSON.parse(fs.readFileSync(file, "utf8"));
+          if (raw && typeof raw === "object" && !Array.isArray(raw)) disk = raw;
+        } catch { /* 不存在/损坏 → 以空表为底 */ }
+        const merged = _applyDiff(base || {}, current, disk);
+        atomicWrite(file, JSON.stringify(merged, null, 2));
+        _resetTo(current, merged);
+        if (base) _resetTo(base, merged);
+      });
+    } catch { /* 标记落盘失败不阻塞主流程 */ }
+  }
+  _loadArchive() { return this._metaLoad(this._archivePath()); }
+  _saveArchive() { this._metaSave(this._archivePath(), this._archived, this._archivedBase); }
+  archive(key) {
+    const k = this._safe(key);
+    const evs = this._logs.get(k);
+    if (!evs || !evs.length) return false;
+    this._archived[k] = Date.now();
+    this._saveArchive();
+    return true;
+  }
+  unarchive(key) {
+    const k = this._safe(key);
+    if (!(k in this._archived)) return false;
+    delete this._archived[k];
+    this._saveArchive();
+    return true;
+  }
+  // 自动归档: lastTs 超过 days 天未活跃的会话打归档标记 (default 主会话与 keep 名单豁免)。
+  // 返回本次新归档的 key 列表。0/负 days = 关闭自动归档。
+  autoArchive({ days = 7, keep = [] } = {}) {
+    if (!(days > 0)) return [];
+    const cutoff = Date.now() - days * 86400000;
+    const keepSet = new Set([...keep, "default"].map((k) => this._safe(k)));
+    const done = [];
+    for (const [key, events] of this._logs) {
+      if (keepSet.has(key) || this._archived[key]) continue;
+      const lastTs = events.length ? events[events.length - 1].ts : 0;
+      if (lastTs && lastTs < cutoff) { this._archived[key] = Date.now(); done.push(key); }
+    }
+    if (done.length) this._saveArchive();
+    return done;
+  }
+
+  // ---- 会话置顶 (2026-11-03): 只影响 list() 排序 ----
+  // 独立落盘 data/sessions/_pinned.json ({ key: pinnedAt }); 不碰事件日志/标题/归档。
+  // 与归档的关系: 置顶优先于"按最近活跃排序", 但归档分组仍单独处理 —— 置顶一个已归档会话
+  // 不会把它从归档组里拽出来, 避免"置顶 = 悄悄取消归档"的隐性副作用。
+  _pinnedPath() { return path.join(this.dir, "_pinned.json"); }
+  _loadPinned() { return this._metaLoad(this._pinnedPath()); }
+  _savePinned() { this._metaSave(this._pinnedPath(), this._pinned, this._pinnedBase); }
+  pin(key) {
+    const k = this._safe(key);
+    const evs = this._logs.get(k);
+    if (!evs || !evs.length) return false;
+    this._pinned[k] = Date.now();
+    this._savePinned();
+    return true;
+  }
+  unpin(key) {
+    const k = this._safe(key);
+    if (!(k in this._pinned)) return false;
+    delete this._pinned[k];
+    this._savePinned();
+    return true;
+  }
+  isPinned(key) { return !!this._pinned[this._safe(key)]; }
+
+  // ---- 会话标题覆盖 (2026-10-11): 改名不改内容/归属/排序/归档 ----
+  // 标题默认从第一条用户消息派生 (list 里 slice(0,20)); 本机制提供独立覆盖字段,
+  // 存 data/sessions/_titles.json ({ key: title }), 与事件日志 append-only 完全解耦。
+  _titlesPath() { return path.join(this.dir, "_titles.json"); }
+  _loadTitles() { return this._metaLoad(this._titlesPath()); }
+  _saveTitles() { this._metaSave(this._titlesPath(), this._titles, this._titlesBase); }
+  // 设置自定义标题; title 为空串则清除覆盖、回退到派生标题。返回是否变更。
+  setTitle(key, title) {
+    const k = this._safe(key);
+    if (!this._logs.has(k)) return false;
+    const t = String(title || "").trim();
+    if (t) { this._titles[k] = t; this._saveTitles(); return true; }
+    if (k in this._titles) { delete this._titles[k]; this._saveTitles(); }
+    return true;
+  }
+  getTitle(key) {
+    const k = this._safe(key);
+    return this._titles[k] || "";
+  }
+
+  // ---- 孤儿标题回收 (评测-II P2-3, 与 src/memory/session-meta.js 同源): 标题台账与正文文件对齐 ----
+  // 病根: delete/rename 只删正文文件, _titles.json 键永久残留 —— 生产实测 13 个标题只剩 5 份正文。
+  // 构造时对 s_* 键对账: 正文缺失的标题移出台账, 移除项合并备份到 _titles.orphans.json (可追溯)。
+  // 边界: 只对账 /^s_/ 会话键; default 按天分片与 ppx_cron_* 等非直映键不在职责内。
+  _reconcileOrphanTitles() {
+    const orphans = [];
+    for (const k of Object.keys(this._titles)) {
+      if (!/^s_/.test(k)) continue;
+      try { if (fs.existsSync(this._file(this._safe(k)))) continue; } catch { continue; }
+      orphans.push([k, this._titles[k]]);
+      delete this._titles[k];
+    }
+    if (!orphans.length) return 0;
+    const backupPath = path.join(this.dir, "_titles.orphans.json");
+    try {
+      let prev = {};
+      try { prev = JSON.parse(fs.readFileSync(backupPath, "utf8")); } catch { prev = {}; }
+      for (const [k, t] of orphans) if (!(k in prev)) prev[k] = t;
+      atomicWrite(backupPath, JSON.stringify(prev, null, 2));
+    } catch { /* 备份失败不阻断回收 */ }
+    this._saveTitles();
+    return orphans.length;
+  }
+
+  // ---- 新会话自动命名 (2026-10-11): 首条用户消息落盘且无自定义标题时生成 "MMDD|类型|主题" ----
+  // 纯规则、确定性、零 LLM 开销。日期取首条消息 ts 转 Asia/Shanghai (UTC+8)。
+  _guessType(text) {
+    const t = text.toLowerCase();
+    const rules = [
+      ["修复", /修复|bug|报错|错误|异常|坏了|闪退|崩溃|出问题|不好使|错乱/],
+      ["发布", /发布|上线|部署|打包|release|deploy/],
+      ["优化", /优化|改进|提速|加速|性能|变慢|卡顿|精简/],
+      ["设计", /设计|界面|ui|样式|配色|布局|交互|美化|好看/],
+      ["文档", /文档|readme|说明|注释|教程/],
+      ["研究", /研究|调研|分析|对比|评估|测评|比较/],
+      ["功能", /功能|实现|开发|新增|添加|做一个|写一个|写个|支持|接入|集成|安装/],
+    ];
+    for (const [name, re] of rules) if (re.test(t)) return name;
+    return "探索";
+  }
+  _autoTitleRule(content, ts) {
+    const raw = String(content || "").trim();
+    if (!raw) return "";
+    // MMDD: 首条消息时间 + 8h → UTC 字段即上海本地月/日
+    const sh = new Date((Number.isFinite(ts) ? ts : Date.now()) + 8 * 3600000);
+    const mmdd = String(sh.getUTCMonth() + 1).padStart(2, "0") + String(sh.getUTCDate()).padStart(2, "0");
+    const type = this._guessType(raw);
+    // 主题: 去 URL / 图片路径 / 附件路径, 折叠空白, 去礼貌前缀, 截断到 14 字
+    let topic = raw
+      .replace(/https?:\/\/\S+/g, "")
+      .replace(/uploads?\/\S+/g, "")
+      .replace(/\b[\w./-]+\.(png|jpe?g|gif|webp|svg|pdf|docx?|xlsx?|zip)\b/gi, "")
+      .replace(/\s+/g, " ")
+      .replace(/^(请|帮我|帮忙)[，,。:：\s]+/, "")
+      .trim();
+    if (!topic) topic = "新会话";
+    if (topic.length > 14) topic = topic.slice(0, 14);
+    return `${mmdd}|${type}|${topic}`;
+  }
+
+  // 增量落盘: 只追加 flushedSeq 之后的新事件 (P1#5, 消除大会话全量重写)
+  // default 按天落盘: 只把当天分片写到对应 default-YYYY-MM-DD.jsonl, 非当前天文件不再改写
+  // pending / explicit (v2026-10-05 W1): 重建路径 (set/fork/rename) 由调用方给出整批待写事件,
+  //   explicit=true 表示"该 key 的磁盘内容整批作废" —— 在同一把锁里先 unlink 再整批写入,
+  //   并发写者插不进"文件已删/新行未写"的缝隙。普通增量路径两个参数都不传, 行为不变。
+  _flush(key, pending = null, explicit = false) {
+    const k = this._safe(key);
+    // 显式/立即落盘覆盖了本 key 的排程意图 (下面会写到最新水位), 不必再被 timer 重复写一次。
+    this._pendingFlushKeys.delete(k);
+    const evs = this._logs.get(k) || [];
+    const flushed = this._flushedSeq.get(k) || 0;
+    const batch = Array.isArray(pending) ? pending
+      : (explicit ? evs : evs.filter((e) => e.seq > flushed));
+    if (!explicit && !batch.length) return;
+    try {
+      if (k === "default") this._flushDaily(k, batch, { rebuild: explicit });
+      else this._flushLegacy(k, batch, { rebuild: explicit });
+      // 落盘后的游标取"本批最大 seq" (多日重建后数组顺序 != seq 顺序, 不能取尾元素);
+      // 重建时旧的 flushed 随清盘一起作废, 所以基准从 0 起算
+      let mx = explicit ? 0 : flushed;
+      for (const e of evs) if (e.seq > mx) mx = e.seq;
+      for (const e of batch) if (e.seq > mx) mx = e.seq;
+      this._flushedSeq.set(k, mx);
+      this._bump(); // 锁内可能改过 seq / compaction 游标, 派生缓存必须作废
+    } catch (e) {
+      // v1.0.9: 落盘失败不再静默 (磁盘满/权限丢失消息不可见), 至少留日志
+      try { console.warn(`[session] 会话 ${k} 落盘失败: ${e.message}`); } catch {}
+    } finally {
+      // OPT-2: 本批已落盘 (无论成功/失败), 乐观尾读缓存一律作废 —— 下一批必须重新读盘:
+      //   成功时盘面已因本批追加而前进; 失败时更不能再拿旧盘面当起点。
+      this._tailCache.clear();
+    }
+  }
+
+  // 事件按值复制 (fork/rename 建目标会话用): 两侧各自重排 seq 时不得互相改到同一批对象
+  _cloneEvent(e) {
+    const data = e && typeof e.data === "object" && e.data ? { ...e.data } : e.data;
+    return { seq: e.seq, ts: e.ts, type: e.type, data };
+  }
+
+  // 按事件 ts 的本地自然日分组 (保持批次内原有顺序)
+  _dayGroups(pending) {
+    const byDay = new Map();
+    for (const e of pending) {
+      const d = this._dayOf(e.ts);
+      let g = byDay.get(d);
+      if (!g) { g = []; byDay.set(d, g); }
+      g.push(e);
+    }
+    return byDay;
+  }
+
+  // 已持锁时的静默删除
+  _rmSyncQuiet(file) {
+    try { fs.rmSync(file, { force: true }); } catch {}
+  }
+
+  // v2026-10-05 (跨进程 seq 竞态兜底): append 分配的 seq 是无锁乐观值, 两进程同时读到同一
+  // diskMax 就会撞号 (~40 条里 14-16 条重复)。唯一安全的判定点是文件锁内、序列化落盘之前:
+  // 重读磁盘真实 seq, 批次最低端 <= diskMax 就整批重排为 diskMax+1 起的连续段。
+  // _logs 里存的是同一批事件对象引用, 原地改 e.seq 即内存/盘一致, 无需额外同步。
+  // 代价: 每个落盘批次多一次 8KB 尾读。
+  // floor (W2): 调用方可给出"这批不得低于的 seq" (default 多日批次逐个分片的游标);
+  //             缺省仍读本 key 的磁盘末行。remap: 收集 旧seq->新seq 供压缩游标修正 (W3)。
+  _ensureUniqueSeq(k, pending, floor, remap = null) {
+    const map = remap || new Map();
+    if (!pending.length) return map;
+    const diskMax = Number.isFinite(floor) ? floor : this._diskMaxSeq(k);
+    // 记下锁内实际读到的盘面 (OPT-2): 调用方 (_flushLegacy) 还要判断"磁盘上有没有行",
+    //   这里复用同一次锁内尾读, 避免同一把锁内对同一文件读两遍。判定点是锁内真实盘面, 不是缓存。
+    this._ensureDiskMax = diskMax;
+    let low = pending[0].seq;
+    for (const e of pending) if (e.seq < low) low = e.seq;
+    if (low > diskMax) return map; // 整段已在磁盘序列之上, 无碰撞
+    let next = diskMax + 1;
+    for (const e of pending) {
+      if (e.seq !== next) map.set(e.seq, next);
+      e.seq = next++;
+    }
+    if ((this._nextSeq.get(k) || 0) < next - 1) this._nextSeq.set(k, next - 1);
+    return map;
+  }
+
+  // W3 (2026-10-05): 压缩事件带的 data.upToSeq 是"压到哪个 seq 为止"的游标, 但它是在锁外
+  //   按当时**内存里**的 seq 算出来的。上面一重排就把同批事件的 seq 全体上移了, upToSeq 却
+  //   留在旧值上, 于是同一批次里同时存在两个 seq 世界: 被压缩的原文回到模型上下文 (重复历史),
+  //   而没被压缩的后续消息反而被吞掉 (投影缺消息)。这里在锁内、序列化之前按 remap 修正,
+  //   并兜底钳制: 游标永远不得追平/越过压缩事件自身 (磁盘末行才是游标的真相)。
+  _repairCompactionCursors(pending, remap) {
+    if (!pending || !pending.length) return;
+    const map = remap && remap.size ? remap : null;
+    for (const e of pending) {
+      if (!e || e.type !== EVENTS.COMPACTION || !e.data || typeof e.data !== "object") continue;
+      const raw = e.data.upToSeq;
+      if (raw === undefined || raw === null) continue;
+      const old = Number(raw);
+      if (!Number.isFinite(old)) continue; // 非数字游标: 保留原值交给投影端处理
+      let fixed = map && map.has(old) ? map.get(old) : old;
+      if (fixed >= e.seq) fixed = e.seq - 1;
+      if (fixed < 0) fixed = 0;
+      if (fixed !== e.data.upToSeq) e.data.upToSeq = fixed;
+    }
+  }
+
+  // 非 default 会话: 增量落盘 (盘上还没有这个会话时全量写, 已有则只追加)
+  // v3.2.3 (P2#15): 追加段加跨进程文件锁 (与 facts 锁策略对齐) —— 多进程共用同一数据目录时,
+  // 无锁 appendFileSync 在 Windows 上可能交错写坏行; 锁内失败由 _flush 的 catch 兜底告警
+  // 2026-10-04: 是否全量重写改由"磁盘上有没有行"决定, 不再看本进程的 flushed 标志。
+  //   原逻辑 flushed===0 就 writeFileSync 整文件覆盖 —— 另一个进程刚写的会话历史会被这一刀
+  //   直接抹掉 (新实例构造时目录还是空的, 它的 flushed 永远是 0)。"重建"意图改由 rebuild
+  //   表达 (锁内 unlink + 整批写), 这里只按磁盘事实走。
+  _flushLegacy(k, pending, { rebuild = false } = {}) {
+    const file = this._file(k);
+    withFileLock(file, () => {
+      if (rebuild) {
+        this._rmSyncQuiet(file);          // W1: 清盘与写入同在一把锁内, 不可被并发写者插入
+        if (!pending.length) { this._rebuildSeqs(k, pending, false); return; } // 空历史: 清盘即全部动作
+        this._rebuildSeqs(k, pending, false);
+      } else {
+        // W3: 没撞号也要过一遍钳制分支 —— 压缩游标可能是锁外算出的越界值 (upToSeq >= 自身 seq)
+        this._repairCompactionCursors(pending, this._ensureUniqueSeq(k, pending));
+      }
+      // 序列化必须在锁内重排之后: 锁外 stringify 写进盘的还是过期的 seq 字节
+      const line = pending.map((e) => JSON.stringify(e)).join("\n") + "\n";
+      // OPT-2: 上面 _ensureUniqueSeq 已在同一把锁内读过本文件的末行 (_ensureDiskMax),
+      //   这里直接复用该盘面判定"追加 or 整文件写", 不再对同一文件重复尾读一遍。
+      if (!rebuild && this._ensureDiskMax > 0) fs.appendFileSync(file, line, "utf8");
+      else fs.writeFileSync(file, line, "utf8");
+    });
+  }
+
+  // default 会话: 按事件 ts 归属的天分片增量写
+  //  - 按天分组: 每个文件只追加自己那天的行
+  //  - 当天文件已有则追加, 首次创建则写入新文件
+  // W2 (2026-10-05): 原实现整批只在**第一个分片的锁内**重排一次, 锚是 _diskMaxSeq("default")
+  //   = 今天(或最新)分片的末行。跨天批次里较旧那天的文件由别的进程写到过更高的 seq, 于是
+  //   本批分配的 seq 落进那天文件时与残存行撞号 (实测 40 条 union 出现 2 个重复)。
+  //   现在: 每个被写分片的磁盘末行都参与游标计算, 并按日升序分配一条连续 seq 段。
+  //   锁集 = 本批涉及的分片 (重建时再加上现存全部分片), 按路径升序一次性全部持有 ——
+  //   并发写者同样按升序取锁, 所以不会互锁; 常见单天批次仍然只加一把锁、一次尾读。
+  _flushDaily(k, pending, { rebuild = false } = {}) {
+    const groups = this._dayGroups(pending);
+    const days = [...groups.keys()].sort();
+    const batchFiles = days.map((d) => this._shardFile(d));
+    // 重建要作废"该 key 的全部磁盘内容", 所以锁集 = 现存全部分片 ∪ 本批要写的分片;
+    // 增量路径再加上锚分片 (withFileLocks 去重, 单天常见批次仍只一把锁)
+    // OPT-2: 锚分片路径留一份 —— 锁内游标播种读的就是它的末行, 逐日尾读遇到同一文件时直接复用。
+    const lockFiles = rebuild
+      ? [...this._defaultFiles(), ...batchFiles]
+      : [...batchFiles, this._defaultAnchorFile()];
+    if (rebuild && !pending.length) {
+      // 空历史的重建 (set(key, [])): 清盘本身就是全部动作
+      withFileLocks(lockFiles, () => { for (const f of this._defaultFiles()) this._rmSyncQuiet(f); });
+      return;
+    }
+    withFileLocks(lockFiles, () => {
+      if (rebuild) {
+        for (const f of this._defaultFiles()) this._rmSyncQuiet(f); // 锁内重新列举: 连并发者刚建出的分片一起作废
+        this._rebuildSeqs(k, pending, true);
+      } else {
+        const remap = new Map();
+        let cursor = this._diskMaxSeq(k);
+        // OPT-2: _diskMaxSeq 刚读过的那个分片 (= 游标播种来源), 逐日尾读遇到它时无需再读一遍。
+        //   注意用 "_diskMaxFile" 而不是锁外取的 anchorFile: 两者之间并发进程可能刚建出新的
+        //   今日分片, 用错文件会低估真实末行 —— 只复用"确实刚读过"的那一个。
+        const seededFile = this._diskMaxFile;
+        for (const d of days) {
+          const g = groups.get(d);
+          const shard = this._shardFile(d);
+          // 权威仍是锁内读到的磁盘末行 (cursor 的播种值); append 的乐观缓存不参与本判定。
+          const tail = shard === seededFile ? cursor : this._tailMaxSeq(shard);
+          if (tail > cursor) cursor = tail;
+          this._ensureUniqueSeq(k, g, cursor, remap);
+          for (const e of g) if (e.seq > cursor) cursor = e.seq;
+        }
+        this._repairCompactionCursors(pending, remap);
+      }
+      for (const d of days) {
+        const file = this._shardFile(d);
+        const line = groups.get(d).map((e) => JSON.stringify(e)).join("\n") + "\n";
+        // OPT-2: 非重建路径一律 appendFileSync —— 目标文件不存在/为空时它与 writeFileSync 逐字节
+        //   等价 (都以本批内容建出文件), 原先的 existsSync 分支是每批多一次系统调用。
+        //   重建路径必须 writeFileSync (整文件覆盖, 兜 Windows rmSync 失败留下的残存行)。
+        if (rebuild) fs.writeFileSync(file, line, "utf8");
+        else fs.appendFileSync(file, line, "utf8");
+      }
+    });
+  }
+
+  // 重建 (set/fork/rename) 的 seq 分配: 磁盘真相 = 本进程刚在同一把锁里删空的目标文件,
+  // 所以游标从 1 起重新连续编号 (旧游标随清盘作废, _nextSeq 直接赋值不取 max)。
+  // 多日批次按日升序分配, 保证"较旧分片的 seq 恒低于较新分片" —— default 的 seq 是跨分片的
+  // 单一游标, 而 _diskMaxSeq 只认最新分片的末行, 区间一旦错位那个锚就会低估。
+  // 兜底: rmSync 失败 (Windows EPERM) 时该分片尾读仍返回残存末行, 本批接着它往上编, 不撞号。
+  _rebuildSeqs(k, batch, daily) {
+    const remap = new Map();
+    const groups = this._dayGroups(batch);
+    let next = 1;
+    for (const d of [...groups.keys()].sort()) {
+      const g = groups.get(d);
+      const floor = daily ? this._tailMaxSeq(this._shardFile(d)) : 0;
+      if (floor >= next) next = floor + 1;
+      for (const e of g) {
+        if (e.seq !== next) remap.set(e.seq, next);
+        e.seq = next++;
+      }
+    }
+    this._repairCompactionCursors(batch, remap);
+    let mx = 0;
+    for (const e of batch) if (e.seq > mx) mx = e.seq;
+    this._nextSeq.set(k, mx);
+    return mx;
+  }
+}

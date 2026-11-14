@@ -1,0 +1,106 @@
+{
+  "date": "2026-11-06",
+  "generated_at": "2026-11-06T14:21:00.246Z",
+  "reproducible": "node scripts/nightly-bench.js",
+  "env": {
+    "node": "v26.12.1",
+    "platform": "win32 x64",
+    "cpus": 20,
+    "bench_rounds": "200",
+    "bench_concurrency": "20"
+  },
+  "all_ok": true,
+  "results": [
+    {
+      "key": "eval",
+      "name": "本地能力评测 (eval)",
+      "ok": true,
+      "exit": 0,
+      "duration_ms": 310,
+      "metrics": {
+        "passed": "7/0"
+      },
+      "tail": [
+        "  ✓ 问候识别  — 在的兄弟, 说。",
+        "[2026-11-06T14:20:55.197Z] [info] tool: get_time()",
+        "  ✓ 时间工具  — 现在是 2026/11/6 22:20:55",
+        "  ✓ 核心价值注入",
+        "  ✓ 生命周期推进  — chats=5 stage=growing",
+        "[2026-11-06T14:20:55.228Z] [info] tool: memory_add(content, layer, scope)",
+        "  ✓ 记忆写入检索  — 我记得:",
+        "- 测试用待办事项 E2E-2026 下周完成",
+        "  ✓ 记忆去重  — 命中 1 条 (归一化去重防冗余)",
+        "[2026-11-06T14:20:55.249Z] [info] tool: read_file(path)",
+        "  ✓ 文件工具  — ppx-agent E2E demo file",
+        "=== 结果: 7 过 / 0 挂 ==="
+      ]
+    },
+    {
+      "key": "bench",
+      "name": "内核吞吐压测 (bench)",
+      "ok": true,
+      "exit": 0,
+      "duration_ms": 4616,
+      "metrics": {
+        "p50_ms": "30",
+        "p95_ms": "40",
+        "p99_ms": "49",
+        "per_round_ms": "12.8"
+      },
+      "tail": [
+        "[2026-11-06T14:20:55.497Z] [info] [tools] 按需曝光: 31 个工具下发完整 schema, 72 个降级为按需 (用 tool_schema 取参数)",
+        "皮皮虾内核压测 | 并发 20 | 轮次 200 | stub LLM",
+        "── (1) 并发调用压测 ──",
+        "[2026-11-06T14:20:55.530Z] [info] [lifecycle] growing: 首次对话",
+        "[2026-11-06T14:20:55.620Z] [info] [lifecycle] mature: 完成 10 次对话",
+        "  调用 200 | 失败 0 | p50 30ms | p95 40ms | p99 49ms | 最慢 49ms",
+        "── (2) 长会话 200 轮 (同一 session) ──",
+        "  200 轮成功 200 | 耗时 2.6s | 12.8ms/轮 | 会话事件 460 条",
+        "── (3) 隔离会话并发 (20 会话 × 3 轮 = 60 请求) ──",
+        "  并发 614ms (p50 204ms) | 串行 831ms (13.8ms/请求)",
+        "  并发度 slowdown = 0.74  (1.00 = 完全串行; 越接近 0.05 越好; 失败 0)",
+        "=== bench 完成 (失败数 >0 时退出码 1) ==="
+      ]
+    },
+    {
+      "key": "selfheal",
+      "name": "自愈基准 (selfheal)",
+      "ok": true,
+      "exit": 0,
+      "duration_ms": 290,
+      "metrics": {
+        "score": "7/7"
+      },
+      "tail": [
+        "[2026-11-06T14:21:00.142Z] [info] selfheal: 清理旧手动备份目录 1 个: memory-backup-0",
+        "[2026-11-06T14:21:00.144Z] [info] selfheal: 修复 5 项: created dir: memory; created dir: memory/daily; created dir: experience; created dir: sessions; created dir: logs",
+        "  PASS  prune_stale_backup_dirs  - pruned=1, remain=2",
+        "[2026-11-06T14:21:00.154Z] [info] selfheal: 清理旧.bak-* 备份文件 2 个: facts.json.bak-1, facts.json.bak-0",
+        "[2026-11-06T14:21:00.154Z] [info] selfheal: 修复 4 项: created dir: memory/daily; created dir: experience; created dir: sessions; created dir: logs",
+        "  PASS  prune_stale_bak  - pruned=2, remain=2",
+        "[2026-11-06T14:21:00.161Z] [info] selfheal: 修复 5 项: created dir: memory; created dir: memory/daily; created dir: experience; created dir: sessions; created dir: logs",
+        "[2026-11-06T14:21:00.163Z] [info] selfheal: 无异常",
+        "  PASS  clean_run_no_fixes  - fixes=0",
+        "Self-heal score: 7/7 (100.0%)",
+        "All self-heal scenarios passed.",
+        "[utils/store] JSON 解析失败, 返回 fallback (文件保留): C:\\Users\\chen\\AppData\\Local\\Temp\\ppx-shb-2-i35nyj\\data\\memory\\facts.json (Expected property name or '}' in JSON at position 2 (line 1 column 3))"
+      ]
+    },
+    {
+      "key": "audit",
+      "name": "审计链校验 (audit:verify)",
+      "ok": true,
+      "exit": 0,
+      "duration_ms": 62,
+      "metrics": {
+        "integrity": "完整",
+        "signed": "启用"
+      },
+      "tail": [
+        "审计日志: C:\\Users\\chen\\Desktop\\PPXANS-Harness\\data\\logs\\audit.ndjson",
+        "链完整性: 完整 | 条数: 211 | 断裂点: 无 | HMAC: 启用",
+        "详情: 审计链完整 (211 条)"
+      ]
+    }
+  ]
+}

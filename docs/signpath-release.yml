@@ -1,0 +1,124 @@
+# Release + SignPath Foundation 签名样例
+#
+# 这是文档样例，不会自动执行。SignPath Foundation 批准后：
+#   1. 复制为 .github/workflows/release-signpath.yml
+#   2. 配置仓库 Secrets/Variables（见 docs/SIGNING.md 第 3、8 节）
+#   3. 确认 SignPath Artifact Configuration 能匹配 PPXANS-Harness-Setup-*.exe
+#
+# 流程：构建未签名安装包 → 上传 artifact → SignPath 人工批准并签名 →
+#       下载签名产物覆盖原文件 → 重新生成 SHA256SUMS → 强制验签 → 发布。
+name: Release (SignPath)
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read # SignPath Action 需要读取本次运行的 artifact
+
+concurrency:
+  group: release-signpath-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  sign-and-release:
+    name: sign + release (windows x64)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Verify tag matches package.json
+        shell: pwsh
+        run: |
+          $tag = "$env:GITHUB_REF_NAME".TrimStart("v")
+          $ver = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($tag -ne $ver) { throw "tag $tag != package.json version $ver" }
+
+      - run: npm ci
+
+      - name: Release gate
+        run: npm run gate:release
+
+      - name: Build unsigned installer
+        run: npm run desktop:pack
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      - name: Upload unsigned artifact
+        id: upload-unsigned
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-installer-${{ github.run_id }}
+          path: dist-desktop/PPXANS-Harness-Setup-*.exe
+          if-no-files-found: error
+          retention-days: 7
+
+      # 每个版本都需要项目 Approver 在 SignPath 中人工批准；
+      # 这里等待 1 小时，避免批准稍慢就超时。
+      - name: Sign with SignPath Foundation
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          connector-url: https://pipelineconnector.connectors.signpath.io/GitHubActions/GitHubCom
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: ${{ vars.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
+          github-artifact-id: ${{ steps.upload-unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: "3600"
+          output-artifact-directory: dist-desktop/signed
+
+      - name: Install signed installer
+        shell: pwsh
+        run: |
+          $signed = Get-ChildItem dist-desktop/signed -Recurse -Filter "PPXANS-Harness-Setup-*.exe" |
+            Select-Object -First 1
+          if (-not $signed) { throw "SignPath 未返回签名后的安装包，请检查 artifact configuration" }
+          Copy-Item $signed.FullName dist-desktop/ -Force
+          Get-ChildItem dist-desktop/PPXANS-Harness-Setup-*.exe | Format-List Name, Length
+
+      - name: Rebuild checksums and require signature
+        shell: pwsh
+        run: |
+          node scripts/checksums.js dist-desktop
+          node scripts/verify-signature.js --require --out dist-desktop/SIGNATURE-STATUS.txt
+          if ($LASTEXITCODE -ne 0) { throw "签名校验失败，拒绝发布" }
+          "" | Add-Content $env:GITHUB_STEP_SUMMARY
+          "### Authenticode" | Add-Content $env:GITHUB_STEP_SUMMARY
+          "```" | Add-Content $env:GITHUB_STEP_SUMMARY
+          Get-Content dist-desktop/SIGNATURE-STATUS.txt | Add-Content $env:GITHUB_STEP_SUMMARY
+          "```" | Add-Content $env:GITHUB_STEP_SUMMARY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ppxans-harness-windows-x64-signed
+          path: |
+            dist-desktop/PPXANS-Harness-Setup-*.exe
+            dist-desktop/SHA256SUMS.txt
+            dist-desktop/SIGNATURE-STATUS.txt
+            LICENSE
+            NOTICE
+            THIRD-PARTY-NOTICES.md
+            CODE_SIGNING_POLICY.md
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          ASSETS=(dist-desktop/PPXANS-Harness-Setup-*.exe dist-desktop/SHA256SUMS.txt dist-desktop/SIGNATURE-STATUS.txt LICENSE NOTICE THIRD-PARTY-NOTICES.md CODE_SIGNING_POLICY.md)
+          gh release create "$TAG" "${ASSETS[@]}" \
+            --title "皮皮虾 PPXANS-Harness ${TAG}" \
+            --generate-notes \
+            || gh release upload "$TAG" "${ASSETS[@]}" --clobber
