@@ -13,9 +13,9 @@ npm run setup
 非交互式 (CI / 脚本):
 
 ```bash
-node bin/ppx-setup.js --list                          # 列出全部内置厂商
-node bin/ppx-setup.js --provider deepseek --key sk-xxx --model deepseek-chat
-node bin/ppx-setup.js --provider lmstudio             # 本地厂商免 Key, 自动探活
+node bin/ppx.js setup --list                          # 列出全部内置厂商
+node bin/ppx.js setup --provider deepseek --key sk-xxx --model deepseek-chat
+node bin/ppx.js setup --provider lmstudio             # 本地厂商免 Key, 自动探活
 ```
 
 ### 可选: 分层路由 (辅助任务走便宜模型)
@@ -23,8 +23,8 @@ node bin/ppx-setup.js --provider lmstudio             # 本地厂商免 Key, 自
 记忆提取/摘要/压缩等辅助调用默认跟随主模型。想省成本, 可指定一个便宜厂商专门跑辅助任务:
 
 ```bash
-node bin/ppx-setup.js --aux deepseek     # 辅助任务走 deepseek (需已配置该厂商 Key)
-node bin/ppx-setup.js --aux off          # 取消, 恢复全走主模型
+node bin/ppx.js setup --aux deepseek     # 辅助任务走 deepseek (需已配置该厂商 Key)
+node bin/ppx.js setup --aux off          # 取消, 恢复全走主模型
 ```
 
 - **不配置 = 全走主模型**, 零配置零门槛; 配置了但厂商不可用 (无 Key/探活失败) 也自动回落主模型。
@@ -49,28 +49,40 @@ Agent 可直接调用 `tts` 工具朗读文本:
 
 ### 云端 (需 API Key)
 
-| 厂商 | 预设 id | base_url (内置) | 环境变量 | 默认模型 |
-|---|---|---|---|---|
-| DeepSeek 深度求索 | `deepseek` | https://api.deepseek.com/v1 | `DEEPSEEK_API_KEY` | deepseek-chat |
-| 智谱 GLM | `zhipu` | https://open.bigmodel.cn/api/paas/v4 | `ZHIPU_API_KEY` | glm-4.7 |
-| 阿里通义千问 | `dashscope` | https://dashscope.aliyuncs.com/compatible-mode/v1 | `DASHSCOPE_API_KEY` | qwen-max |
-| 月之暗面 Kimi | `moonshot` | https://api.moonshot.cn/v1 | `MOONSHOT_API_KEY` | kimi-k2-0711-preview |
-| OpenAI | `openai` | https://api.openai.com/v1 | `OPENAI_API_KEY` | gpt-4o-mini |
-| Anthropic | `anthropic` | https://api.anthropic.com/v1 (OpenAI 兼容层) | `ANTHROPIC_API_KEY` | claude-sonnet-4-5 |
-| Google Gemini | `gemini` | https://generativelanguage.googleapis.com/v1beta/openai/ | `GEMINI_API_KEY` | gemini-2.5-flash |
-| OpenRouter 聚合 | `openrouter` | https://openrouter.ai/api/v1 | `OPENROUTER_API_KEY` | 自选 |
-| Groq | `groq` | https://api.groq.com/openai/v1 | `GROQ_API_KEY` | llama-3.3-70b |
-| 硅基流动 | `siliconflow` | https://api.siliconflow.cn/v1 | `SILICONFLOW_API_KEY` | Qwen/Qwen3-32B |
+| 厂商 | 预设 id | base_url (内置) | 协议 | 环境变量 | 默认模型 |
+|---|---|---|---|---|---|
+| DeepSeek 深度求索 | `deepseek` | https://api.deepseek.com/v1 | openai-completions | `DEEPSEEK_API_KEY` | deepseek-chat |
+| 智谱 GLM | `zhipu` | https://open.bigmodel.cn/api/paas/v4 | openai-completions | `ZHIPU_API_KEY` | glm-4.7 |
+| 阿里通义千问 | `dashscope` | https://dashscope.aliyuncs.com/compatible-mode/v1 | openai-completions | `DASHSCOPE_API_KEY` | qwen-max |
+| 月之暗面 Kimi | `moonshot` | https://api.moonshot.cn/v1 | openai-completions | `MOONSHOT_API_KEY` | kimi-k2-0711-preview |
+| OpenAI | `openai` | https://api.openai.com/v1 | openai-completions | `OPENAI_API_KEY` | gpt-4o-mini |
+| Anthropic | `anthropic` | https://api.anthropic.com/v1 | **anthropic-messages** (原生) | `ANTHROPIC_API_KEY` | claude-sonnet-4-5 |
+| Google Gemini | `gemini` | https://generativelanguage.googleapis.com/v1beta/openai/ | openai-completions | `GEMINI_API_KEY` | gemini-2.5-flash |
+| OpenRouter 聚合 | `openrouter` | https://openrouter.ai/api/v1 | openai-completions | `OPENROUTER_API_KEY` | 自选 |
+| Groq | `groq` | https://api.groq.com/openai/v1 | openai-completions | `GROQ_API_KEY` | llama-3.3-70b |
+| 硅基流动 | `siliconflow` | https://api.siliconflow.cn/v1 | openai-completions | `SILICONFLOW_API_KEY` | Qwen/Qwen3-32B |
 
-### 本地 (免 Key, 自动探活)
+### 本地 (免 Key, 自动探活 + 自动发现)
 
 | 厂商 | 预设 id | base_url (内置) |
 |---|---|---|
 | LM Studio | `lmstudio` | http://127.0.0.1:1234/v1 |
 | Ollama | `ollama` | http://127.0.0.1:11434/v1 |
 
-全部厂商均走 **OpenAI 兼容协议** (chat/completions), 由自研 `LLMClient` 直连, 无 SDK 依赖。
+**本机自动发现** (2026-11-14): 交互向导输 `0`, 或 Web「设置 → 模型 → 一键接入本机模型」——
+自动扫描 6 个回环端口 (LM Studio 1234 / Ollama 11434 / vLLM 8000 / llama.cpp 8080 / Jan 1337 /
+textgen 5000), 列出每个服务的已加载模型与上下文窗口, 选中即写入配置。
+
+协议由自研 `LLMClient` + 三协议适配器直连 (**openai-completions / openai-responses /
+anthropic-messages 原生 Messages**, 不依赖 OpenAI 兼容层), 无 SDK 依赖。
 多厂商可并存, `config/ppx.json` 的 `providers` **数组首位 = 默认厂商**, 探活失败自动回退下一个。
+
+### Key 的三种给法 (安全口径)
+
+- `api_key_env: "DEEPSEEK_API_KEY"` — **推荐**: key 只在环境变量里, 不落盘
+- `api_key_cmd: "op read ..."` — 命令取 key (密码管理器场景), 5s 超时, 失败视为未配置
+- `api_key: "sk-..."` — 明文内联可用 (setup 向导写入), doctor 会提示改用前两种
+- Web 端在「设置 → 模型」粘贴 key; `sanitizeProvider` 保证任何 API/日志都**不回显明文**
 
 ## 三、接口统一使用 MCP 协议
 
@@ -95,9 +107,23 @@ PPXANS 对外集成面统一收敛到 **MCP (Model Context Protocol)**:
 > 前提: `npm start` 或 `npm run setup` 探活通过后保持服务运行。
 > 其余 MCP 客户端同理 — 任何支持 MCP 的宿主 (Claude Code / Cursor / Cline / ...) 配置这一个 URL 即可。
 
-## 四、探活失败排查
+## 四、体检与探活失败排查
+
+**一条命令出全部答案** (2026-11-14 起 doctor 会读 `data/llm/needs-action.json` —— 坏 Key/欠费
+等需要用户处理的通道故障直接点名; 修好后成功调用一次自动清除):
+
+```bash
+node bin/ppx.js doctor          # 离线体检: 配置/密钥三通道/权限/数据目录/技能
+node bin/ppx.js doctor --net    # 加联网: 对每个就绪 provider 做协议正确的 /models 探活
+```
+
+Web 端等价物: 状态条会实时上浮模型通道故障 (「设置 → 模型」里的「测试」按钮可当场复测)。
+
+探活失败排查清单:
 
 1. Key 是否复制完整 / 是否已开通对应模型权限
 2. 模型名是否正确 (部分厂商要求填**部署/接入点 ID** 而不是模型名, 按其控制台给出的标识填)
-3. 本地厂商: LM Studio / Ollama 服务是否已启动
-4. 手动复测: `node bin/ppx-setup.js --provider <id> --key <key>` 会再次探活
+3. 本地厂商: LM Studio / Ollama 服务是否已启动 (或直接用向导输 `0` 自动发现)
+4. 手动复测: `node bin/ppx.js setup --provider <id> --key <key>` 会再次探活;
+   「设置 → 模型」每张 provider 卡也有「测试」按钮 (与 CLI 探活同一函数)
+5. 401/欠费/404 类故障会持久记在 `data/llm/needs-action.json` 并在 doctor 与状态条点名

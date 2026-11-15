@@ -6,6 +6,7 @@
 //   - registerMigration(name, from, to, fn) 注册迁移链, 不允许跳级, 不允许覆盖
 //   - migrateData() 读当前版本 -> 沿迁移链推进 -> 原子写回数据 + 更新 .schema 文件
 //   - 崩溃安全: 迁移在原子写回后版本才推进, 中断重跑幂等
+import fs from "node:fs";
 import path from "node:path";
 import { atomicWrite, ensureDir, readJson } from "./store.js";
 
@@ -40,11 +41,18 @@ export function readSchema(file) {
   return meta.version;
 }
 
+// 已确认落盘的 (name, version) 记忆: writeSchema 在每次 save 后都会被调用, 而版本号在一个
+// 进程生命周期内几乎不变 —— 无条件重写等于每写一次数据就多付一次原子写 (临时文件 + rename +
+// mkdir)。版本未变且文件仍在时跳过; 文件被外部删掉则 existsSync 兜住, 重新落盘。
+const WRITTEN = new Map();
+
 // 写版本 (原子)
 export function writeSchema(file, name, version) {
   const p = schemaFileOf(file);
+  if (WRITTEN.get(p) === `${name}:${version}` && fs.existsSync(p)) return;
   ensureDir(path.dirname(p));
   atomicWrite(p, JSON.stringify({ name, version, updatedAt: new Date().toISOString() }, null, 2));
+  WRITTEN.set(p, `${name}:${version}`);
 }
 
 // 把数据文件迁移到 currentVersion: 沿注册链逐级推进, 无迁移函数则安全跳过 (版本直接标记到目标, 数据不动)。

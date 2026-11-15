@@ -9,7 +9,7 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { githubMirrorUrls } from "../utils/http-proxy.js";
+import { githubMirrorUrls } from "../security/http-proxy.js";
 
 const OUT_CAP = 4000;
 const MSG_CAP = 500;

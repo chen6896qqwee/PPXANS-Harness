@@ -13,6 +13,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import { noteCatch } from "../utils/catch-log.js";
 import { ensureDir, atomicWrite, readText } from "../utils/store.js";
 
 // 内置本体类型。用户可再建自定义类型, 自定义的追加在后, 不覆盖内置。
@@ -24,7 +25,7 @@ export const BUILTIN_TYPES = [
 ];
 
 // 自主模式: read 只读观察 / review 可动手但每步审查 / full 完全权限
-export const AUTONOMY_MODES = ["read", "review", "full"];
+const AUTONOMY_MODES = ["read", "review", "full"];
 
 const DEFAULTS = {
   version: 1,
@@ -204,10 +205,15 @@ export class BotStore {
     return this.normalize(this.readRaw(), { name, root });
   }
 
-  // 读 + 落盘 (补全缺失字段)。首次启动会把默认档案写出来, 之后人是可编辑的。
+  // 读 + 按需落盘 (补全缺失字段)。首次启动把默认档案写出来; 之后人是可编辑的。
+  // 档案没变时不再重写: 面板每 5 秒轮询 /api/bot.state 都会走到这里, 无条件 atomicWrite
+  // (tmp + rename) 等于每 5 秒造一次磁盘写。只有缺文件或规范化和磁盘内容不一致才写。
   ensure({ name, root } = {}) {
-    const prof = this.load({ name, root });
-    try { this.writeRaw(prof); } catch { /* 只读文件系统下不阻塞启动 */ }
+    const raw = this.readRaw();
+    const prof = this.normalize(raw, { name, root });
+    if (!raw || JSON.stringify(raw) !== JSON.stringify(prof)) {
+      try { this.writeRaw(prof); } catch { /* 只读文件系统下不阻塞启动 */ }
+    }
     return prof;
   }
 
@@ -337,7 +343,7 @@ export class BotStore {
     for (const old of AVATAR_EXT) {
       if (old === e) continue;
       const p = path.join(this.dir, `avatar-${id}${old}`);
-      try { if (fs.existsSync(p)) fs.unlinkSync(p); } catch { /* 删不掉不影响新图 */ }
+      try { if (fs.existsSync(p)) fs.unlinkSync(p); } catch (e) { noteCatch(e); /* 删不掉不影响新图 */ }
     }
     const p = path.join(this.dir, `avatar-${id}${e}`);
     fs.writeFileSync(p, buf);

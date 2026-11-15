@@ -23,6 +23,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { walkJs } from "./lib/walk-js.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SRC = path.join(ROOT, "src");
@@ -34,42 +35,51 @@ const GRAPH = argv.includes("--graph");
 // ---- 分层: 数值越小越底层。低层不得 import 高层 ----
 // 注: mcp 标 L3 —— 它是"把已注册工具暴露成标准协议"的层, 天然在 tools 之上
 //   (src/mcp/server.js 直接消费 ToolCatalog), 这是事实而不是缺陷。
-// 注: plugin 标 L4 —— 它是装配器 (builtin.js 几乎 import 全世界的模块)。但 plugin/index.js
-//   同时又是 DI 容器 (Context/compose/loadPlugins), 只依赖 utils, 语义上属 L0。
-//   同一个目录里装了两层东西, 这是真实的历史债: 拆开要把容器下沉到 core, 属独立重构窗口。
+// 注: plugin 标 L0 (2026-11-08 归位) —— 此前该目录同时装着 DI 容器 (index.js/context.js,
+//   只依赖 utils) 与装配器 (builtin.js/v3.js, 依赖几乎全部模块, 标 L4), 同目录混两层,
+//   全仓唯一的 agent→plugin 越层基线因此存在。装配器已搬去 src/agent/plugins/ (随 agent 层),
+//   容器留在这里降为纯 L0, 基线清零。
 const LAYERS = {
-  utils: 0, protocol: 0, seam: 0,
+  utils: 0, protocol: 0, seam: 0, plugin: 0,
+  // boot 标 L0 (2026-11-12 登记): 控制台 UTF-8 / 启动横幅 / 全局异常兜底是入口外壳,
+  //   只依赖 utils; 从 utils 迁出后内核不必再为"启动时的一次性代码"付预算。
+  boot: 0,
   core: 1, config: 1, llm: 1, bus: 1,
   memory: 2, permissions: 2, audit: 2, evidence: 2, evolve: 2,
   ans: 2, session: 2, skills: 2, security: 2, edit: 2,
-  review: 2, repomap: 2, selfheal: 2, wiki: 2, hooks: 2, commands: 2, persona: 2,
+  // verify 标 L2 (2026-11-12 登记): 回合后置条件闸门/声称核对/路径证据是"验证域",
+  //   为 tools(L3) 与 selfcode(L2) 共用; 从 core(L1) 迁出后内核只留跨层原语,
+  //   同时避免 tools → core 的领域级反向依赖。
+  verify: 2,
+  // 2026-11-12 碎片收敛: persona→memory / wiki→repomap / review→verify / commands→agent /
+  //   selfheal→evolve / mode→agent/modes / planning→session / update→services / desktop→services,
+  //   这些顶层名不再存在, 分层表随目录一并删除。
+  repomap: 2, hooks: 2,
+  // workgraph 标 L2 (2026-11-02 登记): 工单账本只依赖 node 内置模块, 由 channels(L3)/agent(L3)
+  //   注入调用; 自身不认识 legion/delivery, 避免 账本 ↔ 编排/通道 的双向依赖。
+  workgraph: 2,
+  // flow 标 L2 (2026-11-02 登记): 原生入站流 (Trigger/两级准入/决策内核) 只依赖 utils 与
+  //   workgraph 的只读状态, 是传输层 (channels L3) 与执行层 (agent L3) 共同的下游语义;
+  //   它不认识 HTTP/飞书/微信, 也不发送消息。
+  flow: 2,
   // channels 标 L3: 它既提供 HTTP/WebSocket 接入, 也承载 MCP over HTTP (依赖 mcp), 是与
   //   mcp 同层的"对外接入层", 不是被工具层调用的内部设施。
   // web 标 L3 (2026-10-31 登记): 本体形态 Web API (bot-api/plugin-api/usage-stats), 与 channels
   //   同为对外接入层; 目前只依赖 utils, 提前登记防止未来盲区 (新模块先登记再谈约束)。
-  tools: 3, orchestrator: 3, services: 3, agent: 3, mode: 3, mcp: 3, channels: 3, web: 3,
-  plugin: 4,
+  tools: 3, orchestrator: 3, services: 3, agent: 3, mcp: 3, channels: 3, web: 3,
 };
 
 // ---- 存量越层基线 (冻结, 只许减少不许增加) ----
 // 每条都写清"为什么现在存在"与"清掉它需要什么", 免得变成没人敢动的死表。
+// 2026-11-08 清零: 曾有唯一一条 agent→plugin (plugin/ 混装容器+装配器所致);
+//   装配器搬去 src/agent/plugins/ 后该越层不再存在。
 const ARCH_BASELINE = [
   // { from, to, why }
-  {
-    from: "agent", to: "plugin",
-    why: "plugin/ 目录里同时装着 DI 容器 (index.js, 只依赖 utils, 应属 L0) 与装配器 (builtin.js/v3.js, 依赖几乎全部模块, 属 L4)。agent 用的是容器那半边, 但目录粒度分不开。清掉它要把 Context/compose/loadPlugins 下沉到 src/core/, 属独立重构窗口。",
-  },
 ];
 
 function listJs(dir) {
   const out = [];
-  (function walk(d) {
-    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
-      const fp = path.join(d, e.name);
-      if (e.isDirectory()) walk(fp);
-      else if (e.name.endsWith(".js")) out.push(fp);
-    }
-  })(dir);
+  walkJs(dir, (fp) => out.push(fp));
   return out;
 }
 
@@ -187,21 +197,39 @@ if (CHECK && fresh.length) { console.error(`\n  ✗ 新增 ${fresh.length} 条�
 // 2026-10-31 上调 src/utils 1400 → 1750: 实测 1707。本次是**搬移不是增长** —— 收编
 //   orchestrator/session-key.js (94 行纯函数, 零依赖) 以消除 ans(L2)→orchestrator(L3) 的
 //   新增越层依赖; 全仓总行数不变, 会话键属通用基础设施, utils 是其自然归属。
+// 2026-11-02 上调 src/plugin 650 → 880: 实测 795。增长全部来自插件信任边界加固 ——
+//   capabilities 白名单/清单形状校验/realpath 越界检查/未知能力 fail-closed 与管理 API 同源校验。
+//   这是安全代码而非业务逻辑; 能力契约本体已下沉到 protocol(L0), 避免 web(L3)→plugin(L4) 越层。
+// 2026-11-03 显式上调 src/core 1300 → 1500 (实测 1462)、src/config 950 → 1050 (实测 1010)。
+//   这是"老实调预算"而不是拆解, 理由: 两处超限都是内核职责内的安全/治理代码 ——
+//   core 被工具循环治理 (policy 676 行: 探索熔断/重复检测/溢出降档/错误重试/结果裁剪)
+//   与后置条件校验 (postcondition 607 行) 占满; config 被 provider/通道/设置校验占满。
+//   目录内再拆不减少总量, 拆出目录又会破坏分层归属 (core 是 L1, 不能再往 L0 塞业务)。
+//   上调后 core 97% / config 96%, 再涨须重新决策。
+// 2026-11-03 上调 src/utils 1750 → 1850 (实测 1800): 关键路径 catch 留痕的读取端 ——
+//   catch-log 增加调用点定位/溢出计数/聚合统计, 让"只写不读"的留痕真正能被 shutdown 与
+//   /health 看见。这是观测基础设施, 不是业务逻辑; 目录内再拆不减总量。
+// 2026-11-05 显式上调 src/config 1050 → 1400 (实测 1339): DSH 吸收 Step 5a 新增
+//   ans_lane.v1 配置归一化 (src/config/ans-lane.js, 288 行) —— 24 个叶子键的版本/来源/
+//   mode↔create_ticket/数值夹取/目标净化/安全不变量, 全部是启动期安全治理, 属 config 内核职责。
+//   不能移到 src/ans (L2): config 是 L1, 反向依赖会破分层; 目录内再拆也不减总量。
+//   上调后 96%, 再涨须重新决策。
+// 2026-11-08 下调 src/plugin 880 → 400 (实测 264): L4 装配器 (builtin.js 427 + v3.js 93)
+//   搬去 src/agent/plugins/, plugin/ 只剩纯 L0 容器 (context.js 93 + index.js 171)。
+//   这是搬移不是增长, 预算回落并留出容器演进的缓冲。
 const KERNEL_BUDGET = {
-  "src/core": 1300,
-  "src/plugin": 650,
-  "src/utils": 1750,
-  "src/config": 950,
+  // 2026-11-12 重新标定 (内核减重后按"当前实际 + 适度余量"收紧, 防止删掉的重量悄悄长回来):
+  //   core 1552→178 行 (验证域迁 verify/, 工具循环迁 agent/loop/), 预算 1500→400;
+  //   utils 2113→1529 行 (出站网络迁 security/, 启动外壳迁 boot/), 预算 1850→1650;
+  //   plugin 未变, 预算 400→320 (当前 266 行)。
+  "src/core": 400,
+  "src/plugin": 320,
+  "src/utils": 1650,
+  "src/config": 1400,
 };
 function dirLines(dir) {
   let n = 0;
-  (function walk(d) {
-    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
-      const p = path.join(d, e.name);
-      if (e.isDirectory()) walk(p);
-      else if (p.endsWith(".js")) n += fs.readFileSync(p, "utf8").split("\n").length;
-    }
-  })(dir);
+  walkJs(dir, (p) => { n += fs.readFileSync(p, "utf8").split("\n").length; });
   return n;
 }
 console.log("\n  --- 内核行数预算 (轻内核缺口 1) ---");

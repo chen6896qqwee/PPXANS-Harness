@@ -6,7 +6,7 @@
 import { warn } from "../utils/logger.js";
 
 // 高置信注入模式 (中英双语): 命中即 suspicious
-export const INJECTION_PATTERNS = [
+const INJECTION_PATTERNS = [
   { id: "override-en", re: /ignore\s+(all\s+)?(previous|prior|above)\s+(instructions|prompts?|rules?)/i, label: "指令覆盖" },
   // 中文语序灵活: 动词与宾语之间允许 ≤12 字修饰 (之前所有/你收到的全部/上面那些...)
   { id: "override-zh", re: /(忽略|无视|忘记| disregard)[^。\n]{0,12}(指令|提示词|规则|设定)/i, label: "指令覆盖" },

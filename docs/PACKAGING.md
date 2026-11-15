@@ -78,7 +78,11 @@ npm run desktop:pack:linux    # 在 Linux 上执行 (CI 覆盖) → dist-desktop
 - 本地在 Windows 上 *不能* 构建 macOS 包；日常发版交给 `.github/workflows/release.yml`
   （`windows-latest` / `macos-latest` / `ubuntu-latest` 三平台矩阵，最后汇总一份 `SHA256SUMS.txt`）。
 
-## 独立安装包（可选）
+## 独立安装包（旧版 Web 形态，保留仅供开发）
+
+> 该路径生成的是**浏览器版**便携包（启动器 `ppx-web.cmd` 会用本机浏览器打开界面），
+> 不是桌面客户端。对外分发请使用上面的 `npm run desktop:pack`；本节仅在需要无 Electron 的
+> 轻量包时使用。
 
 ```bash
 node scripts/package.js              # 便携版 zip + 单文件 Setup.cmd

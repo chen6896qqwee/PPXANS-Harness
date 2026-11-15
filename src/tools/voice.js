@@ -1,6 +1,8 @@
-// src/tools/voice.js - 语音 TTS 工具 (2026-10-03, 开箱即用)
-// 平台策略: Windows = SAPI (系统内置, 免安装) / macOS = say / Linux = espeak (需装)。
-// 诚实边界: 合成出声依赖本机 TTS 引擎; ASR (语音转文字) 需云厂商 Key, 不在本工具开箱范围。
+// src/tools/voice.js - 语音工具 (TTS + ASR)
+// TTS 平台策略: Windows = SAPI (系统内置, 免安装) / macOS = say / Linux = espeak (需装)。
+// ASR 双路 (2026-11-14 补全本地兜底): 云端走 OpenAI 兼容 /audio/transcriptions;
+//   本地 backend=local + bin 走外部 whisper 二进制 (openai-whisper CLI / whisper.cpp),
+//   零依赖内核不内置二进制 —— 缺失时诚实报错并给配置指引, 不编结果。
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import os from "node:os";
@@ -70,11 +72,11 @@ export function registerVoiceTools(catalog) {
   });
 
   // voice_transcribe (ASR): 语音转文字。云端走 OpenAI 兼容 /audio/transcriptions,
-  // 本地 (backend=local) 需外部 whisper 二进制, 零依赖内核不内置 → 诚实提示。
+  // 本地 backend=local + bin 走外部 whisper 二进制 (openai-whisper / whisper.cpp)。
   catalog.register({
     name: "voice_transcribe",
     capability: { readOnly: true, riskLevel: "low", sideEffect: "none" },
-    description: "语音转文字 (ASR): 把音频文件转成文本。需 config.voice.asr 配云端 (base_url + api_key, OpenAI 兼容 /audio/transcriptions 端点); 本地 backend=local 需外部 whisper。",
+    description: "语音转文字 (ASR): 把音频文件转成文本。云端: config.voice.asr 配 base_url + api_key (OpenAI 兼容端点); 本地: backend=local + bin 指向外部 whisper 二进制 (openai-whisper / whisper.cpp)。可选 voice.asr_fallback 兜底块: 主路失败自动切换。",
     parameters: {
       type: "object",
       properties: {
@@ -89,19 +91,13 @@ export function registerVoiceTools(catalog) {
       if (!p) return JSON.stringify({ error: "voice_transcribe: 需要 path" });
       const abs = path.isAbsolute(p) ? p : path.resolve(process.cwd(), p);
       if (!fs.existsSync(abs)) return JSON.stringify({ error: `音频文件不存在: ${p}` });
-      const cloud = resolveVoice(cfg, "asr");
-      if (cloud) {
-        try {
-          const text = await cloudTranscribe(cloud, abs, args.language);
-          return JSON.stringify({ ok: true, text, engine: "cloud" });
-        } catch (e) {
-          return JSON.stringify({ error: `云端 ASR 转写失败: ${e.message}` });
-        }
+      try {
+        const r = await transcribeAudio(cfg, abs, args.language);
+        info(`[voice_transcribe] engine=${r.engine} chars=${String(r.text || "").length}`);
+        return JSON.stringify(r);
+      } catch (e) {
+        return JSON.stringify({ error: `ASR 转写失败: ${e.message}` });
       }
-      if (resolveLocalAsr(cfg)) {
-        return JSON.stringify({ error: "本地 ASR (backend=local) 需外部 whisper 二进制, 零依赖内核未内置。请改配云端 ASR, 或手动调用 whisper 转写。" });
-      }
-      return JSON.stringify({ error: "ASR 未配置: 需在 config.voice.asr 设 base_url + api_key (云端 OpenAI 兼容端点), 或 backend=local (需外部 whisper)。" });
     },
   });
 }
@@ -131,6 +127,93 @@ export async function cloudTranscribe(cfg, absPath, language) {
   return typeof j.text === "string" ? j.text : JSON.stringify(j);
 }
 
+// ---- 本地 ASR (2026-11-14): 外部 whisper 二进制兜底 ----
+
+// 本地 ASR 命令构建 (纯函数, 导出供测试)。两种 flavor:
+//   "cli" (默认): openai-whisper CLI —— whisper <audio> --model <m> --output_format txt --output_dir <dir> [--language <l>]
+//   "whispercpp": whisper.cpp 的 whisper-cli —— --model <m> [--language <l>] --output-txt --output-dir <dir> <audio>
+// 模型解析: model_path (本地模型文件) 优先, 否则 model 名 (openai-whisper 接受模型名或 .pt 路径)。
+export function buildWhisperArgs(flavor, { bin, audioPath, modelPath, model, language, outDir } = {}) {
+  const m = String(modelPath || model || "small");
+  if (String(flavor || "").toLowerCase() === "whispercpp") {
+    const args = ["--model", m];
+    if (language) args.push("--language", String(language));
+    args.push("--output-txt", "--output-dir", String(outDir), String(audioPath));
+    return { cmd: String(bin), args };
+  }
+  const args = [String(audioPath), "--model", m, "--output_format", "txt", "--output_dir", String(outDir)];
+  if (language) args.push("--language", String(language));
+  return { cmd: String(bin), args };
+}
+
+// 本地转写: 跑外部 whisper 二进制, 读回输出的 .txt。
+// _execFile 依赖注入 (测试用假二进制; 生产为默认 promisify(execFile)), 沿 shell.js 同款惯例。
+export async function localTranscribe(cfg, absPath, language, { _execFile = pExecFile } = {}) {
+  if (!cfg || !cfg.bin) {
+    throw new Error("本地 ASR 需要 voice.asr.bin (whisper 可执行文件路径)。安装 openai-whisper (pip install openai-whisper) 后设 bin 为 whisper, 或配 whisper.cpp 的 whisper-cli。");
+  }
+  const flavor = cfg.flavor === "whispercpp" ? "whispercpp" : "cli";
+  const modelPath = cfg.modelPath || cfg.model_path || "";
+  if (flavor === "whispercpp" && !modelPath) {
+    throw new Error("whispercpp flavor 需要 voice.asr.model_path (ggml 模型文件路径)");
+  }
+  const outDir = fs.mkdtempSync(path.join(os.tmpdir(), "ppx-asr-"));
+  try {
+    const { cmd, args } = buildWhisperArgs(flavor, {
+      bin: cfg.bin,
+      audioPath: absPath,
+      modelPath,
+      model: cfg.model,
+      language: language || cfg.defaultLanguage || cfg.default_language,
+      outDir,
+    });
+    await _execFile(cmd, args, { timeout: cfg.timeoutMs || 120000, maxBuffer: 4 * 1024 * 1024, windowsHide: true });
+    const txt = path.join(outDir, path.basename(absPath).replace(/\.[^.]+$/, "") + ".txt");
+    if (!fs.existsSync(txt)) {
+      throw new Error(`whisper 未产出转写文本 (期望 ${txt}); 检查 voice.asr.flavor 与二进制是否匹配 (openai-whisper=cli / whisper.cpp=whispercpp)`);
+    }
+    return fs.readFileSync(txt, "utf8").trim();
+  } catch (e) {
+    if (e && (e.code === "ENOENT" || /ENOENT/.test(String(e.message)))) {
+      throw new Error(`本地 ASR 二进制未找到 (${cfg.bin})。安装 openai-whisper (pip install openai-whisper) 或 whisper.cpp, 并把可执行文件路径配到 voice.asr.bin`);
+    }
+    throw e;
+  } finally {
+    try { fs.rmSync(outDir, { recursive: true, force: true }); } catch { /* 临时目录清理失败不阻断 */ }
+  }
+}
+
+// 统一转写入口 (工具与 HTTP 端点共用, 防两处实现漂移):
+//   主路: voice.asr 云端或本地 (单块内互斥, backend 标定);
+//   兜底块: voice.asr_fallback (与 asr 同构, 可选) —— 主路失败时才走, engine 注明 "(fallback)"。
+//   都没配 → 指引错误, 不编结果。
+export async function transcribeAudio(config, absPath, language, di = {}) {
+  const pick = (block) => {
+    const cloud = resolveVoice(config, block);
+    if (cloud) return { kind: "cloud", cfg: cloud };
+    const local = resolveLocalAsr(config, block);
+    if (local) return { kind: "local", cfg: local };
+    return null;
+  };
+  const run = async (route) => route.kind === "cloud"
+    ? { text: await cloudTranscribe(route.cfg, absPath, language), engine: "cloud" }
+    : { text: await localTranscribe(route.cfg, absPath, language, di), engine: "local" };
+  const primary = pick("asr");
+  if (primary) {
+    try {
+      return { ok: true, ...(await run(primary)) };
+    } catch (e) {
+      const fb = pick("asr_fallback");
+      if (!fb) throw e;
+      const r = await run(fb);
+      return { ok: true, ...r, engine: `${r.engine} (fallback)`, primaryError: e.message };
+    }
+  }
+  const fb = pick("asr_fallback");
+  if (fb) return { ok: true, ...(await run(fb)) };
+  throw new Error("ASR 未配置: 需在 config.voice.asr 设 base_url + api_key (云端 OpenAI 兼容端点), 或 backend=local + bin (外部 whisper 二进制)");
+}
+
 /* ======================= 语音服务配置解析 (v3.1) ======================= */
 // 两条路: 云端 (base_url + api_key) 与本地 (backend=local)。两条路的判定必须互斥 ——
 // backend=local 时一律不走云端解析, 反过来没配 backend 但给了云地址的也不算本地。
@@ -152,18 +235,25 @@ export function resolveVoice(config = {}, kind = "asr") {
 
 /**
  * 解析本地 ASR 配置 (backend=local 时生效)。
+ * bin: whisper 可执行文件 (必填; openai-whisper 的 whisper / whisper.cpp 的 whisper-cli);
+ * flavor: "cli" (openai-whisper, 默认) | "whispercpp" (whisper.cpp, 需 model_path);
+ * timeout_ms: 转写超时 (默认 120000)。
+ * @param {string} kind 配置块名 (默认 "asr"; 兜底块传 "asr_fallback")
  * @returns {object|null} 非本地后端 → null
  */
-export function resolveLocalAsr(config = {}) {
-  const c = config && config.voice && config.voice.asr;
+export function resolveLocalAsr(config = {}, kind = "asr") {
+  const c = config && config.voice && config.voice[kind];
   if (!c || typeof c !== "object") return null;
   if (String(c.backend || "").toLowerCase() !== "local") return null;
   const out = {
     backend: "local",
     model: String(c.model || "small"),
     defaultLanguage: String(c.language || c.default_language || ""),
+    flavor: String(c.flavor || "cli").toLowerCase() === "whispercpp" ? "whispercpp" : "cli",
+    timeoutMs: Number(c.timeout_ms) || 120000,
   };
   if (c.model_path || c.modelPath) out.modelPath = String(c.model_path || c.modelPath);
+  if (c.bin || c.binary) out.bin = String(c.bin || c.binary);
   return out;
 }
 

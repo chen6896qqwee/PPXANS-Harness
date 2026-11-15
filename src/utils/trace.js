@@ -4,7 +4,7 @@
 // v1.0.8: args/result 落盘前 PII 脱敏 (凭证不写日志); read(day) 支持按指定日期读取
 // P0 (2026-09-15): 事件源不变量 (model-visible = logged) ——
 //   turn/step 边界事件落同一 JSONL + verifyReplay() 重放校验 (配对完整性/顺序性)。
-//   对齐 dsh "会话日志是模型可见内容的唯一事实源" 思想, 用皮皮虾自有结构增量实现。
+//   对齐设计溯源 docs/PROVENANCE.md#dsh "会话日志是模型可见内容的唯一事实源" 思想, 用皮皮虾自有结构增量实现。
 import fs from "node:fs";
 import path from "node:path";
 import { logsDir, logicalDay } from "./store.js";
@@ -32,8 +32,8 @@ export class Traces {
   _file(day = logicalDay()) { return path.join(this.dir, `${day}.jsonl`); }
 
   // 记录一次工具调用轨迹
-  record({ tool, args, result, ok, durationMs, error }) {
-    const entry = this._entry({ evt: EVT.TOOL, tool, args, result, ok, durationMs, error });
+  record({ tool, args, result, ok, durationMs, error, flags }) {
+    const entry = this._entry({ evt: EVT.TOOL, tool, args, result, ok, durationMs, error, flags });
     fs.appendFileSync(this._file(), JSON.stringify(entry) + "\n", "utf8");
     return entry;
   }
@@ -65,7 +65,7 @@ export class Traces {
     return { ts: new Date().toISOString(), sessionId: this.sessionId, seq: this.count };
   }
 
-  _entry({ evt, tool, args, result, ok, durationMs, error }) {
+  _entry({ evt, tool, args, result, ok, durationMs, error, flags }) {
     const safeArgs = scrubPII(JSON.stringify(args ?? {})).cleaned;
     const safeResult = scrubPII(String(result ?? "")).cleaned;
     return {
@@ -77,6 +77,7 @@ export class Traces {
       ok: !!ok,
       durationMs: Math.round(durationMs || 0),
       error: error || null,
+      ...(Array.isArray(flags) && flags.length ? { flags } : {}),
     };
   }
 
@@ -128,26 +129,34 @@ export class Traces {
       .map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
   }
 
-  // 统计: 失败率/平均耗时/慢工具
+  // 统计: 失败率/平均耗时/慢工具。**只统计工具调用** —— P0 起同一份 JSONL 还混有
+  //   turn/step 边界事件, 它们没有 ok/durationMs; 旧实现把它们算成失败调用, 面板会凭空
+  //   多出失败率和一条 tool=undefined 的慢工具。turns = 当天的 turn/start 条数
+  //   (没有边界事件的老文件给 null: 面板显示"未知", 不报一个假的 0)。
   stats(day) {
     const all = this.read(day, 10000);
-    if (!all.length) return { count: 0, failed: 0, failRate: "0%", slowTools: [] };
-    const failed = all.filter((t) => !t.ok);
+    const tools = all.filter((t) => !t.evt || t.evt === EVT.TOOL);
+    const hasTurnEvents = all.some((t) => t.evt === EVT.TURN_START || t.evt === EVT.TURN_END);
+    const turns = hasTurnEvents ? all.filter((t) => t.evt === EVT.TURN_START).length : null;
+    if (!tools.length) return { count: 0, failed: 0, failRate: "0%", slowTools: [], turns };
+    const failed = tools.filter((t) => !t.ok);
     const byTool = {};
-    for (const t of all) {
-      (byTool[t.tool] = byTool[t.tool] || { calls: 0, fails: 0, totalMs: 0 });
-      byTool[t.tool].calls++;
-      if (!t.ok) byTool[t.tool].fails++;
-      byTool[t.tool].totalMs += t.durationMs;
+    for (const t of tools) {
+      const name = t.tool || "(unknown)";
+      (byTool[name] = byTool[name] || { calls: 0, fails: 0, totalMs: 0 });
+      byTool[name].calls++;
+      if (!t.ok) byTool[name].fails++;
+      byTool[name].totalMs += Number(t.durationMs) || 0;
     }
     const slow = Object.entries(byTool)
       .map(([tool, v]) => ({ tool, ...v, avgMs: Math.round(v.totalMs / v.calls) }))
       .sort((a, b) => b.avgMs - a.avgMs).slice(0, 5);
     return {
-      count: all.length,
+      count: tools.length,
       failed: failed.length,
-      failRate: all.length ? (failed.length / all.length * 100).toFixed(1) + "%" : "0%",
+      failRate: tools.length ? (failed.length / tools.length * 100).toFixed(1) + "%" : "0%",
       slowTools: slow,
+      turns,
     };
   }
 }

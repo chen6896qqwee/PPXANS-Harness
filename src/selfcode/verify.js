@@ -1,24 +1,95 @@
 // src/selfcode/verify.js — 自改验证器 (2026-10-27)
 //
 // 一道改动能"算数"必须同时过三关, 全部确定性、零依赖、无 LLM:
-//   ① 语法关   node --check (复用 core/postcondition.js 的唯一实现)
-//   ② 行为关   node --test 跑指定测试文件, TAP 解析 (复用 evolve/selfiterate.js)
+//   ① 语法关   node --check (复用 verify/postcondition.js 的唯一实现)
+//   ② 行为关   node --test 跑指定测试文件, TAP 解析 (复用 selfcode/selfiterate.js)
 //   ③ 边界关   改动文件必须落在 root 内, 且不得顺手改测试文件 (修代码不修考卷)
 //
 // 刻意不做的事: 不做 lint、不做覆盖率门 —— 那属于发布流程 (npm run verify),
 // 自改闭环的判定标准只有一个: 原来红的测试现在绿了, 且没把别的搞坏。
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { JS_SELF_CHECK_EXT } from "../core/postcondition.js";
-import { runTestFile } from "../evolve/selfiterate.js";
+import { JS_SELF_CHECK_EXT } from "../verify/postcondition.js";
+import { runTestFile } from "./test-runner.js";
 
 const execFileP = promisify(execFile);
 
 // ---- 边界关: 路径规范化 + 测试文件保护 ----
 // 禁区: node_modules / .git / 账本自身 (改这些不是"改自己", 是砸自己饭碗)
 const DENY_SEGMENTS = ["node_modules", ".git", ".ppx-cache"];
+
+// ---- 自改边界冻结 (2026-11-06, 评估 P0-1) ----
+// 验证器 / 守卫 / 审计链 / 沙箱解析 / 回滚机制一旦可被自改, "可验证的自我改进"就是
+// 自己给自己发合格证: 模型先改 verify.js 让红测试变绿, 再改任何代码都算"验证通过"。
+// 这些文件不进入自改面 —— 要改只能由人手工改, 并同步更新 PPX_VERIFIER_DIGEST 钉值。
+const PROTECTED_SELF = [
+  /^src[\\/]selfcode([\\/]|$)/i,             // 验证器 / 账本 / TAP 解析 / 自改引擎
+  /^src[\\/]evolve[\\/]selfiterate\.js$/i,    // 自主迭代闭环
+  /^src[\\/]verify([\\/]|$)/i,               // 验证域: 后置条件 / 声称核对 / 路径证据
+  /^src[\\/]audit[\\/]audit-chain\.js$/i,      // 审计哈希链
+  /^src[\\/]security([\\/]|$)/i,              // shell 解析 / 注入扫描等安全原语
+  /^src[\\/]tools[\\/]command-guard\.js$/i,    // 命令守卫
+  /^src[\\/]agent[\\/]approval\.js$/i,         // 审批链 (工具执行闸门)
+  /^src[\\/]edit[\\/](editblock|snapshot)\.js$/i, // 补丁解析 / 回滚快照
+  /^package\.json$/i,                         // 测试入口与模块类型
+];
+
+export function isProtectedSelfPath(relPath) {
+  const rel = String(relPath || "").replace(/\\/g, "/").replace(/^\.\//, "");
+  return PROTECTED_SELF.some((re) => re.test(rel));
+}
+
+// 验证器指纹: 对"判定是否可信"的关键文件取内容哈希。账本每条记录都带上它,
+// 事后能看出某次自改是在哪一版验证器下判定的; 人类可用 PPX_VERIFIER_DIGEST 钉住期望值,
+// 不一致直接拒绝自改 (防止有人悄悄改了验证器再来跑闭环)。
+const VERIFIER_FILES = [
+  "src/selfcode/verify.js",
+  "src/selfcode/test-runner.js",
+  "src/selfcode/engine.js",
+  "src/selfcode/ledger.js",
+  "src/selfcode/selfiterate.js",
+  "src/security/shell-parse.js",
+  "src/security/injection.js",
+  "src/tools/command-guard.js",
+  "src/agent/approval.js",
+  "src/audit/audit-chain.js",
+  "src/verify/postcondition.js",
+  "src/edit/editblock.js",
+  "src/edit/snapshot.js",
+  "package.json",
+];
+
+function packageRoot() {
+  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+}
+
+export function verifierDigest(root = null) {
+  const base = root ? path.resolve(root) : packageRoot();
+  const h = createHash("sha256");
+  for (const rel of VERIFIER_FILES) {
+    h.update(rel);
+    try { h.update(fs.readFileSync(path.join(base, rel))); } catch { h.update("<missing>"); }
+  }
+  return h.digest("hex").slice(0, 16);
+}
+
+export function checkVerifierPin(root = null) {
+  const pin = String(process.env.PPX_VERIFIER_DIGEST || "").trim().toLowerCase();
+  const digest = verifierDigest(root);
+  if (!pin) return { ok: true, digest, pinned: false };
+  const ok = pin === digest;
+  return {
+    ok,
+    digest,
+    pinned: true,
+    expected: pin,
+    error: ok ? null : `验证器指纹不符: 期望 ${pin}, 实际 ${digest} (校验器/守卫被改动, 拒绝自改)`,
+  };
+}
 
 // allowTestEdit=false 时, 目标是已知测试文件就拒 (自改代码不能自己改考卷过关)
 // 2026-10-30 修复: 旧实现只认调用方显式传入的 testFiles, 而 engine 每次传的是空数组 ——
@@ -27,7 +98,7 @@ const DENY_SEGMENTS = ["node_modules", ".git", ".ppx-cache"];
 const TEST_DIR_RE = /(^|[\\/])(test|tests|__tests__|spec|specs)([\\/]|$)/i;
 const TEST_FILE_RE = /(\.test\.|\.spec\.|^test[-_])[^\\/]*$/i;
 
-export function isTestFile(relPath) {
+function isTestFile(relPath) {
   const rel = String(relPath || "");
   if (TEST_DIR_RE.test(rel)) return true;
   return TEST_FILE_RE.test(path.basename(rel));
@@ -44,6 +115,11 @@ export function guardPath(root, relPath, { testFiles = [], allowTestEdit = false
   if (hit) return { ok: false, error: `禁区: ${relPath} 位于 ${hit}/ 之下, 不允许自改` };
   if (/(^|[\\/])selfcode[\\/](ledger\.jsonl|backups[\\/])/.test(path.relative(rootAbs, abs))) {
     return { ok: false, error: `禁区: 不许动自改账本本身 (${relPath})` };
+  }
+  // 验证器边界冻结: 这些路径是"判定是否通过"的依据, 不允许被它要判定的对象修改。
+  // 注意: 这里刻意不提供工具参数/环境开关 —— 越权改验证器必须由人手工完成。
+  if (isProtectedSelfPath(path.relative(rootAbs, abs))) {
+    return { ok: false, error: `禁区: ${relPath} 属于自改校验边界 (验证器/守卫/审计/审批), 不允许自改; 需人工修改并更新验证器指纹` };
   }
   const allowedExt = new Set([".js", ".mjs", ".cjs", ".json", ".md", ".txt", ".jsonc"]);
   if (!allowedExt.has(path.extname(abs).toLowerCase())) {
@@ -85,7 +161,7 @@ async function checkOneSyntax(abs, { timeoutMs = 5000 } = {}) {
   let tmp = null;
   if (ext === ".js") {
     tmp = path.join(path.dirname(abs), ".ppx-syncheck-" + Math.random().toString(36).slice(2, 8) + ".mjs");
-    try { fs.writeFileSync(tmp, fs.readFileSync(abs)); target = tmp; } catch { tmp = null; }
+    try { fs.writeFileSync(tmp, fs.readFileSync(abs)); target = tmp; } catch { tmp = null; /* swallowed-ok(2026-11-03): 复制失败 → 直接检查原文件 */ }
   }
   try {
     await execFileP(process.execPath, ["--check", target], { timeout: timeoutMs, windowsHide: true });
@@ -100,7 +176,7 @@ async function checkOneSyntax(abs, { timeoutMs = 5000 } = {}) {
 }
 
 // 返回 { ok, checked, failed: [{file, error}] }
-export async function syntaxGate(absFiles = [], { timeoutMs = 5000 } = {}) {
+async function syntaxGate(absFiles = [], { timeoutMs = 5000 } = {}) {
   const failed = [];
   let checked = 0;
   for (const abs of absFiles) {
@@ -114,7 +190,7 @@ export async function syntaxGate(absFiles = [], { timeoutMs = 5000 } = {}) {
 
 // ---- 行为关: 跑测试文件, 汇总 TAP ----
 // tests: 相对 root 的测试文件路径数组; 返回 { ok, ran, total, pass, fail, failed[], details[] }
-export async function testGate(root, tests = [], { timeoutMs = 120000 } = {}) {
+async function testGate(root, tests = [], { timeoutMs = 120000 } = {}) {
   const details = [];
   let total = 0, pass = 0, fail = 0;
   const failed = [];

@@ -34,6 +34,38 @@ PPXANS-Harness 是**零运行时依赖**的自包含项目：不接入任何第�
 
 ---
 
+## 2.1 deepseek-ai/dsh-superagent-prototype（未复制，仅设计参照）
+
+| 项 | 值 |
+|---|---|
+| 来源 | https://github.com/deepseek-ai/dsh-superagent-prototype |
+| 许可证 | MIT |
+| 性质 | Super-agent 原型（TypeScript / pnpm workspace + Cordis 插件体系） |
+| 当前状态 | 只读研读，**未复制任何文件、未引入任何依赖、未进入 git 历史** |
+| 吸收的设计 | Router/Worker 双层、Trigger/Thread 事件驱动、Admission 两级过滤、Tickets/Assignments 生命周期、Subscriptions 直通、Outbox/Delivery 回投、spill/output-retention、compaction、goal-round-driver |
+| 皮皮虾落地 | `src/channels/{trigger,policy,delivery,output}.js`、`src/orchestrator/{legion,thread-bridge}.js`、`src/workgraph/`、`src/tools/{spill,context}.js`、`src/evolve/speculative.js`；全部用零依赖 JS 重写 |
+
+**结论**：与 `deepseek-harness` 同口径 —— 不复制源码、不设运行时依赖，仅吸收设计与语义。
+逐项对照见 [docs/SUPERAGENT-GAP.md](../docs/SUPERAGENT-GAP.md)，工单账本细节见
+[docs/WORK-GRAPH.md](../docs/WORK-GRAPH.md)。
+
+---
+
+## 2.2 rlaope/deepseek-bot（未复制，仅吸收交互语义）
+
+| 项 | 值 |
+|---|---|
+| 来源 | https://github.com/rlaope/deepseek-bot |
+| 许可证 | MIT |
+| 性质 | 终端 agent 客户端（TypeScript, `dsh` TUI + 本地 socket 传输） |
+| 当前状态 | 只读研读，**未复制任何文件、未引入任何依赖、未进入 git 历史** |
+| 吸收的语义 | 终端线协议（newline-JSON: hello/ready、message、typing、cancel、withdraw、sessions/history、usage/models、审批 question/answer）；`ask_user_question` 回合内提问（选项 / 多选 / 自填、答案结构化回填）；阶段状态行、↑/↓ 输入历史、工具结果折叠 |
+| 皮皮虾落地 | `src/channels/tui.js`（网关端）、`src/agent/index.js` 的 `askQuestions` 生命周期、`src/tools/methods.js` 的 `ask_user`、`public/app.js` 的提问卡与状态栏；全部用零依赖 JS 重写 |
+
+**结论**：不复制源码、不设运行时依赖；终端网关只实现对方协议的服务端，提问只复刻交互语义。
+
+---
+
 ## 3. 已吸收的自研项目
 
 | 项目 | 版本 | 处理方式 |
@@ -51,7 +83,7 @@ PPXANS-Harness 是**零运行时依赖**的自包含项目：不接入任何第�
 |---|---|---|
 | Aegis / HookBus（UK Patent GB2608069.7 论文描述） | Deny-Wins 策略合并：任一高优先级 deny 一票否决，安全策略不可被低优先级 allow 投票覆盖 | `src/tools/catalog.js` 的 `addPolicySubscriber()` + `consolidateDecisions()` |
 | Aegis / HookBus | 订阅者熔断器三态（Closed/Open/Half-Open），防故障订阅者拖垮工具链 | `src/bus/circuit-breaker.js`（新增，基础设施层，区别于 agent 探索熔断） |
-| deepseek-harness / dsh | seam 三分法注册表：Service Definition / Provider / Consumer，一行换实现 | `src/seam/registry.js`（新增，与既有 `src/seam/shell.js`、`src/tools/seam.js` 互补） |
+| deepseek-harness / dsh | seam 三分法注册表：Service Definition / Provider / Consumer，一行换实现 | 工具侧 `src/tools/seam.js`；服务级替换由 `src/plugin/context.js` 服务定位器承担（原 `src/seam/registry.js` 已于 2026-11-08 移除） |
 | dsh | 事件源事实（model-visible = logged）：会话日志是模型可见内容的唯一事实源 | `src/utils/trace.js` 新增 turn/step 边界事件 + `verifyReplay()` 不变量断言 |
 | MERGE-REPORT 遗留 P2 | guard 免疫闸门空转（工具走 catalog 不走总线） | `src/ans/guard.js` 新增 `installGuardOnCatalog()`，guard 接入 ToolCatalog 策略链，与总线版共享状态 |
 | ACE（ICLR 2026，agentic-context-engineering） | 语境即 Playbook：bullets + Generator/Reflector/Curator + 增量 delta 合并 + grow-and-refine | `src/evolve/playbook.js`（applyDelta / growAndRefine / createGate / renderBullets） |
@@ -152,7 +184,7 @@ PPXANS-Harness 是**零运行时依赖**的自包含项目：不接入任何第�
 
 | dsh-bot | 皮皮虾 | 说明 |
 |---|---|---|
-| 本体首页（头像 / 名字 / 一句话 / 今日日程） | `#view-home` | 上半是「按类型开工」，下半是已有本体列表；**不提供「再建一个」**，因为一个进程只绑一个 root，多开是 `ppx-web --port` 的事 |
+| 本体首页（头像 / 名字 / 一句话 / 今日日程） | （已并入 `#view-chat` 空态, 2026-11-03） | 「按类型开工」的类型卡放进对话 hero, 「已有的」整节移除（一个进程只绑一个 root, 身份信息聊天头部一直有, 改名/头像/暂停走设置页） |
 | 对话 + 轨迹双页签 | `#view-chat` 的 `#pane-talk` / `#pane-trace` | 轨迹不是「日志尾巴」，是双源合并：`logs/traces/<day>.jsonl`（工具调用）+ `events-<day>.jsonl`（结构化事件），可按天回翻 |
 | 设置页（身份 / 主动 / 记忆 / 权限） | `#view-settings`，13 个分节 | 全部走 `/api/bot.manage` 单入口 + `BotStore.apply()` 动作白名单；白名单外的 action 直接 400，不靠前端自觉 |
 | 服务状态条 | 侧栏底部 `#svcRows` | 三态点 + 文字，数据来自 `/api/health/summary` 与 provider 探测，不编 |

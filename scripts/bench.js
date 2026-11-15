@@ -90,7 +90,6 @@ function stubLLM() {
   }
   const serialMs = Date.now() - ts0;
   const slowdown = serialMs > 0 ? (concurrentMs / serialMs) : 0;
-  const ideal = serialMs / CONCURRENCY; // 若真正 N 路并行, 总耗时应接近串行总耗时 / 并发数
   console.log(`  并发 ${concurrentMs}ms (p50 ${isoLat[Math.floor(isoLat.length * 0.5)]}ms) | 串行 ${serialMs}ms (${(serialMs / isoTotals).toFixed(1)}ms/请求)`);
   console.log(`  并发度 slowdown = ${slowdown.toFixed(2)}  (1.00 = 完全串行; 越接近 ${(1 / ISO_SESSIONS).toFixed(2)} 越好; 失败 ${isoFails})`);
   if (slowdown > 0.9) {

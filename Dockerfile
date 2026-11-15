@@ -4,7 +4,7 @@
 #   docker build -t ppxans-harness .
 #   docker run -p 8899:8899 -v ppxans-data:/data ppxans-harness
 #   # 指定模型: -e PPX_MODEL=<模型名> -e <API_KEY 环境变量名>=<key>
-#     (密钥经 config.ppj.json 引用环境变量, 见 docs/CONFIG.md; 不建议把密钥烧进镜像)
+#     (密钥经 config.ppx.json 引用环境变量, 见 docs/CONFIG.md; 不建议把密钥烧进镜像)
 FROM node:22-alpine
 
 LABEL org.opencontainers.image.title="PPXANS-Harness"
@@ -27,7 +27,7 @@ COPY package.json ./
 COPY src ./src
 COPY bin ./bin
 COPY config ./config
-COPY public ./public
+COPY webapp ./webapp
 COPY skills ./skills
 
 # 运行时数据 (会话/记忆/审计账本) 落卷: 容器可丢, 记忆不可丢
@@ -44,4 +44,5 @@ EXPOSE 8899
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PPX_PORT||8899)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-CMD ["node", "bin/ppx-web.js"]
+# 单一 CLI 入口 (2026-11-12): bin/ppx-web.js 已并入 `ppx web`, 旧 CMD 会让容器启动即崩
+CMD ["node", "bin/ppx.js", "web"]

@@ -46,7 +46,7 @@ export class TurnProjection {
       if (!task || task.status !== "running") task = s.createTask();
       const turn = task.appendTurn(String(userMsg ?? ""));
       return { sessionId: s.id, turnId: turn.id, seq: turn.seq };
-    } catch { return null; } // 投影层永不影响主链路
+    } catch { return null; /* swallowed-ok(2026-11-03): 投影层设计为永不影响主链路 */ } // 投影层永不影响主链路
   }
 
   // 正常结束一轮 (排队输入存在时状态机自动开下一个 turn, 本层暂不消费)
@@ -57,7 +57,7 @@ export class TurnProjection {
       const task = s && s.currentTask();
       const turn = task && task.completeTurn();
       return turn ? { turnId: turn.id, status: turn.status, queued: task.queuedUserInputs.length } : null;
-    } catch { return null; }
+    } catch { return null; /* swallowed-ok(2026-11-03): 投影层设计为永不影响主链路 */ }
   }
 
   // 中止一轮 (中断/异常)
@@ -72,7 +72,7 @@ export class TurnProjection {
       const turnId = task.currentTurn?.id ?? null;
       task.abort();
       return { turnId, status: "aborted" };
-    } catch { return null; }
+    } catch { return null; /* swallowed-ok(2026-11-03): 投影层设计为永不影响主链路 */ }
   }
 
   // 诊断视图: 指定会话的 turn 概要

@@ -1,7 +1,13 @@
 # PPXANS-Harness 项目说明文档
 
 > ⚠️ **时效说明（2026-10-11 标注）**：本文档是 **v2.7.1（2026-09-17）** 的源码通读快照，其中规模数字（43 工具 / 768 测试 / 103 文件）均为当时实况。
-> 当前代码已是 **v4.0.0**，实测为 **1887 项测试 / 1883 通过 / 0 失败 / 4 网络跳过**、98 个运行时工具（76 内置 + 22 ppx.*）、67 技能、189 个 src 文件。
+> 当前代码已是 **v5.1.0（2026-11-13）**，实测 2656 项测试（2650 通过 / 6 跳过, 见 README 机读锚点）、105 个内置工具（+ 22 ppx.* = MCP 127）、71 技能、287 个 src 文件、340 个测试文件；架构数字以 README 与 CHANGELOG 为准。
+> 判断当前状态请以 [README](../README.md) 与 `CHANGELOG.md` 为准；本文保留以记录架构沿革与 v2.7.1 的优化执行记录。
+>
+> **2026-11-13 复核补注（slim 重构后的差异，读下文时以此为准）**：
+> · 入口已收敛为单一 CLI `bin/ppx.js`（→ `src/cli.js`），`ppx-web.js` / `ppx-serve.js` / `ppx-channels.js` / `ppx-setup.js` 均已删除；
+> · 前端只剩 `webapp/`（Vue 3 + Vite，产物 `webapp/dist` 入库）；`public/` 与 Next.js `web/` 已删除，http 通道优先托管 dist、缺失时回退提示；
+> · `test/` 现为 340 个文件 / 2656 项，`src/` 287 个文件；测试地图见 `docs/TEST-MAP.md`（脚本生成，勿手改）。
 > 判断当前状态请以 [README](../README.md) 与 `CHANGELOG.md` 为准；本文保留以记录架构沿革与 v2.7.1 的优化执行记录。
 
 > 文档版本：v1.2　|　对应代码版本：**v2.7.1**（2026-09-17）　|　核对时间：2026-09-17
@@ -30,7 +36,7 @@
 
 **PPXANS-Harness（皮皮虾）是一个纯 Node.js 编写、零运行时依赖的自包含 Agent 内核**，把「Agent 神经系（ANS）」与「Harness 运行时」合为一体：既是一个能跑工具循环的对话引擎，也是一套带记忆分层、自我修复、自我进化、可审计治理的半自治系统。
 
-它不是框架、不是 SDK，而是**一个完整可启动的产品**——`npm start` 起内核 + Web 界面（同进程同端口），也提供 npm 全局命令 `ppx` / `ppx-serve` / `ppx-channels`，以及 Windows 双击即用的 `.vbs` / `.bat` 启动器。
+它不是框架、不是 SDK，而是**一个完整可启动的产品**——`npm start` 起内核 + Web 界面（同进程同端口），也提供 npm 全局命令 `ppx` / `ppxans`（子命令 `serve` / `web` / `channels` / `daemon`），以及 Windows 双击即用的 `.vbs` / `.bat` 启动器。
 
 ### 1.2 项目坐标
 
@@ -44,7 +50,7 @@
 | 测试规模 | 107 个测试文件 / **10,940 行**；**768 项 / 764 通过 / 0 失败 / 4 跳过**（约 6 秒） |
 | 内置工具 | **43 项**（内核实例实测注册并启用数） |
 | 内置插件 | **13 个**（按依赖顺序装配） |
-| 编排模式 | **7 种**（react / single / plan-exec / router / blackboard / graph / legion） |
+| 编排模式 | **3 种**（react / single / legion；plan-exec/router/blackboard/graph 为 delegate/legion 路径的子集复制品，2026-11-08 精简移除） |
 | 记忆层级 | **5 层**（L0 原始对话 → L1 原子事实 → L2 场景 → L3 画像 → L4 程序性记忆） |
 | 对外协议 | **标准 MCP 服务端**（`POST /mcp`，Streamable HTTP，双 era）+ MCP 客户端 + HTTP + 飞书 + 微信 |
 
@@ -62,7 +68,7 @@
 | `v2.6.0` | **MCP 优先**：MCP 服务端落地，Web 壳全面切 MCP，REST `/api/*` 退役 |
 | `v2.7.0` | **存储加固**：数据文件 schema 版本 + 迁移钩子，facts WAL 增量落盘 |
 
-> **关键设计取舍**：v2.5.0 是一次"减法"决策——把曾经作为可选引擎的 openclaw / DeepSeek Harness 后端全部删除，只留下自研的 `src/llm/client.js`（纯 `fetch` 直连 OpenAI 兼容 API）。这换来的是**完全自包含**：不装任何 npm 包，`node bin/ppx-web.js` 即可运行。
+> **关键设计取舍**：v2.5.0 是一次"减法"决策——把曾经作为可选引擎的 openclaw / DeepSeek Harness 后端全部删除，只留下自研的 `src/llm/client.js`（纯 `fetch` 直连 OpenAI 兼容 API）。这换来的是**完全自包含**：不装任何 npm 包，`node bin/ppx.js web`（或 `node bin/ppx.js`）即可运行。
 
 ### 1.4 六大能力支柱
 
@@ -83,35 +89,38 @@
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│  接入层  src/channels/ (http 813行 / feishu / wechat / log)                │
-│          src/mcp/server.js (POST /mcp, 双era) · src/cli.js · web/ (Next.js) │
+│  接入层  src/channels/ (http 437行 / feishu / wechat / log)             │
+│          src/mcp/server.js (POST /mcp) · src/cli.js · webapp/ (Vue3)    │
 ├──────────────────────────────────────────────────────────────────────────┤
-│  编排层  src/mode/ (7种模式) ── src/orchestrator/ (legion/DAG/supervisor)   │
+│  编排层  src/agent/modes/ (react/single/legion) ── src/orchestrator/    │
+│          (legion/DAG/supervisor)                                        │
 ├──────────────────────────────────────────────────────────────────────────┤
-│  引擎层  src/agent/index.js (715行, 薄编排)                                │
-│          ├─ src/core/policy.js  (工具循环策略状态机, 272行)                 │
-│          ├─ src/core/trace.js   (AsyncLocalStorage traceId 贯穿)           │
-│          ├─ src/agent/context.js + prompts.js (历史/提示词 mixin)           │
-│          └─ src/services/ (memory-service · learning-service · health)      │
+│  引擎层  src/agent/index.js (568行, 薄编排)                             │
+│          ├─ src/agent/loop/policy.js  (工具循环策略状态机)              │
+│          ├─ src/core/trace.js   (AsyncLocalStorage traceId 贯穿)        │
+│          ├─ src/agent/context.js + prompts.js (历史/提示词 mixin)       │
+│          └─ src/services/ (memory-service · learning-service · health)  │
 ├──────────────────────────────────────────────────────────────────────────┤
-│  能力层  src/tools/ (43工具 + catalog 收口 + seam 策略)                     │
-│          src/llm/ (client/retry/router/fence/dsml/embedder)                │
-│          src/memory/ (L0-L4) · src/skills/ · src/persona/                  │
+│  能力层  src/tools/ (43工具 + catalog 收口 + seam 策略)                 │
+│          src/llm/ (client/retry/router/fence/dsml/embedder · adapters/) │
+│          src/memory/ (L0-L4 + persona) · src/skills/                    │
 ├──────────────────────────────────────────────────────────────────────────┤
-│  治理层  src/bus/runtime-bus.js (事件/命令/状态 + 拦截器)                    │
-│          src/ans/ (values/lifecycle/proactive/reward/eviction/guard)       │
-│          src/audit/ (audit-chain SHA-256 / verifier 验证闸门)               │
-│          src/selfheal/ · src/evolve/                                       │
+│  治理层  src/bus/runtime-bus.js (事件/命令/状态 + 拦截器)               │
+│          src/ans/ (values/lifecycle/proactive/reward/eviction/guard)    │
+│          src/audit/ (audit-chain SHA-256 / verifier 验证闸门)           │
+│          src/verify/ (claims/path-evidence/postcondition/review)        │
+│          src/evolve/ (healer/trigger/playbook/loop)                     │
 ├──────────────────────────────────────────────────────────────────────────┤
-│  基础层  src/plugin/ (Context 服务定位器, 一切皆插件)                        │
-│          src/seam/ (registry 能力缝 / shell 可替换执行)                     │
-│          src/utils/ (logger/store/wal/schema/pii/trace/text/winutf8)       │
+│  基础层  src/plugin/ (Context 服务定位器, 一切皆插件)                   │
+│          src/seam/ (registry 能力缝 / shell 可替换执行)                 │
+│          src/utils/ (logger/store/wal/schema/pii/trace/text)            │
+│          src/boot/ · src/security/ (injection/shell-parse/http-proxy)   │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### 2.2 「八大器官」职责映射
 
-项目文档 `docs/ARCHITECTURE-ORGANISM.md` 用有机体隐喻对职责做了归位（**目录结构不动，仅做职责映射**）：
+项目文档 `docs/ARCHITECTURE-ORGANISM.md`(2026-11-08 精简归档至 git 历史) 曾用有机体隐喻对职责做了归位（**目录结构不动，仅做职责映射**）：
 
 | # | 器官 | 对应模块 | 成熟度 |
 |---|---|---|---|
@@ -119,7 +128,7 @@
 | ② | 循环系（总线+调度） | `bus/runtime-bus.js` + `plugin/context.js` + `memory/session.js` + `tools/advanced.js` Scheduler | ✅ 已补齐 |
 | ③ | 呼吸系（环境感知） | `channels/` `mcp/` `tools/document.js` `tools/ocr.js` 多模态读图 | ✅ 完整 |
 | ④ | 消化系（信息编译） | `memory/compaction.js` `tools/ocr.js` `tools/document.js` Chunking | ⚠️ 半（缺 ASR/实体抽取） |
-| ⑤ | 排泄系（遗忘-归档） | `memory/fact-store.js` 衰减 + `ans/eviction.js` 排遗自治 | ✅ 已补齐 |
+| ⑤ | 排泄系（遗忘-归档） | `memory/fact-store.js` 衰减 + `memory/eviction.js` 排遗自治 | ✅ 已补齐 |
 | ⑥ | 运动系（工具执行） | `tools/seam.js` + `catalog.js` + 各注册器 + `seam/shell.js` | ✅ 旗舰系统 |
 | ⑦ | 内分泌系（目标-调节） | `ans/values.js` `persona/` `ans/proactive.js` `ans/reward.js` | ✅ 已补齐 |
 | ⑧ | 免疫系（安全治理） | `ans/guard.js` + `catalog` 策略订阅者链 + `pii.js` + `command-guard.js` | ✅ 已补齐 |
@@ -141,7 +150,7 @@ src/                                  103 文件 / 14,930 行
 ├── llm/            7 文件     514 行  client 自研 HTTP 底座 + router 路由 + retry + fence + dsml + embedder
 ├── mcp/            6 文件   1,642 行  server 服务端 + client 客户端 + admin 管理工具 + http + tasks
 ├── memory/        13 文件   2,389 行  L0–L4 五层 + 会话日志 + 经验库 + 压缩 + 画布 + 资产 + 故障病历
-├── mode/           6 文件     295 行  7 种编排模式（react/single/plan-exec/router/blackboard/graph/legion）
+├── mode/           2 文件     ~130 行  3 种编排模式（react/single/legion）
 ├── orchestrator/   5 文件     517 行  军团编排（legion 多进程 + dag 拓扑 + supervisor 仲裁 + worker）
 ├── persona/        1 文件      29 行  人格注入
 ├── plugin/         3 文件     356 行  Context 服务定位器 + builtin 13 插件 + compose 装配
@@ -153,7 +162,7 @@ src/                                  103 文件 / 14,930 行
 └── utils/          8 文件     469 行  logger/store(WAL/schema)/pii/text/trace/winutf8
 ```
 
-**顶层入口**（4 个）：`src/server.js`（60 行，HTTP 服务）、`src/cli.js`（120 行，终端对话）、`src/channels-cli.js`、`src/aml-server.js`。
+**顶层入口**：`src/server.js`（HTTP 服务）、`src/cli.js`（终端对话 + 单一 CLI 子命令分派）、`src/channels-cli.js`。
 
 ### 2.4 运行时数据目录（`data/`，不进 git）
 
@@ -189,17 +198,17 @@ data/
 
 | 目录/文件 | 用途 |
 |---|---|
-| `bin/` | 5 个可执行入口：`ppx.js`（CLI）、`ppx-web.js`、`ppx-serve.js`、`ppx-channels.js` |
+| `bin/` | 单一可执行入口 `ppx.js`（2026-11-08 起；旧的 `ppx-web.js` / `ppx-serve.js` / `ppx-channels.js` 已并入子命令 `ppx web` / `ppx serve` / `ppx channels`） |
 | `config/` | `ppx.json`（主配置）+ `ppx.json.example` + `identity.md` / `ishiki.md`（人格文件） |
 | `docs/` | 12 份文档 + `releases/` + `screenshots/` |
-| `public/` | **零依赖静态 Web UI**：`index.html` 14KB + `app.css` 23KB + `app.js` 64KB + `vendor/marked.min.js` 35KB |
-| `web/` | Next.js 产品壳（16.3.0 / React 19.2.8 / TS 5 / Tailwind 4），浏览器端走 `lib/mcp.ts` JSON-RPC 客户端 |
-| `skills/` | 10 个方法型技能（`SKILL.md` 目录式）：brainstorm / plan / debug / verify / humanize 族 / ppx-memory / ppx-selfheal / session-naming / prompt-depth-kit / agent-professional-training |
-| `scripts/` | 20 个脚本：eval / bench / selfheal-bench / release / audit-verify / check-web / mcp-smoke 等 |
-| `test/` | 106 个测试文件（`node --test` 原生测试运行器） |
+| `webapp/` | **Vue 3 + Vite 前端**（构建产物 `dist/` 入库，内核直接托管；渲染库为根 `devDependencies`） |
+| ~~`public/`~~ / ~~`web/`~~ | **已删除**（2026-11 前端收敛为 `webapp/`；http 通道优先托管 `webapp/dist`） |
+| `skills/` | 71 个目录式技能（`SKILL.md`），按 agent-professional-training / code / plan / research 等分类 |
+| `scripts/` | 20 个脚本：eval / bench / selfheal-bench / release / audit-verify / web:check / test-map 等 |
+| `test/` | 340 个测试文件（`node --test` 原生测试运行器） |
 | `fixtures/` | `mock-mcp-server.cjs`（MCP 测试桩） |
 | `references/` | `THIRD-PARTY-SOURCES.md`（第三方来源登记，不含源码） |
-| 启动器 | `启动皮皮虾.vbs`（静默推荐）/ `启动皮皮虾.bat` / `停止皮皮虾.bat` / `高级菜单.bat` / `双击启动皮皮虾.bat` |
+| 启动器 | `启动皮皮虾.bat`（桌面客户端，唯一用户入口；首次缺 Electron 会引导安装） |
 
 ---
 
@@ -244,12 +253,12 @@ data/
 - 顶层 ctx 为 `full-access`（内置插件可信）；用户插件默认 `restricted`，注册敏感 key 直接抛错
 - `toolsPlugin.access = "full-access"`（函数外赋值，`compose` 前即可读）
 
-**13 个内置插件装配顺序**（`src/plugin/builtin.js`，依赖在前）：
+**15 个内置插件装配顺序**（`src/agent/plugins/builtin.js`，依赖在前）：
 
 ```
 busPlugin → healerPlugin → personaPlugin → factsPlugin → experiencePlugin
-→ sessionPlugin → memoryPlugin → llmPlugin → memoryLayersPlugin → tracesPlugin
-→ auditPlugin → toolsPlugin → evolvePlugin → modePlugin
+→ legionBoardPlugin → sessionPlugin → memoryPlugin → llmPlugin → memoryLayersPlugin
+→ tracesPlugin → auditPlugin → toolsPlugin → evolvePlugin → modePlugin
 ```
 
 其中 `busPlugin` **必须最先**（注释明确："②循环系：全局总线必须最先"）；`auditPlugin` 必须在 `toolsPlugin` 之前（catalog 依赖它做审计注入）。`compose` 对单个插件做异常隔离——一个 setup 抛错不影响其余。
@@ -339,32 +348,28 @@ ANS = Agent Nervous System，是本项目区别于普通 Agent 框架的部分�
 
 **`verifier.js`** 则提供语义验证闸门 —— `Auditor` 是唯一的「已验证写回」通道，账本落 `data/audit/verified.json`。自学链路（refine / refineSkill / upgradeSkill）必须过这道闸门才允许写回。
 
-### 3.7 编排与执行模式（`src/mode/` + `src/orchestrator/`）
+### 3.7 编排与执行模式（`src/agent/modes/` + `src/orchestrator/`）
 
-**7 种模式**，通过 `ModeRegistry.run(name, agent, userMsg, opts)` 分发，可插拔：
+**3 种模式**，通过 `ModeRegistry.run(name, agent, userMsg, opts)` 分发，可插拔（原 plan-exec/router/blackboard/graph 四种是委派/军团路径的进程内子集，2026-11-08 精简移除；2026-11-12 模组并入 `src/agent/modes/`）：
 
 | 模式 | 机制 |
 |---|---|
 | `react`（默认） | 标准工具循环 |
 | `single` | 单轮直答，不走工具 |
-| `plan-exec` | 先出计划（2–6 步，容错 JSON 解析）再逐步执行 |
-| `router` | 按技能 description 匹配（CJK bigram + 英文词，命中分 ≥1）后注入 `[已激活技能]` |
-| `blackboard` | 黑板多专家（分析师/执行者/审查者），末位审查者输出为答案 |
-| `graph` | 节点顺序执行 + checkpoint 到会话日志 |
 | `legion` | 多进程军团（懒建 `agent._legion`，每 agent 独立 `data/legion/agent-i`） |
 
 **军团编排**（`src/orchestrator/`）：
 
 - `legion.js`：`maxConcurrent: 8` 的有界并发；`spawnAgent` 派生子进程，stdout 逐行解析 JSON 协议；`send` / `broadcast` / `dispatch`（实验性）/ `runDag`
 - `dag.js`：Kahn 算法拓扑分层，层内并行，有环直接抛错
-- `supervisor.js`：多轮评审 + 贪心聚类求共识（相似 >0.4 同组），`consensus < 0.6` 判为分歧，LLM 评审返回 JSON `{accept, feedback}`
+- supervisor 拓扑曾实现于 orchestrator/supervisor.js，因始终无内置调用点于 2026-11-08 精简移除（评审/仲裁语义由 tools/delegate.js 的 arbitrate 循环承载）
 - `agent-worker.js`：子进程 JSON 行协议（`chat` / `ping` / `shutdown`），`PPX_AGENT_READONLY=1` 自动切只读模式
 
 ### 3.8 自愈与进化
 
-**自愈**（`src/selfheal/healer.js`）：`integrity.json` 记录 `{clean, pid, ts}`；`markDirty()` 在启动时置脏 → 若下次启动发现 `clean === false` 即判定**上次是崩溃退出** → 触发 `_cleanupTmp()`。`runStartupChecks()` 补建缺失目录、损坏 `facts.json` 改名 `.corrupt-<ts>` 后重置。清理策略保留最近 2 份备份（`cleanupCorruptBackups` / `cleanupStaleBackupDirs` / `cleanupStaleBakFiles`）。
+**自愈**（`src/evolve/healer.js`，2026-11-12 自 `src/selfheal/` 归位）：`integrity.json` 记录 `{clean, pid, ts}`；`markDirty()` 在启动时置脏 → 若下次启动发现 `clean === false` 即判定**上次是崩溃退出** → 触发 `_cleanupTmp()`。`runStartupChecks()` 补建缺失目录、损坏 `facts.json` 改名 `.corrupt-<ts>` 后重置。清理策略保留最近 2 份备份（`cleanupCorruptBackups` / `cleanupStaleBackupDirs` / `cleanupStaleBakFiles`）。
 
-**进化**（`src/selfheal/evolve.js`）：`EvolutionEngine` 每轮对话 `tick()`，达 `every_calls`（默认 20）且距上次 ≥ `min_interval_ms`（30s）才触发 `_run()`（fire-and-forget）：失败 ≥2 → `refine()`；成功 ≥3 → `refineSkill()`；技能 `uses ≥ 3` → `upgradeSkill()`。
+**进化**（`src/evolve/trigger.js`，2026-11-08 自 selfheal/ 归位）：`EvolutionEngine` 每轮对话 `tick()`，达 `every_calls`（默认 20）且距上次 ≥ `min_interval_ms`（30s）才触发 `_run()`（fire-and-forget）：失败 ≥2 → `refine()`；成功 ≥3 → `refineSkill()`；技能 `uses ≥ 3` → `upgradeSkill()`。
 
 **Playbook**（`src/evolve/playbook.js`）：确定性执行 `ADD/UPDATE/REMOVE` 剧本操作，ADD 相似度 >0.6 拒收（防重复），bullet 带 `counters:{helpful, harmful}`，`harmful - helpful ≥ 3` 自动移除；`createGate()` 提供回归门禁，不通过则拒绝提交。
 
@@ -389,14 +394,18 @@ ANS = Agent Nervous System，是本项目区别于普通 Agent 框架的部分�
 
 **MCP 客户端**（`src/mcp/client.js`，483 行）：零依赖实现 stdio + HTTP Streamable 两种传输，可接入外部 MCP 服务器。
 
-> **架构决策**：v2.6.0 起 Web 产品壳**全面切 MCP** —— 浏览器端通过 `web/src/lib/mcp.ts` 的 JSON-RPC 客户端直连 `/mcp`，REST `/api/*` 退役（`legacy_rest: false` 时彻底返回 410）。
+> ~~**架构决策**：v2.6.0 起 Web 产品壳**全面切 MCP**~~（2026-11-14 更正：该方向未落地，实际为**共存**）—— v5.0 webapp 走 REST（`/message/stream` + `/sessions*` + `/api/*`），MCP 管理虚拟工具（`src/mcp/admin.js`，20 个）服务外部 MCP 宿主；两者共用同一套 config/操作层。`legacy_rest: false` 会把 `/message` `/chat` `/reset` 等**无 UI 消费方**的 Gen-1 端点连同 `/api/*`、`/sessions*`、`/interrupt` 整组 410（纯 MCP 形态部署用；v5.0 UI 会断，见 `src/channels/http.js` 头注）。
 
-### 3.10 Web UI（双形态）
+### 3.10 Web UI（v5.0 单一形态）
+
+> **2026-11-12 补注**：双形态已成历史 —— `public/` 零依赖静态 UI 与 Next.js `web/` 壳均已删除，
+> 现只有 `webapp/`（Vue 3 + Vite）。下表保留 v2.7.1 快照供对照。
 
 | 形态 | 位置 | 特点 |
 |---|---|---|
-| **零依赖静态 UI**（当前主推） | `public/` | 单页 `index.html` + `app.css` + `app.js`（64KB）+ `marked.min.js`。内核直接托管，**同进程同端口，免 token 配置**（服务端把回环 token 注入首页） |
-| Next.js 产品壳（旧版） | `web/` | Next.js 16.3.0 / React 19.2.8 / TS 5 / Tailwind 4；「Codex 桌面版」风格界面，全 CSS 变量题化 |
+| **Vue 3 + Vite SPA**（当前唯一） | `webapp/` → 产物 `webapp/dist` | 组件化前端；`npm run web:build` 构建、`npm run web:dev` 热更、`npm run web:check` 静态自检；内核托管 dist，同进程同端口（服务端注入回环 token） |
+| ~~零依赖静态 UI~~ | ~~`public/`~~ | 已删除（v5.0） |
+| ~~Next.js 产品壳~~ | ~~`web/`~~ | 已删除（v5.0） |
 
 功能覆盖：会话管理、场景、记忆、轨迹、统计、任务面板、模型/插件/预设设置 5 页；流式打字机 + 工具卡片 + Markdown 渲染。
 
@@ -440,7 +449,7 @@ ANS = Agent Nervous System，是本项目区别于普通 Agent 框架的部分�
 
 | 阈值 | 默认值 | 配置键 |
 |---|---|---|
-| 最大工具轮次 | `8` | `agent.max_tool_rounds` |
+| 最大工具轮次 | `24` | `agent.max_tool_rounds` |
 | 工具结果裁剪预算 | `4000` | `agent.tool_result_budget` |
 | 工具错误重试上限 | `2` | `agent.max_tool_error_retry` |
 | 溢出降档次数 | `2` | 常量 |
@@ -572,14 +581,14 @@ quarantineBroken(): 备份损坏段 → 重建空链 → 记录隔离事件
 |---|---|---|
 | 运行时 | **Node.js >= 20** | ESM 模块（`"type": "module"`），纯内置模块 |
 | 依赖管理 | **零运行时依赖** | `package.json` 无 `dependencies` 字段 |
-| 测试 | Node 原生 `node --test` | 107 文件 / 768 项，无 Jest/Mocha |
+| 测试 | Node 原生 `node --test` | 340 文件 / 2656 项，无 Jest/Mocha |
 | LLM 接入 | 自研 `src/llm/client.js` | 纯 `fetch` 直连 OpenAI 兼容 API，SSE 流式 + 原生 tool_calls |
-| 前端（静态） | 原生 HTML/CSS/JS + marked.js | `public/`，零构建 |
-| 前端（Next.js） | Next 16.3.0 / React 19.2.8 / TS 5 / Tailwind 4 | `web/`，独立 `package.json`，不影响主包零依赖 |
+| 前端 | Vue 3.5 + Vite 7 | `webapp/`，构建产物 `dist/` 入库；渲染库在根 `devDependencies`，Vite 打包进 dist，内核仍零运行时依赖 |
 | 协议 | MCP (Streamable HTTP) | 双 era 支持 |
-| CI | GitHub Actions | push/PR 跑全量测试 + web 类型检查/构建 + 本地评测 |
+| CI | GitHub Actions | push/PR 跑全量测试 + web 构建自检（`npm run web:check`）+ 本地评测 |
 
-> **"零依赖"的边界要讲清楚**：主包 `ppxans-harness` 零运行时依赖；`web/` 子目录是独立的 Next.js 项目（有自己的 `package.json`），只在启用「旧版 Next.js 界面」时才需要安装，不影响主包的内核运行。
+> **"零依赖"的边界要讲清楚**：主包 `ppxans-harness` 零运行时依赖（`dependencies` 为空）；前端依赖全部是 `devDependencies`，
+> 只在构建期使用并打包进已入库的 `webapp/dist`。`web/` 的独立 Next.js 项目已于 v5.0 删除。
 
 ### 5.2 配置体系（`src/config/index.js`）
 
@@ -589,7 +598,7 @@ quarantineBroken(): 备份损坏段 → 重建空链 → 记录隔离事件
 
 | 段 | 关键字段 | 当前值 |
 |---|---|---|
-| `agent` | `name` / `max_tool_rounds` / `tool_result_budget` / `max_tool_error_retry` / `model_preference` / `proactive` / `evolve` | 皮皮虾 / 8 / 4000 / 2 / local / `{enabled:true, interval_ms:3600000}` / `{enabled:true, every_calls:20}` |
+| `agent` | `name` / `max_tool_rounds` / `tool_result_budget` / `max_tool_error_retry` / `model_preference` / `proactive` / `evolve` | 皮皮虾 / 24 / 4000 / 2 / local / `{enabled:true, interval_ms:3600000}` / `{enabled:true, every_calls:20}` |
 | `user` | `name` | 兄弟 |
 | `providers` | 6 个：openai / deepseek / dashscope / **qwen-vl（vision）** / lmstudio / **zhipu（vision）** | 各带 `timeout_ms: 180000` + `context_window` |
 | `memory` | `token_budget` 2500 / `decay_per_day` 0.02 / `hit_bonus` 5 / `base_importance` 10 / `compile_threshold` 4.5 / `forget_speed` 1 / `memory_ttl_days` 90 | |
@@ -607,22 +616,27 @@ quarantineBroken(): 备份损坏段 → 重建空链 → 记录隔离事件
 
 ### 5.3 启动入口矩阵
 
+> **2026-11-12 补注**：单 CLI 收敛后，入口矩阵以本表为准（旧行保留对照）。
+
 | 入口 | 命令 / 文件 | 作用 |
 |---|---|---|
-| **一键 Web**（推荐） | `npm start` → `bin/ppx-web.js` | 内核 + 界面同进程同端口，自动开浏览器，轮询就绪后退出启动器 |
+| **桌面客户端**（推荐，唯一用户入口） | `npm start` → `electron/main.js` | 原生窗口；内部以 `ELECTRON_RUN_AS_NODE` 拉起 `ppx.js web`，窗口关闭即回收 |
+| **统一 CLI** | `ppx` / `ppxans` → `bin/ppx.js` → `src/cli.js` | 子命令：`serve` / `web` / `channels` / `daemon` / `setup` / `doctor` / `mcp` / `update` |
 | 终端对话 | `npm run chat` → `src/cli.js` | readline 历史（↑↓）+ `/stop` 中断 + `/reset` 清会话 + Ctrl+C 单次中断 |
-| 仅接口 | `npm run serve` → `src/server.js` | 无界面，`/health` + 通道 webhook + `/mcp` |
-| 通道 CLI | `bin/ppx-channels.js` | 通道管理 |
-| Windows 双击 | `启动皮皮虾.vbs`（静默推荐）/ `.bat`（带窗口）/ `停止皮皮虾.bat` / `高级菜单.bat` | 自动清理上次遗留监听进程 |
-| npm 全局 | `ppx` / `ppxans` / `ppx-serve` / `ppx-web` / `ppx-channels` | `npm i -g ppxans-harness` |
+| 仅接口（开发者） | `ppx serve`（`npm run serve`）→ `src/server.js` | 无界面，`/health` + 通道 webhook + `/mcp` |
+| 通道 CLI | `ppx channels` | 通道管理 |
+| Windows 双击 | `启动皮皮虾.bat` | 打开桌面客户端 |
+| npm 全局 | `ppx` / `ppxans` | `npm i -g ppxans-harness`（`bin/` 里只剩 `ppx.js`） |
+| ~~旧入口~~ | ~~`bin/ppx-web.js` / `ppx-serve.js` / `ppx-channels.js`~~ | 已并入子命令，文件已删除 |
 
-`bin/ppx-web.js` 的 `--print-port` 是个巧思：纯查询端口后立即退出（**必须在 `startServer` 之前退出**，否则会真把服务拉起来），供 `.bat` 启动器读取端口后自行清理旧监听。
+`ppx web --print-port` 仍是纯查询端口后立即退出（**必须在 `startServer` 之前退出**，否则会真把服务拉起来），供 `.bat` 启动器读取端口后自行清理旧监听；实现已从 `bin/ppx-web.js` 移入 `src/web-entry.js`。
 
 ### 5.4 工程脚本
 
 | 脚本 | 命令 | 用途 |
 |---|---|---|
-| 测试 | `npm test` | 768 项全量 |
+| 测试 | `npm test` | 2656 项全量（340 文件，`--test-force-exit`） |
+| 测试地图 | `npm run test:map [模块]` | 由测试 import 反推「改哪个模块跑哪些测试」，`--md` 生成 `docs/TEST-MAP.md` |
 | 发布门禁 | `npm run prepublishOnly` | `selfheal` + `test` 必须先过 |
 | 自愈基准 | `npm run selfheal` | 注入破坏 → 修复 → 输出修复率（7/7 100%） |
 | 审计校验 | `npm run audit:verify [-- --fix]` | 校验链完整性 / 隔离损坏段重建 |
@@ -733,7 +747,7 @@ const overall = this.degraded
 
 | 模块 | 处置 | 标注内容 |
 |---|---|---|
-| `src/seam/registry.js` | 文件头加 ⚠ 标注 | 在 `src/` 内无消费者；服务级替换能力现由 `plugin/context` 服务定位器承担 |
+| `src/seam/registry.js` | **已移除（2026-11-08）** | 曾标注"在 `src/` 内无消费者"；服务级替换能力现由 `plugin/context` 服务定位器承担。连同单测一起删除，设计意图保留在 `config/native-provenance.json` 的 dsh 条目里 |
 | `src/memory/failure-episode.js` | 文件头加 ⚠ 标注 | 已装配 `ctx.provide("failures")` 但无内置消费方；当前失败沉淀走经验库 + refine 闭环 |
 | `src/evolve/playbook.js` | 文件头加 ⚠ 标注 | 已装配 `ctx.provide("playbook")` 但无内置消费方；无代码注入 bullets 或产生 delta |
 | `src/orchestrator/supervisor.js` | 文件头加 ⚠ 标注 | `runSupervisor` 无内置调用点；`spawn_agent` 走 `delegate.js` 自带 review 循环 |
@@ -745,9 +759,9 @@ const overall = this.degraded
 
 | 文件 | 问题 | 处置 |
 |---|---|---|
-| `docs/ARCHITECTURE-ORGANISM.md` | 正文仍写「`src/llm/` client 多后端 http/**openclaw**/deepseek」，但 v2.5.0 已移除该底座 | 该行改为「自研 http 单底座 —— v2.5.0 起已移除 openclaw/deepseek 外部引擎」；并在文档头加**时效说明**（本文是 2026-08-21 快照，当前状态以 PROJECT-OVERVIEW.md 为准） |
-| `docs/ABSORB-DEEPSEEK-HARNESS.md` | 提供 `npm run dsh:install` / `dsh:build` / `npm run dsh` 等**已不存在的可执行指令**，照做必然失败 | 文档头加 🚫 **已废弃（v2.5.0 起）** 标注，明确命令不可执行，仅作决策沿革留档 |
-| `docs/EVALUATION-v1.1.1-全面评价.md` | 「多后端 http/openclaw/deepseek 三路回退」等描述与当前不符 | 加 📌 **历史归档** 标注：这些是 v1.1.x 时期的实况，保留以记录评价沿革 |
+| `docs/ARCHITECTURE-ORGANISM.md`(已归档) | 正文仍写「`src/llm/` client 多后端 http/**openclaw**/deepseek」，但 v2.5.0 已移除该底座 | 该行改为「自研 http 单底座 —— v2.5.0 起已移除 openclaw/deepseek 外部引擎」；并在文档头加**时效说明**（本文是 2026-08-21 快照，当前状态以 PROJECT-OVERVIEW.md 为准） |
+| `docs/ABSORB-DEEPSEEK-HARNESS.md`(已归档) | 提供 `npm run dsh:install` / `dsh:build` / `npm run dsh` 等**已不存在的可执行指令**，照做必然失败 | 文档头加 🚫 **已废弃（v2.5.0 起）** 标注，明确命令不可执行，仅作决策沿革留档 |
+| `docs/EVALUATION-v1.1.1-全面评价.md`(已归档) | 「多后端 http/openclaw/deepseek 三路回退」等描述与当前不符 | 加 📌 **历史归档** 标注：这些是 v1.1.x 时期的实况，保留以记录评价沿革 |
 | `docs/ARCHITECTURE.md` / `docs/CONFIG.md` | — | 已正确注明 v2.5.0 移除，**无需改动** |
 
 > 处置原则：**当前状态类文档**（ARCHITECTURE-ORGANISM）修正正文；**历史留档类文档**（ABSORB / EVALUATION）保留原文、只加时效标注 —— 改历史记录会破坏其证据价值。
@@ -786,7 +800,7 @@ const overall = this.degraded
 ### 6.6 已修复 — 用户实测驱动的第二轮（v2.7.1）
 
 > 本章 6.1–6.3 来自**源码通读**；6.6 来自**扮演用户端到端实测**（Web / MCP / CLI / 真实 LLM / 跨进程记忆 / 安全边界）。
-> 实测方法与原始证据见 `docs/USER-TEST-REPORT.md`。共发现 2×P1 + 3×P2，**全部修复**，测试 754 → **768 项（+14 回归守卫）**，0 失败。
+> 实测方法与原始证据见 `docs/USER-TEST-REPORT.md`(2026-11-08 精简归档至 git 历史)。共发现 2×P1 + 3×P2，**全部修复**，测试 754 → **768 项（+14 回归守卫）**，0 失败。
 
 #### 🔴 P1-1 用户提问被当作长期事实入库（记忆污染，实测污染率 40%）
 
@@ -809,8 +823,8 @@ if (clean.length <= 8 && /[?？]|几点|多少|什么|怎么|为什么|在哪|�
 
 #### 🔴 P1-2 自愈只认 `<root>/data`，不认实际 `dataDir`
 
-`src/selfheal/healer.js:13` 把 `dataDir` 硬编码为 `path.join(rootDir, "data")`，而唯一的装配点
-`src/plugin/builtin.js:58` 传进来的参数是 **`root`**（不是数据目录）。同文件第 71 行 `factsPlugin`
+`src/evolve/healer.js:20` 把 `dataDir` 硬编码为 `path.join(rootDir, "data")`，而唯一的装配点
+`src/agent/plugins/builtin.js:84` 传进来的参数是 **`root`**（不是数据目录）。同文件 `factsPlugin`
 传的却是 `dataDir` —— 整个插件集里**只有 healer 一处这么写**。
 
 **后果**：只要 `PPX_DATA_DIR` 或构造参数把数据目录指到别处（npm 安装形态走 `~/.ppx` 时就是这种情况），

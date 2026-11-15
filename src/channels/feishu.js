@@ -7,7 +7,7 @@
 //   ③ 防重放: event_id 去重缓存 (TTL 5 分钟), 重投递不再触发对话
 import crypto from "node:crypto";
 import { Channel } from "./base.js";
-import { triggerFromFeishuEvent } from "./trigger.js";
+import { triggerFromFeishuEvent } from "../flow/trigger.js";
 
 // 官方算法: base64 解码 → 前 16 字节为 IV, 其余为密文; key = sha256(encrypt_key)
 // 2026-10-24 (R2) 修正: Node 的 decipher.final() 已自动去除 PKCS7 填充 (auto-padding 默认开),
@@ -161,7 +161,7 @@ export class FeishuChannel extends Channel {
     // 事件: 消息
     const event = data.event;
     if (event && event.type === "im.message.receive_v1" && event.message) {
-      // 2026-10-31 (Super-agent 一期): 不再把消息退化成裸字符串 —— 完整读出 chat_id/
+      // 2026-10-31 (v4.1 平台化): 不再把消息退化成裸字符串 —— 完整读出 chat_id/
       //   chat_type/root_id/parent_id/message_id/sender 构造 Trigger, 走两级过滤门 +
       //   四段式会话键归组 (群聊/话题各自独立会话, 不再全混进 default)。回发目标仍是
       //   open_id (send 走 receive_id_type=open_id, 群内回复通道升级留二期)。
@@ -186,14 +186,29 @@ export class FeishuChannel extends Channel {
     }
   }
 
-  async send(to, text) {
+  async send(to, text, meta = null) {
     const target = this._resolveTarget(to);
     if (!target) throw new Error("飞书主动推送缺接收人: 先收到过一条用户消息记录 open_id, 或用 send(openId, ...)");
     const token = await this._getTenantToken();
+    const headers = { "Content-Type": "application/json", "Authorization": `Bearer ${token}` };
+    const content = JSON.stringify({ text });
+    // 2026-11-01 (二期⑥ thread 回投): meta.replyTo = 原消息 message_id → 走 reply 接口,
+    //   回复落在原消息/原话题下 (群聊话题串不散); 无 meta 时旧行为直发。
+    if (meta && meta.replyTo) {
+      const r = await fetch(`https://open.feishu.cn/open-apis/im/v1/messages/${encodeURIComponent(String(meta.replyTo))}/reply`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ msg_type: "text", content }),
+        signal: AbortSignal.timeout(15000),
+      });
+      const data = await r.json();
+      if (data.code !== 0) throw new Error(`飞书发送失败: ${data.msg}`);
+      return data;
+    }
     const r = await fetch("https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
-      body: JSON.stringify({ receive_id: target, msg_type: "text", content: JSON.stringify({ text }) }),
+      headers,
+      body: JSON.stringify({ receive_id: target, msg_type: "text", content }),
       signal: AbortSignal.timeout(15000), // v1.0.8: 网络挂起不永久阻塞
     });
     const data = await r.json();

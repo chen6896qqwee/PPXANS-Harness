@@ -1,5 +1,5 @@
 // src/bus/circuit-breaker.js - 订阅者/策略订阅者熔断器 (P0④)
-// 吸收 Aegis/HookBus 的熔断器模式: Closed → Open → Half-Open 三态, 保护总线/策略链不被故障订阅者拖垮。
+// 设计溯源 docs/PROVENANCE.md#aegis; 自研熔断器: Closed → Open → Half-Open 三态, 保护总线/策略链不被故障订阅者拖垮。
 // 与 src/agent/index.js 的"探索循环熔断"(agent 行为层) 互补: 这里是基础设施层 (订阅者健康)。
 // 设计:
 //   - Closed: 正常调用, 失败计数累加; 窗口内失败超阈值 → Open

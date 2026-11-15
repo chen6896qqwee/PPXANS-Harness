@@ -5,6 +5,7 @@
 //   · 写: 防抖 2s 合并落盘, withFileLock 内"锁内重读 + 按 id 并集"再原子写
 //     (与 failure-episode 同款并发语义, 多进程/CLI 共写不互吞)
 // 容量上限淘汰最旧; embedder 指纹不符 (换模型/换实现) 全量作废。
+import { noteCatch } from "../utils/catch-log.js";
 import path from "node:path";
 import fs from "node:fs";
 import { ensureDir, readJson, withFileLock } from "../utils/store.js";
@@ -29,7 +30,7 @@ export class VectorDiskCache {
         }
       }
       // 指纹不符 = embedder 换代, 旧向量全部作废 (不加载, 下次 flush 覆盖)
-    } catch { /* 空缓存起步 */ }
+    } catch (e) { noteCatch(e); /* 空缓存起步 */ }
   }
 
   // 命中条件: id 存在且内容哈希一致 (内容改了 = 失效重算)
@@ -72,7 +73,7 @@ export class VectorDiskCache {
         try {
           const d = readJson(this.file, null);
           if (d && d.fingerprint === this.fingerprint && d.vectors) disk = d.vectors;
-        } catch { /* 无盘上数据 */ }
+        } catch (e) { noteCatch(e); /* 无盘上数据 */ }
         const merged = { ...disk };
         for (const [id, e] of this._vectors) merged[id] = e;
         // 容量裁剪 (磁盘侧): 保留内存态 + 其余按插入序取最新
@@ -88,7 +89,7 @@ export class VectorDiskCache {
         fs.writeFileSync(tmp, JSON.stringify({ fingerprint: this.fingerprint, vectors: merged }));
         fs.renameSync(tmp, this.file);
       });
-    } catch { /* 落盘失败不阻断检索 (内存缓存仍在), 下次 set 重试 */ }
+    } catch (e) { noteCatch("src/memory/vector-disk.js#ensureDir", e); /* 落盘失败不阻断检索 (内存缓存仍在), 下次 set 重试 */ }
   }
 
   get size() { return this._vectors.size; }

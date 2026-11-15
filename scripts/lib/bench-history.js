@@ -10,7 +10,7 @@
 //   · 保留最近 MAX_KEEP 条, 超出时整体重写一次 —— 文件只有几十行, 重写成本可忽略;
 //   · 只存判分需要的字段 (rate / acceptance / ms), 不存逐条明细 (明细在当日 json 里)。
 //
-// 面板读同一份文件 (src/web/bot-api.js buildBodyState), 格式由本模块与那边共同约定:
+// 面板读同一份文件 (src/web/bot-view.js buildBodyState), 格式由本模块与那边共同约定:
 //   每行一个 JSON: { ts, rate?, acceptance?, ms?, passed?, total? }
 import fs from "node:fs";
 import path from "node:path";
@@ -36,5 +36,5 @@ export function appendHistory(dir, kind, entry) {
       fs.renameSync(tmp, file);
     }
     return true;
-  } catch { return false; }
+  } catch { return false; /* swallowed-ok(2026-11-03): 历史写入失败由返回值告知调用方 */ }
 }

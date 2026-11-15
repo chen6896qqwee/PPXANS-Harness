@@ -1,5 +1,6 @@
 // src/channels/log.js - 日志通道 (dummy): 无网络依赖, 把消息打印到 stdout
 // 用途: 主动提醒/消息先落到本地日志验证契约, 再接真实通道 (webhook/IM) 时只需"换一个 adapter"
+import { info as logInfo } from "../utils/logger.js";
 import { Channel } from "./base.js";
 
 export class LogChannel extends Channel {
@@ -15,7 +16,7 @@ export class LogChannel extends Channel {
 
   async send(to, text) {
     const prefix = to && to !== "*" ? `[log:${to}]` : "[log]";
-    console.log(`${prefix} ${String(text)}`);
+    logInfo(`${prefix} ${String(text)}`);
     return text;
   }
 

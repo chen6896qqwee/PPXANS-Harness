@@ -23,8 +23,13 @@
 //   SKILL.md **内容**修改不改变父目录 mtime, 仍由 _load 的 _sigOf (文件 mtime+size) 逐文件检测,
 //   语义与 v2 完全一致 (见 test/skills-scan-cache.test.js 的回归)。
 import fs from "node:fs";
+import { readJson as readJsonStore } from "../utils/store.js";
 import path from "node:path";
-import os from "node:os";
+import { expandHome } from "../utils/expand-home.js";
+import { noteCatch } from "../utils/catch-log.js";
+
+// ~ 展开实现收口在 utils/expand-home.js (expert-pack 同源); 此处 re-export 保持既有 import 路径
+export { expandHome };
 
 // ---- frontmatter / 章节解析 (零依赖) ----
 
@@ -102,20 +107,16 @@ function readJsonSafe(file, fallback) {
     if (!fs.existsSync(file)) return fallback;
     const raw = fs.readFileSync(file, "utf8");
     if (!raw.trim()) return fallback;
-    const v = JSON.parse(raw);
+    // 2026-11-08 收敛: JSON 解析统一走 utils/store.js (去 BOM/损坏留 warn);
+    // 本地只保留技能元数据特有语义: 仅接受对象。
+    const v = readJsonStore(file, null);
     return v && typeof v === "object" ? v : fallback;
   } catch {
     return fallback;
   }
 }
 
-// 展开 ~ 前缀 (用户级技能目录: "~/.ppx/skills")
-export function expandHome(p) {
-  const s = String(p || "");
-  if (s === "~") return os.homedir();
-  if (s.startsWith("~/") || s.startsWith("~\\")) return path.join(os.homedir(), s.slice(2));
-  return s;
-}
+// 展开 ~ 前缀 (用户级技能目录: "~/.ppx/skills") —— 实现收口 utils/expand-home.js, 单源 re-export
 
 // 归一化根目录描述: string 或 { id, dir, kind, writable }
 function normalizeRoots(input, cfg = {}) {
@@ -148,10 +149,16 @@ export class SkillLoader {
     this.dir = this.roots[0]?.dir || "";
     // 领域层级深度: 1 = 只认 skills/<skill>/; 2 = 额外认 skills/<domain>/<skill>/
     this.maxDepth = Number.isFinite(cfg.maxDepth) ? Math.max(1, Math.min(3, Math.floor(cfg.maxDepth))) : 2;
-    this._cache = new Map(); // id -> { sig, meta }
+    this._cache = new Map(); // id -> { sig, meta, file }
+    // 技能管理页停用清单 (2026-11-03): 停用 = 提示清单不出现 + load_skill 拒绝;
+    //   元数据仍可查 (管理页要能列出并恢复), 文件不动。
+    this.disabled = new Set((Array.isArray(cfg.disabled) ? cfg.disabled : []).map((x) => String(x).toLowerCase()));
     // 目录扫描缓存: { dirs: [{ dir, mtimeMs, unreadable? }], index: Map, provisional: boolean }。
     // dirs = 上次扫描 readdir 过的全部目录 (mtimeMs=null 表示扫描时 stat 不到, 如根不存在)。
     this._indexCache = null;
+    // 缓存代际: _cache 条目被增删/刷新时 +1。catalog() 的稳定视图据此判断"要不要重建"。
+    this._cacheGen = 0;
+    this._catalog = null; // catalog() 的稳定视图 (见下方)
   }
 
   // 可写根 (新技能落盘处); 全部只读时回落到第一根
@@ -265,6 +272,7 @@ export class SkillLoader {
   // 不调用也安全 —— 目录 mtime 签名会在下一次 list()/get() 自动发现变化; 这里只是省掉一次校验。
   invalidate() {
     this._indexCache = null;
+    this._catalog = null;
   }
 
   // 全部技能 id (排序稳定)
@@ -272,18 +280,38 @@ export class SkillLoader {
     return [...this._scan().keys()].sort();
   }
 
+  // 技能 id 解析 (2026-11-13, 评测 P2-1):
+  //   id 是 "domain/leaf" 形式 (如 code/webapp-testing), 而 frontmatter name 常是 leaf
+  //   (webapp-testing)。模型按名字调用 load_skill("webapp-testing") 时旧实现只按 id 精确查,
+  //   明明存在的技能被报"未知"。这里在精确命中之外补一层**唯一叶子名**解析:
+  //   只有同名叶子恰好一个时才认 (多域同名保持歧义 = 拒绝, 不猜)。
+  resolveId(id, index = null) {
+    const raw = String(id || "").trim();
+    if (!raw) return null;
+    const idx = index || this._scan();
+    if (idx.has(raw)) return raw;
+    const leaf = raw.split("/").pop().toLowerCase();
+    const hits = [...idx.keys()].filter((k) => k.split("/").pop().toLowerCase() === leaf);
+    return hits.length === 1 ? hits[0] : null;
+  }
+
   // index 可选: 批量路径 (list) 复用它, 避免每个技能各扫一遍目录树 (n×readdir → 1×readdir)
   _load(id, index = null) {
-    const key = String(id || "");
-    if (!key) return null;
-    const hit = (index || this._scan()).get(key);
+    const idx = index || this._scan();
+    const key = this.resolveId(id, idx);
+    if (!key) {
+      const raw = String(id || "");
+      if (this._cache.delete(raw)) this._cacheGen++;
+      return null;
+    }
+    const hit = idx.get(key);
     if (!hit) {
-      this._cache.delete(key);
+      if (this._cache.delete(key)) this._cacheGen++;
       return null;
     }
     const sig = this._sigOf(hit.file);
     if (sig === null) {
-      this._cache.delete(key);
+      if (this._cache.delete(key)) this._cacheGen++;
       return null;
     }
     const cached = this._cache.get(key);
@@ -295,8 +323,9 @@ export class SkillLoader {
     let raw = "";
     try {
       raw = fs.readFileSync(hit.file, "utf8");
-    } catch {
-      this._cache.delete(key);
+    } catch (e) {
+      noteCatch(e); // 技能文件读失败: 该技能静默消失会误导模型, 必须留痕
+      if (this._cache.delete(key)) this._cacheGen++;
       return null;
     }
     const fm = parseFrontmatter(raw);
@@ -318,23 +347,80 @@ export class SkillLoader {
       file: hit.file,
     };
     this._cache.set(key, { sig, meta, file: hit.file });
+    this._cacheGen++;
     return meta;
   }
 
   // 列出全部技能 (id/name/description/domain/source), 目录增删与内容修改都会反映
   list() {
+    return this._list(false);
+  }
+
+  // 含已停用技能的完整清单 (仅技能管理页使用; 提示注入/检索仍走 list())
+  listAll() {
+    return this._list(true);
+  }
+
+  setDisabled(ids) {
+    this.disabled = new Set((Array.isArray(ids) ? ids : []).map((x) => String(x).toLowerCase()).filter(Boolean));
+    return [...this.disabled];
+  }
+
+  isDisabled(id) {
+    return this.disabled.has(String(id || "").toLowerCase());
+  }
+
+  _list(includeDisabled) {
     const index = this._scan();
     const ids = [...index.keys()].sort();
     const keep = new Set(ids);
-    for (const k of [...this._cache.keys()]) if (!keep.has(k)) this._cache.delete(k);
+    for (const k of [...this._cache.keys()]) {
+      if (!keep.has(k) && this._cache.delete(k)) this._cacheGen++;
+    }
     const out = [];
     for (const id of ids) {
+      if (!includeDisabled && this.isDisabled(id)) continue;
       const m = this._load(id, index);
       if (m) out.push({
         id: m.id, name: m.name, description: m.description,
         domain: m.domain, tags: m.tags, source: m.source, version: m.version,
       });
     }
+    return out;
+  }
+
+  // 轻量目录快照 —— 只供「提示级」消费方 (L2 漏斗的技能打分) 使用, 不是 list() 的替代品。
+  // 与 list() 的差别只有一条: **不对每个 SKILL.md 做 stat**。
+  //   - 目录增删/改名: 仍经 _scan() 的目录 mtime 校验, 即时可见 (与 list() 相同)
+  //   - SKILL.md 内容改动 (name/description): 要等到下一次 list()/_load 刷新 _cache 才反映到
+  //     这里。打分只用来提示"可能命中哪个技能", 落后一轮没有实质影响; 权威清单仍由
+  //     _context() → list() 每轮全量校验 (系统提示里的技能目录不受影响)。
+  // 为什么值得: 每轮 chat 里漏斗先于提示词构建执行, 原来两处各做一次全量 list() =
+  //   2×(82 目录 stat + 67 文件 stat); 漏斗改用本方法后, 稳态下每轮只剩一次文件级校验。
+  // 冷缓存时不投机: 缺失的条目照常 _load (stat+读), 首次结果与 list() 完全一致。
+  // 结果按 (_scan 的 index 身份, _cacheGen) 记忆 —— 同一轮内多次调用返回同一数组,
+  //   上层可按对象身份缓存分词 (见 skills/search.js 的 token 缓存)。
+  catalog() {
+    const index = this._scan();
+    const memo = this._catalog;
+    if (memo && memo.index === index && memo.gen === this._cacheGen) return memo.list;
+    const out = [];
+    for (const id of [...index.keys()].sort()) {
+      if (this.isDisabled(id)) continue;
+      const hit = index.get(id);
+      let ent = this._cache.get(id);
+      if (!ent || ent.file !== hit.file) {
+        if (!this._load(id, index)) continue;
+        ent = this._cache.get(id);
+        if (!ent) continue;
+      }
+      const m = ent.meta;
+      out.push({
+        id: m.id, name: m.name, description: m.description,
+        domain: m.domain, tags: m.tags, source: m.source, version: m.version,
+      });
+    }
+    this._catalog = { index, gen: this._cacheGen, list: out };
     return out;
   }
 
@@ -358,9 +444,14 @@ export class SkillLoader {
     return m ? m.domain : null;
   }
 
-  // SKILL.md 正文 (去 frontmatter)。未知技能返回 null。
+  // SKILL.md 正文 (去 frontmatter)。未知技能或已停用技能返回 null。
+  //   停用判定放在这里而不是只挡 list(): load_skill / 模式路由 / 学习服务都直接 read,
+  //   只过滤清单会让"已停用"变成"只是藏起来", 模型照样能把正文读进上下文。
   read(id) {
-    const m = this._load(String(id || ""));
+    const key = this.resolveId(id);
+    if (!key) return null;
+    if (this.isDisabled(key) || this.isDisabled(id)) return null;
+    const m = this._load(key);
     return m ? m.body : null;
   }
 
@@ -389,7 +480,7 @@ export class SkillLoader {
       fs.writeFileSync(this._usageFile(), JSON.stringify(u, null, 2), "utf8");
       return true;
     } catch {
-      return false;
+      return false; /* swallowed-ok(2026-11-03): 用量统计失败不影响技能加载 */
     }
   }
 

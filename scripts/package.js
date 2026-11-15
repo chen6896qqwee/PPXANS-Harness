@@ -42,12 +42,9 @@ const die = (s) => { console.error(`[package] 错误: ${s}`); process.exit(1); }
 // ---- 打包内容清单 (排除源仓运行数据/测试/构建机专用) ----
 // 2026-10-30: config 不再整目录复制 —— 本机 ppx.json 可能含 API Key / apply 模式自改开关,
 //   ppx.json.bak-* 还带历史密钥。只发模板与身份文件。
-const APP_DIRS = ["src", "bin", "public", "skills"];
+const APP_DIRS = ["src", "bin", "webapp", "skills"];
 const CONFIG_FILES = ["ppx.json.example", "identity.md", "ishiki.md"];
-const APP_FILES = ["package.json", "README.md", "LICENSE", "NOTICE", "THIRD-PARTY-NOTICES.md",
-  "启动皮皮虾.bat", "停止皮皮虾.bat", "高级菜单.bat",
-  "启动皮皮虾.vbs", "皮皮虾 Web.vbs",
-  "start-ppx-server.bat", "start-ppx-chat.bat", "双击启动皮皮虾.bat"];
+const APP_FILES = ["package.json", "README.md", "LICENSE", "NOTICE", "THIRD-PARTY-NOTICES.md"];
 
 function run(cmd, cmdArgs, opts = {}) {
   const r = spawnSync(cmd, cmdArgs, { stdio: opts.capture ? ["ignore", "pipe", "inherit"] : "inherit", cwd: ROOT, ...opts });
@@ -101,7 +98,7 @@ function ensureNodeRuntime() {
 
 // ---- 2. 组装应用目录 ----
 function stageApp(zipPath) {
-  log("[2/5] 组装应用目录 (src/bin/public/skills + 配置模板 + 启动器)");
+  log("[2/5] 组装应用目录 (src/bin/webapp/skills + 配置模板 + 启动器)");
   const stage = path.join(DIST, ".stage");
   fs.rmSync(stage, { recursive: true, force: true });
   fs.mkdirSync(stage, { recursive: true });
@@ -129,7 +126,7 @@ function stageApp(zipPath) {
     "@echo off",
     'set "NODE=%~dp0runtime\\node.exe"',
     'if not exist "%NODE%" set "NODE=node"',
-    '"%NODE%" "%~dp0bin\\ppx-web.js"',
+    '"%NODE%" "%~dp0bin\\ppx.js" web',
   ].join("\r\n") + "\r\n", "utf8");
   const sz = (p) => (fs.statSync(p).size / 1048576).toFixed(1) + "MB";
   log(`      runtime/node.exe: ${sz(path.join(stage, "runtime", "node.exe"))}`);

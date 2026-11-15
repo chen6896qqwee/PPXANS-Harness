@@ -5,10 +5,8 @@
 //     server/discover 探测, 结果带 resultType, 响应 _meta 带 serverInfo 身份戳。
 //   - legacy 2025-06-18 及更早: initialize 握手 + capabilities 协商 (兼容存量 MCP 客户端)。
 // 传输无关: 仅做 JSON-RPC 分发, stdio/HTTP 传输由上层 (src/mcp/http.js 等) 接入。
-import { TOOL_ERROR_PREFIX } from "../tools/catalog.js";
+import { isToolErrorResult } from "../core/errors.js";
 import { warn } from "../utils/logger.js";
-import { sanitizeMcpName } from "./index.js";
-
 // 版本号统一读 package.json, 避免与发布版本漂移 (外部体检: 硬编码 2.5.0 导致 serverInfo 落后真实版本)
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -20,8 +18,8 @@ try {
 
 // 协议版本常量 (与官方 schema/2026-07-28 对齐)
 export const MODERN_PROTOCOL_VERSION = "2026-07-28";  // 现代 era (每请求 _meta)
-export const LEGACY_PROTOCOL_VERSION = "2025-06-18";  // legacy era (initialize 握手) 最高支持版本
-export const SUPPORTED_VERSIONS = [MODERN_PROTOCOL_VERSION, LEGACY_PROTOCOL_VERSION, "2025-03-26", "2024-11-05"];
+const LEGACY_PROTOCOL_VERSION = "2025-06-18";  // legacy era (initialize 握手) 最高支持版本
+const SUPPORTED_VERSIONS = [MODERN_PROTOCOL_VERSION, LEGACY_PROTOCOL_VERSION, "2025-03-26", "2024-11-05"];
 export const SERVER_INFO_META_KEY = "io.modelcontextprotocol/serverInfo";
 
 // ---- MCP 标准错误码 (JSON-RPC 保留段 + MCP 定义段) ----
@@ -60,8 +58,15 @@ function stampServerInfo(result, serverInfo) {
 }
 
 // ---- 工具名清洗: MCP 规范只允许 [A-Za-z0-9_.-] ----
+// 2026-11-06 (评估 P1-1 回归修复): MCP 协议面与 LLM 暴露面的工具名合约必须拆开 ——
+//   MCP 规范允许点号, 自家虚拟工具名 (ppx.chat.send / ppx.chat.stream) 合法含点;
+//   OpenAI 兼容后端的 ^[A-Za-z0-9_-]{1,64}$ 合约只约束"送进 tool_schema 的名字"
+//   (由 mcp/index.js 的 sanitizeMcpName/fitMcpName 负责)。此前 server 侧误用严格版
+//   清洗, 虚拟工具注册 key 被洗成 ppx_chat_send, tools/call 原名查找必然落空
+//   (实测: mcp-stream 3/3 失败, "未知工具: ppx.chat.send")。
+const MCP_PROTOCOL_NAME_MAX = 64;
 function safeToolName(name) {
-  const n = sanitizeMcpName(name); // 只留 \w.-, 截断 64
+  const n = String(name || "").replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, MCP_PROTOCOL_NAME_MAX);
   return n || "unnamed";
 }
 
@@ -100,7 +105,13 @@ export class McpServer {
         description: "发送消息给皮皮虾 agent, 返回完整回复。内部会执行完整工具调用循环 (记忆/搜索/命令等)。sessionId 用于区分会话上下文, 默认 default。",
         inputSchema: chatInputSchema(),
         execute: async (args, ctx, agent) => {
-          const reply = await agent.chat(String(args.message || ""), { sessionKey: args.sessionId || "default" });
+          const message = String(args.message || "");
+          const sessionKey = args.sessionId || "default";
+          const run = () => agent.chat(message, { sessionKey });
+          // 无通道入口也要进工单账本: 否则 MCP 对话在 /work、看门狗与审计链上是黑洞。
+          const reply = typeof agent.chatTracked === "function"
+            ? (await agent.chatTracked(message, { source: "mcp", from: sessionKey, sessionKey, cause: "external", run })).reply
+            : await run();
           return { content: [{ type: "text", text: String(reply) }] };
         },
       },
@@ -111,13 +122,18 @@ export class McpServer {
         inputSchema: chatInputSchema(),
         execute: async (args, ctx, agent) => {
           let full = "";
-          const reply = await agent.chatStream(String(args.message || ""), {
-            sessionKey: args.sessionId || "default",
+          const message = String(args.message || "");
+          const sessionKey = args.sessionId || "default";
+          const run = () => agent.chatStream(message, {
+            sessionKey,
             onDelta: (d) => { full += d; ctx?.stream?.onDelta?.(d); },
             // v2.6.0: 结构化工具/推理事件透传 (web 前端渲染工具卡片 + 轮次进度)
             onTool: (ev) => { ctx?.stream?.onTool?.(ev); },
             onStep: (ev) => { ctx?.stream?.onStep?.(ev); },
           });
+          const reply = typeof agent.chatTracked === "function"
+            ? (await agent.chatTracked(message, { source: "mcp", from: sessionKey, sessionKey, cause: "external", run })).reply
+            : await run();
           const text = full || String(reply);
           return { content: [{ type: "text", text }] };
         },
@@ -209,13 +225,7 @@ export class McpServer {
         } else {
           const text = typeof raw === "string" ? raw : JSON.stringify(raw);
           // isError 判定: 皮皮虾 [工具错误] 前缀 或 工具内部返回的 {"error":...} JSON
-          let isError = typeof raw === "string" && raw.startsWith(TOOL_ERROR_PREFIX);
-          if (!isError && typeof raw === "string") {
-            const trimmed = raw.trim();
-            if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
-              try { isError = !!(JSON.parse(trimmed).error); } catch { /* 非 JSON 不管 */ }
-            }
-          }
+          const isError = isToolErrorResult(raw);
           result.content = [{ type: "text", text }];
           result.isError = isError;
         }
@@ -316,15 +326,51 @@ export class McpServer {
         title: t.title || name,
         description: t.description || "",
         inputSchema: t.inputSchema || { type: "object", properties: {} },
+        // 只读声明透出给客户端 (与 _admitVirtualTool 的只读模式判定同源)
+        ...(t.readOnly ? { annotations: { readOnlyHint: true } } : {}),
       });
     }
     return out;
   }
 
+  // 虚拟工具准入 (2026-11-12): 只读评审模式 + 权限引擎显式 deny。返回 null = 放行, 否则为拒绝原因。
+  //   判定来源与 catalog 工具同在两处: agent.readonly (enableReadonlyMode) / agent.permissions.check。
+  async _admitVirtualTool(name, vt, args) {
+    const agent = this.agent;
+    if (!agent) return null;
+    const readOnly = vt.readOnly === true || (vt.annotations && vt.annotations.readOnlyHint === true);
+    if (agent.readonly === true && !readOnly) {
+      return `[readonly] 当前为只读评审模式, 管理工具 "${name}" 被拒绝 (仅允许读取类操作)`;
+    }
+    const perms = agent.permissions;
+    if (perms && typeof perms.check === "function") {
+      let perm;
+      try {
+        perm = await perms.check(name, args || {}, { planEnabled: false });
+      } catch (e) {
+        return `[permission] 权限引擎异常, 已拒绝执行 (fail-closed): ${e?.message || e}`;
+      }
+      if (perm && perm.decision === "deny") {
+        return `[permission] 工具 ${name} 被拒绝: ${perm.reason || "命中 deny 规则"}`;
+      }
+    }
+    return null;
+  }
+
   async _callTool(name, args, ctx) {
     // 虚拟工具优先 (对话/流式等非 catalog 能力)
-    if (this._virtualTools.has(name)) {
-      return this._virtualTools.get(name).execute(args, ctx, this.agent);
+    // 2026-11-06 (P1-1 回归修复): 查找与注册用同一把清洗 (注册 key 经 safeToolName),
+    //   客户端传来的原名含合法点号时不再漏配。
+    const virtualKey = safeToolName(name);
+    if (this._virtualTools.has(virtualKey)) {
+      const vt = this._virtualTools.get(virtualKey);
+      // 2026-11-12 (安全审计 #4): 虚拟工具不进 catalog, 也就绕过了 `_runTool` 的准入链 ——
+      //   reviewer 只读模式 / 权限 deny 规则下, 外部 MCP 客户端仍可直改设置、删会话。
+      //   这里补上同源判定: 只读模式只放行声明 readOnly 的工具; 权限引擎显式 deny 一律拒绝
+      //   (ask/allow 不改变管理面语义, 管理面本来就是"用户自己点的操作")。引擎异常 fail-closed。
+      const denied = await this._admitVirtualTool(virtualKey, vt, args);
+      if (denied) throw new McpError(MCP_ERROR.INVALID_PARAMS, denied);
+      return vt.execute(args, ctx, this.agent);
     }
     // catalog 工具: 必须经 agent 准入链 (_runTool: PreToolUse 钩子 + 权限引擎 + 审批 + 审计),
     //   不得直连 catalog.call —— 后者会静默绕过 _admitToolCall, 把 MCP 端点变成权限旁路

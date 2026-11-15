@@ -20,6 +20,10 @@ node_modules/
 dist/
 build/
 *.tgz
+# 例外: webapp/dist 是 v5.0 前端的预构建产物, 必须入库 ——
+#   npm ci && npm start 不需要构建步骤 (CI 测试/桌面冒烟直接跑 dist), 与旧 public/ 同一策略
+!webapp/dist/
+!webapp/dist/**
 
 # 本地环境
 .env
@@ -28,7 +32,6 @@ build/
 
 # 本地配置备份(含明文 key)与本地测试产物 — 绝不入库 (2026-10-11)
 config/ppx.json.bak-*
-.ppxtest/
 
 # 验收原始 trial 数据 (可再生成、体积大) — 不入库, 只保留 README/metrics 摘要 (2026-10-11)
 reports/**/trials.json
@@ -36,6 +39,9 @@ reports/**/trials.json
 # 运行期目录: 上传附件与 .ppx 暂存/计划 (本地状态, 易含大图与临时文件) — 不入库 (2026-10-11)
 uploads/
 .ppx/
+
+# 生成物: repo_wiki 工具 (src/repomap/wiki.js) 可随时重生成 (2026-11-08 精简: 不再入库)
+docs/WIKI.md
 
 
 # 审计链 HMAC 密钥 (2026-10-24): 链外锚点, 绝不进版本库
@@ -45,6 +51,4 @@ uploads/
 dist-desktop/
 
 # 单人本地启动器 (2026-10-31): 只对这台机器有意义
-# 注: sandbox-probe/ 不在此列 —— sandbox-probe/calc.js 是 selfiterate 演示探针,
-#   被 test/zz-selfrepair-probe.test.js 引用, 必须入库 (CI checkout 才能过 depcheck)。
 启动桌面版.bat

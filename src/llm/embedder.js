@@ -18,7 +18,7 @@ export function createEmbedder(config = {}) {
             const mod = await import("@xenova/transformers");
             return await mod.pipeline("feature-extraction", config.model || "Xenova/multilingual-e5-small");
           } catch {
-            return null; // 可选包缺失 → 永久降级 (不再反复尝试)
+            return null; // 可选包缺失 → 永久降级 (不再反复尝试) /* swallowed-ok(2026-11-03): 可选依赖缺失 */
           }
         })();
       }
@@ -32,7 +32,7 @@ export function createEmbedder(config = {}) {
         const arr = Array.from(out?.data || []);
         return arr.length ? arr : null;
       } catch {
-        return null;
+        return null; /* swallowed-ok(2026-11-03): null 触发调用方回退 */
       }
     };
   }
@@ -57,7 +57,7 @@ export function createEmbedder(config = {}) {
       const v = j?.data?.[0]?.embedding;
       return Array.isArray(v) && v.length ? v : null;
     } catch {
-      return null;
+      return null; /* swallowed-ok(2026-11-03): null 触发调用方回退 */
     }
   };
 }
@@ -69,7 +69,7 @@ export function createEmbedder(config = {}) {
 //   不再每次查询都等 15s 超时 — 死端点不拖慢记忆检索。
 import { createLocalEmbedder } from "./local-embedder.js";
 
-export function embedderWithFallback(external, local, { maxFails = 2 } = {}) {
+function embedderWithFallback(external, local, { maxFails = 2 } = {}) {
   let fails = 0;
   return async function embed(text) {
     if (external && fails < maxFails) {

@@ -115,7 +115,31 @@ console.log('  对照实测: 基线平均 17836 tok/任务 (含多轮工具循�
 //          spawn_agent 857 tok 大头是 15 个参数 schema (能力面), 且描述为 2026-10-25
 //          "参数可发现性" 修复的产物, 再压有回归风险。若将来压回, 优先:
 //          a) spawn_agent 参数描述逐条压缩 (~60 tok); b) plan_files 312 tok 段并入 SKILL 按需加载。
-const CONTEXT_BUDGET_TOKENS = 15000;
+//     → 15150 (2026-11-01 Super-agent 二期): 实测 ~15,04x。增量明细 (+~135 → 压缩后 ~+80):
+//        +context_read schema —— 链式召回的续读入口 (二期③): 被裁剪工具结果全文归档后,
+//          告示牌引导模型调用本工具翻页读回。已做的压缩: 描述压到 1 句、砍掉 max_chars 参数
+//          (存储层自带 8000 默认/32k 上限, 模型无需调参)。付得起的理由: 它把"裁剪即死路"
+//          变成"裁剪可续读" —— 长输出的找回成本从"重跑工具 (重复副作用/网络/时间)"
+//          降到"一次本地读档"; 且这是 meta 工具, 常驻 schema 是告示牌可引导的前提
+//          (按需名单下模型看得见名字拿不到参数定义)。削减路径: 若将来压回, 可把
+//          context_read 降级为按需工具 + 告示牌改为提示 tool_schema 查参 (多一轮往返)。
+//     → 15400 (2026-11-02 三期第二批): 实测 15235。增量明细 (+169):
+//        +follow_thread schema 169 —— 订阅直通的模型侧入口 (此前只有 /bg 命令与 API 面,
+//          模型看得到 threadDelegate 的能力却没有任何工具能触发)。
+//        付得起的理由: ① 它把"长任务持续跟进"从"每轮都进 Router LLM"换成"话题直通 worker",
+//          文章同型优化实测省 ~37% Router token —— 169 tok 的固定开销由直通省下的推理费覆盖;
+//          ② 与 spawn_agent 分工清晰 (一次性派活 vs 长驻驻派), 不改变既有工具的语义;
+//          ③ 已做压缩: 描述压到一句, 参数只留 action/task/session_key/thread。
+//          削减路径: 若将来压回, 可将 follow_thread 移出 always-on, 由 /bg 命令面继续兜底。
+//     → 15700 (2026-11-02 三期第三批): 实测 15567。增量明细 (+332):
+//        +ask_user schema 332 —— 回合内提问并等待人类回答 (吸收 DeepSeek-Bot 的
+//          ask_user_question 语义, MIT): 选项/多选/自填, 答案以结构化文本回到回合;
+//          无人类通道时工具自身返回推进指引, 不会把回合反问死。
+//        付得起的理由: ① 它替换的是"模型猜错再返工"的整轮成本 —— 一次真实回答省下
+//          的探索/重做远高于 332 tok 常驻; ② 与 clarify 分工明确 (clarify 只生成问题
+//          清单再自猜, ask_user 真正暂停等人); ③ 已做压缩: 描述一句, 参数描述全部单行。
+//          削减路径: 若将来压回, 可将 ask_user 移出 core 常驻, 由 clarify 兜底。
+const CONTEXT_BUDGET_TOKENS = 15700;
 const checkIdx = process.argv.indexOf('--check');
 if (checkIdx >= 0) {
   const mIdx = process.argv.indexOf('--max-tokens');

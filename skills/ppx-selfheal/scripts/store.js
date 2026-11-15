@@ -3,8 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 // 2026-10-05 (同步 src): 独立版刻意不依赖主项目 utils/logger.js (不在扁平化范围内),
-// debug 降级为空操作 (自愈技能里日志噪声无意义), warn 降级为 console.warn。
-const debug = () => {};
+// warn 降级为 console.warn。
 const warn = (...a) => console.warn(...a);
 
 export function ensureDir(dir) {
@@ -13,9 +12,17 @@ export function ensureDir(dir) {
 }
 
 export function atomicWrite(file, data) {
-  ensureDir(path.dirname(file));
   const tmp = file + "." + crypto.randomBytes(4).toString("hex") + ".tmp";
-  fs.writeFileSync(tmp, data, "utf8");
+  // 目录已存在是常态 (dataDir 在构造期已建), 此时不必再跑一次 mkdirSync —— Windows 上它比
+  // 一次 writeFileSync 还慢。缺目录 (首次写/被外部删掉) 时 writeFileSync 报 ENOENT, 再补建重试,
+  // 语义与"先 ensureDir 再写"完全一致, 只是把常态路径的那次系统调用省掉。
+  try {
+    fs.writeFileSync(tmp, data, "utf8");
+  } catch (e) {
+    if (!e || e.code !== "ENOENT") throw e;
+    ensureDir(path.dirname(file));
+    fs.writeFileSync(tmp, data, "utf8");
+  }
   // v1.0.8: rename 覆盖已存在文件在 Windows 并发下可能 EPERM/EEXIST (短窗口), 重试 3 次;
   // 不再降级为非原子直接写 (并发双写可交错损坏文件), 重试仍失败则抛错由调用方处理
   // v3.2.x (2026-10-10, Windows 并发 EPERM 偶发修复): 原实现 3 次 × 30ms busy-wait 总预算仅
@@ -33,7 +40,7 @@ export function atomicWrite(file, data) {
       return;
     } catch (e) {
       if (!RETRY.has(e && e.code) || Date.now() - started + delay > BUDGET_MS) {
-        try { fs.unlinkSync(tmp); } catch {}
+        try { fs.unlinkSync(tmp); } catch (e2) { console.warn("[store] 清理临时文件失败:", e2?.message || e2); }
         throw new Error(`原子写失败: ${file} (${e.message})`);
       }
       _syncSleep(delay);
@@ -86,7 +93,7 @@ export function writeJson(file, obj) {
 //   ② 等待用 Atomics.wait (OS 级阻塞, 零 CPU), 替代原自旋空转 (20ms×150 轮纯烧 CPU 且卡事件循环)。
 const _sleepArr = new Int32Array(new SharedArrayBuffer(4));
 function _syncSleep(ms) {
-  try { Atomics.wait(_sleepArr, 0, 0, ms); } catch { const end = Date.now() + ms; while (Date.now() < end) {} }
+  try { Atomics.wait(_sleepArr, 0, 0, ms); } catch { const end = Date.now() + ms; while (Date.now() < end) { /* busy wait */ } }
 }
 function _pidAlive(pid) {
   try { process.kill(pid, 0); return true; } catch (e) { return e && e.code === "EPERM"; } // EPERM=存在但无权限
@@ -125,15 +132,41 @@ function _callSyncFn(api, file, fn) {
 export function withFileLock(file, fn, { timeoutMs = 3000, pollMs = 20, staleMs = 15000 } = {}) {
   _assertSyncFn("withFileLock", file, fn);
   const lock = file + ".lock";
+  // 释放时只删"仍属于自己"的锁文件 (与 src/utils/store.js 同源): 原实现无条件 rm, 本进程的锁
+  //   被判陈旧强取后, 强取方新建了锁, 而本进程 finally 把【对方的锁】删了 —— 锁在双方都以为
+  //   持有的窗口里消失, 出现双写。
+  // 归属判定先比文件身份 (ino + 创建时间), 命中即删, 不必读锁文件 (Windows 上一次读约 0.5ms);
+  //   被强取时对方必定 rm + 新建, 身份随之改变; 身份读不到才退回内容比对。
+  let myToken = null;
+  let myId = null;
   const acquire = () => {
     try {
       const fd = fs.openSync(lock, "wx"); // 'wx': 已存在则抛错 (原子)
-      try { fs.writeSync(fd, `${process.pid}:${Date.now()}`); } catch {}
+      const token = `${process.pid}:${Date.now()}`;
+      try { fs.writeSync(fd, token); } catch {}
+      try {
+        const st = fs.fstatSync(fd, { bigint: true });
+        myId = { ino: st.ino, bt: st.birthtimeNs ?? 0n };
+      } catch { myId = null; }
       fs.closeSync(fd);
+      myToken = token;
       return true;
     } catch {
       return false;
     }
+  };
+  const releaseIfOwn = () => {
+    if (!myToken) return;
+    try {
+      if (myId) {
+        const st = fs.statSync(lock, { bigint: true });
+        if (st.ino === myId.ino && (myId.bt === 0n || st.birthtimeNs === myId.bt)) fs.rmSync(lock, { force: true });
+      } else if (fs.readFileSync(lock, "utf8").trim() === myToken) {
+        fs.rmSync(lock, { force: true });
+      }
+    } catch {}
+    myToken = null;
+    myId = null;
   };
   // 陈旧锁判定 (v3.0.1 P1#5): 持有者进程已死 / 锁超长持有 / 自进程残留 → 可抢; 活跃进程持有 → 不可抢
   const canSteal = () => {
@@ -170,7 +203,7 @@ export function withFileLock(file, fn, { timeoutMs = 3000, pollMs = 20, staleMs 
   try {
     return _callSyncFn("withFileLock", file, fn);
   } finally {
-    try { fs.rmSync(lock, { force: true }); } catch {}
+    releaseIfOwn();
   }
 }
 

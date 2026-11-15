@@ -8,7 +8,7 @@ import { migrateData, writeSchema } from "./schema.js";
 import { setJaccard, setOverlap } from "./similarity.js";
 import { scrubPII } from "./pii.js";
 import { walFileOf, appendWal, readWal, truncateWal, walSizeBytes } from "./wal.js";
-import { expandedTerms } from "./lexicon.js";
+import { expandedTermWords } from "./lexicon.js";
 // v2026-10-04 (同步 src 2026-10-04 治理批次): 独立版刻意不依赖主项目 ——
 //   src/memory/backend-migrate.js (sqlite→json 一次性导入, 需 node:sqlite) 与 utils/logger.js
 //   都不在扁平化范围内, 故此处不导入 importSqliteIntoJson, warn 降级为 console.warn。
@@ -427,6 +427,9 @@ export class FactStore {
       status: it.status === "deleted" || it.status === "archived" ? it.status : "active",
       ...(it.deletedAt ? { deletedAt: it.deletedAt } : {}),
       ...(it.deleteReason ? { deleteReason: it.deleteReason } : {}),
+      // 2026-11-12: 归档时钟/版本链指针随行保留 (墓碑回收排序与迁移后可追溯性)
+      ...(it.archivedAt ? { archivedAt: it.archivedAt } : {}),
+      ...(it.supersededBy ? { supersededBy: it.supersededBy } : {}),
       prevId: it.prevId ?? null,
       ...(it.ttlDays ? { ttlDays: Number(it.ttlDays) } : {}),
       ...(this._normTime(it.validFrom) ? { validFrom: this._normTime(it.validFrom) } : {}),
@@ -531,14 +534,18 @@ export class FactStore {
       // —— 旧事实不删除 (可审计"当时为真"), 只是从此不再被检索命中
       // 跨 tier 取代规则 (v2026-10-XX): 低权限写入**不得**收口高权限记录 —— 抓一次网页就能让
       //   "用户说过的话"从检索里静默消失, 这比注入更难发现。同权或更高才允许取代。
+      let superseded = false;
       if (supersedeId) {
         const old = this.facts.find((x) => x.id === supersedeId);
         if (old && old.id !== fact.id && !old.validTo && canSupersede(tier, tierOfRecord(old))) {
           old.validTo = now;
+          superseded = true;
           this._markMutated(old);
         }
       }
-      this._statsCache.clear(); // 新增事实 -> 作用域统计失效
+      // 新增一条事实只需增量更新统计; 但若同时收口了旧事实的时效窗口,
+      //   作用域可见集变了, 仍整体失效 (低频)。
+      if (superseded) this._statsCache.clear(); else this._trackStats(fact);
       // 新增先记 upsert 再裁剪 (2026-09-18 修复 WAL 事件序): 原先 _prune 先写 remove、
       //   _markMutated 后补 upsert, WAL 重放时 upsert 在 remove 之后 → 被裁剪的事实"复活"。
       //   改为 upsert → remove 顺序, 重放结果与内存一致。
@@ -620,8 +627,15 @@ export class FactStore {
     let doomed = this.facts
       .filter((f) => f.status === "deleted" || f.status === "archived")
       .filter((f) => matchesTierSelector(tierOfRecord(f), tier));
-    doomed.sort((a, b) => clockOf(a) - clockOf(b)); // 最老的在前
     if (olderThanMs > 0) doomed = doomed.filter((f) => clockOf(f) <= olderThanMs);
+    if (!doomed.length) return [];
+    // 容量口径未超限 = 无一条要回收, 不必排序。add() 每次都会走到这里,
+    //   而墓碑总量通常远低于 maxFacts×K —— 无条件 O(T log T) 是纯浪费。
+    if (cap > 0 && doomed.length <= cap) return [];
+    if (doomed.length > 1) {
+      // 时钟现算一次, 避免比较器里反复 new Date (排序是 O(T log T) 次比较)
+      doomed = doomed.map((f) => ({ f, t: clockOf(f) })).sort((a, b) => a.t - b.t).map((x) => x.f);
+    }
     if (cap > 0) doomed = doomed.slice(0, Math.max(0, doomed.length - cap));
     else if (limit > 0) doomed = doomed.slice(0, limit);
     if (!doomed.length) return [];
@@ -714,7 +728,27 @@ export class FactStore {
       totalLen += bg.size;
       for (const t of bg) df.set(t, (df.get(t) || 0) + 1);
     }
-    return { N, avgdl: N ? totalLen / N : 1, df, grams };
+    return { N, avgdl: N ? totalLen / N : 1, totalLen, df, grams };
+  }
+
+  // 增量维护作用域统计 (add 新增一条时调用), 避免整库重建:
+  //   _statsCache 原先是 add 后 clear() —— 下一轮第一次 query 要重扫全部事实重新分词,
+  //   实测 900 条库每轮多付 ~1.7ms。新增一条只会改变 grams/df/totalLen, 就地加即可;
+  //   删除/改写等会减少条目的操作仍走 rebuildIndex() 全量重建 (低频)。
+  _trackStats(fact) {
+    const bg = this._bigramSet(fact.content);
+    const bases = new Set([fact.scope == null ? "__all__" : "s:" + fact.scope, "__all__"]);
+    for (const base of bases) {
+      for (const key of [base, base + "|exp"]) {
+        const st = this._statsCache.get(key);
+        if (!st || !st.grams || st.grams.has(fact.id)) continue;
+        st.grams.set(fact.id, bg);
+        st.N += 1;
+        st.totalLen += bg.size;
+        st.avgdl = st.N ? st.totalLen / st.N : 1;
+        for (const t of bg) st.df.set(t, (st.df.get(t) || 0) + 1);
+      }
+    }
   }
 
   // 单查询词 IDF: ln(1 + (N - df + 0.5)/(df + 0.5))
@@ -726,7 +760,9 @@ export class FactStore {
 
   // BM25 打分 (简化 tf=1, 因 tokenize 去重为 set)
   _bm25Score(fact, qAll, stats) {
-    const fAll = this._bigramSet(fact.content);
+    // 复用 _queryStats 已算好的 bigram 集合 (与 src 同源): 原先每条候选在每次查询里都重算
+    //   一遍分词, 260 条库单次检索 2.5~2.9ms; 复用后 0.6ms 量级。
+    const fAll = (stats.grams && stats.grams.get(fact.id)) || this._bigramSet(fact.content);
     if (!fAll.size) return 0;
     const docLen = fAll.size;
     const k1 = 1.5;
@@ -897,70 +933,143 @@ export class FactStore {
     return dot / (Math.sqrt(na) * Math.sqrt(nb));
   }
 
-  // 概念路 (2026-10-30, 与 src 同源): 用 lexicon 的"概念簇"把查询扩成同族词, 按命中度排序。
+  // 概念路 (2026-10-30, 2026-11-12 改整词口径; 与 src 同源): 用 lexicon 的"概念簇"把查询扩成同族词, 再按命中度排序。
   //   存在的理由: dense (字符 n-gram 余弦) 与 BM25 (bigram) **都是字面信号**, 字面零交集时
   //   两路全空 —— "什么操作系统" 找不到 "用户用 Windows 11"。概念路补这一段。
-  // 打分: 命中扩展 bigram 的 IDF 加权和 / sqrt(扩展集大小) —— 长查询扩展集大, 不归一会天然占优。
+  //   它只提供弱信号, 由 RRF 与另两路融合。
+  // 打分: 命中的扩展词按 IDF 加权求和 (同簇多个词命中时加权), 再按扩展集权重和开方归一。
+  //   整词子串匹配而非 bigram 交集 —— bigram 会跨词切分 ("同步会"→"同步"), 而"同步"本身是
+  //   「锁/并发」簇的词, 于是"什么时候开会"会误命中"同步文件锁"事实; 整词口径下只有事实里
+  //   真的出现成员词才算桥。
   _conceptRank(q, scoped, stats, limit) {
-    const exp = expandedTerms(q);
-    if (!exp.size || !scoped.length) return [];
-    const norm = Math.sqrt(exp.size);
+    const words = expandedTermWords(q);
+    if (!words.length || !scoped.length) return [];
+    const isLatin = (t) => /^[a-z0-9][a-z0-9._-]*$/.test(t);
+    // 扩展词的 document frequency (整词口径)。只对扩展词统计, 不对每条事实的每个 bigram 重算。
+    const dfOf = new Map();
+    for (const { term } of words) {
+      let df = 0;
+      if (isLatin(term)) {
+        const token = "en:" + term;
+        for (const f of scoped) {
+          const fg = (stats.grams && stats.grams.get(f.id)) || this._bigramSet(f.content);
+          if (fg.has(token)) df += 1;
+        }
+      } else {
+        for (const f of scoped) if (String(f.content).toLowerCase().includes(term)) df += 1;
+      }
+      dfOf.set(term, df);
+    }
+    const idfOf = (df) => Math.log(1 + (stats.N - df + 0.5) / (df + 0.5));
+    const norm = Math.sqrt(words.reduce((n, w) => n + w.weight, 0));
     const out = [];
     for (const f of scoped) {
+      const fc = String(f.content).toLowerCase();
       const fg = (stats.grams && stats.grams.get(f.id)) || this._bigramSet(f.content);
       let s = 0;
       let hitN = 0;
       let minDf = Infinity;
-      for (const t of exp) {
-        if (!fg.has(t)) continue;
+      for (const { term, weight } of words) {
+        const hit = isLatin(term) ? fg.has("en:" + term) : fc.includes(term);
+        if (!hit) continue;
         hitN += 1;
-        s += this._idf(t, stats) || 0.1;
-        const df = stats.df.get(t) || 0;
+        const df = dfOf.get(term) || 0;
+        s += weight * idfOf(df);
         if (df < minDf) minDf = df;
       }
       if (!hitN) continue;
-      // 只命中 1 个扩展 token 时必须是**稀有词**才算信号: "windows" 命中一次是强证据,
-      //   "系统" 命中一次只是巧合。判据用 df 而非绝对 IDF: 小库 (N=2) 时 df=1 的 idf 只有 0.69,
-      //   绝对阈值会把真正的强命中一起误杀。
+      // 准入门槛: 只命中 1 个扩展词时, 它必须是**稀有词**才算信号 ——
+      //   "windows" 命中一次是强证据, "系统" 命中一次只是巧合。
+      //   判据用 df 而不是绝对 IDF 阈值: 小库 (N=2) 时 df=1 的 idf 只有 0.69,
+      //   用绝对阈值 (如 2.0) 会把真正的强命中一起误杀。
       const rareLimit = Math.max(1, Math.floor(stats.N * 0.2));
       if (hitN < 2 && minDf > rareLimit) continue;
-      out.push({ ...f, concept: s / norm });
+      // 单命中降权 (2026-11-12): 一个扩展词命中常常是宽簇带来的巧合 ("目录"簇里的"文件"
+      //   命中"同步文件锁"事实)。保留它 (仍然可能救场), 但只按半票参与融合。
+      const score = (s / norm) * (hitN < 2 ? 0.5 : 1);
+      out.push({ ...f, concept: score, conceptHits: hitN });
     }
     out.sort((a, b) => b.concept - a.concept);
     return out.slice(0, limit);
   }
 
+  // 批量取向量 (2026-11-12): 有界并发 (默认 8) 并行编码, 结果按输入顺序回填
+  async _embedMany(facts, concurrency = 8) {
+    const out = new Array(facts.length);
+    let next = 0;
+    const workers = Math.max(1, Math.min(concurrency, facts.length));
+    await Promise.all(Array.from({ length: workers }, async () => {
+      for (;;) {
+        const i = next++;
+        if (i >= facts.length) return;
+        out[i] = await this._embedFor(facts[i]);
+      }
+    }));
+    return out;
+  }
   // 语义检索: dense + BM25 + 概念 三路 RRF 加权融合; 无 embedder 时 BM25 + 概念两路
   async querySemantic(q, { limit = 5, scope = null, includeExpired = false } = {}) {
     const liveAll = this._live(scope);
     const scoped = includeExpired ? liveAll : liveAll.filter((f) => this._isCurrent(f)); // v3.1 时效过滤
+    // 统计 (含每条文档的 bigram 集合) 在作用域内只算一次, 三路共用
     const scopeKey = (scope == null ? "__all__" : "s:" + scope) + (includeExpired ? "|exp" : "");
     let stats = this._statsCache.get(scopeKey);
     if (!stats || !stats.grams) { stats = this._queryStats(scoped); this._statsCache.set(scopeKey, stats); }
     const concept = this._conceptRank(q, scoped, stats, Math.max(limit * 3, 12));
     const bm25 = this.query(q, { limit, scope, includeExpired });
+    // 逐条置信度 (2026-11-12): BM25 按**查询词覆盖率**打折 —— 查询 8 个二字组只命中 1 个
+    //   的首名, 证据强度远低于全命中; 概念/向量路按各自分数的相对强度 (相对本路首名)。
+    const qAll = this._bigramSet(String(q || "").toLowerCase());
+    const cover = (f) => {
+      if (!qAll.size) return 1;
+      const fg = stats.grams && stats.grams.get(f.id);
+      if (!fg) return 0;
+      let n = 0;
+      for (const t of qAll) if (fg.has(t)) n += 1;
+      return n / qAll.size;
+    };
+    const bm25Conf = (f) => 0.1 + 0.9 * cover(f);
+    // 概念路置信度按**证据条数**给票: 1 个扩展词命中常常是宽簇巧合 → 半票; 2 个 → 0.85;
+    //   3 个以上才视为强桥。用绝对条数而不是"相对本路最高分", 否则列表整体是噪声时
+    //   噪声首名也会拿到满票。
+    const conceptConf = (f) => ((f.conceptHits || 1) >= 2 ? 1 : 0.35);
     if (!this.embedder) {
+      // 无 embedder: BM25 + 概念 两路 (旧行为是纯 BM25)
       if (!concept.length) return bm25;
-      return rrfFuse([bm25, concept], { weights: [1.0, 0.9] }).slice(0, limit);
+      return rrfFuse([bm25, concept], { weights: [1.0, 0.9], confidence: [bm25Conf, conceptConf] }).slice(0, limit);
     }
     const qv = await this._embed(q, "query").catch(() => null);
     if (!qv) {
-      return concept.length ? rrfFuse([bm25, concept], { weights: [1.0, 0.9] }).slice(0, limit) : bm25;
+      return concept.length
+        ? rrfFuse([bm25, concept], { weights: [1.0, 0.9], confidence: [bm25Conf, conceptConf] }).slice(0, limit)
+        : bm25;
     }
     // 懒加载每条事实的 embedding (内存缓存, 不落盘避免 facts.json 膨胀)
+    const vecs = await this._embedMany(scoped);
     const dense = [];
-    for (const f of scoped) {
-      const ev = await this._embedFor(f);
+    for (let i = 0; i < scoped.length; i++) {
+      const f = scoped[i];
+      const ev = vecs[i];
       if (!ev) continue;
       const sim = this._cosine(qv, ev);
-      // dense 准入门槛 0.08: 实测内置哈希向量的弱语义命中落在 0.088~0.275, 噪声在 0~0.074。
-      //   margin 很薄, 但宁可多放一条噪声 (权重 0.45 压着) 也不要误杀唯一的弱语义桥。
+      // dense 准入门槛 (2026-10-30 实测): 12 组"查询×事实"对上量了内置哈希向量的余弦分布 ——
+      //   真正的弱语义命中落在 0.088~0.275 ("什么操作系统"×"Windows 11" 仅 0.088),
+      //   无关噪声落在 0~0.074。阈值取 0.08: margin 很薄, 但宁可多放一条噪声 (权重 0.25 压着),
+      //   也不要误杀唯一的弱语义桥 (取 0.12 会把 0.088 那条直接丢掉)。
       if (sim >= 0.08) dense.push({ ...f, dense: sim });
     }
     dense.sort((a, b) => b.dense - a.dense);
-    // 三路权重: BM25 (可靠字面) 1.0 / 概念 (受控词典桥) 0.9 / dense (哈希兜底, 噪声大) 0.45。
-    //   旧实现三路等权, dense 噪声与 BM25 准确命中同票 —— 那是召回上不去的直接原因。
-    return rrfFuse([bm25, concept, dense], { weights: [1.0, 0.9, 0.45] }).slice(0, limit);
+    const maxDense = dense.length ? dense[0].dense || 1 : 1;
+    const denseConf = (f) => 0.6 + 0.4 * (Math.max(0, f.dense || 0) / maxDense);
+    // 三路权重: BM25 是可靠的字面信号 → 1.0; 概念是可靠的语义桥 (词典受控) → 0.9;
+    //   dense 是兜底通道 (哈希向量, 噪声大) → 0.25, 只用来在另两路全空时救场。
+    //   旧实现三路等权, 结果是 dense 的噪声与 BM25 的准确命中同票 —— 那是召回上不去的直接原因。
+    //   2026-11-12: 0.45 → 0.25。字符 n-gram 余弦对无关中文文本普遍有 0.15~0.25 的底噪,
+    //   0.45 权重足以让纯噪声在多路投票里压过概念路的强命中 (实测"上线之前要做什么检查")。
+    return rrfFuse([bm25, concept, dense], {
+      weights: [1.0, 0.9, 0.25],
+      confidence: [bm25Conf, conceptConf, denseConf],
+    }).slice(0, limit);
   }
 
   hit(id) {
@@ -1221,14 +1330,22 @@ export class FactStore {
         return { ok: true, mode, imported: this.facts.length, skipped: 0 };
       }
       let imported = 0, skipped = 0;
-      const seen = new Set(this.facts.map((f) => this._normKey(f.content)));
+      // 2026-11-12: 活跃行按 scope+内容 去重 (跳过墓碑, 与 add 同口径); 墓碑行按 id 幂等
+      const seenLive = new Set(this._live().map((f) => this._dedupeKey(f)));
+      const tombIds = new Set(this.facts.filter((f) => f.status !== "active").map((f) => String(f.id)));
       const added = [];
       for (const it of items) {
         const factObj = this._normalizeFact(it);
         if (!factObj) { skipped++; continue; }
-        const k = this._normKey(factObj.content);
-        if (seen.has(k)) { skipped++; continue; }
-        seen.add(k);
+        if (factObj.status === "active") {
+          const k = this._dedupeKey(factObj);
+          if (seenLive.has(k)) { skipped++; continue; }
+          seenLive.add(k);
+        } else {
+          const id = String(factObj.id);
+          if (tombIds.has(id)) { skipped++; continue; }
+          tombIds.add(id);
+        }
         this.facts.push(factObj);
         imported++;
         added.push(factObj);
@@ -1293,7 +1410,12 @@ function cryptoRandomId() {
 // weights (2026-10-30, 与 src 同源): 每路的可信度系数, 与该路的 1/(k+rank) 相乘。
 //   三路等权时噪声路会与准确路同票, 融合结果被拉平 —— 这是"多路融合反而更差"的典型成因。
 //   缺省全 1 = 旧行为。
-export function rrfFuse(lists, { k = 60, weights = null } = {}) {
+// confidence (2026-11-12): 每路的**逐条**置信度函数 (item, rank) -> 0..1, 与列表权重相乘。
+//   RRF 只看名次, 会丢掉"这条命中有多强": 查询 8 个二字组只命中 1 个的 BM25 首名,
+//   与命中全部查询词的首名同票; 概念路/向量路内部也有强弱之分 (余弦 0.34 vs 0.17)。
+//   逐条置信度让融合按证据强度投票, 而不是把一条弱命中当强命中。
+//   缺省 null = 旧行为。
+export function rrfFuse(lists, { k = 60, weights = null, confidence = null } = {}) {
   const score = new Map(); // id -> fused score
   const items = new Map(); // id -> item (保留首个出现的对象)
   lists.forEach((list, li) => {
@@ -1302,8 +1424,13 @@ export function rrfFuse(lists, { k = 60, weights = null } = {}) {
     list.forEach((item, rank) => {
       const id = item && item.id;
       if (id == null) return;
+      let c = 1;
+      if (confidence && typeof confidence[li] === "function") {
+        const raw = Number(confidence[li](item, rank));
+        c = Number.isFinite(raw) ? Math.min(1, Math.max(0, raw)) : 1;
+      }
       if (!items.has(id)) items.set(id, item);
-      score.set(id, (score.get(id) || 0) + (w / (k + rank + 1)));
+      score.set(id, (score.get(id) || 0) + (w * c) / (k + rank + 1));
     });
   });
   return [...score.entries()]

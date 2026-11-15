@@ -1,4 +1,4 @@
-﻿// src/utils/pii.js - PII / 凭证检测与脱敏 (架构参考 openhanako pii-guard)
+﻿// src/utils/pii.js - PII / 凭证检测与脱敏 (设计溯源 docs/PROVENANCE.md#hanaagent; 自研)
 const HARD_PATTERNS = [
   { name: "api_key", regex: /\b(sk-[a-zA-Z0-9]{20,}|AKIA[A-Z0-9]{16}|gsk_[a-zA-Z0-9]{20,}|ghp_[a-zA-Z0-9]{36}|glpat-[a-zA-Z0-9_-]{20,}|xoxb-[a-zA-Z0-9-]+)\b/g },
   // v1.0.8: 放宽 inline_secret 值域 (含 :/# 等) + 8 位起, 短密钥不漏检 (原 16+ 位且不含 :#)

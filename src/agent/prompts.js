@@ -7,11 +7,12 @@ import path from "node:path";
 import { valuesPrompt } from "../ans/values.js";
 import { context as rewardContext } from "../ans/reward.js";
 import { imageFileToDataUrl } from "../tools/builtin.js";
-import { summarize as pwfSummarize } from "../planning/pwf.js";
+import { summarize as pwfSummarize } from "../session/pwf.js";
 import { renderBullets } from "../evolve/playbook.js";
 import { loadProjectInstructions } from "../memory/project-md.js";
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_SYSTEM_RATIO, CHARS_PER_TOKEN } from "./context.js";
 import { boundaryPrompt, detectHighRisk, riskDirective } from "../ans/boundary.js";
+import { routerRolePrompt } from "./role.js";
 
 // 多模态: 提取 user 消息中的图片路径并同步读图, 注入 OpenAI 视觉格式的 content 数组。
 // 仅当当前 LLM 是 http 后端且 provider 标记 vision=true 时生效 (自研底座唯一后端)。
@@ -34,12 +35,34 @@ export function visionUserContent(llm, root, userMsg) {
   return content.length > 1 ? content : text;
 }
 
+// ── system 预算分池拟合 (2026-11-09) ──────────────────────────────────────────
+// 旧实现单池按总长裁剪, 静态内容涨到 6492/6553 字符后 (本仓库 67 技能 + 活计划) 暴露两个
+// 实测破绽: ① goals 排裁剪序首位 → 预算一紧目标看板被整体丢弃 (goal-board ④ 挂);
+// ② 静态段(skills 等)的裁剪量取决于【总】长 → 加一条目标 / 命中一次高风险护栏都会改写
+// 静态前缀字节 (goal-board ④"静态前缀逐字节不变"、orchestration 边界护栏挂)。
+// 修复: 以 risk 插槽为界分两池 —— 静态池按 (budget − 尾区预留) 独立拟合 (同数据恒同字节,
+// 前缀缓存契约成立), 动态池用剩余预算拟合; 池内仍按裁剪代价从小到大。
+// 尾区成员与 _context 组装序一致: risk 固定插槽在检索段之前, 其后是工作栈/回合计划/目标。
+const TAIL_KEYS = new Set(["risk", "retrieval", "workstack", "planlive", "goals"]);
+// 裁剪序: 先让"建议性"内容 (奖励/视角/持久计划), 最后才动技能/工具目录。
+// 2026-11-12 修复: plan 曾排在 skills/tools 之后, 一份 3.4KB 的 .ppx/plan 就能把
+//   技能清单(1384)与按需工具(1137)整段挤空 —— 模型既不知道有哪些技能, 也不知道
+//   存在哪些按需工具 (delegate.test 的 _skillsPrompt 契约实测挂)。目录是"可调用能力
+//   的唯一入口", 必须比计划摘要更晚被牺牲。
+const HEAD_TRIM_ORDER = ["reward", "perspective", "plan", "citation", "extra", "projectmd", "dsml", "skills", "tools"];
+// retrieval 不进裁剪序 (与旧单池设计一致: 记忆检索段永不裁, 自身另有预算约束);
+// goals 排 risk 之前 —— 护栏最高优先, 目标只在工作栈/回合计划都让完后才牺牲。
+const TAIL_TRIM_ORDER = ["planlive", "workstack", "goals", "risk"];
+// 尾区预留: 保底 512 字符、至多 10% 预算 (0.25 时 delegate 实测 skills 被整体丢弃, 过挤)
+const TAIL_RESERVE_MIN = 512;
+const TAIL_RESERVE_RATIO = 0.1;
+
 export const promptMethods = {
   // 组装记忆上下文
   // 差异化视角 (_perspective): 多 agent 场景下由委派方注入子 agent 的专属视角,
   // 对抗同质失败 (Anthropic: 同模型+同上下文 → 一个错全错), 生命周期由调用方控制
   // 方法技能清单注入: 让 LLM 知道有哪些方法论技能可用, 面对任务时主动 load_skill
-  // (Superpowers 吸收: 技能不自动生效, 需要触发才读取全文, 省 token)
+  // (设计溯源 docs/PROVENANCE.md#superpowers: 技能不自动生效, 需要触发才读取全文, 省 token)
   _skillsPrompt() {
     try {
       if (!this.skills) return "";
@@ -85,7 +108,7 @@ export const promptMethods = {
       const acfg = this.config?.agent || {};
       const CHAR_BUDGET = Number(acfg.tool_catalog_budget) || 1500;
       let body = `【按需工具】另有 ${hidden.length} 个工具本轮未下发完整参数 (省上下文)。`
-        + "需要时先调 tool_schema(name) 取参数定义再调用, 不要凭猜写参数:";
+        + "需要时先调 tool_schema(name) 取参数定义, 取过之后下一轮会直接下发该工具, 不要重复取:";
       body += "\n" + hidden.join(", ");
       if (body.length > CHAR_BUDGET) {
         body = body.slice(0, Math.max(200, CHAR_BUDGET - 40)).trimEnd()
@@ -95,6 +118,12 @@ export const promptMethods = {
     } catch { return ""; }
   },
 
+  // 【角色】段 (2026-11-04): 仅 Router 进程非空。静态文本 (名单固定), 前缀缓存不破。
+  _rolePrompt() {
+    if (this.role !== "router" || !this._routerAllow) return "";
+    return routerRolePrompt({ allow: [...this._routerAllow] });
+  },
+
   // 【手头的事】段 (2026-10-30, P1): 跨轮任务栈。空栈返回 "" (零 token)。
   // 位置契约: 内容随任务变化 ⇒ **只能放动态区**(检索段之后), 绝不能进静态前缀,
   //   否则每加/改一件事就作废整段 provider 缓存。段内不含时间戳 (逐字节稳定)。
@@ -102,6 +131,15 @@ export const promptMethods = {
     try {
       if (!this.workStack || typeof this.workStack.render !== "function") return "";
       return this.workStack.render();
+    } catch { return ""; }
+  },
+
+  // 【当前计划】段 (v5.0 P2.3): update_plan 工具维护的分步计划, 空计划返回 "" (零 token)。
+  // 位置契约: 随任务变化 ⇒ 动态区 (workstack 之后), 不进静态前缀; 段内不含时间戳。
+  _planLivePrompt() {
+    try {
+      if (!this.planLive || typeof this.planLive.render !== "function") return "";
+      return this.planLive.render(this._activeSessionKey || "default");
     } catch { return ""; }
   },
 
@@ -135,6 +173,26 @@ export const promptMethods = {
     ].join("\n");
   },
 
+  // 【执行循环】段 (2026-11-02): 把"怎么可靠地把一件事做完"压缩成 6 条硬纪律。
+  // 为什么单独成段: 工具调用能力不只取决于工具数量, 更取决于模型是否按"取证→小步→纠错→
+  // 验证→给证据"的固定节奏走。此前这些约束散落在各工具描述里, 模型看不到全局节奏,
+  // 常见失败是"猜路径 / 原样重试 / 改完不验证 / 无证据下结论"。
+  // 静态段 (无动态内容), 位置紧跟能力边界, 与 values 同属行为底线, 不参与预算裁剪。
+  _executionPrompt() {
+    return [
+      "【执行循环】",
+      "1. 先取证再动手: 路径/文件内容/运行结果都用工具确认, 不要凭记忆或猜测。",
+      "2. 一次推进一个可验证的小步; 相互独立的读取可以并行, 有依赖的必须串行。",
+      "3. 工具报错先读错误再改: 参数错就修参数 (不确定结构先 tool_schema), 路径错就先列目录, 不要原样重试。",
+      "4. 同一手段连续失败 2 次就换路 (换工具/换思路/向用户说明), 不要陷入重试循环。",
+      "5. 写入必须验证: 改完读回或看 diff; 声称修好之前跑测试, 遵循先红后绿。",
+      "6. 收尾给结论 + 证据 (文件:行 / 命令输出 / 测试结果); 没验证的部分如实标注不确定。",
+      // 评测-II P2-1: 生产实测 (2026-11-09 等 3 个会话) npm test 30s 必超时, 反复撞超时烧掉
+      //   全部轮次。run_background/job 常驻曝光却零调用 —— 根因是提示词从未引导。
+      "7. 预计超过 30 秒的命令 (全量测试/构建/冒烟) 用 run_background 启动, 用 job 轮询结果; run_command 只跑快命令, 不要反复撞超时。",
+    ].join("\n");
+  },
+
   _context(userMsg) {
     // 组装次序契约 (2026-10-05 前缀缓存 / 2026-10-10 收敛为单条静态区):
     //   静态区在前, **动态检索段在末尾**。检索段 (memory.context 的关键事实排序 /
@@ -151,7 +209,7 @@ export const promptMethods = {
     const extra = this.config.agent?.system_extra || "";
     const perspective = this._perspective ? `【任务视角】${this._perspective}` : "";
     const skills = this._skillsPrompt();
-    // PWF 持久规划注入 (2026-10-06 吸收 planning-with-files): 有落盘计划时自动带出现场,
+    // PWF 持久规划注入 (设计溯源 docs/PROVENANCE.md#planning-with-files): 有落盘计划时自动带出现场,
     // 压缩/清空后 agent 仍知道"刚才干到哪、下一步干嘛" — 计划在磁盘, 不在上下文
     const planCtx = this._planContext();
     // 目标看板注入 (2026-10-05): 多 agent 协作时统一目标可见性 (块内零时间戳, 逐字节稳定)。
@@ -172,11 +230,13 @@ export const promptMethods = {
       { key: "values", text: values },
       { key: "workspace", text: this._workspacePrompt() },      // 工作目录: 静态前缀区最前 (root 恒定)
       { key: "boundary", text: boundaryPrompt(this.config) },  // 能力边界: 静态常驻, 与 values 同属行为底线
+      { key: "loop", text: this._executionPrompt() },           // 执行循环: 取证→小步→纠错→验证→证据
       { key: "persona", text: identity },                       // 人格卡片 (静态身份区)
       { key: "profile", text: profile },                        // L3 画像 (静态身份区)
       { key: "skills", text: skills },
       // 按需工具名单: 紧跟技能目录 (同属"我有什么能力"的静态索引区); 全量曝光时为空串不占位
       { key: "tools", text: this._toolsPrompt() },
+      { key: "role", text: this._rolePrompt() },                // 角色: 仅 Router 非空 (静态)
       { key: "experience", text: experience },                  // 经验块: 静态区末位 (技能清单之后、检索段之前)
       { key: "plan", text: planCtx },
       { key: "citation", text: citation },
@@ -194,6 +254,8 @@ export const promptMethods = {
       { key: "retrieval", text: retrieval },                    // 动态检索段: 随 userMsg 变 (含 "# 今日对话")
       // 手头的事: 动态段 (随任务变), 紧跟检索段之后 —— 必须在静态区之外
       { key: "workstack", text: this._workStackPrompt() },
+      // 回合内计划 (v5.0): update_plan 工具的分步计划, 同属动态区 (随任务变)
+      { key: "planlive", text: this._planLivePrompt() },
       // 目标看板: 恒在检索段**之后** (契约: 加/改目标不得动静态区一个字节)。
       { key: "goals", text: goalsCtx },
     ].filter((p) => p.text);
@@ -207,14 +269,13 @@ export const promptMethods = {
     return Math.max(2000, Math.floor(win * ratio * CHARS_PER_TOKEN));
   },
 
-  // 超预算时按「裁剪代价从小到大」的顺序逐段缩, values/persona(base) 永不裁 —— 它们是行为底线。
-  _fitSystemSections(parts, budget) {
+  // 超预算时按「裁剪代价从小到大」逐段缩; 2026-11-09 起分池 (见文件头 TAIL_KEYS 注释):
+  //   静态池独立拟合保证前缀只随静态数据变, 动态池 (risk/检索/工作栈/planlive/goals)
+  //   用剩余预算, 两池互不牵连。values / boundary / loop / persona(base) 不在裁剪表 → 永不裁。
+  _fitSections(parts, order, budget) {
     let total = parts.reduce((s, p) => s + p.text.length, 0);
-    if (total <= budget) return parts.map((p) => p.text).join("\n\n");
-    // 裁剪顺序 = 裁剪代价从小到大; values / boundary / base 不在表内 → 永不裁 (行为底线)。
-    // risk 放最后: 它是已命中高风险域后的强制护栏, 优先级最高, 最后才考虑牺牲。
-    const TRIM_ORDER = ["goals", "workstack", "reward", "perspective", "skills", "tools", "plan", "citation", "extra", "projectmd", "dsml", "risk"];
-    for (const key of TRIM_ORDER) {
+    if (total <= budget) return parts;
+    for (const key of order) {
       if (total <= budget) break;
       const p = parts.find((x) => x.key === key);
       if (!p || !p.text) continue;
@@ -229,7 +290,17 @@ export const promptMethods = {
       total -= (p.text.length - next.length);
       p.text = next;
     }
-    return parts.filter((p) => p.text).map((p) => p.text).join("\n\n");
+    return parts;
+  },
+
+  _fitSystemSections(parts, budget) {
+    const head = parts.filter((p) => !TAIL_KEYS.has(p.key));
+    const tail = parts.filter((p) => TAIL_KEYS.has(p.key));
+    const reserve = Math.max(TAIL_RESERVE_MIN, Math.floor(budget * TAIL_RESERVE_RATIO));
+    const headFit = this._fitSections(head, HEAD_TRIM_ORDER, budget - reserve);
+    const used = headFit.reduce((s, p) => s + p.text.length, 0);
+    const tailFit = this._fitSections(tail, TAIL_TRIM_ORDER, Math.max(reserve, budget - used));
+    return [...headFit, ...tailFit].filter((p) => p.text).map((p) => p.text).join("\n\n");
   },
 
   // 【项目指令】段 (2026-10-31): AGENTS.md / PPX.md 项目约定注入 —— 修复 /init 自创建起
@@ -298,7 +369,32 @@ export const promptMethods = {
   },
 
   // 多模态 user 消息内容: 有图且存在 vision provider 时返回 content 数组, 否则纯文本
-  _userContent(userMsg) {
-    return visionUserContent(this._visionLLM(), this.root, userMsg);
+  // v4.2: 若本轮 L2 漏斗有分流提示块 (_turnIntentHints, 按 sessionKey 隔离), 追加到 user 消息尾部。
+  //   关键约束: 【幂等】—— 同一轮内多次调用返回一致 (轮末由消费方从 Map 删除);
+  //   且该内容会经 _persistTurn 的 historyText 一并落库 —— wire 与历史逐字节一致 (append-only 契约),
+  //   下一轮模型看到的历史 = 上一轮真实所见; 记忆抽取仍用原文 (见 _persistTurn)。
+  //   sessionKey 须传入 (buildMessages/_userWireText/chatStream 均持有); 缺省按 "default" 取。
+  _userContent(userMsg, sessionKey) {
+    let content = visionUserContent(this._visionLLM(), this.root, userMsg);
+    const sk = String(sessionKey || "default");
+    // 2026-11-03: @ 引用文件 (HTTP 层已读成有界资料块) —— 只进本轮 wire, 记忆抽取仍用原文。
+    const refs = this._turnFileRefs?.get(sk) || "";
+    if (refs) {
+      if (Array.isArray(content)) content = [...content, { type: "text", text: "\n\n" + refs }];
+      else content = String(content ?? "") + "\n\n" + refs;
+    }
+    const hint = this._turnIntentHints?.get(sk) || null;
+    if (hint) {
+      if (Array.isArray(content)) content = [...content, { type: "text", text: "\n\n" + hint }];
+      else content = String(content ?? "") + "\n\n" + hint;
+    }
+    // Step 7: 断点续执行提示 —— 只在本轮由 resumeUnstartedTickets 挂上时出现。
+    const rctx = this._turnResumeHints?.get(sk) || null;
+    const rhint = rctx && typeof this._resumeHintText === "function" ? this._resumeHintText(rctx) : "";
+    if (rhint) {
+      if (Array.isArray(content)) content = [...content, { type: "text", text: "\n\n" + rhint }];
+      else content = String(content ?? "") + "\n\n" + rhint;
+    }
+    return content;
   }
 };

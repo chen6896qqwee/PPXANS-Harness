@@ -8,11 +8,20 @@
 import fs from "node:fs";
 import path from "node:path";
 import { atomicWrite } from "./store.js";
+import { noteCatch } from "./catch-log.js";
 import { warn } from "./logger.js";
 import { resolveDataDir } from "./datadir.js";
 
 // 备份文件最多保留个数
 const MAX_BACKUPS = 3;
+
+// 2026-11-02: 配置文件可能含 api_key 明文, 写盘后收紧到仅属主可读。
+//   POSIX: 0600 (umask 022 默认会落成 0644, 同机其他用户可读)。
+//   Windows: POSIX 权限位不生效 (chmod 只会切只读位), 跳过 —— 依赖用户目录 ACL。
+function restrictSecretMode(file) {
+  if (process.platform === "win32") return;
+  try { fs.chmodSync(file, 0o600); } catch (e) { warn("收紧配置权限失败:", e.message); }
+}
 
 // 配置文件位置:
 //   源码仓库 / 桌面工作副本 (root 不含 node_modules) → <root>/config/ppx.json
@@ -48,6 +57,8 @@ export function writeConfigAtomic(root, cfg) {
   if (fs.existsSync(p)) {
     const bak = p + ".bak-" + new Date().toISOString().replace(/[:.]/g, "-");
     try { fs.copyFileSync(p, bak); } catch (e) { warn("备份失败:", e.message); }
+    // 备份同样含明文 key, 权限跟主文件一致
+    restrictSecretMode(bak);
     try {
       const dir = path.dirname(p);
       const base = path.basename(p);
@@ -56,10 +67,11 @@ export function writeConfigAtomic(root, cfg) {
         .map((f) => ({ f, t: fs.statSync(path.join(dir, f)).mtimeMs }));
       baks.sort((a, b) => b.t - a.t);
       for (const old of baks.slice(MAX_BACKUPS)) {
-        try { fs.unlinkSync(path.join(dir, old.f)); } catch {}
+        try { fs.unlinkSync(path.join(dir, old.f)); } catch (e) { noteCatch(e); /* 旧备份删不掉: 只是多占空间, 下次再清 */ }
       }
-    } catch {}
+    } catch (e) { noteCatch(e); /* 备份清理失败不阻塞主文件写入 */ }
   }
   // 原子写: store.atomicWrite 带随机 .tmp 后缀 + Windows rename 重试 (EPERM/EEXIST 兜底)
   atomicWrite(p, JSON.stringify(cfg, null, 2));
+  restrictSecretMode(p);
 }

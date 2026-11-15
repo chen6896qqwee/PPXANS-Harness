@@ -2,6 +2,11 @@
 // 通过 stdin 收消息, stdout 回结果. 每个 worker 完全隔离.
 import { PPXAgent } from "./agent/index.js";
 
+// 子进程恒为 Worker (2026-11-04): 即使 config 开了 router_role, worker 也不得再分派 ——
+//   否则 Router 派生出的子进程会各自变成 Router, 形成只分派不执行的进程树。
+//   在任何 PPXAgent 构造之前写入, 早于 bootstrap 的角色判定。
+process.env.PPX_AGENT_ROLE = "worker";
+
 const root = process.cwd();
 // 可选: 独立数据目录 (多进程军团隔离, 避免互踩同一个 data/)
 // 可选: 全局共享目录 (跨 agent 共享经验库 = ANS 全局记忆)
@@ -70,7 +75,25 @@ async function handleLine(line) {
         agent._perspective = prevPerspective;
       }
       currentReqId = null;
-      process.stdout.write(JSON.stringify({ id: req.id, type: "reply", reply }) + "\n");
+      // 结构化汇报信封 (2026-11-01 v4.1 平台化): worker→router 不再只有纯文本 reply ——
+      //   附带本请求的轮次/工具步数/工具名单/思考链摘要。旧消费方忽略该字段不受影响;
+      //   主 agent (delegate.js) 可据此引用 worker 的执行证据, SDD 审查可量化。
+      const lr = agent.lastRun || {};
+      const envelope = {
+        status: "ok",
+        // Step 3: 回传父进程给的归属 ID, 父进程据此产 assignment_*/delivery_* 事件 (worker 不产)。
+        ticketId: req.ticketId ? String(req.ticketId) : null,
+        assignmentId: req.assignmentId ? String(req.assignmentId) : null,
+        rounds: Number.isFinite(lr.rounds) ? lr.rounds : null,
+        steps: Number.isFinite(lr.steps) ? lr.steps : null,
+        tools: Array.isArray(lr.toolNames) ? lr.toolNames.slice(0, 32) : [],
+        thinking: String(agent._lastReasoning || "").slice(0, 2000) || null,
+        // v5.0 信封 v2 (2026-11-07): 可验证交付物 —— 实际跑过的命令与写盘产物。
+        //   Router/工单账本据此核验"说了做"是否真做了 (claims.js 之外的硬证据)。
+        commands: Array.isArray(lr.commands) ? lr.commands.slice(0, 16) : [],
+        artifacts: Array.isArray(lr.artifacts) ? lr.artifacts.slice(0, 16) : [],
+      };
+      process.stdout.write(JSON.stringify({ id: req.id, type: "reply", reply, envelope }) + "\n");
     } else if (req.type === "ping") {
       process.stdout.write(JSON.stringify({ id: req.id, type: "pong", name: agent.config.agent?.name || "ppx" }) + "\n");
     } else if (req.type === "shutdown") {

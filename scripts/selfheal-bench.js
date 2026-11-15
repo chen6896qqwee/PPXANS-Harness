@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { Healer } from "../src/selfheal/healer.js";
+import { Healer } from "../src/evolve/healer.js";
 import { makeTmpRoot, cleanupTmp } from "./lib/tmp-agent.js";
 
 // 自愈门槛: 修复率低于 PPX_MIN_SELFHEAL (默认 100) 即非零退出 (坏基准=发布门禁失败)
@@ -34,7 +34,7 @@ function touchOld(f, ageMs) { try { const t = new Date(Date.now() - ageMs); fs.u
     const root = makeTmpRoot("shb-2");
     put(root, "data/memory/facts.json", "{ not valid json !!!");
     const h = new Healer(root);
-    const r = h.heal();
+    h.heal();
     const facts = path.join(root, "data", "memory", "facts.json");
     let arr = false; try { arr = Array.isArray(JSON.parse(fs.readFileSync(facts,"utf8"))); } catch {}
     const n = fs.readdirSync(path.join(root,"data","memory")).filter(f=>f.includes(".corrupt-")).length;

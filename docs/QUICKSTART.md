@@ -20,37 +20,34 @@ npm install -g ppxans-harness
 
 ppx            # 进入对话 CLI
 ppx doctor     # 一键体检: 配置/密钥/数据目录/技能库
-ppx-serve      # 启动 HTTP 服务 (http://127.0.0.1:8899)
-ppx-channels   # 通道自助管理 (list/add/test/enable/disable/remove)
+ppx serve      # 启动 HTTP 服务 (http://127.0.0.1:8899)
+ppx web        # 启动并打开 Web 界面 (校验令牌自动注入)
+ppx channels   # 通道自助管理 (list/add/test/enable/disable/remove)
 ```
 
 > npm 上的包名是 `ppxans-harness`（`ppx-agent` 是早期旧包，不要装）。npm 版本可能滞后于
 > [GitHub Releases](https://github.com/chen6896qqwee/PPXANS-Harness/releases/latest)，以 Releases 为准。
 
-### 方式 B：源码运行（需要 Web UI 或二次开发）
+### 方式 B：源码运行桌面客户端（推荐给日常使用）
 
 ```bash
 git clone https://github.com/chen6896qqwee/PPXANS-Harness.git
 cd PPXANS-Harness
+npm install    # 安装桌面运行时 (Electron) 与开发依赖
+npm start      # 打开桌面窗口（Windows 也可双击 启动皮皮虾.bat）
 npm run setup  # 模型配置向导 (选厂商 → 粘贴 Key → 自动探活)
-npm run chat   # CLI 对话
 ```
 
-> 内核零运行时依赖，源码跑内核不需要 `npm ci`；只有打包桌面端/跑 lint 和测试时需要开发依赖。
-> Web UI 随源码仓库分发（`public/`），由 `npm start` 直接服务，不在 npm 包内。
-
-### 方式 C：Docker（内核 + Web UI 一条命令起）
-
-```bash
-docker build -t ppxans-harness .
-docker run -p 8899:8899 -v ppxans-data:/data ppxans-harness
-```
-
-打开 http://localhost:8899 使用 Web UI（内核和界面同进程同端口；数据落 `/data` 卷）。
-
-> 想一键打包发布物（前端 build + 内核 tgz），运行 `npm run release`，产物在 `dist/`。
+> 内核零运行时依赖，源码跑内核不需要 `npm ci`；只有运行桌面客户端/打包/跑 lint 和测试时需要开发依赖。
+> 普通用户建议直接下载安装包，不需要 Node.js，也不需要浏览器或手记端口。
 
 ## 3. 配置模型
+
+**用桌面客户端的话，不需要改任何文件**：首次启动的向导只问两样 —— 模型名称（如 `deepseek-chat`）和
+API Key，接口地址按模型名自动识别。本地模型（LM Studio / Ollama）留给你自己在「设置 → 模型」里加；
+这一步也可以直接跳过，不配模型也能打开界面，之后随时补。
+
+下面是给 CLI / 服务端场景用的配置文件写法：
 
 模型提供方在 `config/ppx.json` 的 `providers` 数组里，按顺序回退（第一个失败自动切下一个）。纯 HTTP 模型只需配 API key 环境变量：
 
@@ -65,7 +62,15 @@ export DASHSCOPE_API_KEY="..."
 
 内置 provider 模板见 `docs/MODEL-SETUP.md`（文本：`openai` / `deepseek` / `zhipu` / `dashscope` / `moonshot` / `openrouter` / `groq` / `siliconflow` 等；多模态：`qwen-vl`；本地：`lmstudio` / `ollama`）。
 
-## 4. 三种使用方式
+## 4. 常用方式
+
+### 桌面客户端
+
+```bash
+npm start           # 打开桌面窗口（等价 npm run desktop）
+```
+
+对话、记忆、设置、工单都在桌面窗口里完成；无需打开浏览器，也不用记地址或端口。
 
 ### CLI 对话
 
@@ -75,10 +80,10 @@ ppx            # 或 npm run chat
 
 命令：`quit`/`exit` 退出 · `/stop` 中断当前任务 · `/reset` 清空会话 · `↑↓` 浏览历史 · `Ctrl+C` 单次中断。
 
-### HTTP API
+### HTTP API（开发者 / 集成）
 
 ```bash
-ppx-serve      # 或 npm run serve / node src/server.js
+ppx serve      # 或 npm run serve / node src/server.js
 ```
 
 ```bash
@@ -91,30 +96,21 @@ curl -X POST http://127.0.0.1:8899/message \
   -d '{"message": "你好"}'
 ```
 
-### Web UI（需源码）
-
-```bash
-npm start           # 一条命令: 内核 + 界面同进程, 自动打开浏览器 (默认端口 8899)
-                    # 等价: node bin/ppx-web.js [--port 8899] [--no-open] [--host 0.0.0.0]
-```
-
-打开 http://127.0.0.1:8899 。前端与后端同源同端口，启动时服务端自动把本机 token 注入首页，无需手填。
-
 ## 5. 通道（消息接入 + 主动提醒投递）
 
-皮皮虾所有通道统一走 `ChannelManager` 注册表，用 `ppx-channels` 命令自助连接（不改源码）：
+皮皮虾所有通道统一走 `ChannelManager` 注册表，用 `ppx channels` 命令自助连接（不改源码）：
 
 ```bash
-ppx-channels list                     # 查看全部通道 + 启用状态
-ppx-channels add feishu               # 交互式引导配置 → 写盘并启用
-ppx-channels test feishu              # 连通性测试（真实网络探测）
-ppx-channels enable|disable <name>    # 启停
-ppx-channels remove <name>            # 移除配置（恢复默认）
+ppx channels list                     # 查看全部通道 + 启用状态
+ppx channels add feishu               # 交互式引导配置 → 写盘并启用
+ppx channels test feishu              # 连通性测试（真实网络探测）
+ppx channels enable|disable <name>    # 启停
+ppx channels remove <name>            # 移除配置（恢复默认）
 ```
 
 内置通道类型：`http`（默认开）/ `feishu` / `wechat` / `log`（dummy 输出到 stdout，适合先验证主动提醒契约）。
 
-> 配置写在 `config/ppx.json` 的 `channels` 段，改完重启 `ppx-serve` 生效。主动提醒（`agent.proactive.enabled`）默认关闭，开启后定时把待办提醒广播到所有已启用通道。
+> 配置写在 `config/ppx.json` 的 `channels` 段，改完重启皮皮虾生效。主动提醒（`agent.proactive.enabled`）默认关闭，开启后定时把待办提醒广播到所有已启用通道。
 
 ## 6. 引擎底座（v2.5.0 起仅自研 http 底座）
 
@@ -129,4 +125,4 @@ ppx-channels remove <name>            # 移除配置（恢复默认）
 ## 7. 常见问题
 
 - **卡住了 / 不确定配置对没对** → 先跑 `ppx doctor`，它会逐项告诉你 配置/密钥/数据目录/技能库 哪里有问题；加 `--net` 会多发一条最小请求验证模型连通。
-- **LLM 报错** → 检查 `config/ppx.json` 的 `providers` 是否配置了可用的 API key（`export XXX_API_KEY=...`）；本地模型（lmstudio）是否在运行；可先跑 `ppx-serve` 看启动日志确认模型加载。
+- **LLM 报错** → 检查 `config/ppx.json` 的 `providers` 是否配置了可用的 API key（`export XXX_API_KEY=...`）；本地模型（lmstudio）是否在运行；可打开桌面端日志目录查看启动日志确认模型加载。

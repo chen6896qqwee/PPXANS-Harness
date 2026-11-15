@@ -1,4 +1,4 @@
-// src/tools/methods.js - 方法型 Skill (借鉴 7 大神级 Skill)
+// src/tools/methods.js - 方法型 Skill (自研; 设计对照 docs/PROVENANCE.md#superpowers)
 // 零依赖: 全部通过 LLM 多阶段调用实现, 不引入外部包
 // 1. humanize       <- Humanizer-zh   : 去 AI 味
 // 2. write_article  <- writing-agent  : 分阶段写作
@@ -125,6 +125,70 @@ export function registerMethodTools(catalog) {
     },
   });
 
+  // ---------- 4. ask_user: 回合内提问并等待人类回答 (2026-11-02 吸收 DeepSeek-Bot) ----------
+  // 与 clarify 的分工: clarify 只让模型"生成问题清单"再自己猜; ask_user 真正把问题
+  // 递到人面前并暂停回合, 拿到结构化答案 (选项/多选/自填) 后继续。没有人类通道时
+  // 不反问, 返回推进指引 —— 反问一个不存在的用户只会终结轮次。
+  catalog.register({
+    name: "ask_user",
+    capability: { readOnly: true, riskLevel: "low", sideEffect: "none" },
+    description: "向用户提问并等待回答 (回合会暂停)。信息不足、需要在几个方案里选、或做不可逆操作前确认时使用。每轮 1-3 个真正影响执行的问题, 每题给 2-4 个短选项; 用户可选、可多选、也可自填。没有人类通道时不要调用。",
+    parameters: {
+      type: "object",
+      properties: {
+        questions: {
+          type: "array",
+          description: "要问的问题 (1-5 个; 建议 1-3 个, 只问真正影响执行的)",
+          items: {
+            type: "object",
+            properties: {
+              id: { type: "string", description: "问题标识 (可选, 默认 q1/q2…)" },
+              question: { type: "string", description: "问题正文" },
+              header: { type: "string", description: "短标签 (≤12 字), 显示在问题上方" },
+              options: {
+                type: "array",
+                description: "选项 (2-4 个短句; 传字符串即可)",
+                items: {
+                  type: "object",
+                  properties: {
+                    label: { type: "string", description: "选项文字" },
+                    description: { type: "string", description: "选项补充说明 (可选)" },
+                  },
+                  required: ["label"],
+                },
+              },
+              multiSelect: { type: "boolean", description: "是否允许多选 (默认单选)" },
+            },
+            required: ["question"],
+          },
+        },
+      },
+      required: ["questions"],
+    },
+    execute: async (args, ctx) => {
+      const agent = ctx?.agent;
+      const questions = (Array.isArray(args.questions) ? args.questions : []).filter((q) => q && String(q.question || "").trim());
+      if (!questions.length) return "[工具错误] ask_user: 缺少 questions (至少 1 个问题)";
+      if (!agent || typeof agent.askQuestions !== "function") return "[工具错误] ask_user: 当前上下文不支持回合内提问";
+      if (typeof agent.hasQuestionSurface === "function" && !agent.hasQuestionSurface()) {
+        return "无人可答: 当前进程没有把问题递到人面前的通道, 不要调用 ask_user。请按最合理假设继续推进, 并在结论里写明假设。";
+      }
+      const res = await agent.askQuestions(questions.slice(0, 5));
+      if (!res) {
+        return "用户没有回答 (跳过、取消或等待超时)。请按最合理假设继续推进, 并在结论里写明假设; 不要再重复提问同一个问题。";
+      }
+      const lines = ["用户已回答:"];
+      questions.slice(0, 5).forEach((q, i) => {
+        const a = (res.answers || []).find((x) => x.id === String(q.id || `q${i + 1}`)) || { selected: [] };
+        const picked = [...(a.selected || [])];
+        if (a.custom) picked.push(`自填: ${a.custom}`);
+        lines.push(`${i + 1}. ${q.header ? `[${q.header}] ` : ""}${q.question}`);
+        lines.push(`   → ${picked.length ? picked.join("、") : "（未作答）"}`);
+      });
+      return lines.join("\n");
+    },
+  });
+
   // ---------- 场景系统: 类似灵魂文件的场景设定 ----------
   catalog.register({
     name: "scene_create",
@@ -191,7 +255,7 @@ export function registerMethodTools(catalog) {
         ctx.agent.scenes._save();
         return out || "(无输出)";
       } catch (e) {
-        return `[工具错误] scene_describe: ${e.message}`;
+        return `[工具错误] scene_describe: ${e.message}`; /* swallowed-ok(2026-11-03): 错误随工具返回值上报 */
       }
     },
   });

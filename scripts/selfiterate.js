@@ -12,7 +12,7 @@ import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { PPXAgent } from "../src/agent/index.js";
-import { SelfIterationEngine, runTestFile } from "../src/evolve/selfiterate.js";
+import { SelfIterationEngine, runTestFile } from "../src/selfcode/selfiterate.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 

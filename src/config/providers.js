@@ -21,15 +21,98 @@ const PROVIDER_KEYS = [
   //   context_window: UI 表单一直有输入框且卡片展示, 但写盘被过滤 (填了等于没填);
   //   enabled:        provider 启用/禁用 (禁用保留配置与 key, 仅退出路由候选)。
   "context_window", "enabled",
+  // 2026-11-01 (v4.2 雷仔对齐): 协议适配层 + 结构化模型目录 ——
+  //   protocol:     线上协议 (openai-completions 缺省 / openai-responses / anthropic-messages),
+  //                 适配实现在 src/llm/protocol.js, LLMClient 按 provider.protocol 分发;
+  //   display_name: UI 展示名 (卡片/模型座椅), 不参与路由匹配;
+  //   models:       结构化模型目录 [{id,label,context_window,max_output,inputs}] (见 normalizeModels)。
+  "protocol", "display_name",
 ];
+
+// 支持的线上协议 (与 src/llm/protocol.js 的适配器一一对应)
+export const PROTOCOLS = ["openai-completions", "openai-responses", "anthropic-messages"];
+export const DEFAULT_PROTOCOL = "openai-completions";
+// 输入类型: text 恒有; image 需模型/提供商声明 (视觉)
+const INPUT_TYPES = ["text", "image"];
+
+// 2026-11-01 (v4.2): models 归一化 —— 新旧三种形态统一收敛为结构化目录。
+//   兼容输入: "gpt-4o" (旧字符串) | {id, image:true} (半结构化) | [{id,label,...}] (v4.2 结构化)
+//   输出: [{id, label, context_window, max_output, inputs:["text"|"image",...]}]
+//   规则: 提供商级 vision=true 时全目录补 image 输入 (legacy 语义保留, 但不反向覆盖显式声明)。
+export function normalizeModels(models, { vision = false, context_window = null } = {}) {
+  const out = [];
+  const list = Array.isArray(models) ? models : (models ? [models] : []);
+  for (const raw of list) {
+    if (!raw) continue;
+    const m = typeof raw === "string" ? { id: raw } : (typeof raw === "object" ? { ...raw } : null);
+    if (!m || !m.id || typeof m.id !== "string") continue;
+    const inputs = Array.isArray(m.inputs)
+      ? INPUT_TYPES.filter((t) => m.inputs.includes(t))
+      : ["text"];
+    // 旧字段桥接: m.image / m.vision 布尔 → image 输入
+    if ((m.image === true || m.vision === true) && !inputs.includes("image")) inputs.push("image");
+    if (vision === true && !inputs.includes("image")) inputs.push("image");
+    inputs.sort(); // 稳定序: ["image","text"]
+    out.push({
+      id: m.id,
+      label: typeof m.label === "string" ? m.label : "",
+      // 数字合法性: 非法/缺失落 null (消费方逐级回退 provider 级 → 内置默认)
+      context_window: Number.isFinite(m.context_window) && m.context_window >= 1024
+        ? Math.floor(m.context_window)
+        : (Number.isFinite(context_window) && context_window >= 1024 ? Math.floor(context_window) : null),
+      max_output: Number.isFinite(m.max_output) && m.max_output >= 16 ? Math.floor(m.max_output) : null,
+      inputs,
+    });
+  }
+  // 去重 (按 id, 后者胜)
+  const seen = new Map();
+  for (const m of out) seen.set(m.id, m);
+  return [...seen.values()];
+}
+
+// provider 级归一化: protocol 缺省 / models 结构化 / model 串补进目录 (供 client 解析元数据)
+export function normalizeProvider(p) {
+  if (!p || typeof p !== "object") return p;
+  const out = { ...p };
+  if (!out.protocol) out.protocol = DEFAULT_PROTOCOL;
+  // v4.1 对象形态 {chat, context_window} 桥接 (2026-11-01 修复): LLMClient 曾明确支持
+  //   models?.chat / models?.context_window, 初版归一化只认数组 → 该形态被静默丢弃
+  //   (models.chat 选择的模型丢失回落 gpt-4o-mini, 窗口回落 8192), 且写盘会把删除固化。
+  //   此处 chat → 目录项, 其余模型名键容忍为 text-only 条目, context_window 上提 provider 级。
+  if (out.models && !Array.isArray(out.models) && typeof out.models === "object") {
+    const legacy = out.models;
+    const arr = [];
+    if (legacy.chat) {
+      arr.push(typeof legacy.chat === "string" ? { id: legacy.chat } : { ...legacy.chat });
+      if (out.model == null) out.model = typeof legacy.chat === "string" ? legacy.chat : legacy.chat.id;
+    }
+    for (const [k, v] of Object.entries(legacy)) {
+      if (k === "chat" || k === "context_window") continue;
+      if (typeof v === "string") arr.push({ id: v });
+    }
+    if (legacy.context_window != null && out.context_window == null) out.context_window = legacy.context_window;
+    out.models = arr;
+  }
+  const vision = out.vision === true;
+  const models = normalizeModels(out.models, { vision, context_window: out.context_window ?? null });
+  // 旧格式只有 model 单值没有目录: 补一条目录项, 让 per-model 元数据解析有落点
+  if (out.model && !models.some((m) => m.id === out.model)) {
+    models.unshift(...normalizeModels([{ id: out.model, context_window: out.context_window ?? null }], { vision }));
+  }
+  if (models.length) out.models = models;
+  else delete out.models;
+  return out;
+}
 
 const getProvidersPath = configFilePath;
 
 // 读取整个 config, 返回 { providers, raw }
+// 2026-11-01 (v4.2): 读取时逐条归一化 (protocol 缺省 / models 结构化) —— 消费方
+//   (LLMClient / UI) 拿到的永远是规范形态; 旧格式 config/ppx.json 无需迁移即兼容。
 export function readConfig(root) {
   const raw = readPpxConfig(root, null);
   if (raw === null) return { providers: [], raw: { providers: [] } };
-  const providers = Array.isArray(raw.providers) ? raw.providers : [];
+  const providers = Array.isArray(raw.providers) ? raw.providers.map(normalizeProvider) : [];
   return { providers, raw };
 }
 
@@ -43,6 +126,31 @@ export function validateProvider(p) {
     return `后端 ${p.backend} 已不受支持 (v2.5.0 起仅保留自研 http 底座, 外部引擎底座已移除)`;
   }
   if (!p.base_url) return "http 后端需 base_url";
+  // 2026-11-01 (v4.2): 协议白名单 (未知协议宁可拒收也不静默回落, 防发错线格式)
+  if (p.protocol != null && !PROTOCOLS.includes(p.protocol)) {
+    return `protocol 必须是 ${PROTOCOLS.join(" / ")} 之一, 收到: ${p.protocol}`;
+  }
+  if (p.display_name != null && (typeof p.display_name !== "string" || p.display_name.length > 60)) {
+    return "display_name 需为不超过 60 字符的字符串";
+  }
+  if (p.models != null) {
+    if (!Array.isArray(p.models)) return "models 必须是数组 (字符串或 {id,...} 对象)";
+    if (p.models.length > 64) return "models 目录最多 64 条 (做减法, 防目录膨胀)";
+    for (const m of p.models) {
+      if (typeof m === "string") continue;
+      if (!m || typeof m !== "object" || !m.id) return "models 条目需为字符串或含 id 的对象";
+      if (typeof m.id !== "string" || m.id.length > 200) return "models 条目 id 需为 1-200 字符字符串";
+      if (m.context_window != null && (!Number.isFinite(m.context_window) || m.context_window < 1024)) {
+        return `模型 ${m.id} 的 context_window 至少 1024`;
+      }
+      if (m.max_output != null && (!Number.isFinite(m.max_output) || m.max_output < 16)) {
+        return `模型 ${m.id} 的 max_output 至少 16`;
+      }
+      if (m.inputs != null && (!Array.isArray(m.inputs) || m.inputs.some((t) => !INPUT_TYPES.includes(t)))) {
+        return `模型 ${m.id} 的 inputs 只能含 text/image`;
+      }
+    }
+  }
   if (p.vision != null && typeof p.vision !== "boolean") return "vision 必须是布尔";
   if (p.dsml != null && typeof p.dsml !== "boolean") return "dsml 必须是布尔";
   if (p.timeout_ms != null && (!Number.isFinite(p.timeout_ms) || p.timeout_ms < 1000)) return "timeout_ms 至少 1000ms";
@@ -77,12 +185,6 @@ export function listProviders(root) {
   return providers.map((p) => sanitizeProvider(p));
 }
 
-export function getProvider(root, id) {
-  const { providers } = readConfig(root);
-  const p = providers.find((x) => x.id === id);
-  return p ? sanitizeProvider(p) : null;
-}
-
 // 新增
 // v1.0.8: 写盘在文件锁内读-改-写 (防并发 API 请求丢更新)
 export function addProvider(root, raw) {
@@ -91,14 +193,15 @@ export function addProvider(root, raw) {
     const err = validateProvider(raw);
     if (err) throw new Error(err);
     if (providers.find((p) => p.id === raw.id)) throw new Error(`id 冲突: ${raw.id}`);
-    // 仅保留白名单字段
-    const norm = {};
+    // 仅保留白名单字段 + 归一化 (v4.2: protocol 缺省 / models 结构化落盘)
+    const norm = normalizeProvider({});
     for (const k of PROVIDER_KEYS) if (raw[k] !== undefined) norm[k] = raw[k];
     if (!norm.id) norm.id = raw.id;
-    providers.push(norm);
+    providers.push(normalizeProvider(norm));
     cfg.providers = providers;
     writeConfigAtomic(root, cfg);
-    return sanitizeProvider(norm);
+    // 返回落盘后的归一化副本 (norm 本体未过 normalizeProvider, models 可能仍是原始输入形态)
+    return sanitizeProvider(providers[providers.length - 1]);
   });
 }
 
@@ -113,13 +216,13 @@ export function updateProvider(root, id, patch) {
     if (patch.api_key === "") delete merged.api_key;
     const err = validateProvider(merged);
     if (err) throw new Error(err);
-    // 仅保留白名单
-    const clean = {};
+    // 仅保留白名单 + 归一化 (v4.2)
+    const clean = normalizeProvider({});
     for (const k of PROVIDER_KEYS) if (merged[k] !== undefined) clean[k] = merged[k];
-    providers[idx] = clean;
+    providers[idx] = normalizeProvider(clean);
     cfg.providers = providers;
     writeConfigAtomic(root, cfg);
-    return sanitizeProvider(clean);
+    return sanitizeProvider(providers[idx]); // 返回落盘后的归一化副本 (同 addProvider)
   });
 }
 

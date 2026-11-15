@@ -20,7 +20,8 @@ risk: medium
 **公式没有缓存值**: 工具写公式时只写 `<f>`, 不编造结果, 并设置 `fullCalcOnLoad="1"` 让 Excel/LibreOffice 打开时重算。因此任何按"缓存值"读取的程序 (包括本工具的 `read`) 在重算前只能看到 `=SUM(...)` 本身 —— 这不是缺陷, 是如实反映文件状态。
 
 ## 工具
-脚本目录 `scripts/`, 只用 Python 3.9+ 标准库:
+脚本目录 `scripts/`, 只用 Python 3.9+ 标准库。
+`scripts/` 相对本 SKILL.md 所在目录 —— 在项目根执行时请拼上 load_skill 回传的「技能目录」绝对路径。
 
 | 命令 | 用途 |
 |---|---|

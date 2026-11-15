@@ -1,6 +1,6 @@
-// src/hooks/user-hooks.js — 用户配置钩子 (吸收 claude-code settings.json hooks 格式)
-// 此前钩子链只能代码注册 (plugin/builtin + agent 内部), 用户没有任何配置入口 ——
-// "吸收 claude-code 六事件" 只吸收了一半: 事件模型有了, 用户可编程性没有。这里补上配置格式。
+// src/hooks/user-hooks.js — 用户配置钩子 (设计溯源 docs/PROVENANCE.md#claude-code settings.json hooks 格式)
+// 此前钩子链只能代码注册 (agent/plugins/builtin + agent 内部), 用户没有任何配置入口 ——
+// "设计溯源 docs/PROVENANCE.md#claude-code 六事件" 只落地了一半: 事件模型有了, 用户可编程性没有。这里补上配置格式。
 //
 // 格式 (claude-code settings.json 对齐, 配在 config/ppx.json 顶层 hooks 键):
 //   {
@@ -47,7 +47,7 @@ export const USER_HOOK_PRIORITY = 200; // 用户钩子排在系统钩子 (默认
 
 const IS_WIN = process.platform === "win32";
 
-// 路径等值比较 (Windows 不区分大小写; resolve 吸收相对/分隔符差异)
+// 路径等值比较 (Windows 不区分大小写; resolve 抹平相对路径/分隔符差异)
 function samePath(a, b) {
   if (!a || !b) return false;
   const ra = path.resolve(String(a));
@@ -138,7 +138,7 @@ export function loadProjectHooks(root) {
   try {
     raw = JSON.parse(fs.readFileSync(file, "utf8"));
   } catch (e) {
-    return { file, hooks: [], errors: [`.ppx/settings.json 解析失败 (${e.message}), 项目级钩子全部跳过`] };
+    return { file, hooks: [], errors: [`.ppx/settings.json 解析失败 (${e.message}), 项目级钩子全部跳过`] }; /* swallowed-ok(2026-11-03): errors 随返回值上报 */
   }
   const parsed = parseUserHooks(raw?.hooks, "project-settings");
   return { file, ...parsed };
@@ -161,7 +161,7 @@ function buildStdinPayload(event, payload, root) {
     return JSON.stringify(base);
   } catch {
     // result/args 含不可序列化值时降级为最小载荷 (钩子至少知道事件名)
-    return JSON.stringify({ hook_event_name: event, cwd: root, timestamp: base.timestamp });
+    return JSON.stringify({ hook_event_name: event, cwd: root, timestamp: base.timestamp }); /* swallowed-ok(2026-11-03): 契约就是降级载荷 */
   }
 }
 

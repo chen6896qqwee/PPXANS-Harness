@@ -33,12 +33,12 @@ export const SKILL_DOMAINS = [
 export const DOMAIN_IDS = new Set(SKILL_DOMAINS.map((d) => d.id));
 
 // 内置技能根目录 (随 npm 包分发)
-export function builtinSkillsDir(root) {
+function builtinSkillsDir(root) {
   return path.join(root, "skills");
 }
 
 // 用户级技能根目录 (跨项目复用; 与内置隔离, 便于用户自己扩装而不动源码)
-export function userSkillsDir() {
+function userSkillsDir() {
   return path.join(os.homedir(), ".ppx", "skills");
 }
 
@@ -69,7 +69,13 @@ export function skillRootsFromConfig(config, root) {
   }
   // 兜底: 全关也至少留内置 (否则技能系统整体失效, 属配置误用); 兜底根可写, 否则 create_skill 无处落盘
   if (!roots.length) roots.push({ id: "builtin", dir: builtinSkillsDir(root), kind: "builtin", writable: true });
-  // 去重 (同目录多 id 只留先到者 —— 先到者优先级更高)
+  // 去重 (同目录多 id 只留先到者 —— 先到者优先级更高); 实现单源 dedupeRoots
+  return dedupeRoots(roots);
+}
+
+// 跨文件单源 (2026-11-03 重复消除): orchestrator/expert-pack 的 packRootsFromConfig 与此
+// 同语义 (first-wins 优先级靠 roots 顺序表达), 此前逐字双份 —— 谁先改谁就单方面改了优先级语义。
+export function dedupeRoots(roots) {
   const seen = new Set();
   return roots.filter((r) => {
     const k = path.resolve(r.dir).toLowerCase();
@@ -79,7 +85,7 @@ export function skillRootsFromConfig(config, root) {
   });
 }
 
-export function createSkillLoader(config, root) {
+function createSkillLoader(config, root) {
   const roots = skillRootsFromConfig(config, root);
   return new SkillLoader({ roots, maxDepth: config?.skills?.max_depth });
 }
@@ -90,14 +96,22 @@ export function createSkillLoader(config, root) {
 // skill-eval 需要"只跑子集"的能力: PPX_DISABLE_SKILLS="a,b" 环境变量按 id 禁用技能。
 // 不设该 env 时行为完全不变 (零侵入), 这也是它被设计成 env 而非配置项的原因 —— 评测的临时开关
 // 不该污染用户 config。
-export function disabledSkillsFromEnv() {
+function disabledSkillsFromEnv() {
   const raw = process.env.PPX_DISABLE_SKILLS;
   if (!raw) return [];
   return [...new Set(String(raw).split(/[,\s]+/).map((s) => s.trim().toLowerCase()).filter(Boolean))];
 }
 
+// 生效的停用清单 = 评测期 env 临时覆盖 ∪ 用户配置 (config.skills.disabled)。
+// loader (提示注入/load_skill) 与 registry (覆盖率/能力矩阵) 必须读同一份,
+// 否则会出现"提示里没有、覆盖率里还算它一份"的两套口径。
+export function configDisabledSkills(config) {
+  const cfgList = Array.isArray(config?.skills?.disabled) ? config.skills.disabled : [];
+  return [...new Set([...disabledSkillsFromEnv(), ...cfgList.map((s) => String(s).trim().toLowerCase()).filter(Boolean)])];
+}
+
 // 把 env 里的禁用清单作用到注册表上, 并返回该清单 (无 env → 空数组)
-export function applySkillEvalFilter(registry) {
+function applySkillEvalFilter(registry) {
   const list = disabledSkillsFromEnv();
   if (registry) registry.disabledSkills = list;
   return list;

@@ -98,6 +98,30 @@ export function createMcpHttpHandler(server, opts = {}) {
         // 2026-07-28 规范要求必带; 宽松兼容: 直接按 body 版本处理
       }
 
+      // 5.5 Mcp-Method / Mcp-Name 头一致性 (2026-11-12): 现代规范要求 HTTP 头复述 body 的
+      //   method / tools.call 的 name, 供网关做路由与审计而不解析 body。存在即校验 (未带的
+      //   老客户端不受影响); 不一致说明两者来源不同, 按 HEADER_MISMATCH 拒绝 —— 否则
+      //   网关按头路由、服务端按 body 执行, 审计记录与实际行为会分叉。
+      const headerMethod = req.headers["mcp-method"];
+      if (headerMethod && msg && msg.method && String(headerMethod) !== String(msg.method)) {
+        sendJson(res, 400, {
+          jsonrpc: "2.0",
+          id: msg.id ?? null,
+          error: { code: MCP_ERROR.HEADER_MISMATCH, message: "Header Mcp-Method does not match body method", data: { header: String(headerMethod), body: String(msg.method) } },
+        });
+        return;
+      }
+      const headerName = req.headers["mcp-name"];
+      const bodyName = msg && msg.params && msg.params.name;
+      if (headerName && bodyName && String(headerName) !== String(bodyName)) {
+        sendJson(res, 400, {
+          jsonrpc: "2.0",
+          id: msg.id ?? null,
+          error: { code: MCP_ERROR.HEADER_MISMATCH, message: "Header Mcp-Name does not match body params.name", data: { header: String(headerName), body: String(bodyName) } },
+        });
+        return;
+      }
+
       // 6. 通知 (无 id) -> 202
       if (msg && (msg.id === undefined || msg.id === null)) {
         // 通知: 只处理 notifications/* 或 ping 通知语义; 直接受理

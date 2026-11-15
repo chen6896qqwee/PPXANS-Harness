@@ -1,6 +1,6 @@
 {
   "name": "ppxans-harness",
-  "version": "4.0.0",
+  "version": "5.2.0",
   "description": "PPXANS-Harness - 皮皮虾神经系 (ANS) + Harness 一体化智能体内核. 零运行时依赖纯Node. 自愈 + 自学习 + 五层记忆 + SHA-256 审计哈希链 + 多 Agent 军团 + 治理内核(deny-wins/熔断/seam) + 进化内核(Playbook/故障记忆) + 符号画布 + supervisor. 自研底座: 仅 OpenAI 兼容 HTTP 直连, 无外部引擎依赖. Agent Nervous System harness in pure Node, zero runtime dependencies.",
   "type": "module",
   "license": "Apache-2.0",
@@ -11,12 +11,7 @@
   "main": "src/agent/index.js",
   "bin": {
     "ppx": "bin/ppx.js",
-    "ppxans": "bin/ppx.js",
-    "ppx-web": "bin/ppx-web.js",
-    "ppx-serve": "bin/ppx-serve.js",
-    "ppx-channels": "bin/ppx-channels.js",
-    "ppx-setup": "bin/ppx-setup.js",
-    "ppx-mcp": "bin/ppx-mcp.js"
+    "ppxans": "bin/ppx.js"
   },
   "repository": {
     "type": "git",
@@ -27,38 +22,43 @@
     "url": "https://github.com/chen6896qqwee/PPXANS-Harness/issues"
   },
   "scripts": {
-    "start": "node bin/ppx-web.js",
-    "web": "node bin/ppx-web.js",
-    "web:noopen": "node bin/ppx-web.js --no-open",
-    "desktop": "electron electron/main.js",
-    "desktop:dev": "electron electron/main.js",
-    "desktop:edge": "node bin/ppx-desktop.js",
+    "start": "node scripts/desktop-start.mjs",
+    "desktop": "node scripts/desktop-start.mjs",
+    "desktop:dev": "node scripts/desktop-start.mjs",
+    "desktop:smoke": "node scripts/desktop-gui-smoke.mjs",
     "desktop:pack": "node scripts/desktop-pack.js",
     "desktop:pack:dir": "node scripts/desktop-pack.js --dir",
     "desktop:pack:mac": "node scripts/desktop-pack.js --mac",
     "desktop:pack:linux": "node scripts/desktop-pack.js --linux",
     "web:check": "node scripts/check-web.mjs",
+    "web:dev": "vite --config webapp/vite.config.mjs",
+    "web:build": "vite build --config webapp/vite.config.mjs",
     "chat": "node src/cli.js",
     "serve": "node src/server.js",
-    "mcp:serve": "node bin/ppx-mcp.js",
+    "mcp:serve": "node bin/ppx.js mcp serve",
     "release": "node scripts/release.js",
     "eval": "node scripts/eval.js",
+    "eval:ledger": "node scripts/eval-ledger-report.js",
     "taskbench:offline": "node scripts/taskbench-offline.js",
+    "bench:external": "node scripts/external-bench.js",
     "memory:recall": "node scripts/memory-recall.js",
     "selfheal": "node scripts/selfheal-bench.js",
     "selfiterate": "node scripts/selfiterate.js",
     "selfcode": "node scripts/selfcode.js",
     "evolve:loop": "node scripts/evolution-loop.js",
-    "selfheal:run": "node src/selfheal/run.js",
+    "selfheal:run": "node src/evolve/healer-run.js",
     "audit:verify": "node scripts/audit-verify.js",
     "bench": "node scripts/bench.js",
+    "bench:gate": "node scripts/bench-gate.js",
+    "bench:edit": "node scripts/edit-protocol-bench.js",
     "nightly": "node scripts/nightly-bench.js",
-    "test": "node --test --test-force-exit test/*.test.js",
-    "test:coverage": "node --test --experimental-test-coverage --test-force-exit test/*.test.js",
-    "coverage:gate": "node scripts/coverage-gate.js",
+    "guard:catch": "node scripts/silent-catch-guard.mjs --strict",
+    "lexicon:check": "node scripts/lexicon-check.js",
+    "watchdog:external": "node scripts/external-watchdog.mjs",
     "verify": "node scripts/verify.js",
-    "verify:full": "npm run verify && npm run lint && npm test",
-    "gate:release": "npm run verify && npm run lint && node scripts/readme-sync-check.js --with-tests",
+    "version:check": "node scripts/version-sync.js",
+    "clean": "node scripts/clean.js",
+    "gate:release": "npm run verify && npm run lint",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "depcheck": "node scripts/depcheck.js .",
@@ -69,7 +69,7 @@
     "package": "node scripts/package.js",
     "package:portable": "node scripts/package.js portable",
     "package:installer": "node scripts/package.js installer",
-    "setup": "node bin/ppx-setup.js",
+    "setup": "node bin/ppx.js setup",
     "doctor": "node bin/ppx.js doctor"
   },
   "keywords": [
@@ -88,7 +88,8 @@
     "bin/",
     "src/",
     "skills/",
-    "public/",
+    "webapp/dist/",
+    "webapp/public/",
     "config/ppx.json.example",
     "README.md",
     "LICENSE",
@@ -117,18 +118,14 @@
       "electron/**",
       "bin/**",
       "src/**",
-      "public/**",
+      "webapp/**",
       "skills/**",
       "experts/**",
       "plugins/**",
-      "references/**",
       "config/ppx.json.example",
       "config/identity.md",
       "config/ishiki.md",
       "scripts/**",
-      "test/**",
-      "bench/**",
-      "fixtures/**",
       "package.json",
       "README.md",
       "LICENSE",
@@ -138,7 +135,12 @@
     ],
     "win": {
       "target": [
-        { "target": "nsis", "arch": ["x64"] }
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
       "icon": "electron/icon.ico",
       "requestedExecutionLevel": "asInvoker",
@@ -146,8 +148,20 @@
     },
     "mac": {
       "target": [
-        { "target": "dmg", "arch": ["x64", "arm64"] },
-        { "target": "zip", "arch": ["x64", "arm64"] }
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
       ],
       "icon": "electron/icon.png",
       "category": "public.app-category.productivity",
@@ -155,8 +169,18 @@
     },
     "linux": {
       "target": [
-        { "target": "AppImage", "arch": ["x64"] },
-        { "target": "deb", "arch": ["x64"] }
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
       "icon": "electron/icon.png",
       "category": "Utility",
@@ -179,9 +203,16 @@
     "compression": "normal"
   },
   "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.10",
+    "dompurify": "^3.4.17",
     "electron": "^45.1.0",
     "electron-builder": "^26.18.0",
     "eslint": "^9.39.5",
-    "globals": "^17.13.0"
+    "globals": "^17.13.0",
+    "highlight.js": "^11.12.0",
+    "katex": "^0.16.47",
+    "markdown-it": "^14.3.3",
+    "vite": "^7.3.7",
+    "vue": "^3.5.45"
   }
 }

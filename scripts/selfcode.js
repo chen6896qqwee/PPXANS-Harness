@@ -45,7 +45,6 @@ function print(o) {
 }
 
 const cmd = process.argv[2] || "status";
-const mode = arg("apply") === true ? "apply" : null; // --apply 简写
 const eng = new SelfCodeEngine({ root: ROOT, dataDir: DATA, mode: "propose" });
 
 try {

@@ -24,19 +24,25 @@ export const SETTINGS_FIELDS = {
   user: ["name"],
   http: ["port", "auth_token"],
   security: ["command_timeout_ms", "code_act", "deny"],
-  agent: ["name", "mode", "citation_rule", "system_extra", "values"],
+  // intent_funnel (v4.2): 分层漏斗意图识别开关 (false = 关闭 L2 提示注入, 只留 L1 规则直答)
+  // max_tool_rounds (2026-11-03): 工具循环轮次上限, 设置 UI 可调 (1-64)
+  agent: ["name", "mode", "citation_rule", "system_extra", "values", "intent_funnel", "max_tool_rounds"],
   mcp: ["servers", "auto_connect"],
   tools: ["disabled"],
+  skills: ["disabled"],
   llm: ["provider", "reasoning"],
   // 语音识别 (2026-10-11): config.voice.asr 云端 ASR (OpenAI 兼容 /audio/transcriptions)
-  asr: ["backend", "base_url", "api_key", "model"],
+  // 2026-11-14: 补本地 whisper 兜底字段 (backend=local 时生效, bin/flavor/model_path/timeout_ms)
+  asr: ["backend", "base_url", "api_key", "model", "bin", "flavor", "model_path", "timeout_ms", "language"],
 };
 
 // 思考强度合法值 (与前端滑杆档位一致)
 export const REASONING_LEVELS = ["auto", "off", "low", "medium", "high", "max"];
 
 // MCP 服务器字段白名单 (防注入任意字段)
-export const MCP_SERVER_KEYS = ["command", "args", "env", "prefix", "url", "headers", "timeout", "name"];
+// 2026-11-03: 补 trusted —— MCP 管理页要能勾"信任此服务器 (免审批)", 此前白名单缺这个键,
+//   经 PUT /api/settings 保存一次就把已有 trusted 静默丢掉, 外部工具全部退回强制审批。
+const MCP_SERVER_KEYS = ["command", "args", "env", "prefix", "url", "headers", "timeout", "name", "trusted"];
 
 // 安全视图: 抹掉敏感明文 (auth_token / api_key / mcp headers), 只暴露 set 标志
 function sanitizeSettings(cfg) {
@@ -58,6 +64,7 @@ function sanitizeSettings(cfg) {
       citation_rule: cfg.agent?.citation_rule ?? "",
       system_extra: cfg.agent?.system_extra ?? "",
       values: Array.isArray(cfg.agent?.values) ? cfg.agent.values : (DEFAULT_CONFIG.agent?.values || []),
+      max_tool_rounds: Number(cfg.agent?.max_tool_rounds) || (DEFAULT_CONFIG.agent?.max_tool_rounds ?? 24),
     },
     mcp: {
       auto_connect: !!cfg.mcp?.auto_connect,
@@ -65,6 +72,9 @@ function sanitizeSettings(cfg) {
     },
     tools: {
       disabled: Array.isArray(cfg.tools?.disabled) ? cfg.tools.disabled : [],
+    },
+    skills: {
+      disabled: Array.isArray(cfg.skills?.disabled) ? cfg.skills.disabled : [],
     },
     llm: {
       provider: cfg.llm?.provider || "",
@@ -130,6 +140,7 @@ export function updateSettings(root, patch) {
     cfg.agent = { ...(cfg.agent || {}), ...pick(patch.agent, SETTINGS_FIELDS.agent) };
     cfg.mcp = { ...(cfg.mcp || {}), ...pick(patch.mcp, SETTINGS_FIELDS.mcp) };
     cfg.tools = { ...(cfg.tools || {}), ...pick(patch.tools, SETTINGS_FIELDS.tools) };
+    cfg.skills = { ...(cfg.skills || {}), ...pick(patch.skills, SETTINGS_FIELDS.skills) };
     cfg.llm = { ...(cfg.llm || {}), ...pick(patch.llm, SETTINGS_FIELDS.llm) };
     // 语音识别 (2026-10-11): config.voice.asr — api_key 为空时不覆盖 (保留已存密钥)
     if (patch.asr && typeof patch.asr === "object") {
@@ -151,6 +162,10 @@ export function updateSettings(root, patch) {
     if (cfg.agent.values != null && !Array.isArray(cfg.agent.values)) throw new Error("核心价值必须是字符串数组");
     if (cfg.agent.values && cfg.agent.values.some((v) => typeof v !== "string")) throw new Error("核心价值必须是字符串数组");
     if (cfg.agent.mode != null && !/^[a-z-]{2,30}$/.test(String(cfg.agent.mode))) throw new Error("编排模式只含小写字母/横线");
+    if (cfg.agent.max_tool_rounds != null) {
+      const rounds = cfg.agent.max_tool_rounds;
+      if (!Number.isInteger(rounds) || rounds < 1 || rounds > 64) throw new Error("工具轮次上限必须是 1-64 的整数");
+    }
     // mcp.servers: 必须是对象数组, 每项至少 command 或 url, 只保留白名单字段
     if (cfg.mcp.servers != null && !Array.isArray(cfg.mcp.servers)) throw new Error("MCP servers 必须是数组");
     if (Array.isArray(cfg.mcp.servers)) {
@@ -169,6 +184,12 @@ export function updateSettings(root, patch) {
       if (!Array.isArray(cfg.tools.disabled)) throw new Error("tools.disabled 必须是字符串数组");
       if (cfg.tools.disabled.some((t) => typeof t !== "string")) throw new Error("tools.disabled 必须是字符串数组");
     }
+    // skills.disabled: 必须是字符串数组 (技能管理页停用的 id)
+    if (cfg.skills.disabled != null) {
+      if (!Array.isArray(cfg.skills.disabled)) throw new Error("skills.disabled 必须是字符串数组");
+      if (cfg.skills.disabled.some((t) => typeof t !== "string")) throw new Error("skills.disabled 必须是字符串数组");
+      cfg.skills.disabled = [...new Set(cfg.skills.disabled.map((t) => t.trim()).filter(Boolean))];
+    }
     // llm.provider / llm.reasoning: 白名单校验 (空 provider = 自动选择)
     if (cfg.llm.provider != null && String(cfg.llm.provider) !== "") {
       if (!/^[a-zA-Z][a-zA-Z0-9_-]{0,29}$/.test(String(cfg.llm.provider))) throw new Error("llm.provider 必须是合法 provider id");
@@ -184,22 +205,13 @@ export function updateSettings(root, patch) {
       }
       if (a.api_key === "") delete a.api_key; // 空密钥 = 未设置 (不覆盖已存值)
       // base_url 与 api_key 都为空 → 视为清除整个 asr 配置
-      if (!a.base_url && !a.api_key && !a.model) delete cfg.voice.asr;
+      // 2026-11-14: backend=local (本地 whisper) 时不按云字段判空 —— bin/model_path 是它的存在依据
+      const isLocalAsr = String(a.backend || "").toLowerCase() === "local";
+      if (!a.base_url && !a.api_key && !a.model && !isLocalAsr && !a.bin) delete cfg.voice.asr;
       if (cfg.voice && Object.keys(cfg.voice).length === 0) delete cfg.voice;
     }
 
     writeConfigAtomic(root, cfg);
     return sanitizeSettings(cfg);
   });
-}
-
-// 应用 tools.disabled: 返回需要禁用的工具名列表 (供启动时/热重载时禁用)
-export function disabledTools(root) {
-  const { tools } = getSettings(root);
-  return Array.isArray(tools?.disabled) ? tools.disabled : [];
-}
-
-// 可编辑字段元数据 (供前端渲染表单, 免前端硬编码结构)
-export function settingsSchema() {
-  return SETTINGS_FIELDS;
 }

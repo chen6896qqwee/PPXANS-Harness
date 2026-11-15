@@ -13,6 +13,7 @@
 //   并统一判定函数供总线/catalog 两路径复用。审计写失败不再静默 (warn + writeFailures)。
 import { hasPII } from "../utils/pii.js";
 import { warn } from "../utils/logger.js";
+import { noteCatch } from "../utils/catch-log.js";
 
 // 危险 verb 前缀: 命中且未显式白名单放行 → 需单次审批或拒绝
 const DANGEROUS_RE = /^(delete|remove|clear|wipe|drop|purge|truncate|overwrite)/i;
@@ -41,11 +42,6 @@ export function dangerVerdict(verb, args = null) {
   if (DANGEROUS_TOOLS.has(verb)) return { dangerous: true, reason: "dangerous-tool" };
   if (argsDangerous(verb, args)) return { dangerous: true, reason: "dangerous-args" };
   return { dangerous: false, reason: null };
-}
-
-// 危险判定: verb 命中危险且未白名单放行 (向后兼容, 供外部调用)
-export function isDangerous(verb, allowList = []) {
-  return dangerVerdict(verb).dangerous && !allowList.includes(verb);
 }
 
 // 默认记审计账本的最大条目
@@ -146,7 +142,7 @@ export function installGuardOnCatalog(catalog, guardHandle) {
         // 同步状态到 guard 的 lastVerdict (可观测)
         const st = guardHandle._state;
         st.lastVerdict = { verdict: "block", verb, note: reason || "dangerous-not-whitelisted" };
-      } catch {}
+      } catch (e) { noteCatch(e); }
     }
     return {
       decision: "deny",

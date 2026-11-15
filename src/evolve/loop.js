@@ -1,11 +1,13 @@
 // src/evolve/loop.js - 持续进化循环 (2026-10-25, 自主进化第二层)
 //
 // 定位: 把已有的三个孤立能力编排成**一条自主变强的闭环**:
-//   · EvolutionEngine (selfheal/evolve.js): 按 N 次调用做行为学习 (经验/技能) —— 零散触发
-//   · SelfIterationEngine (evolve/selfiterate.js): 按需的代码自改进 —— 人工触发
+//   · EvolutionEngine (evolve/trigger.js): 按 N 次调用做行为学习 (经验/技能) —— 零散触发
+//   · SelfIterationEngine (selfcode/selfiterate.js): 按需的代码自改进 (2026-11-08 归位 selfcode/) —— 人工触发
 //   · FailureEpisodeStore / PlaybookStore: 已记录但少被主动消费
 // 本循环每个周期跑三段 (每段独立失败隔离, 任何一段崩不拖垮整轮):
 //
+//   Phase 0 结构体检 (新增 2026-11-02): 跑一次确定性 self_audit (零 LLM),
+//     把评分/严重度分布写进 journal —— 代码健康度从此也有曲线, 不再只看"修了几个测试"
 //   Phase 1 自我学习 (行为层, 无 LLM 安全跳过):
 //     - 弱点驱动: 故障病历按工具聚类, 头部弱点 (同类 ≥3 条) 定向 refine —— 不再只看"最近 50 条轨迹"
 //     - 常规: refine 失败→经验 + refineSkill 重复模式→技能 (沉淀后自动进 playbook, 既有链路)
@@ -18,10 +20,12 @@
 // 护栏: 单飞锁 (上一轮没跑完不叠加) / 每周期最小间隔 / LLM 预算透传 / 全程 try 隔离。
 // 接入: config agent.evolution_loop { enabled, cron, mode } → Scheduler 每日定时;
 //       CLI `npm run evolve:loop` 手动一轮; evolution_status 工具随时看进化报告。
+import { noteCatch } from "../utils/catch-log.js";
 import fs from "node:fs";
 import path from "node:path";
 import { info, warn } from "../utils/logger.js";
-import { SelfIterationEngine } from "./selfiterate.js";
+import { SelfIterationEngine } from "../selfcode/selfiterate.js";
+import { runAudit } from "../selfcode/audit.js";
 
 const JOURNAL_FILE = "evolve/journal.jsonl";
 
@@ -53,6 +57,22 @@ export class EvolutionLoop {
     return [...map.entries()]
       .map(([key, count]) => { const [tool, category] = key.split("::"); return { tool, category, count }; })
       .sort((a, b) => b.count - a.count);
+  }
+
+  // ---- Phase 0: 结构体检 (只读, 零 LLM) ----
+  // 只取结论不取全文: journal 是长期追加文件, 每轮塞 20 条 findings 会迅速失控。
+  auditSnapshot() {
+    try {
+      const r = runAudit({ root: this.root });
+      return {
+        score: r.score,
+        grade: r.grade,
+        bySeverity: r.bySeverity,
+        topFindings: r.findings.slice(0, 3).map((f) => f.title),
+      };
+    } catch (e) {
+      return { error: String(e?.message || e).slice(0, 200) }; /* swallowed-ok(2026-11-03): 错误随返回值上报 */
+    }
   }
 
   // ---- Phase 1: 自我学习 (行为层) ----
@@ -138,14 +158,16 @@ export class EvolutionLoop {
     }
     this.running = true;
     const t0 = Date.now();
-    const record = { ts: new Date().toISOString(), durationMs: 0, learn: null, iterate: null, capability: null };
+    const record = { ts: new Date().toISOString(), durationMs: 0, audit: null, learn: null, iterate: null, capability: null };
     try {
+      record.audit = this.auditSnapshot();       ev("evolution/audited", { score: record.audit.score, grade: record.audit.grade });
       record.learn = await this.learn();       ev("evolution/learned", record.learn);
       record.iterate = await this.iterate(targetFiles); ev("evolution/iterated", { ran: record.iterate.ran });
       record.capability = this.capabilitySnapshot();
       record.durationMs = Date.now() - t0;
       this._journalAppend(record);
       info(`[evolution-loop] ✅ 进化周期完成 (${record.durationMs}ms): 经验+${record.learn.refined} 技能+${record.learn.skillsCreated}`
+        + `${record.audit && Number.isFinite(record.audit.score) ? ` 结构${record.audit.score}分(${record.audit.grade})` : ""}`
         + `${record.iterate.ran ? ` 代码修复 fixed=${record.iterate.fixed ?? 0} rolledBack=${record.iterate.rolledBack ?? 0}` : ""}`);
       return record;
     } catch (e) {
@@ -164,7 +186,7 @@ export class EvolutionLoop {
     try {
       fs.mkdirSync(path.dirname(this.journalFile), { recursive: true });
       fs.appendFileSync(this.journalFile, JSON.stringify(record) + "\n", "utf8");
-    } catch { /* 日志失败不阻断 */ }
+    } catch (e) { noteCatch("src/evolve/loop.js#_journalAppend", e); /* 日志失败不阻断 */ }
   }
 
   journalTail(n = 20) {

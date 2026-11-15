@@ -7,6 +7,8 @@ import path from "node:path";
 import zlib from "node:zlib";
 import { ocrImage } from "./ocr.js";
 import { safePath } from "./builtin.js";
+import { isProtectedRead } from "./builtin-paths.js";
+import { scrubPII } from "../utils/pii.js";
 
 const MAX_CHARS = 20000; // 单文档返回上限
 
@@ -37,6 +39,13 @@ function decodePdfString(latin1Str) {
   return utf8.includes("\uFFFD") ? clean.toString("latin1") : utf8;
 }
 
+// 文档读取上限 (2026-11-12): read_document 属低危读、免审批, 但整文件 readFileSync +
+//   inflateSync 无上限时, 一个恶意 PDF (高压缩比流) 或超大文件就能让主进程 OOM / 卡死
+//   事件循环 (同进程的 HTTP/SSE 全停)。解压上限与读盘上限分开设, 保证"压缩包小、解压后巨型"
+//   这条路径也被挡住; 超限的压缩流退回原文扫描 (有界), 超限文件直接拒绝。
+const MAX_DOC_BYTES = 20 * 1024 * 1024;
+const MAX_INFLATE_BYTES = 16 * 1024 * 1024;
+
 // 零依赖 PDF 文本提取: 遍历 stream, FlateDecode 解压, 提取 (text) Tj 与 [(a)(b)] TJ
 export function extractPdfText(buf) {
   const raw = buf.toString("latin1");
@@ -45,11 +54,11 @@ export function extractPdfText(buf) {
   let m;
   while ((m = streamRe.exec(raw)) !== null) {
     let data = m[1];
-    // 尝试 FlateDecode 解压 (内容流通常是压缩的)
+    // 尝试 FlateDecode 解压 (内容流通常是压缩的); 解压炸弹由 maxOutputLength 挡下
     try {
-      const inf = zlib.inflateSync(Buffer.from(data, "latin1")).toString("latin1");
+      const inf = zlib.inflateSync(Buffer.from(data, "latin1"), { maxOutputLength: MAX_INFLATE_BYTES }).toString("latin1");
       if (inf.length > 0) data = inf;
-    } catch { /* 未压缩则用原文 */ }
+    } catch { /* 未压缩/超限则用原文 */ }
     // (text) Tj
     for (const tm of data.matchAll(/\(([^)]*)\)\s*Tj/g)) {
       const t = decodePdfString(tm[1]).trim();
@@ -96,6 +105,11 @@ function htmlToText(html) {
 export function extractDocumentText(filePath) {
   const ext = path.extname(filePath).toLowerCase();
   if (!fs.existsSync(filePath)) throw new Error(`文件不存在: ${filePath}`);
+  const size = fs.statSync(filePath).size;
+  if (size > MAX_DOC_BYTES) {
+    throw new Error(`文档过大 (${(size / 1048576).toFixed(1)}MB > ${MAX_DOC_BYTES / 1048576}MB), 拒绝整读: `
+      + `请先切分/压缩, 或用 run_command 走流式工具处理`);
+  }
   const buf = fs.readFileSync(filePath);
   switch (ext) {
     case ".txt": case ".md": case ".csv": case ".json": case ".log":
@@ -174,11 +188,17 @@ export function registerDocumentTools(catalog, { rootDir }) {
     },
     execute: async (args, ctx) => {
       try {
-        const p = safePath(rootDir, args.path);
+        const p = safePath(rootDir, args.path, ctx);
+        // 2026-11-13 (评测 P2-4): read_file 已拦受保护路径, read_document 此前是旁路 ——
+        //   把 config/ppx.json 当文本读走可绕过凭据保护; 与 read_file 同口径 fail-closed。
+        if (isProtectedRead(p)) {
+          return JSON.stringify({ error: "受保护路径, 禁止读取 (审计锚点/凭证/含密钥配置)" });
+        }
         const cfg = (ctx && ctx.agent && ctx.agent.config) || {};
         const text = await readDocumentText(p, ocrOptsFromConfig(cfg));
         const max = Math.min(args.maxChars || MAX_CHARS, 40000);
-        const truncated = text.length > max ? text.slice(0, max) + `\n...[已截断, 共 ${text.length} 字符]` : text;
+        const safeText = scrubPII(text).cleaned;
+        const truncated = safeText.length > max ? safeText.slice(0, max) + `\n...[已截断, 共 ${safeText.length} 字符]` : safeText;
         return truncated || "(文档无文本内容, 且未识别出扫描件文字)";
       } catch (e) {
         return JSON.stringify({ error: "read_document 失败: " + e.message });
@@ -203,7 +223,7 @@ export function registerDocumentTools(catalog, { rootDir }) {
       const agent = ctx && ctx.agent;
       const cfg = (agent && agent.config && agent.config.ocr) || {};
       try {
-        const p = safePath(rootDir, args.path);
+        const p = safePath(rootDir, args.path, ctx);
         const text = await ocrImage(p, {
           tesseract: cfg.tesseract || "tesseract",
           lang: args.lang || cfg.lang || "chi_sim",
@@ -233,7 +253,7 @@ export function registerDocumentTools(catalog, { rootDir }) {
       const agent = ctx && ctx.agent;
       if (!agent || !agent.facts) return JSON.stringify({ error: "ingest_document: 缺少 agent 上下文" });
       try {
-        const p = safePath(rootDir, args.path);
+        const p = safePath(rootDir, args.path, ctx);
         const text = await readDocumentText(p, ocrOptsFromConfig(agent.config));
         const chunks = splitChunks(text, 500);
         if (!chunks.length) return JSON.stringify({ error: "文档无可入库的文本 (可能是扫描件 PDF, 且 OCR 不可用)" });

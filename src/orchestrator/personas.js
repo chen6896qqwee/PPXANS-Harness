@@ -1,30 +1,31 @@
-// src/orchestrator/personas.js - 人格模板体系 (2026-10-07 吸收自 TencentCloud/Octop)
+// src/orchestrator/personas.js - 人格模板体系 (设计溯源 docs/PROVENANCE.md#octop)
 //
-// 吸收来源: Octop 的 `docs/personas.md` + `infra/agents/persona/mbti_profiles.py`。
+// 设计对照: Octop 的 `docs/personas.md` + `infra/agents/persona/mbti_profiles.py`;
+// 本文件是零依赖原生实现。
 //   Octop 把人格做成**结构化数据**而不是 16 个 Markdown 文件 —— 理由写在它的文档里:
 //   "so it can be localized without shipping 16 separate Markdown files"。
-//   这里照抄这个判断: 16 型 × 四轴维度 × 六项行为映射, 全部是数据, 渲染时才落成文本。
+//   这里沿用这个判断: 16 型 × 四轴维度 × 六项行为映射, 全部是数据, 渲染时才落成文本。
 //
 // 与"专家"的区别 (这是 Octop 明确划开的一条线, 也是本模块存在的理由):
 //   专家 Expert  = 干什么 (能力域 + 技能绑定 + 只读/需人工约束)
 //   人格 Persona = 怎么说话 (语气 + 冲突处理 + 创造方式 + 规划风格)
 //   两者正交: 同一个"代码专家"可以配 INTJ 也可以配 ENFP, 产出内容不同但职责不变。
 //
-// 渲染契约 (照搬 Octop):
+// 渲染契约 (设计溯源 docs/PROVENANCE.md#octop):
 //   persona 是**骨架**, 用户自定义 system_prompt 是**修剪** —— 自定义内容追加在骨架之后,
 //   不允许覆盖骨架 (否则"人格"变成一句空话, 跨用户行为不可复现)。
 //   模板变量: {agent_name} / {user_display} / {custom}
 
 export const PERSONA_DIMENSIONS = ["ei", "sn", "tf", "jp"];
 
-export const DIMENSION_LABELS = {
+const DIMENSION_LABELS = {
   ei: { name: "能量方向", poles: { E: "外向", I: "内向" } },
   sn: { name: "信息获取", poles: { S: "实感", N: "直觉" } },
   tf: { name: "决策依据", poles: { T: "思考", F: "情感" } },
   jp: { name: "生活态度", poles: { J: "判断", P: "感知" } },
 };
 
-// 六项行为映射的键 (照搬 Octop 的 MBTIBehaviorMapping)
+// 六项行为映射的键 (设计对照 Octop 的 MBTIBehaviorMapping)
 export const BEHAVIOR_KEYS = ["answer_style", "casual_chat", "conflict", "creativity", "emotion", "planning"];
 
 // ---- 16 型 + default ----
@@ -354,7 +355,7 @@ export function renderPersona(code, { agentName = "皮皮虾", userDisplay = "�
 }
 
 // 紧凑一行摘要 (注入列表 / 工具输出用)
-export function personaLine(code) {
+function personaLine(code) {
   const p = getProfile(code);
   return `${p.code} ${p.name_zh}(${p.name_en}) — ${p.summary_zh}`;
 }

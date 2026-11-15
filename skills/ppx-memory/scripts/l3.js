@@ -11,6 +11,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import { ensureDir, readJson, writeJson, readText, writeText, logicalDay } from "./store.js";
+import { tierOfRecord, canPromote } from "./provenance.js";
+
+// 画像内容策略版本 (落 meta.json)。2 = 隔离带事实 (tool-fetched / unknown) 不进画像。
+const PERSONA_POLICY = 2;
 
 // 旧版正文里两处烘日期的行 (只匹配**生成模板**的精确形态, 绝不通吃用户事实里可能出现的日期)
 const BAKED_UPDATED_RE = /\n> (由皮皮虾 L3 画像引擎生成|从经验库自动学习) \| 更新: (\d{4}-\d{2}-\d{2})/;
@@ -43,7 +47,10 @@ export class PersonaStore {
     // 聚焦用户相关的记忆 (来源: 对话 / LLM提炼 / 主动记 / 手动 / 用户分享)
     // 注: 事实的来源标记在 source 字段 (type 恒为 general), 之前按 type 过滤永远为空 -> 修正为按 source
     const USER_SOURCES = ["conversation", "extract", "agent-self", "manual", "user-shared"];
-    const userFacts = facts.filter((f) => USER_SOURCES.includes(f.source) || USER_SOURCES.includes(f.type));
+    // 隔离带拦截 (2026-11-12): source 只说明"谁写的"; 跑过外部工具的轮次蒸馏结果会带
+    //   provenance:"tool-fetched"。画像正文进 system prompt 静态区, 抓取文本不得混入。
+    const userFacts = facts.filter((f) =>
+      (USER_SOURCES.includes(f.source) || USER_SOURCES.includes(f.type)) && canPromote(tierOfRecord(f)));
     const interests = this._topTopics(userFacts);
     // 记忆概要: 内容去重后取最近 10 条 (防 LLM 提炼变体/重复记忆稀释画像)
     const uniq = this._uniqByContent(userFacts).slice(-10);
@@ -170,7 +177,12 @@ ${uniq.map((l) => `- ${l.lesson}`).join("\n") || "- 暂无"}
     this._migrated.add(file);
     const meta = this._meta();
     meta[metaKey] = logicalDay();
+    meta.personaPolicy = PERSONA_POLICY;
     writeJson(this.metaFile, meta);
+  }
+
+  policyStale() {
+    return Number(this._meta().personaPolicy || 0) < PERSONA_POLICY;
   }
 
   _meta() {

@@ -2,7 +2,7 @@
 //
 // 背景 (2026-10-09): 同一个项目里存在两套错误口径——
 //   · provider 降级路径 (agent/index.js _shortReason) 会把错误转人话
-//   · 硬失败路径 (core/policy.js LLM_FAILED_HINT) 把 ${e.message} 原样拼给用户
+//   · 硬失败路径 (agent/loop/policy.js LLM_FAILED_HINT) 把 ${e.message} 原样拼给用户
 // 于是用户可能看到 "ERR_HTTP_HEADERS_SENT" / "EPIPE" / 一整坨原始 JSON 这类不该外泄的内容。
 // 本模块把"判定 + 转译"收敛到一处, 两条路径共用, 防止再次漂移。
 
@@ -78,5 +78,5 @@ export function isInternalErrorText(text) {
  */
 export function llmFailedHint(err) {
   return `[皮皮虾] LLM 调用失败: ${explainError(err)}
-排查指引: 1) 检查 config/ppx.json 的 providers 是否配置了可用的 API key (export XXX_API_KEY=...); 2) 本地模型 (lmstudio) 是否在运行; 3) 启动 ppx-serve 看日志确认模型加载。`;
+排查指引: 1) 检查 config/ppx.json 的 providers 是否配置了可用的 API key (export XXX_API_KEY=...); 2) 本地模型 (lmstudio) 是否在运行; 3) 启动 ppx serve 看日志确认模型加载。`;
 }

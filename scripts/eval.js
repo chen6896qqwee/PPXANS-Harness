@@ -2,7 +2,7 @@
 // scripts/eval.js - 统一 E2E 评测入口 (每次发版前跑一遍)
 // 分层评测:
 //   (1) 本地能力层 (必跑, 零依赖): 问候识别 / 时间工具 / 记忆闭环 / 生命周期 / 价值注入 / 文件工具
-//   (2) LLM 端到端层 (--llm): LLM 直连 5 case + 记忆闭环 (复用 e2e-response-smoke 思路)
+//   (2) LLM 端到端层 (--llm): LLM 直连 5 case + 记忆闭环 (此前曾有独立的 e2e-response-smoke 脚本, 2026-11-08 精简并入本文件思路)
 //       provider 选择优先级:
 //         a. --provider <id>          从 config/ppx.json 取指定 provider
 //         b. PPX_E2E_BASE_URL+KEY+MODEL 环境变量 (CI 注入, 跑真实回归)

@@ -29,8 +29,13 @@ PPXANS-Harness 是一个**会执行命令、读写文件、访问网络**的自�
 - **提示注入扫描**: 工具结果入库前扫描 (`security/injection.js`)
 - **审计哈希链**: 全部工具调用 append-only + SHA-256 链式防篡改，事后可追责
 - **HTTP 认证**: Bearer Token，本机 token 注入有 Origin 同端口校验
+- **密钥落盘** (2026-11-02): 含 `api_key` 的 `config/ppx.json` 及其 `.bak-*` 备份在 POSIX 上写为 `0600`；`ppx doctor` 会检查历史文件权限。更推荐 `api_key_env` / `api_key_cmd`，密钥根本不进配置文件
+- **插件能力边界** (2026-11-02): 清单 `ppx.plugin.json` 的 `access` 与 `capabilities` 双层门；`capabilities` 只接受敏感服务白名单（`routes/lifecycle/tools/shell/pages/providers/extensions`），未知能力整插件 fail-closed；entry 同时做字符串穿越与 realpath 符号链接越界检查
 
 ### 已知边界 (诚实声明)
+
+- **插件没有 JS 沙箱**: `plugins/` 下的代码由主进程 `require`，与你的 Agent 同权限运行。`access`/`capabilities`
+  限制的是**能注册哪些敏感服务**，不是代码能力。只安装你读得懂、且完全信任的插件。
 
 - **JS 沙箱 (`code_run`) 防失误不防恶意**: worker_threads + node:vm 隔离了 IO/网络/进程，  
   但 Node 原生不提供强隔离。**不要**用它跑不受信第三方的恶意代码——  

@@ -18,7 +18,8 @@ risk: medium
 `.docx` 就是一个 ZIP 包: 正文在 `word/document.xml`, 样式在 `word/styles.xml`, 编号在 `word/numbering.xml`, 关系在 `*.rels`。理解这一点, 读写都不需要重型库; 也意味着**任何手工拼接 XML 的错误都会让 Word 报"文件已损坏"**, 所以生成后必须跑 `validate`。
 
 ## 工具
-脚本目录 `scripts/`, 全部只用 Python 3.9+ 标准库 (无需 pip):
+脚本目录 `scripts/`, 全部只用 Python 3.9+ 标准库 (无需 pip)。
+`scripts/` 是相对本 SKILL.md 所在目录的路径 —— `run_command` 的工作目录是项目根, 直接照抄相对路径会找不到脚本; 请拼上 load_skill 回传的「技能目录」绝对路径再执行。
 
 | 命令 | 用途 |
 |---|---|

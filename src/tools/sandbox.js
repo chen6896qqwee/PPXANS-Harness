@@ -72,8 +72,7 @@ export function runInSandbox(code, { timeoutMs = 3000, maxHeapMb = 128 } = {}) {
   });
 }
 
-export function registerSandboxTools(catalog, { rootDir = process.cwd() } = {}) {
-  void rootDir;
+export function registerSandboxTools(catalog) {
   catalog.register({
     name: "code_run",
     description: "在内置 JS 沙箱执行一段 JavaScript 并返回结果 (纯计算: 数学/字符串/数组/JSON 处理)。沙箱无网络/文件/进程访问。适合精确计算与数据转换, 比手算可靠、比 shell 干净。",

@@ -35,6 +35,32 @@ keep `runtime/LICENSE.node.txt`.
 These tools are used to produce the installers and are not part of the
 shipped application.
 
+## Bundled in the Web UI (build-time dependencies)
+
+The browser UI (`webapp/`, Vue 3 + Vite) renders Markdown, code and math with
+four libraries. Since v5.0 they are ordinary root `devDependencies` in
+`package.json`: `npm run web:build` runs Vite, which bundles them (plus Vue) into
+`webapp/dist/assets/`. The built assets are committed, so a clone runs without
+an extra install; `npm run web:check` re-verifies that `dist/index.html` and the
+assets it references are present.
+
+They are **not** runtime dependencies of the Node kernel: `dependencies` stays
+empty, the kernel loads nothing at run time, and the UI never fetches from a CDN.
+
+| Component | Version | License | What it does |
+|---|---|---|---|
+| [Vue](https://github.com/vuejs/core) | 3.5.x | MIT | UI framework for the webapp SPA |
+| [Vite](https://github.com/vitejs/vite) | 7.x | MIT | Build/dev server; emits `webapp/dist` |
+| [markdown-it](https://github.com/markdown-it/markdown-it) | 14.x | MIT | Markdown → HTML (`html:false`, so raw HTML in model output stays text) |
+| [DOMPurify](https://github.com/cure53/DOMPurify) | 3.4.x | Apache-2.0 OR MPL-2.0 | Sanitizes the rendered HTML before it reaches the DOM |
+| [KaTeX](https://github.com/KaTeX/KaTeX) | 0.16.x | MIT | `$inline$` / `$$block$$` math (fonts emitted into `webapp/dist/assets/`) |
+| [highlight.js](https://github.com/highlightjs/highlight.js) | 11.x | BSD-3-Clause | Syntax highlighting for fenced code blocks |
+
+Exact versions live in `package.json`; each package keeps its upstream `LICENSE`
+inside `node_modules/<name>/`. highlight.js is themed by our own token colors in
+the webapp stylesheet rather than by an upstream stylesheet, so the same markup
+follows both the dark and the light palettes.
+
 ## Bundled third-party skills
 
 `skills/` contains skills imported from upstream skill libraries. Each imported
@@ -84,5 +110,6 @@ SOFTWARE.
 
 Design ideas were informed by the projects listed in the README section
 “架构来源与致谢”; their source code is not bundled. The imported skills above
-are the only third-party source files shipped in this repository. See
+are the only third-party source files shipped in this repository; the Web UI
+libraries are npm packages bundled into `webapp/dist` at build time. See
 `references/THIRD-PARTY-SOURCES.md` for the registry.

@@ -27,7 +27,9 @@ if (HAS_WEB) {
   console.log("=== 1/4 构建前端 (Next.js 生产产物) ===");
   run("npm run build --prefix web");
 } else {
-  console.log("=== 1/4 构建前端: 跳过 (web/ 深度定制 UI 不存在, 现行 UI 为 public/ 零构建) ===");
+  // v5.0 (2026-11-07): 前端重铸为 Vue3+Vite, 构建产物 webapp/dist 入库; 发布前重跑一次保证新鲜
+  console.log("=== 1/4 构建前端 (webapp: Vue3+Vite) ===");
+  run("npm run web:build");
 }
 
 console.log("\n=== 2/4 打包内核 npm 包 ===");

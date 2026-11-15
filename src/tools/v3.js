@@ -6,15 +6,28 @@ import path from "node:path";
 import { renderRepoMap } from "../repomap/index.js";
 import { parseEditBlocks, applyAll, formatRetryFeedback, parseCodexPatch, PATCH_FORMAT_HELP, MISSING_TARGET_HELP, patchTargetPreview, looksLikePath, resolvePatchTargets } from "../edit/editblock.js";
 import { Snapshot } from "../edit/snapshot.js";
-import { runReview } from "../review/index.js";
-import { jsExportSelfCheck } from "../core/postcondition.js";
-import { safePath, rememberSessionWrite } from "./builtin.js";
+import { runReview } from "../verify/review.js";
+import { jsExportSelfCheck } from "../verify/postcondition.js";
+import { safePath, rememberSessionWrite, sensitiveWriteHint } from "./builtin.js";
 import { GOAL_STATUSES } from "../evidence/index.js";
-import { generateWiki, checkStaleness } from "../wiki/index.js";
-import * as pwf from "../planning/pwf.js";
+import { generateWiki, checkStaleness } from "../repomap/wiki.js";
+import * as pwf from "../session/pwf.js";
+
+// traces 落盘的 args 是脱敏后的 JSON 字符串且超长截断 —— 先按 JSON 取 path,
+// 截断串再退化成正则取 path 字段 (write_file 的 path 在参数最前)。
+function tracePathOf(args) {
+  const s = String(args ?? "");
+  try {
+    const p = JSON.parse(s).path;
+    if (typeof p === "string" && p) return p;
+  } catch { /* 截断的 JSON 走下面的正则 */ }
+  const m = s.match(/"path"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  if (!m) return null;
+  try { return JSON.parse(`"${m[1]}"`); } catch { return null; }
+}
 
 export function registerV3Tools(catalog, { rootDir, agent = null }) {
-  // 0. repo_wiki — 代码库 Wiki (2026-10-02 吸收 ZCode repo-wiki): 架构文档 + file:line 绑定 + 敏感排除
+  // 0. repo_wiki — 代码库 Wiki (2026-10-02 设计溯源 docs/PROVENANCE.md#zcode repo-wiki): 架构文档 + file:line 绑定 + 敏感排除
   catalog.register({
     name: "repo_wiki",
     capability: { readOnly: false, riskLevel: "medium", sideEffect: "workspace" },
@@ -40,7 +53,7 @@ export function registerV3Tools(catalog, { rootDir, agent = null }) {
       return `Wiki 概况 (${summary}; 上次生成于 docs/WIKI.md, ${staleness.reason}):\n\n${w.text}`;
     },
   });
-  // 0b. usage_stats — 会话级使用统计 (2026-10-02 吸收 ZCode 使用统计: 模型消耗/调用次数)
+  // 0b. usage_stats — 会话级使用统计 (2026-10-02 设计溯源 docs/PROVENANCE.md#zcode 使用统计: 模型消耗/调用次数)
   catalog.register({
     name: "usage_stats",
     capability: { readOnly: true, riskLevel: "low", sideEffect: "none" },
@@ -77,12 +90,12 @@ export function registerV3Tools(catalog, { rootDir, agent = null }) {
       },
       required: [],
     },
-    execute: async (args) => {
+    execute: async (args, ctx) => {
       // 2026-09-18 修复 (P2): repo_map 原先对 args.root 无路径防护,
       //   绝对路径/.. 穿越可枚举工作区外任意目录的结构与标识符 (信息泄露面)。
       //   现与 write_file/apply_patch 同一安全不变量: safePath 前缀 + realpath 双校验。
       try {
-        safePath(rootDir, args.root || ".");
+        safePath(rootDir, args.root || ".", ctx);
       } catch (e) {
         return JSON.stringify({ error: `路径被拒绝: ${e.message}` });
       }
@@ -109,7 +122,7 @@ export function registerV3Tools(catalog, { rootDir, agent = null }) {
       },
       required: ["content"],
     },
-    execute: async (args) => {
+    execute: async (args, ctx) => {
       const rawContent = String(args.content || "");
       // 2026-10-09: SR 解不出块时再看 codex 风格 —— 模型实测会吐 *** Begin Patch 统一 diff,
       //   旧实现在那种情况下只会回一句"未找到任何 SEARCH/REPLACE 块", 模型无从改写;
@@ -159,7 +172,12 @@ export function registerV3Tools(catalog, { rootDir, agent = null }) {
       //   且目标路径藏在 content 字符串里, permissions 的 findEscape 也看不见。
       //   现统一走 safePath (前缀 + realpath 双重校验), 与 write_file 同一安全不变量。
       try {
-        for (const b of blocks) safePath(rootDir, b.path);
+        for (const b of blocks) {
+          const abs = safePath(rootDir, b.path, ctx);
+          // 2026-11-08 安全收口: .git/ 一律拒写 (hook 注入面), 与 write_file 同一不变量
+          const sensitive = sensitiveWriteHint(abs);
+          if (sensitive) return JSON.stringify({ error: `路径被拒绝: ${sensitive}` });
+        }
       } catch (e) {
         return JSON.stringify({ error: `路径被拒绝: ${e.message}` });
       }
@@ -243,9 +261,14 @@ export function registerV3Tools(catalog, { rootDir, agent = null }) {
     execute: async (args) => {
       let { files = [], diff = null } = args || {};
       if (!files.length && !diff) {
-        // 兜底: 用 traces 里最近的写操作文件
-        const recent = (agent?.traces?.read?.("write_file", 10) || []);
-        files = recent.map((t) => t.args?.path).filter(Boolean);
+        // 兜底: 用 traces 里最近的写操作文件。traces.read(day, limit) 首参是"日期",
+        //   旧代码传 "write_file" 会去读 write_file.jsonl (不存在) → 兜底恒为空;
+        //   且 trace 落盘的 args 是脱敏 JSON 字符串, 不是对象。
+        const recent = agent?.traces?.read?.(undefined, 100) || [];
+        files = [...new Set(recent
+          .filter((t) => t.ok && t.tool === "write_file")
+          .map((t) => tracePathOf(t.args))
+          .filter(Boolean))].slice(-10);
       }
       const out = runReview({ files, diff });
       // 报告存到 agent, Web UI /api/review/latest 直接读
@@ -310,7 +333,7 @@ export function registerV3Tools(catalog, { rootDir, agent = null }) {
     },
   });
 
-  // 5. plan_files — 三文件持久规划 (2026-10-06 吸收 planning-with-files 27k★)
+  // 5. plan_files — 三文件持久规划 (设计溯源 docs/PROVENANCE.md#planning-with-files)
   //    task_plan/findings/progress 落盘 .ppx/plan/, 计划在磁盘不在上下文,
   //    扛住压缩//clear/崩溃; SessionStart 与压缩摘要自动注入现场 (prompts._planContext)
   catalog.register({

@@ -264,7 +264,7 @@ export function getGovernor() {
   return _default;
 }
 
-export function configureGovernor(opts) {
+function configureGovernor(opts) {
   return getGovernor().configure(opts || {});
 }
 

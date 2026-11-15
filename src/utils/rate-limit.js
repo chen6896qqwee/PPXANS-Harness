@@ -6,7 +6,7 @@
 // 用法:
 //   const limiter = new TokenBucket({ perMin: 60 });
 //   if (!limiter.take(ip)) { /* 回 429 */ }
-export const RATE_WINDOW_MS = 60_000;
+const RATE_WINDOW_MS = 60_000;
 // 桶数超过此值时顺带回收过期桶 (摊还 O(1), 不引入定时器)
 const DEFAULT_SWEEP_AT = 512;
 

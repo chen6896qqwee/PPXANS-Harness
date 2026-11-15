@@ -86,7 +86,7 @@ export const HIGH_RISK_RULES = {
 };
 
 // ---- 关键词探测 (零依赖, 误报可接受: 误报只多一句提醒, 漏报才是问题) ----
-export const RISK_PATTERNS = {
+const RISK_PATTERNS = {
   medical: /诊断|病症|症状|用药|剂量|处方|药(物|品)|病情|化验单|检验报告|影像|片子|癌|肿瘤|血糖|血压|抑郁|焦虑症|怀孕|孕|手术|治疗方案|吃什么药|中医|西医|医保报销/,
   legal: /合同|协议条款|起诉|应诉|诉讼|仲裁|判决|法律责任|赔偿|侵权|劳动仲裁|离婚|继承|遗嘱|商标|专利|著作权|合规审查|法律意见/,
   finance: /股票|个股|基金|理财|投资|收益率|仓位|买入|卖出|加仓|减仓|止损|期货|期权|外汇|加密货币|比特币|贷款|利率|估值|市盈率|财报预测|荐股|打新/,
@@ -100,7 +100,7 @@ export const RISK_PATTERNS = {
 //   最容易出事的问法。弱词表抓的是**泛化求助信号**, 命中后不注入完整 directive (太吵,
 //   会毁掉日常体验), 只插一句"可能涉及专业领域, 请提示复核"的短护栏。
 // 误报代价被刻意压到最低: 一句话提醒; 漏报代价才是我们怕的。
-export const RISK_WEAK_PATTERNS = {
+const RISK_WEAK_PATTERNS = {
   medical: /身体不适|不舒服|头晕|乏力|失眠|过敏|体检|复查|副作用|要不要去医院|什么毛病|严重吗|会不会传染|忌口|进补/,
   legal: /这份.{0,6}(文件|协议|条款)|能不能签|有没有风险|维权|被告|纠纷|违约金|试用期|竞业|税务|被起诉|被投诉|要不要请律师/,
   finance: /钱放哪|怎么存|划不划算|收益率高|保本|亏了|套牢|该不该买|要不要卖|借钱|借给|担保|征信|分期|手续费|涨价前|抄底|逃顶/,
@@ -109,7 +109,7 @@ export const RISK_WEAK_PATTERNS = {
 };
 
 // 弱命中扫描: 与强命中同签名, 但**只在强命中为空时才有意义** (强命中已覆盖的域不再重复提醒)
-export function detectWeakRisk(text, config = null) {
+function detectWeakRisk(text, config = null) {
   const cfg = { ...BOUNDARY_DEFAULTS, ...(config?.agent?.boundary || {}) };
   if (cfg.weak_risk === false) return [];
   const allowed = new Set(Array.isArray(cfg.high_risk_domains) ? cfg.high_risk_domains : BOUNDARY_DEFAULTS.high_risk_domains);

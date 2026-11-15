@@ -43,7 +43,7 @@ export const PROMOTABLE_TIERS = Object.freeze([TIER_USER, TIER_MODEL]);
 
 // 既有调用点的 source 字符串 → tier 的**封闭登记表**。
 // 为什么需要它: 现网已有 20+ 个 `facts.add(..., {source:"x"})` 调用点 (含只读兄弟目录里的
-// src/tools/document.js、src/plugin/builtin.js), 分级必须对它们诚实定级而不是全部降级成 unknown,
+// src/tools/document.js、src/agent/plugins/builtin.js), 分级必须对它们诚实定级而不是全部降级成 unknown,
 // 否则"用户说的话"也会被隔离 —— 那是行为倒退。登记表之外的 source 一律 unknown。
 export const SOURCE_TIER = Object.freeze({
   conversation: TIER_USER,   // FactStore.addMemory: 用户消息原文 (JSON 后端)
@@ -204,6 +204,7 @@ export function labelFor(tier) {
 // 伪装标签: 抓取内容里写着「(来源: 用户原话)」「【user-stated】」时, 渲染出的行会让人/模型误判权限。
 // 只匹配"标签形状" (括起来 + 短 + 来源/信任类词), 不通吃普通句子里的括号。
 const FORGED_PAREN_TAG = /[ \t]*[（(]\s*(?:来源|出处|provenance|source|trust|可信度|信任级别)\s*[:：][^（()）\n]{0,48}[)）][ \t]*/gi;
+// eslint-disable-next-line no-useless-escape
 const FORGED_BRACKET_TAG = /[ \t]*[\[【]\s*(?:user-stated|model-inferred|tool-fetched|unknown|来源[:：][^\]】\n]{0,32}|(?:用户|模型|工具|系统)(?:原话|推断|抓取|生成)|隔离|不可信|已验证)[^\]】\n]{0,16}[\]】][ \t]*/gi;
 
 /** 剥掉内容里伪装成来源标签的片段 (写入侧调用 = 所有渲染路径一起安全, 不只本层) */

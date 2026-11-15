@@ -1,4 +1,6 @@
 // src/utils/store.js - 零依赖文件存储 (JSON + 原子写)
+import { info as logInfo, warn as logWarn } from "../utils/logger.js";
+import { noteCatch } from "./catch-log.js";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
@@ -9,9 +11,17 @@ export function ensureDir(dir) {
 }
 
 export function atomicWrite(file, data) {
-  ensureDir(path.dirname(file));
   const tmp = file + "." + crypto.randomBytes(4).toString("hex") + ".tmp";
-  fs.writeFileSync(tmp, data, "utf8");
+  // 目录已存在是常态 (dataDir 在构造期已建), 此时不必再跑一次 mkdirSync —— Windows 上它比
+  // 一次 writeFileSync 还慢。缺目录 (首次写/被外部删掉) 时 writeFileSync 报 ENOENT, 再补建重试,
+  // 语义与"先 ensureDir 再写"完全一致, 只是把常态路径的那次系统调用省掉。
+  try {
+    fs.writeFileSync(tmp, data, "utf8");
+  } catch (e) {
+    if (!e || e.code !== "ENOENT") throw e;
+    ensureDir(path.dirname(file));
+    fs.writeFileSync(tmp, data, "utf8");
+  }
   // v1.0.8: rename 覆盖已存在文件在 Windows 并发下可能 EPERM/EEXIST (短窗口), 重试 3 次;
   // 不再降级为非原子直接写 (并发双写可交错损坏文件), 重试仍失败则抛错由调用方处理
   // v3.2.x (2026-10-10, Windows 并发 EPERM 偶发修复): 原实现 3 次 × 30ms busy-wait 总预算仅
@@ -29,7 +39,7 @@ export function atomicWrite(file, data) {
       return;
     } catch (e) {
       if (!RETRY.has(e && e.code) || Date.now() - started + delay > BUDGET_MS) {
-        try { fs.unlinkSync(tmp); } catch {}
+        try { fs.unlinkSync(tmp); } catch (e2) { noteCatch(e2); /* 清不掉临时文件: 下次原子写会另起一个, 不阻塞报错 */ }
         throw new Error(`原子写失败: ${file} (${e.message})`);
       }
       _syncSleep(delay);
@@ -48,7 +58,7 @@ export function readJson(file, fallback = null) {
     // v3.0.1 (P0#1): 解析失败不再完全静默 —— 至少留一条 warn。
     // 注意: 此处**不动文件** (不自作主张改名/删除) —— 调用方按 parseFailed 自行留档。
     // v2026-10-04 (P2#15 同步): 独立版无 logger 模块, 用 console.warn 保持同等可见度
-    console.warn(`[utils/store] JSON 解析失败, 返回 fallback (文件保留): ${file} (${e && e.message ? e.message : e})`);
+    logWarn(`[utils/store] JSON 解析失败, 返回 fallback (文件保留): ${file} (${e && e.message ? e.message : e})`);
     return fallback;
   }
 }
@@ -64,7 +74,7 @@ export function readJsonGuarded(file, fallback = null) {
     if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1);
     return { data: JSON.parse(raw), existedBefore: true, parseFailed: false };
   } catch (e) {
-    console.warn(`[utils/store] JSON 损坏 (文件保留待恢复): ${file} (${e && e.message ? e.message : e})`);
+    logWarn(`[utils/store] JSON 损坏 (文件保留待恢复): ${file} (${e && e.message ? e.message : e})`);
     return { data: fallback, existedBefore: true, parseFailed: true };
   }
 }
@@ -83,7 +93,7 @@ export function writeJson(file, obj) {
 //   ② 等待用 Atomics.wait (OS 级阻塞, 零 CPU), 替代原自旋空转 (20ms×150 轮纯烧 CPU 且卡事件循环)。
 const _sleepArr = new Int32Array(new SharedArrayBuffer(4));
 function _syncSleep(ms) {
-  try { Atomics.wait(_sleepArr, 0, 0, ms); } catch { const end = Date.now() + ms; while (Date.now() < end) {} }
+  try { Atomics.wait(_sleepArr, 0, 0, ms); } catch { const end = Date.now() + ms; while (Date.now() < end) { /* busy wait */ } /* swallowed-ok(2026-11-03): Atomics 不可用 → 忙等回退 */ }
 }
 function _pidAlive(pid) {
   try { process.kill(pid, 0); return true; } catch (e) { return e && e.code === "EPERM"; } // EPERM=存在但无权限
@@ -123,17 +133,25 @@ function _callSyncFn(api, file, fn) {
 export function withFileLock(file, fn, { timeoutMs = 3000, pollMs = 20, staleMs = 15000 } = {}) {
   _assertSyncFn("withFileLock", file, fn);
   const lock = file + ".lock";
-  // 本次持有的锁令牌 (pid:ts)。释放时只删"内容仍是自己令牌"的锁文件 ——
+  // 本次持有的锁令牌 (pid:ts)。释放时只删"仍属于自己"的锁文件 ——
   //   (2026-10-10 修复) 原 finally 无条件 rmSync, 存在这样的竞态: 本进程的锁被判陈旧强取后,
   //   强取方新建了自己的锁; 而本进程 fn() 一返回就执行 finally, 把【对方的锁】删了 ——
   //   结果锁在双方都以为持有的窗口里凭空消失 (残留 .lock / 双写风险)。
   //   高并发压测下可复现 (test/lock-two-process-rmw.test.js D 组偶发 "收尾后仍有 .lock")。
+  // 2026-11-03 (热路径): 归属判定先比文件身份 (ino + 创建时间), 命中即删 —— 不再每取放一次锁
+  //   都读一遍锁文件 (Windows 上一次 readFileSync 约 0.5ms, 比整个 writeJson 还贵)。被强取时
+  //   对方必定 rm + 新建, 文件身份随之改变, 判定依旧安全; 身份读不到 (异常文件系统) 才退回读内容。
   let myToken = null;
+  let myId = null;
   const acquire = () => {
     try {
       const fd = fs.openSync(lock, "wx"); // 'wx': 已存在则抛错 (原子)
       const token = `${process.pid}:${Date.now()}`;
-      try { fs.writeSync(fd, token); } catch {}
+      try { fs.writeSync(fd, token); } catch (e) { noteCatch("src/utils/store.js#_assertSyncFn", e); }
+      try {
+        const st = fs.fstatSync(fd, { bigint: true });
+        myId = { ino: st.ino, bt: st.birthtimeNs ?? 0n };
+      } catch { myId = null; }
       fs.closeSync(fd);
       myToken = token;
       return true;
@@ -141,13 +159,20 @@ export function withFileLock(file, fn, { timeoutMs = 3000, pollMs = 20, staleMs 
       return false;
     }
   };
-  // 仅当锁文件内容正是本次令牌时才删除 —— 借"令牌比对"消除误删他锁的竞态。
+  // 只删"仍是自己建的那一个"锁文件。
   const releaseIfOwn = () => {
     if (!myToken) return;
     try {
-      if (fs.readFileSync(lock, "utf8").trim() === myToken) fs.rmSync(lock, { force: true });
-    } catch { /* 锁已被他人取走/不存在 → 无副作用 */ }
+      if (myId) {
+        // (ino, birthtime) 同时相等 = 自 acquire 以来文件没被删除重建; 创建时间兜住 ino 复用。
+        const st = fs.statSync(lock, { bigint: true });
+        if (st.ino === myId.ino && (myId.bt === 0n || st.birthtimeNs === myId.bt)) fs.rmSync(lock, { force: true });
+      } else if (fs.readFileSync(lock, "utf8").trim() === myToken) {
+        fs.rmSync(lock, { force: true });
+      }
+    } catch (e) { noteCatch(e); /* 锁已被他人取走/不存在 → 无副作用 */ }
     myToken = null;
+    myId = null;
   };
   // 陈旧锁判定 (v3.0.1 P1#5): 持有者进程已死 / 锁超长持有 / 自进程残留 → 可抢; 活跃进程持有 → 不可抢
   const canSteal = () => {
@@ -175,7 +200,7 @@ export function withFileLock(file, fn, { timeoutMs = 3000, pollMs = 20, staleMs 
     if (Date.now() - start > timeoutMs) {
       // v3.0.1 (P1#5): 活跃进程持锁 → 抛错而非抢锁 (宁可失败不可双写损坏)
       if (!canSteal()) throw new Error(`文件锁被活跃进程持有, 等待 ${timeoutMs}ms 后放弃: ` + lock);
-      try { fs.rmSync(lock, { force: true }); } catch {} // 陈旧锁强取 (此处无 myToken, 不涉误删)
+      try { fs.rmSync(lock, { force: true }); } catch (e) { noteCatch(e); } // 陈旧锁强取 (此处无 myToken, 不涉误删)
       if (!acquire()) {
         // 2026-10-11 加固: 强取瞬间可能被并发方 (同样在走超时强取路径) 抢先建锁 —— 原实现
         //   直接抛"文件锁获取超时"。高发场景: 旧服务被 taskkill /F 强杀留下僵尸锁 + Windows
@@ -186,7 +211,7 @@ export function withFileLock(file, fn, { timeoutMs = 3000, pollMs = 20, staleMs 
           _syncSleep(pollMs * 5);
           if (acquire()) { won = true; break; }
           if (!canSteal()) break;
-          try { fs.rmSync(lock, { force: true }); } catch {}
+          try { fs.rmSync(lock, { force: true }); } catch (e) { noteCatch(e); }
         }
         if (!won) throw new Error("文件锁获取超时: " + lock);
       }
@@ -259,7 +284,7 @@ export function mutateJsonCollection(file, fallback, mutate, { warnTag = "store"
     // (调用方把已改的内存态保留在自身字段里, 下次成功写入时全量补上)
     // 用 console.log 而非 console.warn: 与项目既有 warn 出口一致 (走 stdout, 可被日志采集),
     //   且不引入对 logger 模块的依赖 (store 是底层工具, 保持零依赖)。
-    console.log(`[warn] [${warnTag}] 落盘失败 (内存态保留, 下次写入补齐): ${file} (${e && e.message ? e.message : e})`);
+    logInfo(`[warn] [${warnTag}] 落盘失败 (内存态保留, 下次写入补齐): ${file} (${e && e.message ? e.message : e})`);
     return { ok: false, data, error: e, corrupted };
   }
 }

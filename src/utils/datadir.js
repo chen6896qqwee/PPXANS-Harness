@@ -4,7 +4,7 @@
 import path from "node:path";
 import os from "node:os";
 
-export function defaultDataDir(root) {
+function defaultDataDir(root) {
   if (String(root).includes("node_modules")) return path.join(os.homedir(), ".ppx");
   return path.join(root, "data");
 }

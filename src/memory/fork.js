@@ -1,8 +1,9 @@
 // src/memory/fork.js - 会话 fork 基线 (P2⑦)
-// 吸收 HanaAgent 的 fork baseline 设计思想:
+// 设计溯源 docs/PROVENANCE.md#hanaagent 的 fork baseline 设计思想:
 //   子代理 spawn 时携带记忆基线快照 (L1 facts + L3 persona + 经验精选), 子任务结束按结果 merge 或 discard。
 // 皮皮虾自研实现: 主 agent 记忆导出为子 dataDir 可读的快照文件, 子 agent 独立演进,
 //   结束后可选 merge 回主记忆 (去重) 或丢弃 (隔离)。纯代码, 无 LLM 参与 merge 决策。
+import { noteCatch } from "../utils/catch-log.js";
 import fs from "node:fs";
 import path from "node:path";
 import { ensureDir, writeText, readText } from "../utils/store.js";
@@ -25,7 +26,7 @@ export function exportMemorySnapshot({ agent, toDataDir, factsLimit = 50, experi
       writeText(path.join(snapDir, "facts.md"), `# L1 事实快照 (fork 基线)\n${lines}\n`);
       wrote.facts = top.length;
     }
-  } catch {}
+  } catch (e) { noteCatch("src/memory/fork.js#writeText", e); }
 
   // L3 persona: 主 agent 画像 (用户画像 + agent 人格)
   // 修复 (2026-09-17): 原调用 agent.personaStore.read() —— PersonaStore 并不存在 read(),
@@ -44,7 +45,7 @@ export function exportMemorySnapshot({ agent, toDataDir, factsLimit = 50, experi
         wrote.persona = true;
       }
     }
-  } catch {}
+  } catch (e) { noteCatch("src/memory/fork.js#writeText", e); }
 
   // 全局经验精选
   try {
@@ -56,7 +57,7 @@ export function exportMemorySnapshot({ agent, toDataDir, factsLimit = 50, experi
         wrote.experience = list.length;
       }
     }
-  } catch {}
+  } catch (e) { noteCatch("src/memory/fork.js#writeText", e); }
 
   return { wrote, path: snapDir };
 }

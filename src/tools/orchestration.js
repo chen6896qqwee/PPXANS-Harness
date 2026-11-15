@@ -13,9 +13,10 @@ import { getGovernor } from "../orchestrator/governor.js";
 import { teamCatalog, teamRiskProfile, TEAMS } from "../orchestrator/teams.js";
 import { expertCatalog, EXPERTS, HIGH_RISK_DOMAINS } from "../orchestrator/experts.js";
 import { assessBoundary, CAPABILITY_BOUNDARIES } from "../ans/boundary.js";
+import { currentTrace } from "../core/trace.js";
 
 // 九维核心能力 → 本仓库的实际承载体 (用于 capability_matrix 的诚实自述)
-export const CAPABILITY_AXES = [
+const CAPABILITY_AXES = [
   { id: "perceive", name: "感知", impl: "visionUserContent 多模态读图 / read_document / ocr_image / voice_transcribe (ASR)" },
   { id: "memory", name: "记忆", impl: "五层记忆 (L0 会话 / L1 原子 / L2 场景 / L3 画像 / L4 程序性) + WAL + 高斯衰减 + 遗忘回滚" },
   { id: "plan", name: "规划", impl: "plan / plan-exec 模式 + goal_board 目标台账 + DAG 拓扑编排 (orchestrator/dag.js)" },
@@ -193,6 +194,7 @@ export function registerOrchestrationTools(catalog, { getAgent = () => null } = 
       lines.push(`子智能体并发: 上限 ${st.limit} / 单次派发 ${st.perCallMax} / 在跑 ${st.running} / 排队 ${st.waiting}`);
       lines.push("", "— 能力边界 —");
       const b = assessBoundary({ task: "", config: agent?.config });
+      lines.push(`边界护栏: ${b.enabled ? "开" : "关 (config.agent.boundary.enabled=false)"}`);
       lines.push(`边界条款 ${CAPABILITY_BOUNDARIES.length} 条: ${CAPABILITY_BOUNDARIES.map((x) => x.title).join(" / ")}`);
       lines.push(`高风险域需人类监督: ${(agent?.config?.agent?.boundary?.high_risk_domains || HIGH_RISK_DOMAINS).join(", ")}`);
       return lines.join("\n");
@@ -223,6 +225,51 @@ export function registerOrchestrationTools(catalog, { getAgent = () => null } = 
       }
       lines.push(`边界条款: ${CAPABILITY_BOUNDARIES.map((b) => b.title).join(" / ")}`);
       return lines.join("\n");
+    },
+  });
+
+  // ---- 7. 话题驻派 (2026-11-02 三期第二批: 订阅直通的模型侧入口) ----
+  // 与 spawn_agent 的分工: spawn_agent 一次派活一次收活; follow_thread 让一个话题
+  // 长期由同一 worker 跟进, 后续同话题消息在通道层直通 worker, 不再花 Router LLM 的钱。
+  // 工具只做"控制面", 真正的直通/回投由 agent.threadDelegate + ThreadBridge 完成。
+  catalog.register({
+    name: "follow_thread",
+    capability: { riskLevel: "medium", readOnly: false, destructive: false, sideEffect: "system" },
+    category: "orchestration",
+    power: "agent",
+    description: "把当前会话驻派给长驻 worker: 后续同会话消息直通该 worker (不经主 LLM), 适合持续跟进的长任务。action=attach/detach/list。",
+    parameters: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["attach", "detach", "list"], description: "默认 attach" },
+        task: { type: "string", description: "驻派任务说明 (attach 必填)" },
+        session_key: { type: "string", description: "会话键, 默认当前会话" },
+        thread: { type: "string", description: "话题 id (可选, 按话题直通时用)" },
+      },
+      required: [],
+    },
+    execute: async (args, ctx) => {
+      const agent = agentOf(ctx);
+      if (!agent) return "[工具错误] follow_thread: 无 agent 上下文";
+      const action = String(args.action || "attach");
+      const sk = String(args.session_key || currentTrace()?.sessionKey || "default");
+      if (action === "list") {
+        const list = agent.threadWorkers?.() || [];
+        if (!list.length) return "当前没有驻派 worker (用 follow_thread action=attach task=... 驻派)。";
+        return `驻派 worker (${list.length}):\n` + list.map((w) =>
+          `- ${w.worker} → ${w.threadKey}${w.thread ? ` [话题 ${w.thread}]` : ""} · 转发 ${w.forwards || 0} 次`
+        ).join("\n");
+      }
+      if (action === "detach") {
+        const ok = await agent.threadDetach?.(sk);
+        return ok ? `已撤驻 ${sk} 的 worker (进程已回收)。` : `${sk} 没有驻派 worker。`;
+      }
+      if (action !== "attach") return `[工具错误] follow_thread: 未知 action ${action} (attach|detach|list)`;
+      const task = String(args.task || "").trim();
+      if (!task) return "[工具错误] follow_thread: attach 需要 task (说清 worker 持续跟进什么)";
+      if (typeof agent.threadDelegate !== "function") return "[工具错误] follow_thread: 当前 agent 未装配话题编排";
+      const r = await agent.threadDelegate(sk, task.slice(0, 2000), { thread: args.thread || null });
+      return `已驻派 ${sk} → 长驻 worker ${r.name}${r.reused ? " (复用已有驻派)" : ""}。后续同会话消息将直通 worker; 撤驻: follow_thread action=detach session_key=${sk}`;
     },
   });
 

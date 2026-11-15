@@ -11,12 +11,10 @@
 // 零依赖, 全离线可测。
 import { estimateTokens } from "../utils/text.js";
 import { EVENTS } from "../memory/session.js";
-import { transcriptToText, buildCompactionMessages } from "../memory/compaction.js";
+import { compactSession } from "../memory/compact-engine.js";
 import { currentTrace } from "../core/trace.js";
-import { debug, warn } from "../utils/logger.js";
 
 const EVIDENCE_MARK = "【工具证据】";
-const AUX_LLM_TIMEOUT_MS = 10000;
 
 // 单个工具结果落盘/展示时的折叠 (头 70% + 尾 30% + 可见占位), 与 memory-ticker 同形
 function foldText(s, budget) {
@@ -199,7 +197,6 @@ export const evidenceMethods = {
     }
     const out = [];
     let placeholderDone = false;
-    let cursor = 0;
     for (let i = 0; i < items.length; i++) {
       const it = items[i];
       if (it.kind !== "evidence") { out.push(it); continue; }
@@ -297,7 +294,7 @@ export const evidenceMethods = {
     // 过期水位线: 磁盘比内存新 (兄弟进程写过) -> 内存视图不可信, 拒绝压缩
     if (durableMax > memMax) return { ok: false, reason: "stale-replay", durableMax };
 
-    this.sessionStore.flush(k); // 压缩前先把 skipFlush 的待写记录落盘 (游标只引用磁盘真相)
+    this.sessionStore.flush(k, { sync: true }); // 压缩前先把 skipFlush 的待写记录落盘 (游标只引用磁盘真相)
     const evs = this.sessionStore.replay(k);
     let prevUpTo = 0, prevComp = null;
     for (const e of evs) if (e.type === EVENTS.COMPACTION) { prevUpTo = e.data?.upToSeq || 0; prevComp = e; }
@@ -328,7 +325,7 @@ export const evidenceMethods = {
 
     const summary = this._deterministicSummary(covered, prevComp, boundary);
     this.sessionStore.append(k, EVENTS.COMPACTION, { summary, upToSeq: boundary, method: mode, fidelity: true });
-    this.sessionStore.flush(k);
+    this.sessionStore.flush(k, { sync: true });
     return { ok: true, method: mode, upToSeq: boundary, summary };
   },
 
@@ -392,51 +389,21 @@ export const evidenceMethods = {
   },
 
   // ---- LLM 压缩 (覆盖 context 版): 加保真闸门 ----
+  // 会话压缩 (架构优化 ⑨): 与 context.js 同一引擎 —— 保真闸门/归档/事件/锁一处实现。
+  //   返回值保持旧契约: 压缩成功 {ok:true,method,upToSeq}; 被保真闸门拒绝 {ok:false,reason,violations}。
   async _maybeCompact(sessionKey) {
     const k = sessionKey || "default";
     if (!this.llm || typeof this.llm.chat !== "function") return;
-    const events = this.sessionStore.replay(k);
-    let upToSeq = 0;
-    for (const e of events) if (e.type === EVENTS.COMPACTION) upToSeq = e.data?.upToSeq || 0;
-    const tail = events.filter((e) => e.seq > upToSeq && (e.type === EVENTS.USER || e.type === EVENTS.ASSISTANT));
-    if (!tail.length) return;
-    const tokenBudget = Number(this.config.memory?.history_token_budget) || 4000;
-    const total = tail.reduce((a, e) => a + estimateTokens(e.data?.content), 0);
-    if (total <= tokenBudget * 1.5) return;
-    const split = Math.floor(tail.length / 2);
-    const old = tail.slice(0, split);
-    if (old.length < 2) return;
-    const lastSeq = old[old.length - 1].seq;
-    const transcript = transcriptToText(old.map((e) => ({ role: e.type === EVENTS.USER ? "user" : "assistant", content: e.data?.content })));
-    try { if (this.hooks) await this.hooks.emit("PreCompact", { sessionKey: k, upToSeq: lastSeq }); } catch { /* 指针失败不阻断 */ }
-    let summary;
-    try {
-      const r = await this.llm.chat(buildCompactionMessages(transcript), { timeoutMs: AUX_LLM_TIMEOUT_MS, retryMax: 0 });
-      summary = r?.content;
-    } catch (e) {
-      // 2026-10-24: 压缩失败显式化 —— 此前静默 return, 调用方无感知, 长会话退化为硬裁剪
-      //   时信息无声丢失。现在出声 (warn + 结构化事件), 供监控/看板暴露压缩健康度。
-      warn(`[compact] LLM 压缩失败 (会话 ${k}), 本轮退化为硬裁剪: ${String(e?.message || e).slice(0, 120)}`);
-      this.bus?.emit?.("agent/compact-failed", { sessionKey: k, reason: "llm-error", error: String(e?.message || e).slice(0, 200) }, { source: "evidence._maybeCompact" });
-      return;
-    }
-    if (!summary) {
-      warn(`[compact] LLM 压缩返回空 (会话 ${k}), 本轮退化为硬裁剪`);
-      this.bus?.emit?.("agent/compact-failed", { sessionKey: k, reason: "empty-summary" }, { source: "evidence._maybeCompact" });
-      return;
-    }
-    // 保真闸门: 摘要丢了字面标识符 -> 拒绝压缩 (退化为既有硬裁剪, 绝不静默丢证据)
-    const covered = events.filter((e) => e.seq <= lastSeq && e.type !== EVENTS.COMPACTION);
-    const pins = this._extractPins(covered);
-    const missing = pins.filter((p) => !String(summary).includes(p));
-    if (missing.length) {
-      debug(`[compact] 保真闸门拒绝压缩: ${missing.length}/${pins.length} 个字面标识符未保留`);
-      return { ok: false, reason: "fidelity-refused", violations: missing.map((p) => `pins-verbatim: ${p}`) };
-    }
-    this.sessionStore.append(k, EVENTS.COMPACTION, { summary, upToSeq: lastSeq, method: "llm", fidelity: true });
-    // 2026-10-24: PostCompact 钩子接线 —— 此前只发 PreCompact, 六事件钩子里的 PostCompact
-    //   全仓无 emit 点。压缩后钩子可做缓存失效/看板刷新等善后; 异常不阻断主链。
-    try { if (this.hooks) await this.hooks.emit("PostCompact", { sessionKey: k, upToSeq: lastSeq, method: "llm" }); } catch { /* 钩子失败不阻断 */ }
-    return { ok: true, method: "llm", upToSeq: lastSeq };
+    const rawBudget = Number(this.config.memory?.history_token_budget);
+    const r = await compactSession(this, {
+      sessionKey: k,
+      budget: rawBudget > 0 ? rawBudget : this._autoHistoryBudget(),
+      reason: "evidence",
+      fidelity: true,
+      archive: true,
+    });
+    if (r.status === "ok") return { ok: true, method: "llm", upToSeq: r.upToSeq };
+    if (r.status === "refused") return { ok: false, reason: "fidelity-refused", violations: r.missing };
+    return undefined;
   },
 };

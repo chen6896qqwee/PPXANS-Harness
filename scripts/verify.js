@@ -16,13 +16,18 @@ const NODE = process.execPath;
 const CHECKS = [
   { name: "依赖完整性 (depcheck)",          file: "scripts/depcheck.js",             args: ["."] },
   { name: "架构守卫 (arch-guard)",          file: "scripts/arch-guard.js",           args: ["--check"] },
-  { name: "README 数字同步",                file: "scripts/readme-sync-check.js",    args: [] },
-  { name: "功能宣称闸门 (claim-gate)",      file: "scripts/claim-gate.js",           args: [] },
+  // 自研溯源 (2026-11-02): 禁止上游 import/vendored 标记; 每个设计来源必须有原生模块与文档登记。
+  { name: "自研溯源 (native-guard)",        file: "scripts/native-guard.js",         args: [] },
+  // 版本收口 (2026-11-02): package / lock / CHANGELOG / README 版本必须一致。
+  { name: "版本号一致性",                   file: "scripts/version-sync.js",         args: [] },
   { name: "Web UI 静态检查",                file: "scripts/check-web.mjs",           args: [] },
   { name: "审计链校验",                     file: "scripts/audit-verify.js",         args: [] },
   { name: "自愈基准",                       file: "scripts/selfheal-bench.js",       args: [] },
   { name: "技能格式检查",                   file: "scripts/skill-lint.js",           args: [] },
   { name: "缓存前缀审计",                   file: "scripts/cache-audit.js",          args: ["--check"] },
+  // 价格覆盖 (2026-11-12): 云端预设模型必须有价; 价格表条目/阶梯必须合法。
+  //   拦的是"换了新模型名, 账本静默按 $0 记账, 预算闸门形同虚设"。
+  { name: "价格覆盖审计",                   file: "scripts/pricing-audit.js",        args: ["--check"] },
   { name: "上下文预算检查",                 file: "scripts/ctx-profile.js",          args: ["--check"] },
   { name: "本地能力评测",                   file: "scripts/eval.js",                 args: [] },
   // 痛觉闸门 (2026-10-30): 20 个确定性判分任务走真实工具循环, 离线零 LLM, 约 4s。
@@ -32,7 +37,12 @@ const CHECKS = [
   // 记忆召回闸门 (2026-10-30): holdout 集 recall@3 低于 90% 即失败。
   //   防的是"改检索/分词/RRF 权重把召回打回去" —— 这条以前完全没人看着。
   { name: "记忆召回质量",                   file: "scripts/memory-recall.js",        args: ["--check"] },
-  { name: "静默 catch 守卫",                file: "scripts/silent-catch-guard.mjs",  args: [] },
+  // 静默 catch 门禁 (2026-11-03): 必须 --strict —— 曾以 report 模式挂在这里, 永远 PASS,
+  //   等于检查项存在但不拦人。scope 无效同样失败 (手填 if/for 等于没留位置)。
+  { name: "静默 catch 守卫",                file: "scripts/silent-catch-guard.mjs",  args: ["--strict"] },
+  // 文案门禁 (2026-11-13): 内核叫法 (本体/空间/工单/身体/轨迹/姿态/生命周期) 不许漏进
+  //   用户可见文案 —— 词典 webapp/src/i18n/lexicon.js 是唯一出口, 这条闸门保证它真的生效。
+  { name: "界面文案一致性 (lexicon)",       file: "scripts/lexicon-check.js",        args: [] },
 ];
 
 const verbose = process.argv.includes("--verbose");

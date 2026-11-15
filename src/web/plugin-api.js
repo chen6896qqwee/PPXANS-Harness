@@ -11,6 +11,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
+import { PLUGIN_CAPABILITIES, parsePluginCapabilities } from "../protocol/index.js";
+import { noteCatch } from "../utils/catch-log.js";
+import { readJson } from "./read-json.js";
 
 const MANIFEST = "ppx.plugin.json";
 const VALID_ACCESS = new Set(["restricted", "full-access"]);
@@ -60,6 +63,13 @@ function safeEntry(raw) {
   return entry;
 }
 
+// 2026-11-02: capabilities 与管理页同规 —— 未知能力拒绝写入 (不静默丢弃)。
+// 校验实现与加载器同源 (protocol 契约), 避免"能保存但加载时被整插件跳过"。
+function safeCapabilities(raw) {
+  const r = parsePluginCapabilities(raw);
+  if (r.error) throw new Error(r.error);
+  return r.capabilities;
+}
 function readManifest(dir) {
   const mf = path.join(dir, MANIFEST);
   if (!fs.existsSync(mf)) return null;
@@ -83,11 +93,19 @@ function publicPlugin(id, dir, man, extra = {}) {
   const entry = String(man.entry || "index.cjs");
   const info = entryInfo(dir, entry);
   const access = VALID_ACCESS.has(String(man.access)) ? String(man.access) : "restricted";
+  const rawCaps = Array.isArray(man.capabilities) ? man.capabilities : [];
+  const capabilities = rawCaps.filter((c) => typeof c === "string" && PLUGIN_CAPABILITIES.includes(c));
+  const badCaps = rawCaps.filter((c) => !capabilities.includes(c));
+  let warning = "";
+  if (man.capabilities != null && !Array.isArray(man.capabilities)) warning = "capabilities 必须是数组，插件不会被装配";
+  else if (badCaps.length) warning = `未知能力 ${badCaps.map((c) => JSON.stringify(c)).join(", ")}，插件不会被装配`;
   return {
     id,
     name: String(man.name || id).slice(0, MAX_NAME),
     description: String(man.description || "").slice(0, MAX_DESC),
     access,
+    capabilities,
+    ...(warning ? { warning } : {}),
     entry,
     enabled: man.enabled !== false,
     size: info.size,
@@ -165,6 +183,7 @@ function createPlugin(channel, body) {
   const name = String(body.name || id).trim().slice(0, MAX_NAME) || id;
   const description = String(body.description || "").trim().slice(0, MAX_DESC);
   const access = VALID_ACCESS.has(String(body.access)) ? String(body.access) : "restricted";
+  const capabilities = safeCapabilities(body.capabilities);
   let code = String(body.code == null ? TEMPLATE(id, name) : body.code);
   if (!code.trim()) code = TEMPLATE(id, name);
   if (Buffer.byteLength(code, "utf8") > MAX_CODE) throw new Error("代码过长（上限 200KB）");
@@ -174,7 +193,7 @@ function createPlugin(channel, body) {
   try {
     writeAtomic(path.join(dir, entry), code);
     writeAtomic(path.join(dir, MANIFEST), JSON.stringify({
-      name, entry, access, description, enabled: true,
+      name, entry, access, capabilities, description, enabled: true,
       created_by: "web-ui", created_at: new Date().toISOString(),
     }, null, 2) + "\n");
   } catch (e) {
@@ -206,6 +225,7 @@ function updatePlugin(channel, idRaw, body) {
     if (!VALID_ACCESS.has(String(body.access))) throw new Error("access 只能是 restricted 或 full-access");
     man.access = String(body.access);
   }
+  if (body.capabilities != null) man.capabilities = safeCapabilities(body.capabilities);
   if (body.enabled != null) man.enabled = Boolean(body.enabled);
   man.entry = entry;
   man.updated_at = new Date().toISOString();
@@ -259,18 +279,9 @@ function detail(channel, idRaw) {
   const p = publicPlugin(id, dir, man);
   let code = "";
   if (p.entryInside) {
-    try { code = fs.readFileSync(path.join(dir, p.entry), "utf8"); } catch { /* 入口缺失时留空 */ }
+    try { code = fs.readFileSync(path.join(dir, p.entry), "utf8"); } catch (e) { noteCatch(e); /* 入口缺失时留空 */ }
   }
   return { ...p, code };
-}
-
-async function readJson(channel, req, res) {
-  const raw = await channel._readBody(req, res);
-  if (raw === null) return null;
-  try { return JSON.parse(raw || "{}"); } catch {
-    channel._json(res, 400, { ok: false, error: "非法 JSON" });
-    return null;
-  }
 }
 
 function fail(channel, res, e) {

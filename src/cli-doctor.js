@@ -10,6 +10,7 @@ import { configFilePath } from "./utils/config-file.js";
 import { readJsonGuarded } from "./utils/store.js";
 import { resolveDataDir } from "./utils/datadir.js";
 import { resolveApiKeyCmd } from "./llm/router.js";
+import { readNeedsAction } from "./llm/needs-action.js";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -32,7 +33,7 @@ export async function runDoctor({ net = false } = {}) {
   const cfgPath = configFilePath(ROOT);
   const probe = readJsonGuarded(cfgPath);
   if (!probe.existedBefore) {
-    check(results, "配置文件", false, `${cfgPath} 不存在 — 运行 ppx-setup (源码目录: npm run setup) 生成`);
+    check(results, "配置文件", false, `${cfgPath} 不存在 — 运行 ppx setup (或 npm run setup) 生成`);
   } else if (probe.parseFailed) {
     check(results, "配置文件", false, `${cfgPath} 不是合法 JSON — 修好或改名后重跑`);
     console.log("\n结论: 修复 config/ppx.json 后重跑 ppx doctor");
@@ -74,29 +75,48 @@ export async function runDoctor({ net = false } = {}) {
       && (keyInline || p.api_key_cmd || (envVal && !isPlaceholder(String(envVal))));
   });
 
-  // 4. 模型连通 (--net 才发请求: 一条最小对话, 8s 超时)
+  // 3.5 配置落盘权限 (2026-11-02): 配置可能含 api_key / auth_token 明文。
+  //   POSIX 上 0644 代表同机其他用户可读 —— 新写入已自动 0600, 这里兜底检查历史文件。
+  if (process.platform !== "win32" && probe.existedBefore && !probe.parseFailed) {
+    try {
+      const mode = fs.statSync(cfgPath).mode & 0o777;
+      const loose = (mode & 0o077) !== 0;
+      check(results, `配置权限 0${mode.toString(8)}`, !loose,
+        loose ? `其他用户可读, 执行 chmod 600 ${cfgPath}` : "");
+    } catch (e) {
+      check(results, "配置权限", false, String(e.message || e).slice(0, 80));
+    }
+  }
+
+  // 3.2 LLM 通道待处理项 (2026-11-14, BYO 体验轮): auth/balance/404 类失败落
+  //   data/llm/needs-action.json, HTTP 成功一次自愈清除。此前只有默认关闭的看门狗读它,
+  //   doctor 是 needs-action.js 注释承诺的巡检面 —— 本项兑现。
+  try {
+    const na = readNeedsAction();
+    if (na && na.entries.length) {
+      for (const x of na.entries.slice(0, 5)) {
+        check(results, `LLM 通道 ${x.provider}/${x.model} [${x.reason}]`, false,
+          `${x.userHint || "需要用户处理"} (自 ${x.firstAt}, 累计 ${x.count} 次; 修好后成功调用一次即自动清除)`);
+      }
+    } else {
+      check(results, "LLM 通道无待处理故障", true);
+    }
+  } catch (e) {
+    check(results, "LLM 通道待处理项", false, String(e.message || e).slice(0, 60));
+  }
+
+  // 4. 模型连通 (--net 才发请求: 协议适配器探活 /models, 8s 超时)
   if (net && llmReady) {
     for (const p of provs) {
       const keyInline = p.api_key && !isPlaceholder(String(p.api_key));
       const envVal = p.api_key_env ? process.env[p.api_key_env] : null;
       const key = keyInline ? p.api_key : (p.api_key_cmd ? resolveApiKeyCmd(p) : envVal);
       if (!key || isPlaceholder(String(key))) continue;
-      const t0 = Date.now();
-      try {
-        const res = await fetch(String(p.base_url).replace(/\/$/, "") + "/chat/completions", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-          body: JSON.stringify({ model: p.model, messages: [{ role: "user", content: "ping" }], max_tokens: 4 }),
-          signal: AbortSignal.timeout(8000),
-        });
-        const ok = res.ok;
-        check(results, `  连通 ${p.base_url}`, ok, ok ? `${Date.now() - t0}ms` : `HTTP ${res.status}: ${(await res.text()).slice(0, 80)}`);
-      } catch (e) {
-        check(results, `  连通 ${p.base_url}`, false, String(e.message || e).slice(0, 80));
-      }
+      const r = await probeProviderNet(p);
+      check(results, `  连通 ${p.base_url} (${p.protocol || "openai-completions"})`, r.ok, r.detail);
     }
   } else if (!net) {
-    console.log("  (模型连通性探测未执行 — 加 --net 发一条最小真实请求)");
+    console.log("  (模型连通性探测未执行 — 加 --net 做协议正确的 /models 探活)");
   }
 
   // 5. 数据目录可写 (与运行时同一解析规则: PPX_DATA_DIR > 默认目录)
@@ -108,7 +128,7 @@ export async function runDoctor({ net = false } = {}) {
     fs.unlinkSync(probeFile);
     check(results, `数据目录可写 ${dataDir}`, true);
   } catch (e) {
-    check(results, `数据目录可写 ${dataDir}`, false, e.message.slice(0, 80));
+    check(results, `数据目录可写 ${dataDir}`, false, e.message.slice(0, 80)); /* swallowed-ok(2026-11-03): 已写入体检结果 */
   }
 
   // 6. 技能数量 (递归数 SKILL.md, 与 skills-registry 口径一致)
@@ -133,7 +153,7 @@ export async function runDoctor({ net = false } = {}) {
   if (net && process.env.PPX_UPDATE_CHECK !== "0") {
     try {
       const cur = readJsonGuarded(path.join(ROOT, "package.json")).data?.version || "0.0.0";
-      const { checkWithConfig, updateNotice } = await import("./update/index.js");
+      const { checkWithConfig, updateNotice } = await import("./services/update.js");
       const u = await checkWithConfig({ config, currentVersion: cur, dataDir });
       if (u.ok) {
         check(results, "版本", true, u.updateAvailable ? updateNotice(u) : `已是最新 v${cur}`);
@@ -150,4 +170,25 @@ export async function runDoctor({ net = false } = {}) {
   console.log(`\n结论: ${bad.length === 0 ? "✅ 全部就绪, 可以 npm start" : `❌ ${bad.length} 项未过 — 按上面的 ✗ 修复后重跑`}`);
   if (bad.length === 0 && !llmReady) console.log("提示: 密钥未就绪时仍可进入本地工具模式 (记忆/文件/命令), 配好 key 后即有完整对话。");
   return bad.length === 0;
+}
+
+// 连通性探测 (2026-11-14, BYO 体验轮): 旧实现裸 POST {base}/chat/completions —— 对
+//   anthropic-messages / openai-responses 协议的 BYO 配置必然误报"不通" (运行时实际可用,
+//   三协议适配器在 src/llm/protocol.js)。改走 LLMClient.health(): 与 ppx setup 探活、
+//   POST /api/providers/test 同一函数 —— /models 路径与鉴权头由适配器按 protocol 生成。
+//   语义如实记录: 探测从"最小 chat 补全"变为"协议正确的 /models 探活"。
+export async function probeProviderNet(p, timeoutMs = 8000) {
+  const keyInline = p.api_key && !isPlaceholder(String(p.api_key));
+  const envVal = p.api_key_env ? process.env[p.api_key_env] : null;
+  const key = keyInline ? p.api_key : (p.api_key_cmd ? resolveApiKeyCmd(p) : envVal);
+  if (!key || isPlaceholder(String(key))) return { ok: false, detail: "无可用密钥" };
+  try {
+    const { LLMClient } = await import("./llm/client.js");
+    const c = new LLMClient({ ...p, api_key: key, timeout_ms: timeoutMs });
+    const t0 = Date.now();
+    const ok = await c.health();
+    return { ok, detail: ok ? `${Date.now() - t0}ms` : "探测未通过 (检查 key / base_url / 模型服务是否启动)" };
+  } catch (e) {
+    return { ok: false, detail: String(e.message || e).slice(0, 80) };
+  }
 }

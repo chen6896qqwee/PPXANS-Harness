@@ -1,108 +1,151 @@
-// scripts/check-web.mjs - Web 界面静态自检 (零依赖, 不需要浏览器)
-// 用途: 改完 public/ 下的界面后先跑一遍, 抓出"引用不存在的 DOM id / 图标 / 静态资源"
-//       这类必然导致运行时报错的问题; 用法: npm run web:check
+// scripts/check-web.mjs - Web 界面静态自检 v2 (v5.0 Vue3+Vite 前端, 零依赖, 不需要浏览器)
+// 用途: 改完 webapp/ 下的界面后先跑一遍, 抓出"引用不存在的图标/资源/锚点 id"
+//       这类必然导致运行时报错的问题; 用法: npm run web:check (CI web job 同款)
+//
+// v5.0 与旧版 (扫描 public/ 手写文件) 的差异:
+//   - 前端源码在 webapp/ (Vue SFC), 构建产物在 webapp/dist (入库, npm ci 后可直接跑);
+//   - JS 语法闸 = vite build 本身 (import/export 无法 new Function 解析), 所以本脚本
+//     要求 dist 存在 —— 没有就明确提示先跑 npm run web:build, 不静默放过;
+//   - CSP 契约在【构建产物】上断言: 无内联可执行脚本 (ppx-boot 由服务端运行时注入,
+//     是 type="application/json" 数据节点, 不受 script-src 约束);
+//   - 结构锚点 id 在 Vue 组件源码里找 (Electron 菜单/冒烟依赖这批 id, 见 electron/smoke.js)。
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const html = fs.readFileSync(path.join(root, "public", "index.html"), "utf8");
-const js = fs.readFileSync(path.join(root, "public", "app.js"), "utf8");
-// 2026-10-27: 前端拆成 app.js (对话/工作台) + bot.js (本体/设置/轨迹) 两个文件。
-// 自检必须都扫, 否则 bot.js 的 id 引用与图标调用全成盲区。
-const bot = fs.readFileSync(path.join(root, "public", "bot.js"), "utf8");
-// 2026-10-31: 「使用统计」页 (stats.js) 与它自带的样式表 (stats.css) 一并纳入自检 ——
-// 不进扫描清单就等于给新页面开了个盲区, 和当初 bot.js 漏检是同一类问题。
-const stats = fs.readFileSync(path.join(root, "public", "stats.js"), "utf8");
-const css = fs.readFileSync(path.join(root, "public", "app.css"), "utf8")
-  + fs.readFileSync(path.join(root, "public", "bot.css"), "utf8")
-  + fs.readFileSync(path.join(root, "public", "stats.css"), "utf8");
+const webapp = path.join(root, "webapp");
+const dist = path.join(webapp, "dist");
 
 let bad = 0;
 const fail = (m) => { console.log("  ✗ " + m); bad++; };
 const ok = (m) => console.log("  ✓ " + m);
 
-// 1) 图标: defs 里定义 vs 被引用
-const defined = new Set([...html.matchAll(/<g id="(i-[a-z-]+)"/g)].map((m) => m[1]));
-const used = new Set([...(html + js + bot).matchAll(/href="#(i-[a-z-]+)"/g)].map((m) => m[1]));
-// app.js 里大量图标是 ico("name") 运行时拼出来的, 扫不到 href → 单独识别调用名,
-// 否则这类图标会被误报成"未使用"(自检输出失去信噪比)
-for (const m of (js + bot + stats).matchAll(/\bico\(\s*["']([a-z-]+)["']/g)) used.add("i-" + m[1]);
+function walk(dir, exts, out = []) {
+  for (const name of fs.readdirSync(dir)) {
+    if (name === "node_modules" || name === "dist" || name.startsWith(".")) continue;
+    const p = path.join(dir, name);
+    const st = fs.statSync(p);
+    if (st.isDirectory()) walk(p, exts, out);
+    else if (exts.some((e) => name.endsWith(e))) out.push(p);
+  }
+  return out;
+}
+
+const srcFiles = walk(path.join(webapp, "src"), [".js", ".vue", ".css"]);
+const srcOf = (p) => fs.readFileSync(p, "utf8");
+const allSrc = srcFiles.map(srcOf).join("\n");
+const template = srcOf(path.join(webapp, "index.html"));
+
+// 0) 构建产物存在 (web:check 的前置)
+const distIndex = path.join(dist, "index.html");
+if (!fs.existsSync(distIndex)) {
+  fail("webapp/dist/index.html 不存在 —— 先跑 npm run web:build (产物已入库, 正常 clone 后应直接存在)");
+  console.log("\n结果: 1 个问题");
+  process.exit(1);
+}
+const distHtml = fs.readFileSync(distIndex, "utf8");
+
+// 1) 图标: 模板 sprite 定义 vs 全站引用 (含 ico("name") 运行时调用)
+const defined = new Set([...template.matchAll(/<g id="(i-[a-z-]+)"/g)].map((m) => m[1]));
+const used = new Set();
+for (const m of (template + allSrc).matchAll(/#(i-[a-z-]+)/g)) used.add(m[1]);
+for (const m of allSrc.matchAll(/\bico\(\s*["']([a-z-]+)["']/g)) used.add("i-" + m[1]);
 const missIcon = [...used].filter((u) => !defined.has(u));
 if (missIcon.length) fail("引用了未定义的图标: " + missIcon.join(", "));
 else ok(`图标定义 ${defined.size} 个, 引用 ${used.size} 个, 全部命中`);
 
-const unusedIcon = [...defined].filter((d) => !used.has(d));
-// 未被使用的图标是【备用的图标集】(stop/bot/sun/monitor/term 等通用 UI 元素), 留着供后续功能取用 ——
-//   不是遗留问题, 故用 · (提示) 而非 ✗ (失败)。真正的门禁在上面: "引用了未定义的图标" 才是错误。
-if (unusedIcon.length) console.log(`  · 备用图标 ${unusedIcon.length} 个 (已定义未引用, 供后续取用): ` + unusedIcon.join(", "));
-
-// 2) id: HTML 里声明的 + JS 模板里生成的
-const htmlIds = new Set([...html.matchAll(/\bid="([A-Za-z][\w-]*)"/g)].map((m) => m[1]));
-const jsIds = new Set([...(js + bot + stats).matchAll(/\bid="([A-Za-z][\w-]*)"/g)].map((m) => m[1]));
-const allIds = new Set([...htmlIds, ...jsIds]);
-const refs = [...(js + bot + stats).matchAll(/\$\("([\w-]+)"\)/g)].map((m) => m[1]);
-const missId = [...new Set(refs)].filter((r) => !allIds.has(r));
-if (missId.length) fail("$() 引用了不存在的 id: " + missId.join(", "));
-else ok(`$() 引用 ${new Set(refs).size} 个 id, 全部存在于 DOM 或 JS 模板`);
-
-// 2b) 重复 id: getElementById 只返回第一个命中。撞了就会出现
-//     「内容明明生成了、页面上却是加载中」这种最难查的 bug (2026-10-27 真踩过:
-//     抽屉里的 #settingsBody 与本体的设置容器同名, 结果设置页永远是初始空态)。
-{
-  const list = [...html.matchAll(/\bid="([A-Za-z][\w-]*)"/g)].map((m) => m[1]);
-  const seen = new Set();
-  const dup = new Set();
-  for (const x of list) { if (seen.has(x)) dup.add(x); seen.add(x); }
-  if (dup.size) fail("HTML 里存在重复 id (getElementById 只认第一个): " + [...dup].join(", "));
-  else ok(`HTML id 无重复 (${list.length} 个)`);
+// 2) dist 产物里的静态资源引用必须真实存在 (含哈希名的 js/css/字体)
+for (const m of distHtml.matchAll(/(?:href|src)="(\/[^"]+)"/g)) {
+  const u = m[1].replace(/\?.*$/, "");
+  if (!fs.existsSync(path.join(dist, u.replace(/^\//, "")))) fail("dist 静态资源不存在: " + u);
 }
+if (!bad) ok("dist 静态资源引用全部存在");
 
-// 3) 两个脚本都真解析一遍 (替代旧的括号计数粗检)
-for (const [name, src] of [["app.js", js], ["bot.js", bot], ["stats.js", stats]]) {
-  try {
-    new Function(src);
-    ok(`${name} 语法解析通过`);
-  } catch (e) {
-    fail(`${name} 语法错误: ` + e.message);
+// 2b) chunk 尺寸预算 (2026-11-14 优化循环): vite.config.mjs manualChunks 按库分块后,
+//    主包/渲染栈各设上限防回潮 —— 谁往主包塞大依赖, web:check 当场红,
+//    不再靠 chunkSizeWarningLimit 告警静音 (旧值 1500 曾把 817kB 主包捂住)。
+const KB = 1024;
+const jsChunks = fs.readdirSync(path.join(dist, "assets"))
+  .filter((f) => f.endsWith(".js"))
+  .map((f) => ({ f, kb: Math.round(fs.statSync(path.join(dist, "assets", f)).size / KB) }));
+const BUDGETS = [
+  { re: /^index-/, max: 250, name: "主包(业务代码)" },
+  { re: /^vendor-render-/, max: 650, name: "渲染栈(markdown-it/katex/highlight.js)" },
+  { re: /^vendor-vue-/, max: 120, name: "Vue运行时" },
+];
+const sizeOf = (re) => jsChunks.filter((c) => re.test(c.f)).reduce((s, c) => s + c.kb, 0);
+for (const { re, max, name } of BUDGETS) {
+  if (sizeOf(re) > max) {
+    fail(`chunk 预算超限: ${name} ${sizeOf(re)}kB > ${max}kB`);
   }
 }
+const unbudgeted = jsChunks.filter((c) => c.kb > 200 && !BUDGETS.some((b) => b.re.test(c.f)));
+if (unbudgeted.length) fail("未预算的大块: " + unbudgeted.map((c) => `${c.f} ${c.kb}kB`).join(", "));
+if (!bad) ok(`chunk 预算全在限: ${BUDGETS.map((b) => `${b.name} ${sizeOf(b.re)}kB≤${b.max}`).join(", ")}`);
 
-// 4) CSS 里被 JS/HTML 使用的关键类是否已定义 (v3.0 codex 风格结构)
-const cssClasses = new Set([...css.matchAll(/\.([a-z][\w-]*)/g)].map((m) => m[1]));
-const need = ["side", "brand", "newchat", "ghead", "topbar", "hero", "stream",
-  "ev", "toolcard", "approval", "plancard", "diffbox", "chip", "composer", "send",
-  "palette", "pitem", "drawer", "tab", "dpane", "tree", "goal", "issue", "badge",
-  "setrow", "toast", "btn",
-  // bot 形态 (2026-10-27)
-  "view", "botbar", "avavt", "bmeta", "bsub", "panes", "ptab", "bwrap", "bcard",
-  "brows", "swrap", "ssec", "srow", "titem",
-  // 使用统计页 (2026-10-31)
-  "st-wrap", "st-kpis", "st-card", "st-heat", "st-cell", "st-legend", "st-models"];
-const missCls = need.filter((c) => !cssClasses.has(c));
-if (missCls.length) fail("样式表缺少类: " + missCls.join(", "));
-else ok(`样式表覆盖全部关键类 (${need.length} 个)`);
+// 3) CSP 契约: 构建产物无内联可执行脚本 (type=application/json 数据节点除外, 且 dist 本不含它)
+const inlineExec = [...distHtml.matchAll(/<script\b([^>]*)>/g)]
+  .filter((m) => !/\bsrc=/.test(m[1]) && !/type="application\/json"/.test(m[1]));
+if (inlineExec.length) fail("dist/index.html 出现内联可执行脚本 (CSP script-src 'self' 会拦): " + inlineExec.length + " 处");
+else ok("dist 无内联可执行脚本 (CSP 兼容)");
+if (!/<script src="\/theme\.js"><\/script>/.test(distHtml)) fail("dist/index.html 缺少 head 内同步加载的 /theme.js (防 FOUC 契约)");
+else ok("theme.js 同步加载契约保持");
 
-// 5) 关键结构断言 (v3.0 时间线/命令面板/审批/抽屉四 Tab + 2026-10-27 的三层视图)
-[["侧栏", 'id="side"'], ["composer", 'id="composer"'], ["抽屉", 'id="drawer"'],
- ["命令面板", 'id="palette"'], ["对话流", 'id="stream"'], ["空状态", 'id="hero"'],
- ["输入框", 'id="inp"'], ["发送按钮", 'id="btnSend"'],
- ["文件树面板", 'id="pane-files"'], ["目标面板", 'id="pane-goal"'],
- ["审查面板", 'id="pane-review"'], ["设置面板", 'id="pane-settings"'],
- ["本体首页", 'id="view-home"'], ["对话视图", 'id="view-chat"'],
- ["本体设置", 'id="view-settings"'], ["本体设置容器", 'id="botSettings"'],
- ["轨迹页签", 'id="pane-trace"'], ["本体列表", 'id="botList"'],
- ["使用统计视图", 'id="view-stats"'], ["使用统计容器", 'id="statsWrap"']].forEach(([n, s]) => {
-  if (!html.includes(s)) fail(`缺少结构: ${n} (${s})`);
-});
-if (bad) console.log("  · 结构断言未全部通过"); else ok("关键结构齐全");
+// 4) 结构锚点 id (Electron 菜单/冒烟 + 面板定位依赖; 在 Vue 源码全文中找)
+//    2026-11-08: 侧栏的「本体列表」(id=botList) 随信息架构收拢并入一级导航, 锚点换成
+//    新增的三个一级视图 (项目 / 任务 / 能力) —— 检查的语义仍是"关键结构没被删掉"。
+const ANCHORS = [
+  ["侧栏", 'id="side"'], ["新会话按钮", 'id="btnNew"'],
+  ["对话视图", 'id="view-chat"'], ["空状态", 'id="hero"'], ["开工姿态卡", 'id="typeCards"'],
+  ["对话流", 'id="stream"'], ["composer", 'id="composer"'], ["输入框", 'id="inp"'],
+  ["发送按钮", 'id="btnSend"'],
+  ["项目视图", 'id="view-projects"'], ["任务视图", 'id="view-tasks"'], ["能力视图", 'id="view-caps"'],
+  ["文件树面板", 'id="pane-files"'], ["目标面板", 'id="pane-goal"'],
+  ["审查面板", 'id="pane-review"'], ["工单面板", 'id="pane-tickets"'], ["轨迹页签", 'id="pane-trace"'],
+  ["本体设置", 'id="view-settings"'], ["本体设置容器", 'id="botSettings"'],
+  ["使用统计视图", 'id="view-stats"'], ["使用统计容器", 'id="statsWrap"'],
+];
+for (const [name, s] of ANCHORS) {
+  if (!allSrc.includes(s)) fail(`缺少结构锚点: ${name} (${s})`);
+}
+if (!bad) ok("结构锚点齐全 (" + ANCHORS.length + " 个)");
 
-// 6) 静态资源引用是否都会被内核静态服务命中
-[...html.matchAll(/(?:href|src)="(\/[^"]+)"/g)].map((m) => m[1]).forEach((u) => {
-  const f = path.join(root, "public", u.replace(/^\//, ""));
-  if (!fs.existsSync(f)) fail("静态资源不存在: " + u);
-});
-ok("静态资源引用全部存在");
+// 5) 关键 CSS 类 (JS 模板 class= + 各 css 文件选择器的并集里找)
+const clsUsed = new Set();
+for (const m of allSrc.matchAll(/class="([^"]+)"/g)) {
+  for (const c of m[1].split(/\s+/)) if (/^[a-z][\w-]*$/i.test(c)) clsUsed.add(c);
+}
+for (const m of allSrc.matchAll(/\.([a-z][\w-]*)/gi)) clsUsed.add(m[1]);
+// 2026-11-08: 首屏重排后 chip(命令快捷条) 与 hero-types(姿态卡区) 两个类随结构移除,
+//   换成新的三块: 当前项目条 project / 起点卡容器 cards / 工作模式一行 modebar。
+const need = ["side", "brand", "newchat", "ghead", "hero", "stream", "ev", "toolcard",
+  "approval", "plancard", "diffbox", "cards", "composer", "send", "palette", "pitem",
+  "drawer", "tab", "dpane", "tree", "goal", "issue", "badge", "setrow", "toast", "btn",
+  "view", "botbar", "avavt", "bmeta", "bsub", "panes", "ptab", "project", "modebar", "bcard",
+  "shint", "swrap", "ssec", "srow", "titem",
+  "st-wrap", "st-kpis", "st-card", "st-heat", "st-cell", "st-legend", "st-models",
+  "onb", "onb-mask", "onb-point", "onb-starter", "guidebtn", "tree-filter",
+  "qcard", "verdict", "seatcard", "permcard", "codewrap", "codebar", "think"];
+const missCls = need.filter((c) => !clsUsed.has(c));
+if (missCls.length) fail("缺少关键类: " + missCls.join(", "));
+else ok(`样式覆盖全部关键类 (${need.length} 个)`);
+
+// 6) 公开契约: ppx-boot 数据节点消费 + PPXMarkdown 冒烟面 + 渲染库全局
+const bootJs = srcOf(path.join(webapp, "src", "boot.js"));
+if (!bootJs.includes('"ppx-boot"') && !bootJs.includes("'ppx-boot'")) fail("boot.js 不再解析 ppx-boot 节点 (服务端注入契约断裂)");
+else ok("ppx-boot 注入契约已对接");
+const mdJs = srcOf(path.join(webapp, "src", "markdown", "index.js"));
+for (const [name, needle] of [
+  ["window.PPXMarkdown", "window.PPXMarkdown"],
+  ["window.markdownit", "window.markdownit"],
+  ["window.DOMPurify", "window.DOMPurify"],
+  ["window.katex", "window.katex"],
+  ["window.hljs", "window.hljs"],
+]) {
+  if (!mdJs.includes(needle)) fail("markdown/index.js 缺少冒烟契约: " + name);
+}
+if (!bad) ok("PPXMarkdown + 渲染库全局契约齐全");
 
 console.log(bad ? `\n结果: ${bad} 个问题` : "\n结果: 全部通过");
 process.exit(bad ? 1 : 0);

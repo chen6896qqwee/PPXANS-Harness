@@ -10,6 +10,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { logicalDay } from "../utils/store.js";
+import { PRICING_META, estimateCost, isPriced } from "../llm/pricing.js";
 
 const MAX_SESSION_FILES = 300;
 const MAX_SESSION_BYTES = 16 * 1024 * 1024; // 超过这个体积的会话只读头尾取首末时间戳
@@ -17,6 +18,39 @@ const SESSION_EDGE_BYTES = 1 * 1024 * 1024;
 const IDLE_GAP_MS = 30 * 60 * 1000; // 超过 30 分钟的空档算「人走了」, 不计入聊天时长
 
 const num = (v) => (Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : 0);
+
+// ---- 延迟账本摘要 (评测-II P2-2) ----
+// p50/p95 由分桶累积**近似**导出 (桶代表值 = 区间中点; ge120s 开口段给 null —— 不编造尾部)。
+// avgMs 是精确值 (sumMs/count)。趋势监控够用; SLA 级判定请以原始日志为准。
+const LATENCY_ORDER = ["lt1s", "lt3s", "lt10s", "lt30s", "lt60s", "lt120s", "ge120s"];
+const LATENCY_BOUNDS = [1000, 3000, 10000, 30000, 60000, 120000];
+
+export function latencySummary(latency) {
+  const b = (latency && typeof latency === "object") ? latency : {};
+  const count = num(b.count);
+  const maxMs = num(b.maxMs) || null;
+  if (!count) return { count: 0, avgMs: null, p50Ms: null, p95Ms: null, maxMs, approx: false };
+  const rep = (i) => (i === 0
+    ? Math.round(LATENCY_BOUNDS[0] / 2)
+    : (i < LATENCY_BOUNDS.length ? Math.round((LATENCY_BOUNDS[i - 1] + LATENCY_BOUNDS[i]) / 2) : null));
+  const quantile = (q) => {
+    const target = Math.ceil(q * count);
+    let acc = 0;
+    for (let i = 0; i < LATENCY_ORDER.length; i++) {
+      acc += num(b.buckets?.[LATENCY_ORDER[i]]);
+      if (acc >= target) return rep(i);
+    }
+    return null;
+  };
+  return {
+    count,
+    avgMs: Math.round(num(b.sumMs) / count),
+    p50Ms: quantile(0.5),
+    p95Ms: quantile(0.95),
+    maxMs,
+    approx: true,
+  };
+}
 
 function sessionsDir(agent) {
   return path.join(agent.dataDir || path.join(agent.root, "data"), "sessions");
@@ -143,10 +177,15 @@ export function buildUsageStats(agent) {
   const daily = Object.keys(days).sort().map((day) => {
     const b = days[day] || {};
     const byModel = {};
+    const cachedByModel = {};
+    let cachedTokens = 0;
     for (const [m, v] of Object.entries((b.byModel && typeof b.byModel === "object") ? b.byModel : {})) {
       byModel[m] = num(v && v.tokens);
+      const cached = num(v && v.cachedTokens);
+      if (cached) cachedByModel[m] = cached;
+      cachedTokens += cached;
     }
-    return { day, tokens: num(b.tokens), calls: num(b.calls), byModel };
+    return { day, tokens: num(b.tokens), calls: num(b.calls), byModel, cachedTokens, cachedByModel };
   }).filter((d) => d.calls > 0);
 
   // --- 峰值日 ---
@@ -155,18 +194,39 @@ export function buildUsageStats(agent) {
     : null;
 
   // --- 模型占比 (累计, 与按天账本无关, 升级前就有数) ---
+  // 2026-11-13 (评测 P1-2): 历史 deepseek-flash 曾因价格表缺条目记成 $0。
+  //   不改写原始账本 (那不是账单), 而是在只读聚合里补一列 estimatedCost:
+  //   仅对「有 token、记录成本为 0、当前价格表能定价」的模型，用 total_tokens
+  //   按 completion 价保守估算 (无 prompt/completion 拆分时 pricing.js 的既有口径)。
+  //   UI 显示「记录成本 / 估算成本」，两者不再混为一谈。
   const byModelRaw = (u.byModel && typeof u.byModel === "object") ? u.byModel : {};
   const totalTokens = num(u.tokens);
+  const overrides = agent?.config?.budget?.model_prices;
   const models = Object.entries(byModelRaw)
-    .map(([model, v]) => ({
-      model,
-      tokens: num(v && v.tokens),
-      calls: num(v && v.calls),
-      cost: num(v && v.cost),
-      share: totalTokens > 0 ? num(v && v.tokens) / totalTokens : 0,
-    }))
+    .map(([model, v]) => {
+      const tokens = num(v && v.tokens);
+      const recorded = num(v && v.cost);
+      const priced = isPriced(model, overrides);
+      const estimated = recorded === 0 && tokens > 0 && priced
+        ? estimateCost(model, { total_tokens: tokens }, overrides)
+        : 0;
+      return {
+        model,
+        tokens,
+        calls: num(v && v.calls),
+        cachedTokens: num(v && v.cachedTokens),
+        cost: recorded,
+        estimatedCost: Math.round(estimated * 1e9) / 1e9,
+        costBasis: recorded > 0 ? "recorded" : (estimated > 0 ? "estimated" : (priced ? "zero" : "unpriced")),
+        share: totalTokens > 0 ? tokens / totalTokens : 0,
+      };
+    })
     .filter((m) => m.tokens > 0 || m.calls > 0)
     .sort((a, b) => b.tokens - a.tokens);
+
+  const recordedCost = models.reduce((n, m) => n + m.cost, 0);
+  const estimatedCost = models.reduce((n, m) => n + (m.cost === 0 ? m.estimatedCost : 0), 0);
+  const dayCalls = daily.reduce((n, d) => n + d.calls, 0);
 
   // --- 会话 ---
   const chat = scanSessions(agent);
@@ -179,6 +239,15 @@ export function buildUsageStats(agent) {
   for (const d of daily) if (d.calls > 0) activeDays.add(d.day);
   const st = streaks(activeDays, today);
 
+  // --- 未定价模型 (2026-11-12) ---
+  //   无内置价的云端模型按 $0 记账: 页面上"金额很低"会被误读成"用得省"。
+  //   这里把它们单独列出来, 让"账不准"与"真省钱"在 UI 上无法混淆。
+  const unpricedRaw = (u.unpriced && typeof u.unpriced === "object") ? u.unpriced : {};
+  const unpriced = Object.entries(unpricedRaw)
+    .map(([model, v]) => ({ model, calls: num(v && v.calls), tokens: num(v && v.tokens) }))
+    .filter((m) => m.calls > 0)
+    .sort((a, b) => b.tokens - a.tokens);
+
   const pt = num(u.promptTokens);
   const ch = num(u.cacheHitTokens);
 
@@ -186,14 +255,35 @@ export function buildUsageStats(agent) {
     ok: true,
     generatedAt: new Date().toISOString(),
     today,
+    pricing: PRICING_META,
     totals: {
       tokens: totalTokens,
       calls: num(u.calls),
       cost: num(u.cost),
+      // 记录成本与估算成本分开呈现; effectiveCost 只用于"粗略看量级", 不是账单
+      recordedCost,
+      estimatedCost: Math.round(estimatedCost * 1e9) / 1e9,
+      effectiveCost: Math.round((recordedCost + estimatedCost) * 1e9) / 1e9,
+      costIsEstimated: recordedCost === 0 && estimatedCost > 0,
       promptTokens: pt,
       cacheHitTokens: ch,
       cacheHitPct: pt > 0 ? ch / pt : null,
+      unpriced,
+      unpricedCalls: unpriced.reduce((n, m) => n + m.calls, 0),
+      unpricedTokens: unpriced.reduce((n, m) => n + m.tokens, 0),
       models,
+    },
+    // 账本对账: 累计 calls 与按天 calls 的差值是"分桶功能上线前的历史", 显式暴露,
+    //   不再让读者把 240 vs 250 当成丢账。
+    // 评测-II P2-2: LLM 调用延迟摘要 (分桶近似, 见 latencySummary)
+    latency: latencySummary(u.latency),
+    reconciliation: {
+      totalCalls: num(u.calls),
+      dayCalls,
+      unbucketedCalls: Math.max(0, num(u.calls) - dayCalls),
+      lastCallAt: u.lastCallAt || null,
+      lastCostAt: u.lastCostAt || null,
+      note: "dayCalls 只统计按天分桶上线后的调用; unbucketedCalls 是历史累计差额, 不是丢失数据",
     },
     peak: peak ? { day: peak.day, tokens: peak.tokens, calls: peak.calls } : null,
     streak: {

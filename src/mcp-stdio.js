@@ -2,7 +2,7 @@
 // 位置: src 根层组合入口 (与 server.js 同级) —— 它 import agent (组合根职责);
 //   放进 src/mcp/ 会造成 agent → mcp (既有) + mcp → agent 依赖环, 已被 arch-guard 拦下。
 // 让 Claude Code / ZCode / Cursor / MCP Inspector 等任何 MCP 客户端把皮皮虾作为 **stdio 型
-// MCP 服务器**直接接入: `ppx mcp serve` (或 node bin/ppx-mcp.js)。
+// MCP 服务器**直接接入: `ppx mcp serve` (或 ppx mcp serve)。
 //   Claude Code:   claude mcp add ppx -- ppx mcp serve
 //   通用 .mcp.json: { "mcpServers": { "ppx": { "command": "ppx", "args": ["mcp", "serve"] } } }
 //
@@ -15,6 +15,7 @@
 import readline from "node:readline";
 import { PPXAgent } from "./agent/index.js";
 import { McpServer, MCP_ERROR } from "./mcp/server.js";
+import { noteCatch } from "./utils/catch-log.js";
 
 // 单行 JSON-RPC 分发: 返回要写回 stdout 的响应对象 (通知返回 null)
 async function dispatchLine(server, line, write) {
@@ -92,7 +93,7 @@ export async function runStdioHost({
   const server = new McpServer(agent, { name: agent.config?.agent?.name || "ppxans-harness" });
 
   const write = (obj) => {
-    try { output.write(JSON.stringify(obj) + "\n"); } catch { /* 流已关闭: 静默 */ }
+    try { output.write(JSON.stringify(obj) + "\n"); } catch (e) { noteCatch(e); /* 流已关闭: 静默 */ }
   };
   console.error(`[ppx-mcp] stdio 宿主就绪: ${server.serverInfo.name} v${server.serverInfo.version} · ${agent.tools?.list?.().length ?? "?"} 工具 (JSON-RPC over stdio, 逐行分帧)`);
 
@@ -100,7 +101,7 @@ export async function runStdioHost({
   const shutdown = async () => {
     if (closed) return;
     closed = true;
-    try { await agent.shutdown(); } catch { /* 关闭失败不强退 */ }
+    try { await agent.shutdown(); } catch (e) { noteCatch(e); /* 关闭失败不强退 */ }
   };
 
   const rl = readline.createInterface({ input, terminal: false });

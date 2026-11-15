@@ -17,6 +17,7 @@
 // expert-pack 的 KNOWN_DOMAINS = DOMAIN_IDS ∪ HIGH_RISK_DOMAINS, 故此处须登记使用方用到的域。
 import path from "node:path";
 import { ensureDir, readJson, writeJson } from "../utils/store.js";
+import { noteCatch } from "../utils/catch-log.js";
 
 export const HIGH_RISK_DOMAINS = ["compliance", "medical", "legal", "finance"];
 
@@ -307,7 +308,7 @@ export function saveUserExperts(dir) {
     ensureDir(path.dirname(file));
     writeJson(file, { version: 1, experts: [...USER_EXPERTS.values()] });
     return true;
-  } catch { return false; }
+  } catch (e) { noteCatch(e); return false; }
 }
 
 /** 载入用户专家库, 返回载入条数 (文件缺失/损坏返回 0, 不抛) */
@@ -321,5 +322,5 @@ export function loadUserExperts(dir) {
       if (n.id) USER_EXPERTS.set(n.id, n);
     }
     return list.length;
-  } catch { return 0; }
+  } catch (e) { noteCatch(e); return 0; }
 }

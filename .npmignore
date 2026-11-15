@@ -6,9 +6,7 @@ config/ppx.yml
 data/
 *.log
 logs/
-test/
 bench/
-fixtures/
 references/
 docs/
 node_modules/

@@ -6,16 +6,16 @@
 import { parseSections } from "./loader.js";
 
 // 技能正文必须包含的章节 (与 learning-service 的 "## Process + ## Verify" 语义一致)
-export const requiredSections = ["流程", "验证"];
+const requiredSections = ["流程", "验证"];
 
 // 正文长度下限 (低于视为"只写了标题没写实质")
-export const MIN_CONTENT_LEN = 20;
+const MIN_CONTENT_LEN = 20;
 
 // 升级版相对旧版的最小长度比 (低于即判"缩水退步")
-export const MIN_UPGRADE_RATIO = 0.8;
+const MIN_UPGRADE_RATIO = 0.8;
 
 // 正文是否真实引用了高频工具 (按整词匹配, 避免子串误判)。命中返回工具名, 否则 null。
-export function groundedInTools(content, hotTools = []) {
+function groundedInTools(content, hotTools = []) {
   const text = String(content || "");
   for (const t of hotTools) {
     const name = String(t || "").trim();
@@ -27,7 +27,7 @@ export function groundedInTools(content, hotTools = []) {
 }
 
 // 章节齐全性检查 → 缺失章节数组
-export function missingSections(content) {
+function missingSections(content) {
   const secs = parseSections(String(content || ""));
   return requiredSections.filter((s) => !secs[s] || !String(secs[s]).trim());
 }

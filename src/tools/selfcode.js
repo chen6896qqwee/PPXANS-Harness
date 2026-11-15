@@ -3,7 +3,8 @@
 // 这是"皮皮虾能自己改自己的代码"的工具面。引擎在 src/selfcode/, 这里只做三件事:
 // 参数收敛、权限分级、把引擎结论翻译成模型能直接照着做下一步的回执。
 //
-// 只有三个工具 (schema 每个都要按 token 付钱, 常驻上下文的东西必须逐个算账):
+// 只有四个工具 (schema 每个都要按 token 付钱, 常驻上下文的东西必须逐个算账):
+//   self_audit   只看不改: 结构健康度 (死代码/依赖环/巨石/静默 catch) + 评分 + 建议
 //   self_edit    补丁式自改: 解析 → 边界 → 落盘 → 三关验证 → 绿留红滚 → 记账
 //   self_verify  只验证不改: 语法 + 指定测试, 事后复核
 //   self_rewind  按账本回滚某次自改
@@ -16,78 +17,27 @@
 //   · self_edit 想真正落盘要过**双门**: 调用参数 mode="apply" + config agent.self_code.mode="apply"。
 //     单点误用不会把代码改坏, 这是从 self_improve 沿用下来的同一条纪律。
 import path from "node:path";
-import fs from "node:fs";
 import { SelfCodeEngine } from "../selfcode/engine.js";
 import { verifyChange, guardPath } from "../selfcode/verify.js";
-import { parseEditBlocks, parseCodexPatch, resolvePatchTargets, looksLikePath } from "../edit/editblock.js";
+import { impactOf } from "../selfcode/graph.js";
+import { runAudit, formatAudit } from "../selfcode/audit.js";
+import { patchTargetFiles } from "../edit/editblock.js";
 
 const ERR = (name, msg) => `[工具错误] ${name}: ${msg}`;
 
-// ---- 自动测试发现 (2026-10-30 强化) ----
+// ---- 自动测试发现 (2026-10-30 强化, 2026-11-02 改走依赖图) ----
 // 此前 self_edit 的 tests 参数"不给则只验语法" —— 模型忘传时 apply 就裸落盘。
-// 现在按补丁目标文件三级映射相关测试, 让"改完即验证"不依赖模型自觉:
-//   ① 同名/同前缀: src/llm/fence.js → test/fence*.test.js
-//   ② 引用: 测试文件的 import 路径含该模块 (../src/llm/fence)
-//   ③ 兜底: config agent.self_iteration.target_files 前 3 个 (全局适应度)
-function extractPatchFiles(raw) {
-  const files = new Set();
-  for (const m of String(raw || "").matchAll(/\*\*\* (?:Update|Add|Move) File: ([^\s*]+)/g)) {
-    files.add(m[1].replace(/\\/g, "/"));
-  }
+// 现在按补丁目标文件映射相关测试, 让"改完即验证"不依赖模型自觉:
+//   impactOf 内部: ① import 反向引用 ② 同名/同前缀约定 ③ 传递依赖上的测试。
+//   一个都找不到时兜底 config agent.self_iteration.target_files 前 3 个 (全局适应度)。
+function relatedTests(agent, srcFiles, cap = 6) {
+  let picked = [];
   try {
-    let blocks = parseEditBlocks(raw);
-    if (!blocks.length) {
-      const cx = parseCodexPatch(raw);
-      if (cx.detected) blocks = cx.blocks || [];
-    }
-    const targets = resolvePatchTargets(raw, blocks);
-    blocks.forEach((b, i) => {
-      const p = looksLikePath(b.path) ? b.path : (targets[i] || "");
-      if (p) files.add(String(p).replace(/\\/g, "/"));
-    });
-  } catch { /* 粗解析失败不影响主流程 (引擎稍后还会完整解析) */ }
-  return [...files].filter((f) => /\.(js|mjs|cjs|json|md)$/i.test(f));
-}
-
-function discoverRelatedTests(agent, srcFiles, cap = 6) {
-  const root = agent?.root || process.cwd();
-  let testFiles = [];
-  try {
-    testFiles = fs.readdirSync(path.join(root, "test")).filter((f) => f.endsWith(".test.js"));
-  } catch { return []; }
-  const bases = srcFiles.map((f) => String(f).replace(/\\/g, "/"));
-  const picked = new Set();
-  const push = (name) => { if (testFiles.includes(name) && !picked.has(name) && picked.size < cap) picked.add(name); };
-  // ① 同名/同前缀
-  for (const f of bases) {
-    const base = path.basename(f).replace(/\.[^.]+$/, "");
-    for (const t of testFiles) {
-      const tn = t.replace(/\.test\.js$/, "");
-      if (tn === base || tn.startsWith(base + ".") || tn.startsWith(base + "-")) push(t);
-    }
-  }
-  // ② import 引用
-  if (picked.size < cap) {
-    const need = bases.map((f) => f.replace(/\.[^.]+$/, ""));
-    for (const t of testFiles) {
-      if (picked.has(t)) continue;
-      let txt = "";
-      try { txt = fs.readFileSync(path.join(root, "test", t), "utf8"); } catch { continue; }
-      for (const f of need) {
-        if (txt.includes(f)) { push(t); break; }
-      }
-      if (picked.size >= cap) break;
-    }
-  }
-  // ③ 兜底: 一个都没找到时跑全局适应度前 3 个, 保证 apply 至少有一道回归网
-  if (!picked.size) {
-    const fit = (agent?.config?.agent?.self_iteration?.target_files) || [];
-    for (const t of fit) {
-      if (picked.size >= Math.min(cap, 3)) break;
-      push(String(t).split("/").pop());
-    }
-  }
-  return [...picked];
+    picked = impactOf(agent?.root || process.cwd(), srcFiles, { maxTests: cap }).relatedTests;
+  } catch { /* 图构建失败时退回兜底 */ }
+  if (picked.length) return picked.slice(0, cap);
+  const fit = (agent?.config?.agent?.self_iteration?.target_files) || [];
+  return fit.map(String).slice(0, Math.min(cap, 3));
 }
 
 function engineFor(agent, { allowTestEdit = false } = {}) {
@@ -107,6 +57,36 @@ function engineFor(agent, { allowTestEdit = false } = {}) {
 export function registerSelfCodeTools(catalog, { agent, getAgent } = {}) {
   // 装配顺序不确定: 优先用惰性 getter, 工具真正被调用时才取 agent (与 team-room 等模块同一写法)
   const A = () => (typeof getAgent === "function" ? getAgent() : agent);
+
+  // ---- 0. self_audit: 只看不改的结构体检 ----
+  // 为什么值得占一份常驻 schema: 自优化闭环此前只有"测试红→修"的被动入口,
+  // 没人报错时模型不知道自己该优化什么。本工具把 graph/audit 的确定性结论
+  // (死代码、依赖环、巨石、静默 catch + 评分趋势) 直接变成下一步行动建议。
+  catalog.register({
+    name: "self_audit",
+    capability: { readOnly: true, riskLevel: "low", sideEffect: "none" },
+    description: "自审代码结构 (只读): 死代码候选/依赖环/断链 import/巨石文件/静默 catch 热点 + 0-100 评分与优先建议。改前找目标、改后看趋势。",
+    parameters: {
+      type: "object",
+      properties: {
+        json: { type: "boolean", description: "true=返回完整 JSON (默认返回紧凑文本)" },
+        max_findings: { type: "number", description: "最多返回多少条 findings, 默认 40" },
+      },
+      required: [],
+    },
+    category: "selfmod",
+    power: "agent",
+    idempotent: true,
+    execute: async (args) => {
+      const ag = A();
+      if (!ag) return ERR("self_audit", "无 agent 上下文");
+      const r = runAudit({
+        root: ag.root || process.cwd(),
+        thresholds: { maxFindings: Number(args.max_findings) || 40 },
+      });
+      return args.json ? JSON.stringify(r, null, 2) : formatAudit(r);
+    },
+  });
 
   // ---- 1. self_edit: 补丁式自改 ----
   catalog.register({
@@ -142,14 +122,28 @@ export function registerSelfCodeTools(catalog, { agent, getAgent } = {}) {
       const t = Array.isArray(args.tests) ? args.tests.map(String).slice(0, 12) : [];
       // apply 且未显式给 tests → 自动映射相关测试 (改完即验证, 不裸落盘)
       let autoTests = [];
+      let impact = null;
       if (mode === "apply" && !t.length) {
-        const targets = extractPatchFiles(patch);
-        if (targets.length) autoTests = discoverRelatedTests(ag, targets, 6);
+        const targets = patchTargetFiles(patch).filter((f) => /\.(js|mjs|cjs|json|md)$/i.test(f));
+        if (targets.length) {
+          try {
+            impact = impactOf(ag.root || process.cwd(), targets, { maxTests: 6 });
+            autoTests = impact.relatedTests || [];
+          } catch { /* 图失败则走兜底 */ }
+          if (!autoTests.length) autoTests = relatedTests(ag, targets, 6);
+        }
         if (autoTests.length) t.push(...autoTests);
       }
       const r = await eng.run({ patch, tests: t, mode, reason: String(args.reason || "") });
       if (autoTests.length) {
         r.autoTests = { files: autoTests, note: "apply 未显式传 tests, 已按补丁目标自动映射相关测试参与验证" };
+      }
+      if (impact && (impact.directDependents.length || impact.relatedTests.length)) {
+        r.impact = {
+          directDependents: impact.directDependents.slice(0, 10),
+          totalDependents: impact.totalDependents,
+          relatedTests: impact.relatedTests,
+        };
       }
       try { ag._eqPush?.("selfcode", { stage: r.stage, ok: !!r.ok, ledgerId: r.ledgerId || null, files: (r.files || []).map((f) => f.path) }); } catch {}
       return JSON.stringify(r, null, 2);

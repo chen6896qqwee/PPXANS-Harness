@@ -3,395 +3,36 @@
 //   - 主 agent 分析任务 → 认为需要专门角色/并行/隔离 → 调 spawn_agent
 //   - 子 agent: 独立会话目录 (隔离) + 共享全局经验库 (ANS 全局记忆)
 //   - 子 agent 复用懒建军团 (agent._legion), 不重复 spawn 进程
-// v2 (2026-08-17): 吸收 Anthropic 多智能体研究洞察
+// v2 (2026-08-17): 多智能体研究洞察落地 (设计对照, 自研实现)
 //   - 并行任务: tasks 数组并行派发多个子 agent (专才 + 并行化)
 //   - 差异化上下文: perspectives 注入每个子 agent 专属视角, 对抗同质失败
 //   - 仲裁聚合: arbitrate 时主 agent LLM 综合各子结果做最终裁决
-// v3 (2026-08-17): 吸收 Superpowers SDD 子代理驱动开发
+// v3 (2026-08-17): SDD 子代理驱动开发 (设计溯源 docs/PROVENANCE.md#superpowers)
 //   - review 循环: 实施者 -> 只读审查者 -> (发现问题 -> 修复 -> 复审) * fixRounds -> 熔断停放
 //   - 审查者只读 (PPX_AGENT_READONLY), 实施者修复复用原进程 (上下文完整)
 //   - 账本 ledger: 全程记录审查/修复轮次, 熔断时未决发现交主 agent 裁定
+// 2026-11-03 巨石拆分: 宿主保留「工具注册面 (spawn_agent 的 schema + execute 编排) +
+//   autoCreateExpert (可生长专家建档)」; SDD review 纯函数拆进 delegate-review.js,
+//   编排流 (专家解析/仲裁/runTeam/监督者循环/review 循环/记忆板) 拆进 delegate-team.js。
+//   全部公开导出经下方重导出保持原 import 路径不变; 拆出模块不 import 本文件 (无环)。
 import path from "node:path";
+import { noteCatch } from "../utils/catch-log.js";
 import { Legion } from "../orchestrator/legion.js";
-import { resolveExpert, normalizePersona, registerUserExpert, resolveExpertWithUser, saveUserExperts } from "../orchestrator/experts.js";
+import { registerUserExpert, normalizePersona, resolveExpertWithUser, saveUserExperts } from "../orchestrator/experts.js";
 import { resolveTeam, teamExperts, teamRiskProfile } from "../orchestrator/teams.js";
 import { withTimeout } from "../utils/async.js";
 import { profileFromEngine, childSpawnEnv } from "../permissions/intersection.js";
 import { currentTrace } from "../core/trace.js";
+import { createTrigger } from "../flow/trigger.js";
+import {
+  ROUTE_KIND, ROUTER_EVENT, buildDelegationBrief, emitRouterEvent, normalizeWorkerReport,
+} from "../flow/router.js";
+import {
+  DELEGATE_TIMEOUT_MS, resolveExpertFor, runTeam, runSupervisorLoop, runReviewLoop,
+  arbitrateWithBoard, publishToBoard,
+} from "./delegate-team.js";
 
-const DELEGATE_TIMEOUT_MS = 120000; // 子任务最长等待 (防卡死主 agent 工具循环)
-
-// ---- 专家解析 (2026-10-10 接线) ----
-// 专家包 (磁盘上可增长) 优先, 再落内置 EXPERTS 名册 + 用户档。
-//   此前只认内置名册, 于是专家包 id ("ai-coding-coach" / "ops-engineer" 等) 恒解析失败,
-//   静默降级成"无专家", 人格视角根本没进子 agent。此处补上包目录这条通路。
-export function resolveExpertFor(agent, key) {
-  const k = String(key || "").trim();
-  if (!k) return null;
-  const packs = agent?.expertPacks;
-  if (packs && typeof packs.resolve === "function") {
-    const pack = packs.resolve(k);
-    if (pack) {
-      let persona = null;
-      try {
-        persona = typeof packs.personaOf === "function"
-          ? packs.personaOf(pack.id, {
-            agentName: agent?.config?.agent?.name || "皮皮虾",
-            userDisplay: agent?.userName || "兄弟",
-            withAgents: true,
-          })
-          : null;
-      } catch { /* persona 渲染失败 → 回落包自带 perspective */ }
-      return {
-        name: pack.label || pack.id,
-        perspective: persona || pack.perspective || null,
-        readonly: !!pack.readonly,
-        requiresHuman: !!pack.requiresHuman,
-        domain: pack.domain,
-        source: "pack",
-      };
-    }
-  }
-  return resolveExpert(k) || resolveExpertWithUser(k) || null;
-}
-
-// ---- SDD review 循环: 纯函数 (可测) ----
-
-// 严重级标签映射 (v1.0.8): 内部表示 Critical/Important/Minor, 展示用中文, 解析兼容中英
-export function severityLabel(s) {
-  if (s === "Critical" || s === "严重" || s === "P0") return "严重";
-  if (s === "Important" || s === "重要" || s === "P1") return "重要";
-  return "次要";
-}
-function severityOf(token) {
-  if (token === "严重" || token === "P0") return "Critical";
-  if (token === "重要" || token === "P1") return "Important";
-  if (token === "Critical" || token === "Important") return token; // 英文 token 原样映射
-  return "Minor";
-}
-
-// 解析审查者输出 -> 发现列表 [{ severity, finding }]
-// 期望格式: 每行 "[严重|重要|次要] 描述" (兼容英文 Critical/Important/Minor), 无发现为 "(无发现)"
-export function parseReviewFindings(text) {
-  if (!text) return [];
-  const out = [];
-  const re = /\[(严重|重要|次要|Critical|Important|Minor)\]\s*([^\n]+)/g;
-  let m;
-  while ((m = re.exec(String(text)))) {
-    const finding = m[2].trim();
-    if (finding) out.push({ severity: severityOf(m[1]), finding });
-  }
-  return out;
-}
-
-// 是否需要触发修复: 有 Critical/Important
-export function needsFix(findings) {
-  return findings.some((f) => f.severity === "Critical" || f.severity === "Important");
-}
-
-// 组装审查者提示词 (只读审查契约)
-export function buildReviewPrompt(workDesc, judge, perspective) {
-  const p = perspective ? `\n【审查视角】${perspective}` : "";
-  return `你是只读审查者。审查下面"产出"中实施者的结果, 找出问题。严格遵守: 只读审查, 禁止修改/写入任何文件, 禁止执行命令。
-
-【任务要求】${workDesc}
-【审查准则】${judge || "对照任务要求检查: 功能正确性 / 需求满足度 / 边界情况 / 明显风险"}${p}
-
-【产出】
-${"<产出内容>"}
-
-输出发现清单, 每行一条, 格式 "[严重级] 描述", 严重级用:
-- [严重] 功能错误 / 需求未满足 / 会导致失败
-- [重要] 质量缺陷 / 边界情况 / 明显风险
-- [次要] 小改进 / 风格
-没有任何问题时只输出一行 "(无发现)"。不要输出其他内容。`;
-}
-
-// 修复提示词: 把未决发现交给实施者修复
-export function buildFixPrompt(task, findings) {
-  const open = findings.filter((f) => f.severity === "Critical" || f.severity === "Important");
-  const lines = open.map((f) => `[${severityLabel(f.severity)}] ${f.finding}`).join("\n");
-  return `上一轮产出存在以下 ${open.length} 项问题, 请逐一修复 (只解决这些问题, 不要引入新问题):\n${lines}\n\n原始任务: ${task}`;
-}
-
-// ---- 纯函数: 组装多子结果 + 视角 (仲裁输入) ----
-export function buildArbitrationInput(tasks, results, perspectives) {
-  return tasks.map((t, i) => {
-    const p = perspectives?.[i] ? ` (视角: ${perspectives[i]})` : "";
-    return `【子任务${i + 1}${p}】${t}\n【结果${i + 1}】${String(results[i] || "").slice(0, 2000)}`;
-  }).join("\n\n");
-}
-
-// 主 agent 聚合评审 (仲裁者模式): 综合各子结果, 输出最终裁决
-// 无 LLM 或评审失败时退化为简单拼接 (不阻塞)
-export async function arbitrate(agent, tasks, results, perspectives, judge) {
-  const input = buildArbitrationInput(tasks, results, perspectives);
-  const system = "你是多 agent 结果的仲裁者。综合各方结果, 识别分歧与共识, 给出一个整合后的最终答案。直接输出最终答案, 不要复述过程。";
-  const user = input + (judge ? `\n\n【评审要求】${judge}` : "");
-  try {
-    const r = await agent.llm.chat([
-      { role: "system", content: system },
-      { role: "user", content: user.slice(0, 6000) },
-    ]);
-    const text = String(r?.content || "").trim();
-    return text || `(仲裁无输出)\n\n${input}`;
-  } catch (e) {
-    return `(仲裁失败, 直出各方结果)\n\n${input}`;
-  }
-}
-
-// (withTimeout 收敛到 utils/async.js: 原先本文件与 orchestrator/supervisor.js 各写一份)
-
-// 仲裁 + 记忆板上下文 (2026-10-02): share_board 时先读板 (本角色最近发布), 让仲裁者看到军团累积知识。
-// 板为空/异常时静默退化为纯仲裁, 不阻塞。
-export async function arbitrateWithBoard(agent, tasks, results, perspectives, judge, { board, shareBoard, boardTopic } = {}) {
-  let boardContext = "";
-  if (shareBoard && board) {
-    try {
-      const entries = board.query({ topic: boardTopic, limit: 20 });
-      if (entries.length) {
-        boardContext = "\n\n【军团记忆板 (本角色近期发布)】\n" + entries.map((e) => `- ${e.from}: ${e.content}`).join("\n");
-      }
-    } catch { /* 读板失败不阻塞仲裁 */ }
-  }
-  return arbitrate(agent, tasks, results, perspectives, judge + boardContext);
-}
-
-/* ======================= 班组编排 (runTeam) ======================= */
-
-/**
- * 按拓扑把一个任务分派给班组并整合产出。
- * 五种拓扑: pipeline (前环产出成为后环输入) / parallel (各自产出 + 仲裁整合) /
- *          debate (正反两方 + 仲裁) / review (实施 + 只读审查) / supervisor (兜底走仲裁整合)。
- * 安全侧: 只读成员一律挂 PPX_AGENT_READONLY; 全部 spawn 走治理入口 (spawnAgents 优先);
- *        数据目录在 <agent.dataDir>/legion/<成员名> 下隔离。
- * @param {object} o
- * @param {object} o.agent  主 agent
- * @param {object} o.L      军团 (测试可注入桩)
- * @param {{id:string,name:string,topology:string}} o.team
- * @param {Array<{name:string,perspective?:string,readonly?:boolean}>} o.members
- * @param {string} o.task
- * @param {string} [o.judge]     仲裁/审查准则
- * @param {Function} [o.onSpawn] 每 spawn 一个成员回调一次 (供调用方 finally 回收)
- * @returns {Promise<{text:string, spawnNames:string[], replies:string[]}>}
- */
-export async function runTeam({ agent, L, team, members = [], task, judge = null, onSpawn = null } = {}) {
-  const teamId = String(team?.id || "team").replace(/[^\w-]/g, "") || "team";
-  const topology = String(team?.topology || "parallel");
-  const list = (members || []).filter(Boolean);
-  if (!task) return { text: "(班组任务为空)", spawnNames: [], replies: [] };
-  if (!list.length) return { text: "(班组无成员)", spawnNames: [], replies: [] };
-
-  const ts = Date.now().toString(36);
-  // 名字带班组标识 → 与其他委派/其他班组的子 agent 不冲突
-  const spawnNames = list.map((m, i) => {
-    const slug = String(m.name || m.id || `m${i}`).replace(/[^\w\u4e00-\u9fff-]/g, "").slice(0, 12);
-    return `${teamId}_${i}_${slug}_${ts}`;
-  });
-  const specs = list.map((m, i) => ({
-    name: spawnNames[i],
-    opts: {
-      dataDir: path.join(agent.dataDir, "legion", spawnNames[i]),
-      globalDataDir: agent.globalDataDir,
-      // 只读成员挂只读杠杆 (子进程侧禁修改类工具)
-      env: m.readonly ? { PPX_AGENT_READONLY: "1" } : {},
-    },
-  }));
-
-  // 治理入口: 整批走 spawnAgents (可被配额/并发治理拦下), 缺该口才退回逐个 spawn
-  if (typeof L?.spawnAgents === "function") await L.spawnAgents(specs);
-  else for (const s of specs) L?.spawnAgent?.(s.name, s.opts);
-  for (const s of specs) { try { onSpawn?.(s.name); } catch { /* 回调异常不影响编排 */ } }
-  if (agent.lifecycle) agent.lifecycle.reproduce(specs.length);
-
-  const send = async (i, message) => {
-    const who = list[i].name || spawnNames[i];
-    try {
-      const r = await withTimeout(
-        L.send(spawnNames[i], { type: "chat", message, perspective: list[i].perspective || null }, { timeout: DELEGATE_TIMEOUT_MS + 5000 }),
-        DELEGATE_TIMEOUT_MS,
-        who,
-      );
-      return String(r?.reply || "(无回复)");
-    } catch (e) {
-      return `[${who} 失败] ${e.message}`;
-    }
-  };
-  const nameOf = list.map((m) => m.name || m.id);
-  const persps = list.map((m) => m.perspective || null);
-
-  // ---- pipeline: 前环产出成为后环输入 ----
-  if (topology === "pipeline") {
-    const replies = [];
-    for (let i = 0; i < list.length; i++) {
-      const parts = [`【任务】${task}`];
-      if (i > 0) {
-        parts.push(`【上一环产出】\n${replies[i - 1]}\n\n请在此基础上继续推进, 不要重复上一环已完成的工作。`);
-      }
-      if (persps[i]) parts.push(`【你的视角】${persps[i]}`);
-      replies.push(await send(i, parts.join("\n\n")));
-    }
-    return { text: replies.map((r, i) => `【${nameOf[i]}】\n${r}`).join("\n\n"), spawnNames, replies };
-  }
-
-  // ---- debate: 正反两方 + 仲裁 ----
-  if (topology === "debate") {
-    const replies = [];
-    for (let i = 0; i < list.length; i++) {
-      const side = i === 0 ? "正方" : "反方";
-      const msg = `【议题】${task}\n\n你是**${side}**。请坚决站在${side}立场论证, 并主动预见并回应对方可能提出的反驳。`
-        + (persps[i] ? `\n【你的视角】${persps[i]}` : "");
-      replies.push(await send(i, msg));
-    }
-    const verdict = await arbitrate(
-      agent,
-      list.map(() => task), replies, persps,
-      judge || "权衡正反两方论据, 给出经得起反驳的结论, 并说明结论成立的前提条件",
-    );
-    const text = [`【仲裁结论】\n${verdict}`]
-      .concat(replies.map((r, i) => `【${i === 0 ? "正方" : "反方"}·${nameOf[i]}】\n${r}`))
-      .join("\n\n");
-    return { text, spawnNames, replies };
-  }
-
-  // ---- review: 实施者 (可写) + 只读审查者 ----
-  if (topology === "review") {
-    const impl = await send(0, `【任务】${task}`);
-    const revTexts = [];
-    const findings = [];
-    for (let i = 1; i < list.length; i++) {
-      const r = await send(i, `${buildReviewPrompt(task, judge, persps[i])}\n\n【产出】\n${impl}`);
-      revTexts.push(r);
-      findings.push(...parseReviewFindings(r));
-    }
-    const open = findings.filter((f) => f.severity === "Critical" || f.severity === "Important");
-    const head = `【实施·${nameOf[0]}】\n${impl}`;
-    const text = open.length
-      ? `${head}\n\n⚠️ 审查发现问题 (${open.length} 项, 未修复 —— 交主 agent 裁定)\n${open.map((f) => `[${severityLabel(f.severity)}] ${f.finding}`).join("\n")}`
-      : (revTexts.length ? `${head}\n\n✅ 审查通过\n${revTexts.join("\n")}` : head);
-    return { text, spawnNames, replies: [impl, ...revTexts] };
-  }
-
-  // ---- parallel / supervisor: 各自独立产出 → 仲裁整合 ----
-  // (supervisor 的进程级调度在 orchestrator/supervisor.js, 这里保持"各自产出 + 仲裁"的协作形状)
-  const replies = await Promise.all(list.map((_, i) => send(i, [
-    `【任务】${task}`,
-    persps[i] ? `【你的视角】${persps[i]}` : "",
-    "请独立给出你的结论与依据, 不必迁就他人观点。",
-  ].filter(Boolean).join("\n\n"))));
-  const verdict = await arbitrate(agent, list.map(() => task), replies, persps, judge);
-  const text = [`【仲裁结论】\n${verdict}`, "## 各方原始产出"]
-    .concat(replies.map((r, i) => `【${nameOf[i]}】\n${r}`))
-    .join("\n\n");
-  return { text, spawnNames, replies };
-}
-
-/* ======================= 监督者编排循环 ======================= */
-// supervisor 模式: 编排 N 个专家子 agent 并行产出 → 监督者 LLM 评审 (评估各专家子 agent)
-// → 打回则带反馈再派发一轮 → 接受则产出定稿。返回带 "✅ 监督者编排" 头的完整报告。
-export async function runSupervisorLoop({ agent, L, task, judge = null, expertKeys = [], role = "专家", maxRounds = 3 } = {}) {
-  // 专家名册解析: 有 expertKeys 用名册, 否则用 2 个默认差异化专家
-  const experts = (expertKeys && expertKeys.length)
-    ? expertKeys.map((k) => resolveExpertFor(agent, k) || { name: String(k), perspective: null })
-    : [
-        { name: "分析专家", perspective: "从收益与可行性两个维度独立论证" },
-        { name: "风险专家", perspective: "从风险与反例角度独立论证, 主动挑出漏洞" },
-      ];
-  const ts = Date.now().toString(36);
-  const spawnNames = experts.map((m, i) => `${role}_${i}_${ts}`);
-  const spawned = [];
-  for (let i = 0; i < experts.length; i++) {
-    L.spawnAgent(spawnNames[i], {
-      dataDir: path.join(agent.dataDir, "legion", spawnNames[i]),
-      globalDataDir: agent.globalDataDir,
-      // 非只读专家不设 readonly
-      env: experts[i].readonly ? { PPX_AGENT_READONLY: "1" } : {},
-    });
-    spawned.push(spawnNames[i]);
-  }
-  if (agent.lifecycle) agent.lifecycle.reproduce(experts.length);
-
-  const send = async (i, message) => {
-    try {
-      const r = await withTimeout(
-        L.send(spawnNames[i], { type: "chat", message, perspective: experts[i].perspective || null }, { timeout: DELEGATE_TIMEOUT_MS + 5000 }),
-        DELEGATE_TIMEOUT_MS,
-        experts[i].name,
-      );
-      return String(r?.reply || "(无回复)");
-    } catch (e) {
-      return `[${experts[i].name} 失败] ${e.message}`;
-    }
-  };
-
-  let feedback = null;
-  let final = "";
-  let lastReplies = [];
-  for (let round = 1; round <= maxRounds; round++) {
-    const parts = [`【任务】${task}`];
-    if (feedback) parts.push(`【上一轮监督者反馈】\n${feedback}\n\n请据此修正你的结论。`);
-    if (experts) parts.push("请独立给出你的结论与依据。");
-    const replies = await Promise.all(experts.map((_, i) => send(i, parts.join("\n\n"))));
-    lastReplies = replies;
-
-    // 监督者评审 (LLM): 返回 {accept, feedback[]}
-    const verdict = await supervise(agent, task, experts.map((e) => e.name), replies, judge);
-    if (verdict.accept) {
-      final = await finalize(agent, task, replies, judge);
-      break;
-    }
-    feedback = (verdict.feedback && verdict.feedback.length)
-      ? verdict.feedback.join("\n")
-      : "结论不够具体, 请补充可执行的依据";
-  }
-
-  const head = ["✅ 监督者编排", `专家: ${experts.map((e) => e.name).join(" · ")}`];
-  // 2026-10-25 修复 (评估报告 P2): 超轮时原实现只回一句占位语 —— 各专家的原始结论
-  //   被整轮丢弃 (line 旧 `body` 变量算了不用), 与返回文案"输出各方原始结论"的承诺相悖。
-  //   现在超轮时把最后一轮各方结论如实带回 (各截 2000 字), 交主 agent/用户裁定。
-  if (final) return [head.join("\n"), "", final].join("\n");
-  const body = experts
-    .map((e, i) => `【${e.name}】\n${String(lastReplies[i] ?? "(无回复)").slice(0, 2000)}`)
-    .join("\n\n");
-  return [head.join("\n"), "", `⚠️ 监督者未在 ${maxRounds} 轮内接受, 各方最后一轮原始结论如下 (供裁定):`, "", body].join("\n");
-}
-
-// 监督者评审: 用主 agent LLM 评估各专家产出, 返回 {accept, feedback[]}
-async function supervise(agent, task, names, replies, judge) {
-  const input = names.map((n, i) => `【${n}】\n${String(replies[i]).slice(0, 2000)}`).join("\n\n");
-  const system = "你是监督者, 评估各专家子 agent 的结论。若结论充分可直接采用, 否则给出打回反馈。只输出 JSON: {\"accept\": true/false, \"feedback\": [\"...\"]}";
-  const user = `【任务】${task}\n\n${input}\n\n【评审准则】${judge || "结论必须具体可执行"}`;
-  try {
-    const r = await agent.llm.chat([
-      { role: "system", content: system },
-      { role: "user", content: user.slice(0, 8000) },
-    ]);
-    const text = String(r?.content || "").trim();
-    const m = text.match(/\{[\s\S]*\}/);
-    if (m) {
-      const obj = JSON.parse(m[0]);
-      return { accept: !!obj.accept, feedback: Array.isArray(obj.feedback) ? obj.feedback : [] };
-    }
-    return { accept: true, feedback: [] };
-  } catch {
-    return { accept: true, feedback: [] };
-  }
-}
-
-// 定稿: 监督者接受后, 用主 agent LLM 综合产出最终结论
-async function finalize(agent, task, replies, judge) {
-  try {
-    const r = await agent.llm.chat([
-      { role: "system", content: "你是最终定稿者。综合各专家结论, 给出定稿。" },
-      { role: "user", content: `【任务】${task}\n\n${replies.map((x) => String(x).slice(0, 2000)).join("\n\n")}` },
-    ]);
-    return String(r?.content || "").trim() || "定稿结论: " + replies.join(" / ");
-  } catch {
-    return "定稿结论: " + replies.join(" / ");
-  }
-}
-
-/* ======================= 可生长专家: 自动建档 ======================= */
+// ---- 可生长专家: 自动建档 ----
 
 /**
  * 用主 agent 的 LLM 为一个未知领域自动建档专家 (opt-in: config.agent.auto_create_experts)。
@@ -422,92 +63,10 @@ export async function autoCreateExpert(agent, query) {
     }));
     saveUserExperts(agent.dataDir);
     return resolveExpertWithUser(expert.id) || expert;
-  } catch {
+  } catch (e) {
+    noteCatch(e); // 坏 JSON 是预期分支, 但写盘失败也必须能复盘
     return null;
   }
-}
-
-// ---- SDD review 循环: 实施 -> 只读审查 -> (修复 -> 复审) * N -> 熔断 ----
-// 返回: 通过时 "✅ 审查通过..." + 产出; 熔断时 "⚠️ 未决发现停放..." + 产出
-// namePrefix: 多任务 review 时传入 `${role}_${ts}_${i}`, 保证每对 agent 名唯一
-async function runReviewLoop({ agent, L, task, perspective, role, judge, fixRounds, namePrefix = null }) {
-  const ts = Date.now().toString(36);
-  const implName = namePrefix ? `${namePrefix}_impl` : `${role}_impl_${ts}`;
-  const revName = namePrefix ? `${namePrefix}_rev` : `${role}_rev_${ts}`;
-  const mkOpts = (n) => ({ dataDir: path.join(agent.dataDir, "legion", n), globalDataDir: agent.globalDataDir });
-  L.spawnAgent(implName, mkOpts(implName));
-  // 审查者只读: PPX_AGENT_READONLY=1 时 worker 禁用全部修改/执行工具
-  L.spawnAgent(revName, { ...mkOpts(revName), env: { PPX_AGENT_READONLY: "1" } });
-  if (agent.lifecycle) agent.lifecycle.reproduce(2);
-
-  const max = (() => { // v1.0.8: fix_rounds=0 应能设 0 (原 `|| 3` 把 0 变 3)
-    const parsed = Number(fixRounds);
-    return Number.isFinite(parsed) ? Math.min(Math.max(parsed, 0), 5) : 3;
-  })(); // 熔断上限 (Superpowers 5 轮, 默认 3 控成本; 0 = 不修复直接停放)
-  const ledger = [];
-  let findings = [];
-  let result = "";
-
-  // 1. 实施
-  try {
-    const r = await withTimeout(L.send(implName, { type: "chat", message: task, perspective }, { timeout: DELEGATE_TIMEOUT_MS + 5000 }), DELEGATE_TIMEOUT_MS, "实施");
-    result = String(r?.reply || "").trim() || "(实施者无回复)";
-  } catch (e) {
-    return `[工具错误] spawn_agent(review): 实施失败: ${e.message}`;
-  }
-  ledger.push({ round: 0, step: "implement" });
-
-  // 2. 审查 + 修复循环
-  let round = 0;
-  while (true) {
-    const reviewText = await (async () => {
-      try {
-        const r = await withTimeout(L.send(revName, { type: "chat", message: buildReviewPrompt(task, judge, perspective) + `\n\n【产出】\n${result.slice(0, 6000)}`, perspective }, { timeout: DELEGATE_TIMEOUT_MS + 5000 }), DELEGATE_TIMEOUT_MS, "审查");
-        return String(r?.reply || "");
-      } catch (e) {
-        return `[Critical] 审查者不可用: ${e.message}`;
-      }
-    })();
-    findings = parseReviewFindings(reviewText);
-    ledger.push({ round, step: "review", findings });
-    if (!needsFix(findings)) break;   // 通过
-    if (round >= max) break;          // 熔断
-    round++;
-    try {
-      const r = await withTimeout(L.send(implName, { type: "chat", message: buildFixPrompt(task, findings), perspective }, { timeout: DELEGATE_TIMEOUT_MS + 5000 }), DELEGATE_TIMEOUT_MS, `修复第${round}轮`);
-      result = String(r?.reply || "").trim() || "(实施者无回复)";
-    } catch (e) {
-      ledger.push({ round, step: "fix", error: e.message });
-      break;
-    }
-    ledger.push({ round, step: "fix" });
-  }
-
-  // 3. 汇总: 通过 or 熔断停放 (账本交主 agent 裁定)
-  const open = findings.filter((f) => f.severity === "Critical" || f.severity === "Important");
-  if (open.length) {
-    return `⚠️ 审查未通过: 达到修复上限 (${max} 轮), 以下 ${open.length} 项未决发现已停放, 请主 agent 裁定是否接受当前产出:\n`
-      + open.map((f) => `- [${severityLabel(f.severity)}] ${f.finding}`).join("\n")
-      + `\n\n当前产出:\n${result}`;
-  }
-  const summary = findings.length
-    ? findings.map((f) => `[${severityLabel(f.severity)}]`).join(" ")
-    : "无";
-  return `✅ 审查通过 (审查发现: ${summary})\n\n${result}`;
-}
-
-// ---- 军团共享记忆板接入 (2026-10-02) ----
-// 子任务结论自动发布到记忆板 (topic=角色), 仲裁前自动读板注入。
-// 发布永不阻塞委派: 任何异常吞掉 (记忆板是增强, 不是依赖)。
-export function publishToBoard(board, { from, topic, task, reply, status = "完成" }) {
-  if (!board) return;
-  try {
-    board.publish({
-      from,
-      topic,
-      content: `[${status}] 任务: ${String(task).slice(0, 120)} → 结论: ${String(reply).slice(0, 400)}`,
-    });
-  } catch { /* 记忆板满/IO 异常均不阻塞委派 */ }
 }
 
 export function registerDelegateTools(catalog, opts = {}) {
@@ -515,6 +74,10 @@ export function registerDelegateTools(catalog, opts = {}) {
   catalog.register({
     name: "spawn_agent",
     capability: { readOnly: false, riskLevel: "medium", sideEffect: "system" },
+    // 委派是长任务: 不声明时吃全局 tool_timeout_ms (默认 30s), 子 agent 正常跑一轮就会被掐断
+    //   (2026-11-04 实测: 只读任务 worker 30.5s 完成, 主侧在 30s 已返回"超时")。
+    //   内部单任务上限是 DELEGATE_TIMEOUT_MS (120s), 外层给到 180s 覆盖单任务/并行 + 一次修正。
+    timeoutMs: DELEGATE_TIMEOUT_MS + 60000,
     description: "派生子 agent 处理子任务并等待结果; 适合需要专门角色、并行或隔离执行的任务。子 agent 共享全局经验库。各参数之间怎么搭配, 见参数说明 (task/tasks 二选一; perspectives 配 tasks; arbitrate 聚合; review 走 SDD 审查; supervisor 走监督者编排)。",
     parameters: {
       type: "object",
@@ -570,6 +133,27 @@ export function registerDelegateTools(catalog, opts = {}) {
       const effPersps = tasks.map((_, i) => perspectives[i] || expertList[i]?.perspective || null);
 
       const boardTopic = role;
+
+      // 高级编排 (团队/临时专家组/审查/监督) 走各自循环, 不经过下方直派路径 ——
+      //   这里先记一条决策事件, 让"Router 为什么开这批 worker"在审计链上可见;
+      //   逐 Worker 的 dispatch/report 仍由各编排流的 step 事件与工具调用证据覆盖。
+      const advanced = args.team ? "team" : args.topology ? "topology"
+        : args.review ? "review" : args.supervisor ? "supervisor" : null;
+      if (advanced) {
+        const advSk = currentTrace()?.sessionKey || "default";
+        agent._markTurnRoute?.(advSk, "worker");
+        emitRouterEvent(agent, ROUTER_EVENT.DECISION, {
+          kind: "spawn_agent",
+          route: ROUTE_KIND.WORKER,
+          tasks: tasks.length,
+          workers: tasks.length,
+          sessionKey: advSk,
+          origin: "delegate",
+          reason: advanced,
+          memoryInjected: false,
+          routerRole: agent?.role === "router",
+        });
+      }
 
       // 班组模式 (2026-10-07): team 命中名册 → 整体接管分工 (成员/拓扑/只读杠杆全由名册给出)
       if (args.team) {
@@ -673,31 +257,186 @@ export function registerDelegateTools(catalog, opts = {}) {
           planEnabled: (typeof agent.isPlanMode === "function" ? agent.isPlanMode(sessionKey) : false)
             || agent.permissions?.planEnabled === true,
         });
+        // 委派建单 (2026-11-05 调度闭环收口 ②): Router 的每次委派落一张工单 —— 分派/收口
+        //   与入站同源可查 (/work 面板 / watchdog / 审计链)。source=spawn_agent, messageId
+        //   留空 (每任务独立建单不误去重); 账本未装配/失败降级 ticket=null, 不阻断委派。
+        const work = agent?.work || null;
+        agent._markTurnRoute?.(sessionKey, "worker");
+        const memoryInject = agent?.config?.agent?.delegate_memory_inject === true && !!agent?.facts;
+        emitRouterEvent(agent, ROUTER_EVENT.DECISION, {
+          kind: "spawn_agent",
+          route: ROUTE_KIND.WORKER,
+          tasks: tasks.length,
+          workers: names.length,
+          sessionKey,
+          origin: "delegate",
+          reason: args.team ? "team" : args.supervisor ? "supervisor" : args.review ? "review"
+            : tasks.length > 1 ? "parallel" : "single",
+          memoryInjected: memoryInject,
+          routerRole: agent?.role === "router",
+        });
+        const tickets = tasks.map((task) => {
+          try {
+            return work ? work.submit(createTrigger({
+              source: "spawn_agent", from: sessionKey, text: String(task),
+            }), { sessionKey, cause: "delegate" }) : null;
+          } catch { return null; }
+        });
         try {
-          for (let i = 0; i < names.length; i++) {
-            L.spawnAgent(names[i], {
-              dataDir: path.join(agent.dataDir, "legion", names[i]),
+          // 配额治理 (2026-11-05 收口): 此前逐个 L.spawnAgent() 绕过 ConcurrencyGovernor
+          //   (README 声称 spawn 已纳治理, 但普通并行路径漏网)。整批走 spawnAgents
+          //   (acquire(1)/进程退出归还, legion.js 一期已铺), 缺该口才退回逐个 spawn
+          //   (与 delegate-team.runTeam 同款回退, 兼容测试桩)。
+          const specs = names.map((name, i) => ({
+            name,
+            opts: {
+              dataDir: path.join(agent.dataDir, "legion", name),
               globalDataDir: agent.globalDataDir,
               env: childSpawnEnv(parentProfile, !!expertList[i]?.readonly),
+            },
+          }));
+          let spawned = [];
+          if (typeof L?.spawnAgents === "function") {
+            spawned = (await L.spawnAgents(specs)) || [];
+          } else {
+            for (const s of specs) {
+              try { L?.spawnAgent?.(s.name, s.opts); spawned.push({ ok: true, name: s.name }); }
+              catch (e) { spawned.push({ ok: false, name: s.name, error: e.message }); }
+            }
+          }
+          const spawnFailed = new Map(); // name -> 原因 (配额拒绝/spawn 异常)
+          for (const r of (Array.isArray(spawned) ? spawned : [])) {
+            if (r && r.ok === false) spawnFailed.set(String(r.name), r.error || "spawn_failed");
+          }
+          // 生命周期: 繁衍计数 (ANS: reproducing) —— 只数真正 spawn 成功的
+          const liveCount = names.filter((n) => !spawnFailed.has(n)).length;
+          if (agent.lifecycle && liveCount > 0) agent.lifecycle.reproduce(liveCount);
+
+          // 委派工单 begin/fail: spawn 失败的子任务当场收口, 成功的开指派 (worker=worker 名)
+          const assignments = new Array(names.length).fill(null);
+          for (let i = 0; i < names.length; i++) {
+            const t = tickets[i];
+            if (!t || t.deduped) continue;
+            const err = spawnFailed.get(names[i]);
+            if (err) { try { work.fail(t.id, new Error(err), { failureKind: "spawn_failed" }); } catch { /* 账本不阻断 */ } }
+            else { try { assignments[i] = work.begin(t.id, { worker: names[i], sessionKey }); } catch { /* 账本不阻断 */ } }
+          }
+
+          // 分派事件: 每个 Worker 一条 (工单/指派/角色), 与 ticket_assigned 互补 ——
+          //   后者记"账本状态变了", 这里记"Router 做了分派决定"。正文不入链。
+          for (let i = 0; i < names.length; i++) {
+            const t = tickets[i];
+            if (!t || t.deduped) continue;
+            emitRouterEvent(agent, ROUTER_EVENT.DISPATCH, {
+              ticketId: t.id,
+              assignmentId: assignments[i]?.id || null,
+              worker: names[i],
+              sessionKey,
+              origin: "delegate",
+              route: ROUTE_KIND.WORKER,
+              role: effRoles[i],
+              expert: expertList[i]?.id || null,
+              memoryInjected: memoryInject,
             });
           }
-          // 生命周期: 繁衍计数 (ANS: reproducing)
-          if (agent.lifecycle) agent.lifecycle.reproduce(names.length);
 
           // 并行派发, 全部等结果 (各自独立超时)
+          // 全局上下文 (2026-11-05): 开启 delegate_memory_inject 后, Router 把跨会话记忆与
+          //   同角色共享板的近期事实作为 [全局上下文] 前缀随分派注入 —— Worker 不必重问
+          //   "Session X 里有没有 Y"。检索失败只退回裸任务文本, 绝不阻断派发。
           const settled = await Promise.all(tasks.map(async (task, i) => {
+            const t = tickets[i];
+            const asg = assignments[i];
+            const startedAt = Date.now();
+            const ticketId = t && !t.deduped ? t.id : null;
+            const assignmentId = asg?.id || null;
             try {
+              const spawnErr = spawnFailed.get(names[i]);
+              if (spawnErr) throw new Error(`worker 启动失败: ${spawnErr}`);
+              let brief = { text: "", memoryHits: 0, boardHits: 0 };
+              if (memoryInject) {
+                brief = await buildDelegationBrief(agent, task, {
+                  board: shareBoard ? board : null, role: effRoles[i],
+                });
+              }
+              const message = brief.text ? `${brief.text}[任务] ${task}` : task;
               const reply = await withTimeout(
-                L.send(names[i], { type: "chat", message: task, perspective: effPersps[i] }, { timeout: DELEGATE_TIMEOUT_MS + 5000 }),
+                L.send(names[i], {
+                  type: "chat", message, perspective: effPersps[i],
+                  // Step 3 信封回传: worker 原样带回这两个 ID, Router 侧据此归组汇报。
+                  ticketId, assignmentId,
+                }, {
+                  timeout: DELEGATE_TIMEOUT_MS + 5000,
+                  onProgress: (ev) => {
+                    if (!t || t.deduped || !work || typeof work.progress !== "function") return;
+                    const patch = {};
+                    if (Number.isFinite(ev?.round)) patch.rounds = ev.round + 1;
+                    if (Number.isFinite(ev?.steps)) patch.steps = ev.steps;
+                    if (ev?.lastTool) patch.lastTool = ev.lastTool;
+                    if (!Object.keys(patch).length) return;
+                    try { work.progress(t.id, patch); } catch { /* 观测不阻断派发 */ }
+                  },
+                }),
                 DELEGATE_TIMEOUT_MS,
                 `子任务${i + 1}`
               );
-              return { ok: true, reply: reply.reply || "(子 agent 无回复)" };
+              // 2026-11-01 (二期⑤): worker 回包带结构化汇报信封 (旧 worker 无该字段 = null)
+              return {
+                ok: true,
+                reply: reply.reply || "(子 agent 无回复)",
+                envelope: reply.envelope || null,
+                ticketId, assignmentId, worker: names[i],
+                durationMs: Date.now() - startedAt,
+                memoryHits: brief.memoryHits, boardHits: brief.boardHits,
+              };
             } catch (e) {
-              return { ok: false, reply: `[子任务${i + 1}失败] ${e.message}` };
+              return {
+                ok: false,
+                reply: `[子任务${i + 1}失败] ${e.message}`,
+                error: e, envelope: null,
+                ticketId, assignmentId, worker: names[i],
+                durationMs: Date.now() - startedAt,
+              };
             }
           }));
+
+          // Worker 汇报事件 (先于账本收口): 结构化信封 → 白名单事实, 与工单终态正交。
+          //   超时/异常时 ok=false, 不采信子进程自称的 status。
+          for (let i = 0; i < settled.length; i++) {
+            const s = settled[i];
+            emitRouterEvent(agent, ROUTER_EVENT.REPORT, {
+              ...normalizeWorkerReport({
+                ok: s.ok,
+                envelope: s.envelope,
+                worker: s.worker,
+                ticketId: s.ticketId,
+                assignmentId: s.assignmentId,
+                durationMs: s.durationMs,
+                errorKind: s.ok ? null : "delegate_error",
+              }),
+              memoryHits: s.memoryHits || 0,
+              boardHits: s.boardHits || 0,
+            });
+          }
+
+          // 委派工单收口: 成功/失败按 settled 事实落账 (迟到的失败不覆盖终态, service 已挡)
+          for (let i = 0; i < settled.length; i++) {
+            const t = tickets[i];
+            if (!t || t.deduped) continue;
+            const s = settled[i];
+            if (s.ok) { try { work.complete(t.id, { result: s.reply, envelope: s.envelope }); } catch { /* 账本不阻断 */ } }
+            else { try { work.fail(t.id, s.error, { failureKind: "delegate_error" }); } catch { /* 账本不阻断 */ } }
+          }
           const results = settled.map((s) => s.reply);
+          // 汇报信封 → 模型可读摘要 (轮次/步数/工具名): 主 agent 引用 worker 执行证据用
+          // 2026-11-05: 附工单号 —— 委派在 /work 账本可查 (收口 ②)
+          const envelopeNote = (s) => {
+            const e = s.envelope;
+            if (!e) return "";
+            const tools = Array.isArray(e.tools) && e.tools.length ? e.tools.join(",") : "无";
+            const tid = s.ticketId ? ` 工单=${s.ticketId}` : "";
+            return `\n[汇报信封] 状态=${e.status || "?"} 轮次=${e.rounds ?? "?"} 工具步=${e.steps ?? 0} 用具=${tools}${tid}`;
+          };
 
           // share_board: 每个子任务结论自动上板 (成功/失败都记, 状态区分)
           if (shareBoard) {
@@ -706,8 +445,26 @@ export function registerDelegateTools(catalog, opts = {}) {
             });
           }
 
-          // 单任务: 保持旧行为, 直接返回子 agent 回复
-          if (tasks.length === 1) return results[0];
+          // 结论回写全局记忆 (2026-11-05): 共享板是 7 天 TTL 的临时协作区, worker 结论此前
+          //   随进程回收即散; 成功结论落 FactStore 才能被后续 Router/Worker 跨会话检索。
+          //   只取短摘要 + dedupe, source=fork-merge (model-inferred 分级); 可用配置关闭。
+          if (agent?.config?.agent?.delegate_memory_writeback !== false && agent?.facts
+            && typeof agent.facts.add === "function") {
+            for (let i = 0; i < settled.length; i++) {
+              const s = settled[i];
+              if (!s.ok) continue;
+              const text = String(s.reply || "").replace(/\s+/g, " ").trim();
+              if (text.length < 12) continue;
+              try {
+                agent.facts.add(`[worker:${effRoles[i] || names[i]}] ${text.slice(0, 280)}`, {
+                  source: "fork-merge", type: "general", importance: 0.35, dedupe: true,
+                });
+              } catch { /* 记忆写回失败不影响派发结果 */ }
+            }
+          }
+
+          // 单任务: 保持旧行为, 直接返回子 agent 回复 (附汇报信封摘要, 模型可引用执行证据)
+          if (tasks.length === 1) return results[0] + envelopeNote(settled[0]);
 
           // 多任务: 有 arbitrate 走主 agent 仲裁聚合, 否则拼接各方结果
           if (args.arbitrate) {
@@ -735,3 +492,10 @@ export function registerDelegateTools(catalog, opts = {}) {
     },
   });
 }
+
+// ---- 重导出 (2026-11-03 拆分): 调用方 import 路径与名称逐字不变 ----
+// 纯转发 (本文件不直接使用): SDD review 纯函数 + 仲裁输入/仲裁
+export { severityLabel, parseReviewFindings, needsFix, buildReviewPrompt, buildFixPrompt } from "./delegate-review.js";
+export { buildArbitrationInput, arbitrate } from "./delegate-team.js";
+// 本文件直接使用 (上面已 import), 再导出保持旧入口
+export { DELEGATE_TIMEOUT_MS, resolveExpertFor, runTeam, runSupervisorLoop, arbitrateWithBoard, publishToBoard };

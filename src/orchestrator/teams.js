@@ -94,7 +94,7 @@ export const TEAMS = {
 };
 
 // 中文名 / 别名 → 班组 id
-export const TEAM_ALIASES = {
+const TEAM_ALIASES = {
   "研发": "dev", "开发": "dev", "功能开发": "dev", "重构": "dev",
   "修复": "hotfix", "热修": "hotfix", "故障": "hotfix",
   "调研": "research", "研究": "research", "选型": "research",

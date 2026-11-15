@@ -11,6 +11,12 @@
 import fs from "node:fs";
 import path from "node:path";
 import { ensureDir, readJson, writeJson, readText, writeText, logicalDay } from "../utils/store.js";
+import { tierOfRecord, canPromote } from "./provenance.js";
+
+// 画像内容策略版本 (落 meta.json)。2 = 隔离带事实 (tool-fetched / unknown) 不进画像。
+// 存在的意义: 旧版本把隔离带内容写进过画像正文, 而正文按天缓存 —— 升级后必须当"过期"强制重建一次,
+// 否则已泄漏的抓取文本会继续留在 system prompt 的静态区直到下一个自然日。
+const PERSONA_POLICY = 2;
 
 // 旧版正文里两处烘日期的行 (只匹配**生成模板**的精确形态, 绝不通吃用户事实里可能出现的日期)
 const BAKED_UPDATED_RE = /\n> (由皮皮虾 L3 画像引擎生成|从经验库自动学习) \| 更新: (\d{4}-\d{2}-\d{2})/;
@@ -42,8 +48,12 @@ export class PersonaStore {
     if (!force && this._exists(this.userFile)) return this.userPersona();
     // 聚焦用户相关的记忆 (来源: 对话 / LLM提炼 / 主动记 / 手动 / 用户分享)
     // 注: 事实的来源标记在 source 字段 (type 恒为 general), 之前按 type 过滤永远为空 -> 修正为按 source
+    // 隔离带拦截 (2026-11-12): source 只说明"谁写的", 不说明"内容从哪来" —— memory-ticker 会把跑过
+    //   外部工具的轮次蒸馏结果写成 source:"extract" + provenance:"tool-fetched"。画像正文会进 system
+    //   prompt 静态区, 抓来的页面文本一旦混进去就是常驻的提示注入面。只放行可晋级档。
     const USER_SOURCES = ["conversation", "extract", "agent-self", "manual", "user-shared"];
-    const userFacts = facts.filter((f) => USER_SOURCES.includes(f.source) || USER_SOURCES.includes(f.type));
+    const userFacts = facts.filter((f) =>
+      (USER_SOURCES.includes(f.source) || USER_SOURCES.includes(f.type)) && canPromote(tierOfRecord(f)));
     const interests = this._topTopics(userFacts);
     // 记忆概要: 内容去重后取最近 10 条 (防 LLM 提炼变体/重复记忆稀释画像)
     const uniq = this._uniqByContent(userFacts).slice(-10);
@@ -143,7 +153,7 @@ ${uniq.map((l) => `- ${l.lesson}`).join("\n") || "- 暂无"}
 
   // 文件指纹 (mtimeMs:size); 文件不存在/不可读返回 null (与 readText 的缺省语义对齐)
   _sigOf(file) {
-    try { const st = fs.statSync(file); return `${st.mtimeMs}:${st.size}`; } catch { return null; }
+    try { const st = fs.statSync(file); return `${st.mtimeMs}:${st.size}`; } catch { return null; /* swallowed-ok(2026-11-03): 文件不存在 → null */ }
   }
 
   // 惰性迁移 (幂等, 每实例每文件一次): 剥掉正文烘日期行 → 重写文件 → 日期写入 meta (不丢信息)。
@@ -170,7 +180,14 @@ ${uniq.map((l) => `- ${l.lesson}`).join("\n") || "- 暂无"}
     this._migrated.add(file);
     const meta = this._meta();
     meta[metaKey] = logicalDay();
+    meta.personaPolicy = PERSONA_POLICY;
     writeJson(this.metaFile, meta);
+  }
+
+  // 当前画像是否按最新内容策略生成过。false = 文件里可能还留着旧策略的产物 (含隔离带内容),
+  // 调用方 (MemoryService.refreshPersona) 据此立即强制重建, 不等跨天。
+  policyStale() {
+    return Number(this._meta().personaPolicy || 0) < PERSONA_POLICY;
   }
 
   _meta() {
@@ -179,7 +196,7 @@ ${uniq.map((l) => `- ${l.lesson}`).join("\n") || "- 暂无"}
   }
 
   _mtime(f) {
-    try { return new Date(fs.statSync(f).mtime).toISOString().slice(0, 10); } catch { return null; }
+    try { return new Date(fs.statSync(f).mtime).toISOString().slice(0, 10); } catch { return null; /* swallowed-ok(2026-11-03): 文件不存在 → 无日期 */ }
   }
 
   _topTopics(facts) {
@@ -194,6 +211,6 @@ ${uniq.map((l) => `- ${l.lesson}`).join("\n") || "- 暂无"}
     return [...freq.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8);
   }
 
-  _exists(f) { try { return fs.existsSync(f); } catch { return false; } }
+  _exists(f) { try { return fs.existsSync(f); } catch { return false; /* swallowed-ok(2026-11-03): 探测语义 */ } }
   _read(f) { return readText(f, ""); }
 }

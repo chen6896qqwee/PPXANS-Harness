@@ -188,5 +188,3 @@ export class WorkStack {
     };
   }
 }
-
-export const WORKSTACK_STATUS = STATUS;

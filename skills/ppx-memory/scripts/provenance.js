@@ -204,6 +204,7 @@ export function labelFor(tier) {
 // 伪装标签: 抓取内容里写着「(来源: 用户原话)」「【user-stated】」时, 渲染出的行会让人/模型误判权限。
 // 只匹配"标签形状" (括起来 + 短 + 来源/信任类词), 不通吃普通句子里的括号。
 const FORGED_PAREN_TAG = /[ \t]*[（(]\s*(?:来源|出处|provenance|source|trust|可信度|信任级别)\s*[:：][^（()）\n]{0,48}[)）][ \t]*/gi;
+// eslint-disable-next-line no-useless-escape
 const FORGED_BRACKET_TAG = /[ \t]*[\[【]\s*(?:user-stated|model-inferred|tool-fetched|unknown|来源[:：][^\]】\n]{0,32}|(?:用户|模型|工具|系统)(?:原话|推断|抓取|生成)|隔离|不可信|已验证)[^\]】\n]{0,16}[\]】][ \t]*/gi;
 
 /** 剥掉内容里伪装成来源标签的片段 (写入侧调用 = 所有渲染路径一起安全, 不只本层) */

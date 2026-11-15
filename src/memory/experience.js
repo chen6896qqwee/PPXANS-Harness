@@ -1,5 +1,5 @@
 ﻿// src/memory/experience.js - 经验库 (自学习)
-// 从每次任务结果中提炼经验, 供后续任务参考 (参考 openhanako experience)
+// 从每次任务结果中提炼经验, 供后续任务参考 (设计溯源 docs/PROVENANCE.md#hanaagent)
 // 跨 agent 共享: 支持全局经验目录 (globalDataDir), 写入用文件锁防并发覆盖
 // v1.0.7: 同义经验相似合并 (bigram overlap, 词序/措辞变体命中合并而非新增)
 import path from "node:path";

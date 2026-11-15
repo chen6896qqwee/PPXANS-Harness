@@ -1,5 +1,5 @@
 ﻿// src/tools/selfmod.js - Self-modification 工具
-// 参考 deepseek-harness 的 self-modification: agent 能检查/挂载/卸载自己的运行时能力
+// 设计溯源 docs/PROVENANCE.md#dsh; 自研 self-modification: agent 能检查/挂载/卸载自己的运行时能力
 // 这里落地为"能力级自修改": 枚举能力(工具+技能) / 启用 / 禁用 / 加载技能, 不破坏零依赖内核
 import { SkillLoader } from "../skills/loader.js";
 import { scoreSkills } from "../skills/search.js";
@@ -25,7 +25,7 @@ export function registerSelfmodTools(catalog, { roots, writeDir, skillsDir }) {
     category: "selfmod",
     power: "agent",
     idempotent: true,
-    execute: async (args) => {
+    execute: async (args, ctx) => {
       const kind = args && args.kind ? args.kind : "all";
       const lines = [];
       if (kind === "all" || kind === "tool") {
@@ -36,7 +36,9 @@ export function registerSelfmodTools(catalog, { roots, writeDir, skillsDir }) {
       }
       if (kind === "all" || kind === "skill") {
         lines.push("— 技能 —");
-        for (const s of loader.list()) {
+        // 有 agent 时读它的 loader (含用户停用清单); 无 ctx 的直调回落到本模块实例
+        const ldr = ctx?.agent?.skills || loader;
+        for (const s of ldr.list()) {
           lines.push(`${s.id}: ${s.name} — ${s.description}`);
         }
       }
@@ -80,6 +82,12 @@ export function registerSelfmodTools(catalog, { roots, writeDir, skillsDir }) {
           JSON.stringify(m.parameters || { type: "object", properties: {} }, null, 2),
         ].join("\n"));
       }
+      // 按需模式: 取过 schema 的工具从下一轮起回到函数数组 (2026-11-02)。
+      // 否则模型每轮都得"先取 schema 再凭记忆拼参数", 同一工具反复取 = 白付 token 还更容易错。
+      try {
+        const added = typeof catalog.expose === "function" ? catalog.expose(names) : [];
+        if (added.length) out.push(`[已加入后续轮次工具列表] ${added.join(", ")} —— 下一轮可直接调用, 无需重复取 schema。`);
+      } catch { /* 曝光失败不影响本次返回 schema */ }
       return out.join("\n\n");
     },
   });
@@ -121,12 +129,43 @@ export function registerSelfmodTools(catalog, { roots, writeDir, skillsDir }) {
     category: "selfmod",
     power: "user",
     idempotent: true,
-    execute: async (args) => {
-      const content = loader.read(args.id);
-      if (content === null) return capErr("load_skill", `未知技能: ${args.id}`);
-      
-      if (loader && typeof loader.trackUse === "function") { try { loader.trackUse(args.id); } catch {} }
-      return `# ${args.id}\n\n${content}`;
+    execute: async (args, ctx) => {
+      const ldr = ctx?.agent?.skills || loader;
+      // 2026-11-13 (评测 P2-1): 接受 id 或唯一 slug/叶子名 (如 webapp-testing)
+      const resolved = (ldr && typeof ldr.resolveId === "function" && ldr.resolveId(args.id)) || args.id;
+      // 已停用技能与"不存在"要分开报: 前者用户在管理页关掉了, 后者才是真没有。
+      //   loader.read 对停用技能返回 null (与未知同形), 这里先按 agent 的权威清单判一次。
+      if (typeof ldr.isDisabled === "function" && (ldr.isDisabled(resolved) || ldr.isDisabled(args.id))) {
+        return capErr("load_skill", `技能已停用: ${args.id} (可在 Web 管理页重新启用)`);
+      }
+      const content = ldr.read(resolved);
+      if (content === null) {
+        // 2026-11-14 (评测 P2-1): 只报"未知技能"会让模型拿同一 id 盲目重试 (实测 5 连败:
+        //   Word×2 / webapp-testing×3)。报错里附上可用清单, 让模型一步自纠, 不再撞墙。
+        let hint = "";
+        try {
+          const ids = (typeof ldr.list === "function" ? ldr.list() : [])
+            .map((s) => String(s && s.id ? s.id : s)).filter(Boolean).slice(0, 20);
+          if (ids.length) hint = `。可用技能: ${ids.join(", ")}${ids.length >= 20 ? " …" : ""}`;
+        } catch { /* 清单取不到就保持原报错 */ }
+        return capErr("load_skill", `未知技能: ${args.id}${hint}`);
+      }
+
+      if (ldr && typeof ldr.trackUse === "function") { try { ldr.trackUse(resolved); } catch {} }
+      // 技能正文里的相对路径 (scripts/xxx.py) 是相对 SKILL.md 所在目录, 而 run_command 的
+      //   工作目录是项目根 —— 只回正文, 模型会照抄 `python scripts/xxx.py`, 拿到
+      //   "can't open file" 后转头用 write_file 硬写 .docx/.xlsx, 产出打不开的坏文件。
+      //   这里把绝对目录一并给出, 让"加载技能 → 调脚本"这条链一次走通。
+      let dirHint = "";
+      try {
+        const meta = typeof ldr.get === "function" ? ldr.get(resolved) : null;
+        if (meta && meta.file) {
+          dirHint = `> 技能目录: ${path.dirname(meta.file)}\n`
+            + `> 正文中的相对路径 (如 scripts/xxx.py) 相对此目录; run_command 的工作目录是项目根, `
+            + `请拼绝对路径调用。\n\n`;
+        }
+      } catch { /* 取不到路径不影响正文返回 */ }
+      return `# ${resolved}\n\n${dirHint}${content}`;
     },
   });
 
@@ -139,11 +178,11 @@ export function registerSelfmodTools(catalog, { roots, writeDir, skillsDir }) {
     category: "selfmod",
     power: "user",
     idempotent: true,
-    execute: async (args) => {
+    execute: async (args, ctx) => {
       const q = String(args.query || "").trim();
       if (!q) return capErr("skill_search", "需要 query 关键词");
       if (!loader) return capErr("skill_search", "技能目录未装配");
-      const results = scoreSkills(loader, q).slice(0, 8);
+      const results = scoreSkills(ctx?.agent?.skills || loader, q).slice(0, 8);
       return JSON.stringify({ query: q, count: results.length, results });
     },
   });

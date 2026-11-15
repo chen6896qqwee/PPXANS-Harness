@@ -26,6 +26,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { PPXAgent } from "../src/agent/index.js";
 import { appendHistory } from "./lib/bench-history.js";
+import { noteCatch } from "../src/utils/catch-log.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, "..");
@@ -38,8 +39,11 @@ const SET = setIdx >= 0 ? String(process.argv[setIdx + 1] || "all") : "all";
 //   拦住回退 (比如有人调了 RRF 权重/改了分词把召回打回去), 不是逼着往上加。
 //   2026-10-30 建立时实测 holdout recall@3 = 100%, 门槛设 90%: 掉 1 条查询不报警,
 //   掉 2 条以上报警 —— 单条波动属于语料边界, 系统性退化必须拦。
+//   2026-11-12 概念路改整词口径 + 融合按置信度投票后 holdout recall@1 到 100%,
+//   同时增加 recall@1 门槛 80%: 只保 recall@3 会漏掉"名次滑到第 2/3"的退化。
 const CHECK = process.argv.includes("--check");
 const MIN_ACCEPTANCE = 0.9;
+const MIN_ACCEPTANCE_R1 = 0.8;
 
 // ---- 固定语料: 40 条有真实感的记忆 (跨主题, 长度不一, 有近义表述可互相干扰) ----
 // 前 20 条是 dev 集的目标, 后 20 条既作干扰项也作 holdout 的目标。
@@ -201,11 +205,15 @@ try {
 if (JSON_OUT) {
   console.log(JSON.stringify({ kind: "memory-recall", ts: new Date().toISOString(), node: process.version, ...summary, rows }, null, 2));
 } else if (CHECK) {
-  const ok = summary.acceptance >= MIN_ACCEPTANCE;
-  console.log(`记忆召回闸门: holdout recall@${TOP_K} = ${(summary.acceptance * 100).toFixed(0)}% (门槛 ${(MIN_ACCEPTANCE * 100).toFixed(0)}%) ${ok ? "✓" : "✗"}`);
+  const hold = sets.find((s) => s.set === "holdout");
+  const okK = summary.acceptance >= MIN_ACCEPTANCE;
+  const ok1 = !hold || hold.recall1 >= MIN_ACCEPTANCE_R1;
+  const ok = okK && ok1;
+  console.log(`记忆召回闸门: holdout recall@${TOP_K} = ${(summary.acceptance * 100).toFixed(0)}% (门槛 ${(MIN_ACCEPTANCE * 100).toFixed(0)}%), recall@1 = ${hold ? (hold.recall1 * 100).toFixed(0) : "—"}% (门槛 ${(MIN_ACCEPTANCE_R1 * 100).toFixed(0)}%) ${ok ? "✓" : "✗"}`);
   if (!ok) {
     for (const r of rows) {
-      if (r.rank && r.rank <= TOP_K) continue;
+      const hitK = r.rank && r.rank <= TOP_K;
+      if (hitK && (ok1 || r.rank === 1)) continue;
       console.log(`  退化的查询: ${r.query} → 期望「${r.expect}」, 实返 ${r.top.join(" | ") || "(空)"}`);
     }
   }
@@ -245,6 +253,6 @@ try {
   appendHistory(outDir, "memory-recall", {
     recall1: summary.recall1, recallK: summary.recallK, acceptance: summary.acceptance,
   });
-} catch { /* 存档失败不影响探针 */ }
+} catch (e) { noteCatch("scripts/memory-recall.js#main", e); /* 存档失败不影响探针 */ }
 
 process.exit(CHECK && summary.acceptance < MIN_ACCEPTANCE ? 1 : 0);

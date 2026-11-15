@@ -1,4 +1,4 @@
-// src/tools/governance.js - 记忆治理 + 审计 + 运维工具集 (吸收自 ppx-v2)
+// src/tools/governance.js - 记忆治理 + 审计 + 运维工具集 (承接自 ppx-v2)
 // 来源: ppx-v2 v0.4.0 bundles/ppx-tools/index.js 的 5 个治理工具 (memory_forget/restore/export/import/clear_layer)
 //        + audit_verify, 以及 ppx-memory/ppx-selfheal 暴露的 persona_build/persona_read/selfheal_run。
 // 改写: ppx-v2 原版用 cordis 的 defineTool + @deepseek-ai/schemastery (z.object) 声明,
@@ -189,12 +189,12 @@ function registerMemoryGovernanceTools(catalog, { rootDir, facts, dataDir } = {}
     category: "memory",
     power: "user",
     idempotent: true,
-    execute: async (args) => {
+    execute: async (args, ctx) => {
       if (!facts) return noFacts();
       const dump = facts.exportAll({ includeDeleted: args.include_deleted !== false });
       let out;
       if (args.file) {
-        out = safePath(rootDir || ".", args.file);
+        out = safePath(rootDir || ".", args.file, ctx);
       } else {
         ensureDir(exportsDir);
         out = path.join(exportsDir, `memory-${Date.now()}.json`);
@@ -221,9 +221,9 @@ function registerMemoryGovernanceTools(catalog, { rootDir, facts, dataDir } = {}
     category: "memory",
     power: "user",
     idempotent: false,
-    execute: async (args) => {
+    execute: async (args, ctx) => {
       if (!facts) return noFacts();
-      const fp = safePath(rootDir || ".", args.file);
+      const fp = safePath(rootDir || ".", args.file, ctx);
       if (!fs.existsSync(fp)) return JSON.stringify({ error: "文件不存在", file: args.file });
       let payload;
       try { payload = JSON.parse(fs.readFileSync(fp, "utf8")); } catch (e) { return JSON.stringify({ error: "JSON 解析失败: " + e.message }); }
@@ -256,7 +256,7 @@ function registerMemoryGovernanceTools(catalog, { rootDir, facts, dataDir } = {}
   });
 }
 
-// ---- 组 2: 审计链校验 (吸收自 ppx-v2 audit.js: SHA-256 哈希链防篡改验证) ----
+// ---- 组 2: 审计链校验 (承接自 ppx-v2 audit.js: SHA-256 哈希链防篡改验证) ----
 function registerAuditTools(catalog, { audit } = {}) {
   catalog.register({
     name: "audit_verify",

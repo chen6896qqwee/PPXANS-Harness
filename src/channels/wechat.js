@@ -8,8 +8,10 @@
 import crypto from "node:crypto";
 import { Channel } from "./base.js";
 import { decryptMsg, verifySignature, encryptReplyXml } from "./wechat-crypto.js";
-import { triggerFromWechatFields } from "./trigger.js";
-import { admitThroughPolicy } from "./policy.js";
+import { triggerFromWechatFields } from "../flow/trigger.js";
+import { admitThroughPolicy } from "../flow/policy.js";
+import { createTicketLink } from "../flow/worklink.js";
+import { TICKET_STATUS } from "../workgraph/store.js";
 
 export class WechatWebhookChannel extends Channel {
   constructor(agent, {
@@ -164,28 +166,52 @@ export class WechatWebhookChannel extends Channel {
       return ""; // 重发消息: 回 200 空体 (微信协议语义 = 本次不回复, 平台自行停止重投)
     }
     this._seenMsgs.set(msgId, Date.now());
-    // 2026-10-31 (Super-agent 一期): 构造 Trigger 走两级过滤门 + 四段式会话键归组。
+    // 2026-10-31 (v4.1 平台化): 构造 Trigger 走两级过滤门 + 四段式会话键归组。
     //   被动回包协议特殊 (5 秒内必须回 XML, 回复走返回值而非主动推送), 因此不走
     //   handleTrigger (那会经 send() 主动推送二次发送); 被过滤时回空体让平台停止重投。
     const trigger = triggerFromWechatFields({ from: g("FromUserName"), messageId: msgId, text, createTime: g("CreateTime") });
     const gate = await admitThroughPolicy(trigger, this.agent);
     if (!gate.ok) return "";
-    const reply = await this.agent.chat(text, gate.sessionKey ? { sessionKey: gate.sessionKey } : undefined);
+    // 工单账本接线 (2026-11-05 调度闭环收口 ①): 微信被动回包也统一建单 —— 账本事实与
+    //   飞书/HTTP 同源 (/work 面板 / watchdog / 审计链从此看到微信入站)。被动协议不走
+    //   handleTrigger (那会经 send() 主动推送二次发送), 经 flow/worklink 走
+    //   submit→begin→complete/fail 三段式; 账本失败降级 ticket=null, 不阻断回复。
+    const link = createTicketLink(this.agent?.work || null, trigger, { sessionKey: gate.sessionKey || null });
+    if (link.isDupe) {
+      // webhook 重试命中既有工单 (复用 handleTrigger 的 REPLAY/DUPLICATE 语义):
+      //   已完成 → 被动窗口内直接回缓存结果 (首次回包可能丢包); 在途 → 回空体让平台停止重投。
+      if (link.ticket.status === TICKET_STATUS.DONE && link.ticket.result) {
+        return { xml: this._passiveReplyXml(g("FromUserName"), g("ToUserName"), link.ticket.result) };
+      }
+      return "";
+    }
+    link.begin();
+    let reply;
+    try {
+      reply = await this.agent.chat(text, gate.sessionKey ? { sessionKey: gate.sessionKey } : undefined);
+    } catch (e) {
+      link.fail(e);
+      throw e;
+    }
+    link.done(reply);
     const toUser = g("FromUserName");
     if (toUser) this.lastUser = toUser; // 记录最近联系人, 供主动提醒回发
     const fromUser = g("ToUserName");
-    // 2026-10-25 评估修复: agent 回复含 "]]>" 时 CDATA 提前闭合 → 回包 XML 破损,
-    //   微信解析失败/静默丢回复。标准解法: 把 ]]> 拆成两段 CDATA ("]] ]]>" → "]]]]><![CDATA[>").
+    return { xml: this._passiveReplyXml(toUser, fromUser, reply) };
+  }
+
+  // 被动文本回包 (2026-11-05 从 _replyFromXml 提出, 供正常回复与工单重放缓存结果共用)。
+  //   agent 回复含 "]]>" 时 CDATA 提前闭合 → 回包 XML 破损, 微信解析失败/静默丢回复。
+  //   标准解法: 把 ]]> 拆成两段 CDATA ("]] ]]>" → "]]]]><![CDATA[>").
+  _passiveReplyXml(toUser, fromUser, reply) {
     const cdata = (s) => String(s ?? "").replace(/\]\]>/g, "]]]]><![CDATA[>");
-    return {
-      xml: `<xml>
+    return `<xml>
   <ToUserName><![CDATA[${cdata(toUser)}]]></ToUserName>
   <FromUserName><![CDATA[${cdata(fromUser)}]]></FromUserName>
   <CreateTime>${Math.floor(Date.now() / 1000)}</CreateTime>
   <MsgType><![CDATA[text]]></MsgType>
   <Content><![CDATA[${cdata(reply)}]]></Content>
-</xml>`,
-    };
+</xml>`;
   }
 
   // 防重放缓存清扫 (与飞书通道同策略: TTL 5 分钟 + 容量上限)

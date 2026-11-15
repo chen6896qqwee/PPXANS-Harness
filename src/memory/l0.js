@@ -2,6 +2,7 @@
 // 架构: 会话事件日志 (SessionStore) 为唯一事实源, L0 是其只读派生视图
 // 不再独立维护 l0/*.jsonl -- 对话原文由 session 事件日志全量保存, 消除 today/l0/facts 三处重复
 // 过滤噪音: 短消息/命令/注入标签 (保留, 用于判断"是否值得记录")
+import { noteCatch } from "../utils/catch-log.js";
 import path from "node:path";
 import { ensureDir, logicalDay } from "../utils/store.js";
 import { SessionStore, EVENTS } from "./session.js";
@@ -29,7 +30,7 @@ export class L0Recorder {
       this.sessionStore = new SessionStore(dir);
       this.dir = path.join(dir, "memory", "l0");
     }
-    if (this.dir) { try { ensureDir(this.dir); } catch {} }
+    if (this.dir) { try { ensureDir(this.dir); } catch (e) { noteCatch(e); } }
   }
 
   // 记录: 代理到 session 事件日志 (session 是唯一事实源, 不再独立写 JSONL)

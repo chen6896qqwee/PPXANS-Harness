@@ -20,7 +20,7 @@ const ACTION_VERBS = [
 const ACTION_VERB_EN = /\b(avoid|ensure|verify|check|always|never|must|use|retry|dont|don't|config|pass|set|run|gunakan|before|after)\b/i;
 
 // 可操作动词检测 (中文含集合词 || 英文动词)
-export function isActionable(lesson) {
+function isActionable(lesson) {
   const s = String(lesson || "");
   if (ACTION_VERB_EN.test(s)) return true;
   return ACTION_VERBS.some((v) => s.includes(v));
@@ -33,7 +33,7 @@ function toolIdents(s) {
 }
 
 // 接地弱判定: 若经验点名了某个"已知工具", 则该工具必须出现在失败轨迹里 (防幻觉工具)
-export function groundedInFailedTraces({ lesson, failedTraces = [], knownTools = [] } = {}) {
+function groundedInFailedTraces({ lesson, failedTraces = [], knownTools = [] } = {}) {
   const known = new Set((Array.isArray(knownTools) ? knownTools : []).map((t) => String(t).toLowerCase()));
   if (!known.size) return { ok: true, checked: false }; // 无已知工具清单时跳过 (不误伤通用英文)
   const failed = new Set((Array.isArray(failedTraces) ? failedTraces : []).map((t) => String(t?.tool || "").toLowerCase()));

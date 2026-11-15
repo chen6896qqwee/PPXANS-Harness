@@ -1,0 +1,200 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ppxans.local/schema/ans_lane.v1.json",
+  "title": "PPXANS ANS lane v1（主动通知车道）",
+  "$comment": "Step 0 契约冻结候选。ANS = 主动提醒（proactive ticker）与看门狗（watchdog）等系统发起的动作。本文件定义它们走哪条车道、是否建单、去重/限流/安全边界。运行时代码只允许实现本文件。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "enabled"],
+  "properties": {
+    "version": { "const": "ans_lane.v1" },
+    "enabled": {
+      "type": "boolean",
+      "default": false,
+      "description": "false = 完全保持现状（manager.broadcast 直发），不产生任何新行为；true = 走本车道。"
+    },
+    "internal_only": {
+      "const": true,
+      "description": "v1 恒为 true：车道只在进程内调用，不暴露 HTTP/WS，不接受外部注入。"
+    },
+    "origin": { "const": "ans" },
+    "sources": {
+      "type": "array",
+      "items": { "enum": ["proactive", "watchdog"] },
+      "default": ["proactive", "watchdog"],
+      "description": "允许进入本车道的系统来源；未列入的来源继续走旧 broadcast。"
+    },
+    "mode": {
+      "enum": ["notify", "submit"],
+      "default": "notify",
+      "description": "notify = 纯通知（默认，不建单）；submit = 提交为工单（必须 create_ticket=true）。"
+    },
+    "create_ticket": {
+      "type": "boolean",
+      "default": false,
+      "description": "默认 false：ANS 通知不建工单、不参与 DSH 完成判断。"
+    },
+    "targets": {
+      "type": "array",
+      "minItems": 0,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["channel", "to"],
+        "properties": {
+          "channel": { "type": "string", "minLength": 1 },
+          "to": { "type": "string", "minLength": 1 },
+          "thread": { "type": ["string", "null"] },
+          "replyTo": { "type": ["string", "null"] }
+        }
+      },
+      "description": "显式目标列表。enabled=true 时不得为空（不做隐式全通道广播）。"
+    },
+    "delivery": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "route": { "enum": ["async", "sync"], "default": "async" },
+        "max_attempts": { "type": "integer", "minimum": 1, "maximum": 10, "default": 4 },
+        "backoff_ms": { "type": "integer", "minimum": 0, "default": 2000 },
+        "backoff_cap_ms": { "type": "integer", "minimum": 0, "default": 60000 },
+        "jitter_ratio": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.1 },
+        "ttl_ms": { "type": "integer", "minimum": 0, "default": 3600000 },
+        "deadline_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 15000,
+          "description": "仅在 route=sync 时生效；ANS 默认 async，不使用该字段。"
+        }
+      },
+      "default": { "route": "async", "max_attempts": 4, "backoff_ms": 2000, "backoff_cap_ms": 60000, "jitter_ratio": 0.1, "ttl_ms": 3600000, "deadline_ms": 15000 }
+    },
+    "dedupe": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "strategy": {
+          "enum": ["period_bucket", "explicit", "none"],
+          "default": "period_bucket",
+          "description": "period_bucket = <key_prefix>:<source>:<floor(ts/bucket_ms)>；显式 key 优先。"
+        },
+        "bucket_ms": { "type": "integer", "minimum": 1000, "default": 3600000 },
+        "key_prefix": { "type": "string", "minLength": 1, "default": "ans" },
+        "window_ms": { "type": "integer", "minimum": 0, "default": 30000 }
+      },
+      "default": { "strategy": "period_bucket", "bucket_ms": 3600000, "key_prefix": "ans", "window_ms": 30000 }
+    },
+    "rate_limit": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "min_interval_ms": { "type": "integer", "minimum": 0, "default": 60000 },
+        "max_per_hour": { "type": "integer", "minimum": 1, "default": 12 }
+      },
+      "default": { "min_interval_ms": 60000, "max_per_hour": 12 },
+      "description": "按键（source + 目标通道）限流；超限丢弃并计一次 dropped，不重试。"
+    },
+    "security": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "inherit": {
+          "const": true,
+          "description": "v1 恒为 true：ANS 与入站共用权限判定/审计/钩子/审批四档。"
+        },
+        "extra_deny_tools": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "default": [],
+          "description": "只能加严，不能放宽；与全局工具黑名单取并集。"
+        }
+      },
+      "default": { "inherit": true, "extra_deny_tools": [] }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] },
+      "then": { "properties": { "targets": { "minItems": 1 } } }
+    },
+    {
+      "if": {
+        "properties": { "mode": { "const": "submit" } },
+        "required": ["mode"]
+      },
+      "then": {
+        "properties": { "create_ticket": { "const": true } }
+      }
+    },
+    {
+      "if": {
+        "properties": { "mode": { "const": "notify" } },
+        "required": ["mode"]
+      },
+      "then": {
+        "properties": { "create_ticket": { "const": false } }
+      }
+    }
+  ],
+  "x-projection-rules": {
+    "question": "ANS 的主动动作是否建工单？",
+    "notify": {
+      "ticket": false,
+      "assignment": false,
+      "turn": false,
+      "dsCompletionJudgment": false,
+      "events": ["delivery_accepted", "delivery_delivered | delivery_failed | delivery_dead_letter"],
+      "note": "纯通知：只产生投递回执（身份 deliveryId，无 ticket/assignment），DSH 不得据此收单或重试。"
+    },
+    "submit": {
+      "ticket": true,
+      "ticketOrigin": "ans",
+      "assignment": "仅在真正执行时创建",
+      "turn": "同步执行路径可能有",
+      "dsCompletionJudgment": true,
+      "events": ["ticket_created", "ticket_assigned", "assignment_*", "ticket_completed | ticket_failed", "delivery_*"],
+      "note": "显式开启才允许；必须走 workgraph.submit，不得绕过准入与去重。"
+    }
+  },
+  "x-event-map": {
+    "enabled=false": "完全沿用现有 manager.broadcast，无新事件（I1）。",
+    "enabled=true + notify": "delivery_* only；origin=ans；dedupe 用 period_bucket。",
+    "enabled=true + submit": "ticket_* + assignment_*（若执行）+ delivery_*；origin=ans。"
+  },
+  "x-security-rules": [
+    "inherit=true 不可关闭；ANS 与入站共用同一 _admitToolCall。",
+    "extra_deny_tools 与全局黑名单取并集，只加严。",
+    "internal_only=true 不可关闭：不新增 HTTP 入口，不接受外部 origin=ans 注入。",
+    "ANS 发起的工具调用同样落审计与钩子，失败不得静默。"
+  ],
+  "examples": [
+    {
+      "version": "ans_lane.v1",
+      "enabled": true,
+      "internal_only": true,
+      "origin": "ans",
+      "sources": ["proactive", "watchdog"],
+      "mode": "notify",
+      "create_ticket": false,
+      "targets": [{ "channel": "feishu", "to": "ou_owner", "thread": null, "replyTo": null }],
+      "delivery": { "route": "async", "max_attempts": 4, "backoff_ms": 2000, "backoff_cap_ms": 60000, "jitter_ratio": 0.1, "ttl_ms": 3600000, "deadline_ms": 15000 },
+      "dedupe": { "strategy": "period_bucket", "bucket_ms": 3600000, "key_prefix": "ans", "window_ms": 30000 },
+      "rate_limit": { "min_interval_ms": 60000, "max_per_hour": 12 },
+      "security": { "inherit": true, "extra_deny_tools": [] }
+    },
+    {
+      "version": "ans_lane.v1",
+      "enabled": true,
+      "internal_only": true,
+      "origin": "ans",
+      "sources": ["watchdog"],
+      "mode": "submit",
+      "create_ticket": true,
+      "targets": [{ "channel": "feishu", "to": "ou_owner", "thread": null, "replyTo": null }],
+      "delivery": { "route": "async", "max_attempts": 4, "backoff_ms": 2000, "backoff_cap_ms": 60000, "jitter_ratio": 0.1, "ttl_ms": 3600000, "deadline_ms": 15000 },
+      "dedupe": { "strategy": "explicit", "bucket_ms": 3600000, "key_prefix": "ans", "window_ms": 30000 },
+      "rate_limit": { "min_interval_ms": 60000, "max_per_hour": 12 },
+      "security": { "inherit": true, "extra_deny_tools": [] }
+    }
+  ]
+}

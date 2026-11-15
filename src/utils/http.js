@@ -1,6 +1,6 @@
 // src/utils/http.js - HTTP 请求/响应小工具 (唯一实现, 2026-09-18 重构收敛)
 // 收敛前重复情况:
-//   - readBody 在 channels/base、channels/http、mcp/http、aml-server 各写一份 (读循环 + 上限判定)
+//   - readBody 在 channels/base、channels/http、mcp/http 各写一份 (读循环 + 上限判定)
 //   - JSON 响应样板 (writeHead + Content-Type + JSON.stringify + end) 在四处共约 20 处手写
 // 提取后语义由本文件单点决定; 各调用方保留自己的错误码/降级策略 (413 写响应 vs 返回 null vs 抛错)。
 
@@ -35,7 +35,7 @@ export const SSE_HEADERS = Object.freeze({
 
 // 统一 JSON 响应。
 //   obj === undefined 时只结束响应不写 body (channels/http 的 204 语义)。
-//   contentLength=true 时补 Content-Length (aml-server 需要)。
+//   contentLength=true 时补 Content-Length (曾供 aml-server, 该适配器 2026-11-08 退役)。
 export function sendJson(res, code, obj, { headers = {}, contentLength = false } = {}) {
   const body = obj === undefined ? "" : JSON.stringify(obj);
   const h = { "Content-Type": "application/json", ...headers };

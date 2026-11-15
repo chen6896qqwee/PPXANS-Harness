@@ -1,5 +1,5 @@
 // src/memory/failure-episode.js - 故障记忆 (P1⑥)
-// 吸收 ReLoop / Vial / Aegis 的"故障即知识"设计:
+// 设计溯源 docs/PROVENANCE.md#reloop-vial / Vial / Aegis 的"故障即知识"设计:
 //   每次失败存结构化 episode (错误类型/根因/修复/置信度), 下次相似故障检索历史辅助诊断, 自愈不再从零推理。
 // 与经验库 (Experience, L4) 互补: 经验库是"学到的教训", 本模块是"故障的结构化病历" (可检索、可回放)。
 // 纯代码可测, 检索用词法相似 (零依赖), 可升级 embedding。
@@ -9,6 +9,7 @@
 import path from "node:path";
 import { ensureDir, mutateJsonCollection, readJson, withFileLock, unionById } from "../utils/store.js";
 import { shortId } from "../utils/id.js";
+import { noteCatch } from "../utils/catch-log.js";
 import { lexicalSimilarity } from "../evolve/playbook.js";
 
 export const FAILURE_CATEGORY = ["throttle", "network", "validation", "auth", "unknown"];
@@ -58,8 +59,9 @@ export class FailureEpisodeStore {
         const disk = Array.isArray(g) ? g : [];
         this._episodes = unionById(disk, this._episodes);
       });
-    } catch {
-      // 锁竞争超时不阻断读 (读操作不写盘, 退化用内存快照即可)
+    } catch (e) {
+      // 锁竞争超时不阻断读 (读操作不写盘, 退化用内存快照即可) —— 但频繁锁超时是故障信号, 留痕
+      noteCatch("src/memory/failure-episode.js#_reload", e);
     }
     return this._episodes;
   }

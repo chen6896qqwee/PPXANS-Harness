@@ -5,6 +5,7 @@
 // 与 DSML (src/llm/dsml.js) 互补, 均为自研解析器, 零外部依赖。
 // 纯函数, 无 I/O, 便于单测。
 
+import { noteCatch } from "../utils/catch-log.js";
 import { parseDsml } from "./dsml.js";
 
 // 围栏正则: ⟪tool:名字|{json}⟫  (参数用 JSON; 名字限标识符)
@@ -20,7 +21,7 @@ export function parseToolFence(text) {
     const name = m[1];
     const argsRaw = m[2].trim();
     let args = {};
-    try { args = JSON.parse(argsRaw || "{}"); } catch { /* 非JSON则空对象 */ }
+    try { args = JSON.parse(argsRaw || "{}"); } catch (e) { noteCatch(e); /* 非JSON则空对象 */ }
     calls.push({
       id: "ppx_" + calls.length + "_" + Math.random().toString(36).slice(2, 8),
       type: "function",

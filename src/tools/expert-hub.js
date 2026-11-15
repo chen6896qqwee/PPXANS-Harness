@@ -1,4 +1,4 @@
-// src/tools/expert-hub.js - 专家库 / 人格 / 市场 工具 (2026-10-07 吸收自 TencentCloud/Octop)
+// src/tools/expert-hub.js - 专家库 / 人格 / 市场 工具 (设计溯源 docs/PROVENANCE.md#octop)
 //
 //   expert_pack_list     专家库名册 (按域/分类/来源过滤) + 市场分类计数
 //   expert_pack_show     看一个专家包的完整信息 (元数据 + 渲染后的 persona + 快速提示词)

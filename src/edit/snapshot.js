@@ -52,7 +52,7 @@ export const Snapshot = {
           if (fs.existsSync(p)) fs.unlinkSync(p);
           restored++;
         } catch (err) {
-          failures.push({ path: p, error: `删除新建文件失败: ${err?.message || err}` });
+          failures.push({ path: p, error: `删除新建文件失败: ${err?.message || err}` }); // swallowed-ok(2026-11-03): 失败项并入 failures 由调用方判定
         }
       } else {
         try {
@@ -64,7 +64,7 @@ export const Snapshot = {
           fs.renameSync(tmp, p);
           restored++;
         } catch (err) {
-          failures.push({ path: p, error: `恢复原内容失败: ${err?.message || err}` });
+          failures.push({ path: p, error: `恢复原内容失败: ${err?.message || err}` }); // swallowed-ok(2026-11-03): 失败项并入 failures 由调用方判定
         }
       }
     }

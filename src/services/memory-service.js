@@ -91,6 +91,7 @@ export class MemoryService {
     ], { timeoutMs: AUX_LLM_TIMEOUT_MS, retryMax: 0 });
     return String(r.content || "")
       .split(/\n+/)
+      // eslint-disable-next-line no-useless-escape
       .map((s) => s.replace(/^[\d\.\-、)）]\s*/, "").trim())
       .filter((s) => s && s !== String(q).trim())
       .slice(0, 3);
@@ -123,10 +124,13 @@ export class MemoryService {
   //   同一逻辑日已生成过 → 重启也不重建, 静态区逐字节稳定。
   refreshPersona() {
     const today = logicalDay();
-    if (this._personaBuilt === today) return;
+    // 内容策略变更 (2026-11-12: 隔离带事实不得进画像) → 旧画像当过期, 立即重建一次。
+    // 只看"今天建过没有"不够: 旧策略的正文里可能已烘进抓取文本, 正文又常驻 system prompt。
+    const stale = this.personaStore.policyStale?.() === true;
+    if (!stale && this._personaBuilt === today) return;
     try {
       const days = this.personaStore.personaDays?.();
-      if (days && days.user === today && days.agent === today) {
+      if (!stale && days && days.user === today && days.agent === today) {
         this._personaBuilt = today; // 跨进程档已置: 本进程直接对齐, 不写盘
         this.tracer?.event("memory/persona", { ok: true, skipped: "persisted-same-day" });
         return;

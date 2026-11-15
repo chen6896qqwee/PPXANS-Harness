@@ -38,7 +38,7 @@ export function resolveApiKeyCmd(p) {
     const key = String(out || "").trim();
     return key || undefined;
   } catch {
-    return undefined;
+    return undefined; /* swallowed-ok(2026-11-03): 取值失败 → 回退 env 明文 */
   }
 }
 
@@ -140,7 +140,7 @@ export async function orderByHealth(clients, { probeMs = 4000 } = {}) {
   if (!clients || !clients.length) return [];
   const states = await Promise.all(clients.map(async (c) => {
     try { return { client: c, ok: typeof c.health === "function" ? await c.health() : true }; }
-    catch { return { client: c, ok: false }; }
+    catch { return { client: c, ok: false }; /* swallowed-ok(2026-11-03): 失败即标记该 client 不健康 */ }
   }));
   const healthy = states.filter((s) => s.ok).map((s) => s.client);
   const unwell = states.filter((s) => !s.ok).map((s) => s.client);

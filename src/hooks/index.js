@@ -1,4 +1,4 @@
-// src/hooks/index.js — 钩子链 (吸收 claude-code 六事件)
+// src/hooks/index.js — 钩子链 (设计溯源 docs/PROVENANCE.md#claude-code 六事件)
 // 纯 JS、事件驱动注册、超时熔断、单钩子异常不中断链。
 
 // claude-code 钩子事件 (PreToolUse 可否决/改参, PostToolUse 可附加上下文)

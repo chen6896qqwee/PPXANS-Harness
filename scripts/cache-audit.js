@@ -31,6 +31,9 @@
 // 退出码: 0 = 全部通过; 1 = 存在回归 (FAIL) 或审计跑不起来; 2 = 用法错误。
 // 不带参数时也按闸门退出 —— 这个脚本的用途就是门, --check 只是把意图写明白。
 
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   PROJECT_ROOT,
   runFullAudit,
@@ -39,6 +42,27 @@ import {
 } from "./lib/cache-audit-core.js";
 
 const AWS_TIERS = [512, 1024, 4096]; // Bedrock 可缓存 checkpoint 档位 (5 分钟 / 1 小时 TTL)
+
+// ---- 探针工作根 (2026-11-08 隔离) ----
+// 机制审计要的是"装配管线"不变量, 不是"开发者当前工作数据"快照。曾直接用仓库根当 agent
+// root —— 开发者在 .ppx/plan/ 里写的进度/发现 (含历史日期等事实内容) 会周期性命中
+// volatile_isolation 的 date 模式, 把机制门禁打成数据门禁 (2026-11-08 实锤)。
+// 这里改用固定名隔离根: 名字刻意避开 mkdtemp-dir 模式 (ppx-…-6位随机尾), root 位于
+// os.tmpdir() 下时 volatileHits 的 tmpdir-path 检查自动豁免; persona/技能用确定性回退 +
+// seed 技能, 计划区为空。会话写盘仍在各自 mkdtemp dataDir, 探针根每次重建。
+const PROBE_ROOT = path.join(os.tmpdir(), "ppx-probe-root");
+function makeProbeRoot() {
+  fs.rmSync(PROBE_ROOT, { recursive: true, force: true });
+  fs.mkdirSync(path.join(PROBE_ROOT, "config"), { recursive: true });
+  fs.writeFileSync(path.join(PROBE_ROOT, "config", "ppx.json"),
+    JSON.stringify({ providers: [], skills: { user_dir: "" } }), "utf8");
+  const skillDir = path.join(PROBE_ROOT, "skills", "probe", "seed-skill");
+  fs.mkdirSync(skillDir, { recursive: true });
+  fs.writeFileSync(path.join(skillDir, "SKILL.md"),
+    "---\nname: seed-skill\ndescription: 前缀缓存审计探针种子技能\n---\n\n# seed-skill\n保证【可用技能】块非空。\n",
+    "utf8");
+  return PROBE_ROOT;
+}
 
 // ---------------- 参数解析 ----------------
 function parseArgs(argv) {
@@ -78,16 +102,19 @@ if (args.help) {
 // ---------------- 主流程 ----------------
 async function main(args) {
   let result;
+  const probeRoot = makeProbeRoot();
   try {
     result = await runFullAudit({
       fixture: args.fixture ? FIXTURES[args.fixture] : null,
-      projectRoot: PROJECT_ROOT,
+      projectRoot: probeRoot,
       keepCaptures: args.verbose,
     });
   } catch (e) {
     console.error("✗ 审计无法完成 (会话捕获失败): " + (e && e.stack ? e.stack : e));
     process.exitCode = 1;
     return;
+  } finally {
+    try { fs.rmSync(probeRoot, { recursive: true, force: true }); } catch { /* 清理失败不影响结论 */ }
   }
 
   const { checks, metrics } = result;

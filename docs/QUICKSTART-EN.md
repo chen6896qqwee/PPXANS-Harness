@@ -40,14 +40,15 @@ ppx                      # interactive chat (CLI);  npm run chat is the same thi
 node bin/ppx.js --version
 ```
 
-Web UI + HTTP channel:
+Desktop client (and headless HTTP for developers):
 
 ```bash
-npm start                # Web UI + HTTP on http://127.0.0.1:8899 (one process, one port)
-node bin/ppx-serve.js    # headless HTTP only (/health, /message, /mcp)
+npm install              # once: installs the desktop runtime (Electron)
+npm start                # desktop client window (no browser, no port to remember)
+node bin/ppx.js serve   # headless HTTP only (/health, /message, /mcp) — developer use
 ```
 
-## 4. Skills (built-in: 67, across 12 domains)
+## 4. Skills (built-in: 71, across 12 domains)
 
 - `skill_search { query }` — find a skill by keyword
 - `load_skill { name }` — load full instructions on demand
@@ -68,7 +69,7 @@ node bench/falsify.js                    # judge-falsifiability gate: reference 
 
 ## 7. MCP
 
-PPXANS ships an MCP server (`ppx-serve` exposes `/mcp`) and can act as an MCP client. Point any MCP-compatible tool at it.
+PPXANS ships an MCP server (`ppx mcp serve` exposes `/mcp`) and can act as an MCP client. Point any MCP-compatible tool at it.
 
 Two ways to connect:
 

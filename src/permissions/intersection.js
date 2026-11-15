@@ -1,4 +1,4 @@
-// src/permissions/intersection.js — 委派权限交集 (吸收 Codex permission_profile_intersection)
+// src/permissions/intersection.js — 委派权限交集 (设计溯源 docs/PROVENANCE.md#codex; 自研)
 // 不变量原文 (codex-rs/protocol/src/permission_profile_intersection.rs):
 //   "A policy cannot be intersected without weakening either input."
 //   —— 两个权限档位的交集结果**永远不得比任何一个输入更宽**。
@@ -36,7 +36,7 @@ export const APPROVAL_RESTRICTION_RANK = {
   [AskForApproval.UNLESS_TRUSTED]: 3,
 };
 // 规则动作的严格度 (deny 最大)。
-export const RULE_ACTION_RANK = { allow: 0, ask: 1, deny: 2 };
+const RULE_ACTION_RANK = { allow: 0, ask: 1, deny: 2 };
 
 const MOST_RESTRICTIVE_SANDBOX = SandboxPolicy.READ_ONLY;
 const MOST_RESTRICTIVE_APPROVAL = AskForApproval.UNLESS_TRUSTED;
@@ -63,6 +63,7 @@ function resolveRoot(raw, label) {
   const s = raw.trim();
   if (!s) return { none: true };
   // glob 字符: 落点集合无法穷举 → 不可解析 (Codex: glob terminates the intersection)。
+  // eslint-disable-next-line no-useless-escape
   if (/[*?\[\]<>|"]/.test(s)) return { bad: `${label}.workspaceRoot 含通配/非法字符: ${s}` };
   // 设备命名空间与 UNC (symlink-ish 重解析路径): isWithinRoot 的字符串包含保证不了真实落点,
   // 且 reparse point 背后是什么在纯函数里不可判 → 终止, 不假装查过。

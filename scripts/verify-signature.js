@@ -18,6 +18,7 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { noteCatch } from "../src/utils/catch-log.js";
 
 const args = process.argv.slice(2);
 const inputs = [];
@@ -150,7 +151,7 @@ function parseRecords(ps) {
     if (!text.startsWith("{")) continue;
     try {
       out.push(JSON.parse(text));
-    } catch {
+    } catch (e) { noteCatch(e);
       // PowerShell 偶发警告行, 忽略
     }
   }

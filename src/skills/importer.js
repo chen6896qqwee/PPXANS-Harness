@@ -16,6 +16,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DOMAIN_IDS } from "./registry.js";
+import { noteCatch } from "../utils/catch-log.js";
 
 export const IMPORT_LIMITS = {
   maxFiles: 40,             // 单个技能最多导入的附随文件数
@@ -318,12 +319,12 @@ export async function importSkills(opts = {}) {
             fs.writeFileSync(abs, body, "utf8");
             entry.bytes += body.length;
             entry.files.push(rel);
-          } catch { /* 单个附随文件失败不影响技能本体 */ }
+          } catch (e) { noteCatch(e); /* 单个附随文件失败: 报告里要能查到是哪个仓库拉取坏了 */ }
         }
       }
       report.imported.push(entry);
     } catch (e) {
-      report.failed.push({ path: skillPath, error: e.message });
+      report.failed.push({ path: skillPath, error: e.message }); /* swallowed-ok(2026-11-03): 失败项已记入报告 */
     }
   }
   return report;

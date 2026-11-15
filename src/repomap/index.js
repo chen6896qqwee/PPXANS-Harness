@@ -1,4 +1,4 @@
-// src/repomap/index.js - 仓库地图 (吸收 aider 思路, 纯 JS 实现, 零依赖)
+// src/repomap/index.js - 仓库地图 (设计溯源 docs/PROVENANCE.md#aider 思路, 纯 JS 实现, 零依赖)
 // 职责: 递归扫描仓库 -> 正则提取 def/ref -> 引用图 -> PageRank 排序 -> token 预算内渲染目录+签名骨架
 // 设计目标: 给 LLM 一段"地图", 在长上下文压缩/摘要时保留最重要的定义与引用关系。
 
@@ -65,7 +65,7 @@ function defRegexes(ext) {
 // 从单个文件内容提取 { defs, defNames, refSet, refCounts, imports }
 // (2026-10-02 导出: wiki 生成器复用符号提取)
 // 2026-10-24 (R2): 新增 imports 提取 (JS/TS) —— 供跨文件 import 边, 替代"仅同文件共现"的近似
-export function extractSymbols(content, ext) {
+function extractSymbols(content, ext) {
   const lines = content.split(/\r?\n/);
   const defs = [];
   const defLineSet = new Set();

@@ -1,6 +1,6 @@
-// src/utils/session-key.js - 会话键编码 scheme (2026-10-07 吸收自 TencentCloud/Octop)
+// src/utils/session-key.js - 会话键编码 scheme (设计溯源 docs/PROVENANCE.md#octop)
 //
-// 吸收来源: Octop `docs/architecture.md` 的 "Conversation surfaces" 表。
+// 设计对照: Octop `docs/architecture.md` 的 "Conversation surfaces" 表; 本文件自研。
 //   它把每个入口的会话键编码成同一套形状:
 //     <agent_id>:<surface>:<session>:<dm|group>
 //   例如 `aid:dashboard:user_7:dm` / `aid:feishu:oc_xxx:group` / `aid:cli:user_7:dm`。
@@ -15,8 +15,8 @@
 // 设计取舍: **纯函数 + 不做隐式归一**。键是跨进程/跨天持久化的标识, 悄悄改写历史键会让
 // 老会话凭空消失; 因此解析失败一律返回 null 并保留原键, 由调用方决定怎么兜。
 
-export const SURFACES = ["cli", "web", "http", "api", "feishu", "wechat", "cron", "legion", "worker", "test", "unknown"];
-export const SCOPES = ["dm", "group"];
+const SURFACES = ["cli", "web", "http", "api", "feishu", "wechat", "telegram", "cron", "legion", "worker", "test", "unknown"];
+const SCOPES = ["dm", "group"];
 
 // 安全段字符: 刻意**不含 ':'** —— 冒号是段分隔符, 一旦出现在段里, 反解析就会错位
 // (群聊消息串进单聊历史、两个用户互相覆盖, 都不会立刻报错, 是最难查的一类)。

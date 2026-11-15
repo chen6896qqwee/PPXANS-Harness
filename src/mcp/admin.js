@@ -1,6 +1,8 @@
 // src/mcp/admin.js - MCP 管理虚拟工具 (零依赖)
 // 把会话管理 / 提供方 CRUD / 设置读写 / 任务面板 暴露为标准 MCP 工具,
-// 让 web 前端完全走 MCP 协议, 逐步退役 /api/* REST 端点。
+// 服务外部 MCP 宿主 (Claude Desktop / Cursor 等)。与 REST /api/* 是**共存**关系
+// (v5.0 webapp 走 REST, 见 src/channels/http.js 头注; 退役目标只是无 UI 消费方的
+// Gen-1 非流式端点), 不是"前端全面切 MCP" —— 旧表述已随 2026-11-14 双轨收敛轮更正。
 // 这些是"虚拟工具" (注入 McpServer extraTools), 不进 catalog, 不污染 LLM 工具列表。
 import {
   listProviders, addProvider, updateProvider, removeProvider, reorderProviders,
@@ -13,7 +15,7 @@ import path from "node:path";
 
 // 任务面板技能模板库: 按技能预置步骤列表, 新建任务时可选 (供 web 前端渲染下拉)
 // 每个模板 = { id, label, steps: string[] }
-export const TASK_TEMPLATES = [
+const TASK_TEMPLATES = [
   {
     id: "apt",
     label: "Agent 专业训练评估 (agent-professional-training)",
@@ -106,7 +108,10 @@ function wrap(fn) {
 //   createAdminTools 的签名与返回结构 ({ tools, taskBoard }) 完全不变。
 export function createAdminTools(agent) {
   const root = agent.root;
-  const taskBoard = createTaskBoard(root);
+  // 2026-11-14 (双轨收敛轮, G-A): TaskBoard 必须与 REST /api/tasks 同源 (agent.getTaskBoard)。
+  //   此前自建实例 + 各自整表覆写 data/tasks.json = 一边建任务另一边一写就抹掉 (P0 数据丢失);
+  //   R17 只接通了 agent↔REST, 这里是漏掉的第三条腿。
+  const taskBoard = agent.getTaskBoard?.() ?? createTaskBoard(root);
   return {
     tools: [
       ...sessionTools(agent),
@@ -125,6 +130,7 @@ function sessionTools(agent) {
       name: "ppx.sessions.list",
       title: "会话列表",
       description: "列出全部会话 (key/count/lastTs/title)。等价于旧 REST /sessions。",
+      readOnly: true,
       inputSchema: { type: "object", properties: {} },
       execute: wrap(() => (agent.sessionStore && typeof agent.sessionStore.list === "function" ? agent.sessionStore.list() : [])),
     },
@@ -132,6 +138,7 @@ function sessionTools(agent) {
       name: "ppx.sessions.history",
       title: "会话历史",
       description: "读取指定会话的消息历史 (role/content 数组)。等价于旧 REST /sessions/:key/history。",
+      readOnly: true,
       inputSchema: { type: "object", properties: { key: { type: "string", description: "会话 key" } }, required: ["key"] },
       execute: wrap((args) => (agent.sessionStore && typeof agent.sessionStore.deriveMessages === "function" ? agent.sessionStore.deriveMessages(String(args.key)) : [])),
     },
@@ -167,6 +174,7 @@ function providerTools(agent, root) {
       name: "ppx.providers.list",
       title: "模型提供方列表",
       description: "列出全部 LLM 提供方 (key 已抹掉, 只留 api_key_set 标志)。等价于旧 REST /api/providers。",
+      readOnly: true,
       inputSchema: { type: "object", properties: {} },
       execute: wrap(() => { ensureConfigDir(root); const p = listProviders(root); return { providers: p, default_id: p[0] ? p[0].id : null }; }),
     },
@@ -199,22 +207,13 @@ function providerTools(agent, root) {
       name: "ppx.providers.test",
       title: "探测提供方",
       description: "健康探测指定提供方 (复用 agent 客户端, 无真实网络时返回可读结果)。",
+      readOnly: true,
       inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
       execute: wrap(async (args) => { ensureConfigDir(root);
-        const id = String(args.id);
-        let client = (agent.allProviders || []).find((c) => c.providerId === id);
-        let fromCache = !!client;
-        if (!client && agent.llm && agent.llm.providerId === id) { client = agent.llm; fromCache = true; }
-        if (!client) {
-          const { readConfig } = await import("../config/providers.js");
-          const { providers } = readConfig(root);
-          const p = providers.find((x) => x.id === id);
-          if (!p) throw new Error("提供方不存在");
-          const { LLMClient } = await import("../llm/client.js");
-          client = new LLMClient(p);
-        }
-        const healthy = await client.health();
-        return { ok: true, healthy, detail: healthy ? "API 端点可达" : "探测失败, 请检查 key/base_url", source: fromCache ? "agent-cache" : "disk-config" };
+        // 2026-11-14 (双轨收敛轮, G-C): 探活链收敛到 src/web/provider-ops.js —— 与 REST
+        //   POST /api/providers/test 同一实现, detail 文案不再漂移。
+        const { testProviderClient } = await import("../web/provider-ops.js");
+        return await testProviderClient(agent, String(args.id));
       }),
     },
     {
@@ -235,6 +234,7 @@ function settingsTools(agent, root) {
       name: "ppx.settings.get",
       title: "读取设置",
       description: "读取可编辑设置 (用户名/HTTP 端口/安全/agent 预设)。敏感字段只回 set 标志。",
+      readOnly: true,
       inputSchema: { type: "object", properties: {} },
       execute: wrap(() => { ensureConfigDir(root); return { settings: getSettings(root) }; }),
     },
@@ -243,7 +243,20 @@ function settingsTools(agent, root) {
       title: "更新设置",
       description: "更新设置 (patch: {user?, http?, security?, agent?, mcp?, tools?})。热重载立即生效。",
       inputSchema: { type: "object", properties: { patch: { type: "object" } }, required: ["patch"] },
-      execute: wrap(async (args) => { ensureConfigDir(root); const settings = updateSettings(root, args.patch || {}); agent.reloadSettings(); return { ok: true, settings }; }),
+      execute: wrap(async (args) => {
+        ensureConfigDir(root);
+        const settings = updateSettings(root, args.patch || {});
+        agent.reloadSettings();
+        // 2026-11-14 (双轨收敛轮, G-B): 补审计 —— REST PUT /api/settings 一直写 settings_updated
+        //   (哈希链), MCP 通道此前静默。只记键名不记值 (值可能含密钥), 与 REST 脱敏口径逐字一致。
+        try {
+          agent.audit?.appendEvent?.({
+            event: "settings_updated",
+            fields: { keys: Object.keys(args.patch || {}).slice(0, 20).join(","), ok: true, via: "mcp" },
+          });
+        } catch { /* 审计降级不阻断设置 */ }
+        return { ok: true, settings };
+      }),
     },
 
   ];
@@ -256,6 +269,7 @@ function taskTools(agent, taskBoard) {
       name: "ppx.task.templates",
       title: "任务模板列表",
       description: "列出任务面板内置技能模板 (按技能预置步骤), 供新建任务时选用。含 agent 训练评估/会话重命名/提示词方案/代码审查/MCP 合规/技能吸收。",
+      readOnly: true,
       inputSchema: { type: "object", properties: {} },
       execute: wrap(() => TASK_TEMPLATES),
     },
@@ -274,6 +288,7 @@ function taskTools(agent, taskBoard) {
       name: "ppx.task.list",
       title: "任务列表",
       description: "列出全部任务 (含每步状态)。等价于任务面板读操作。",
+      readOnly: true,
       inputSchema: { type: "object", properties: {} },
       execute: wrap(() => taskBoard.list()),
     },
@@ -309,7 +324,11 @@ function taskTools(agent, taskBoard) {
         if (!t) throw new Error("任务不存在");
         taskBoard.update({ id, status: "running" });
         const prompt = str(args.prompt) || `执行任务「${t.title}」: ${t.description || ""}`;
-        const reply = await agent.chat(prompt, { sessionKey: "task:" + id });
+        const sessionKey = "task:" + id;
+        const run = () => agent.chat(prompt, { sessionKey });
+        const reply = typeof agent.chatTracked === "function"
+          ? (await agent.chatTracked(prompt, { source: "mcp-task", from: id, sessionKey, cause: "external", run })).reply
+          : await run();
         // 全部步骤置 done, 任务置 done
         taskBoard.complete(id, reply);
         return { ok: true, id, result: reply };

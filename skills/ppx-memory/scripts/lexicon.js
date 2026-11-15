@@ -42,11 +42,11 @@ const CONCEPTS = [
   // ---- 性能 ----
   ["快", "慢", "性能", "并发", "吞吐", "延迟", "卡", "响应", "提速", "瓶颈"],
   ["锁", "加锁", "同步", "阻塞", "竞争", "race", "lock", "队列", "排队"],
-  ["开销", "成本", "花费", "占用", "token", "预算", "省", "浪费"],
+  ["开销", "成本", "花费", "花在", "花了", "花掉", "token", "预算", "省", "浪费"],
   ["缓存", "cache", "命中", "复用", "预热"],
 
   // ---- 质量 / 验证 ----
-  ["测试", "基准", "bench", "跑测", "用例", "回归", "验证", "验收"],
+  ["测试", "基准", "bench", "跑测", "用例", "回归", "验证", "验收", "离线"],
   ["覆盖率", "cover", "八成", "比例", "标准"],
   ["检查", "巡检", "自愈", "体检", "健康", "监控", "告警", "定时"],
   ["失败", "报错", "错误", "异常", "崩", "坏", "挂"],
@@ -55,7 +55,8 @@ const CONCEPTS = [
   // ---- 安全 ----
   ["安全", "危险", "风险", "威胁", "攻击", "漏洞"],
   ["拦截", "拦", "阻止", "禁止", "拒绝", "deny", "守卫", "防线", "策略", "闸门"],
-  ["篡改", "防改", "验签", "哈希", "hash", "sha", "签名", "审计", "链", "校验"],
+  ["熔断", "断路器", "叫停", "中断", "停止", "暂停", "刹车", "熔断器"],
+  ["篡改", "防改", "被改", "改动", "改坏", "验签", "哈希", "hash", "sha", "签名", "审计", "链", "校验"],
   ["密钥", "凭证", "secret", "key", "令牌", "token", "环境变量", "认证", "授权"],
   ["验证码", "短信", "手机号", "二次验证", "otp", "网关"],
   ["权限", "授权", "角色", "角色权限", "访问控制", "rbac"],
@@ -74,12 +75,13 @@ const CONCEPTS = [
   ["团队", "同事", "成员", "协作", "分工"],
   ["入职", "新人", "上手", "培训", "交接", "文档"],
   ["客户", "客人", "用户", "甲方", "投诉", "不满", "反馈"],
+  ["价格", "报价", "报价单", "价钱", "单价", "费用", "收费"],
   ["回复", "响应", "答复", "处理", "跟进"],
 
   // ---- 数据 / 存储 ----
   ["数据库", "db", "sql", "表", "连接池", "连接数", "存储"],
   ["日志", "log", "记录", "痕迹", "流水", "保留", "归档"],
-  ["文件", "目录", "路径", "文件夹", "path", "dir", "盘"],
+  ["目录", "路径", "文件夹", "path", "dir", "盘"],
   ["图片", "图像", "照片", "出图", "尺寸", "分辨率", "像素"],
   ["视频", "素材", "片子", "剪辑", "硬盘"],
   ["模型", "大模型", "llm", "推理", "端点", "endpoint", "provider"],
@@ -163,6 +165,35 @@ export function conceptMatches(query) {
   return hit;
 }
 
+// 整词扩展 (2026-11-12): 命中簇的成员**原词**, 不做 bigram 拆解。
+//   expandedTerms 输出 bigram 供 BM25 索引交集, 但拆解会把 "同步会" 变成 "同步" ——
+//   "同步" 本身又是「锁/并发」簇的词, 于是"什么时候开会"意外命中"同步文件锁"那类事实。
+//   概念路改用整词匹配: 只有事实里真的出现该成员词才算桥, 跨词边界噪声消失。
+//   簇权重: 查询里有多个词同指一簇时, 该簇更可信 (1 + 0.5×(命中词数-1))。
+export function expandedTermWords(query) {
+  const matched = conceptMatches(query);
+  if (!matched.size) return [];
+  const qlow = String(query || "").toLowerCase();
+  const qTokens = cjkGrams(query);
+  const seen = new Set();
+  const out = [];
+  for (const [ci, qterms] of matched) {
+    const weight = 1 + 0.5 * Math.max(0, qterms.size - 1);
+    for (const raw of CONCEPTS[ci]) {
+      const term = raw.toLowerCase();
+      if (seen.has(term)) continue;
+      const isLatin = /^[a-z0-9][a-z0-9._-]*$/.test(term);
+      // 查询自身已含的词不算"新信息"
+      if (isLatin ? qTokens.has("en:" + term) : qlow.includes(term)) continue;
+      // 单字概念太泛 (改/盘/快), 作桥只会带来噪声
+      if (!isLatin && term.length < 2) continue;
+      seen.add(term);
+      out.push({ term, weight });
+    }
+  }
+  return out;
+}
+
 // 扩展词集合 (bigram 口径, 直接可与 BM25 的 _bigramSet 交集)。
 // 命中簇里**除查询自身已含的词以外**的成员 —— 只补充信息, 不重复原查询。
 export function expandedTerms(query) {
@@ -182,4 +213,4 @@ export function expandedTerms(query) {
 
 export const CONCEPT_COUNT = CONCEPTS.length;
 
-export default { conceptMatches, expandedTerms, CONCEPT_COUNT };
+export default { conceptMatches, expandedTerms, expandedTermWords, CONCEPT_COUNT };

@@ -2,6 +2,7 @@
 // 轻量任务工作区: 任务 = { id, title, description, status, steps[], result, createdAt, updatedAt }
 // 持久化到 <root>/data/tasks.json (原子写), 支持 create/list/get/update/step/delete/complete。
 // 供 MCP 工具 ppx.task.* 与 web 前端任务面板使用。
+import { noteCatch } from "../utils/catch-log.js";
 import path from "node:path";
 import { readJson, writeJson } from "../utils/store.js";
 import { shortId } from "../utils/id.js";
@@ -29,7 +30,7 @@ export class TaskBoard {
   _save() {
     try {
       writeJson(this.file, { tasks: [...this.tasks.values()] });
-    } catch (e) { /* 持久化失败不阻断内存操作 */ }
+    } catch (e) { noteCatch("src/mcp/tasks.js#writeJson", e); /* 持久化失败不阻断内存操作 */ }
   }
 
   _normalize(t) {

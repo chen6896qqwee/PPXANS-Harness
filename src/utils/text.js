@@ -18,10 +18,6 @@ export function setTokenEstimator(fn) {
   _customEstimator = typeof fn === "function" ? fn : null;
 }
 
-export function getTokenEstimator() {
-  return _customEstimator;
-}
-
 function isCjk(code) {
   return (code >= 0x4e00 && code <= 0x9fff)   // CJK 统一汉字
     || (code >= 0x3400 && code <= 0x4dbf)     // 扩展 A
@@ -57,4 +53,14 @@ export function estimateTokens(s) {
   const base = estimateTokensBase(s);
   const factor = tokenCalibrationFactor();
   return factor === 1 ? base : Math.max(1, Math.ceil(base * factor));
+}
+
+// ---- 硬截断 (2026-11-12) ----
+// clip 与上面的 token 估算无关, 只是把 "按字符上限截断" 收敛成一份实现:
+//   flow/router、workgraph/store、workgraph/checkpoints 原先各抄了一份。
+// 语义刻意保持"硬截断": 不加省略号、不合并空白 —— 落盘摘要/检查点/审计事件
+// 对原文前缀有字节级要求, 加装饰符反而改变事实。需要给人看的缩写由各调用方自己加。
+export function clip(v, n) {
+  const s = String(v ?? "");
+  return s.length > n ? s.slice(0, n) : s;
 }

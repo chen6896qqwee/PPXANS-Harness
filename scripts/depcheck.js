@@ -11,32 +11,29 @@
 //   node scripts/depcheck.js [rootDir]      # 默认当前目录
 //   退出码: 0 = 完整, 1 = 存在缺失模块
 //
-// 扫描范围: 全树 .js/.mjs/.cjs, 跳过 node_modules / .git / data / dist / 隔离区
+// 扫描范围: 全树 .js/.mjs/.cjs, 跳过 node_modules / .git / data / dist / 隔离区 / .ppxtest
 // dist-desktop: electron-builder 产物, 内含源码副本, 扫描会误报"缺失模块"
 // 只检查【相对路径】import (`./x`, `../x`); node: 内置与裸包名 (外部依赖) 不在此职责内。
 
 import fs from "node:fs";
 import path from "node:path";
+import { walkFiles } from "./lib/walk-js.js";
 
 const ROOT = path.resolve(process.argv[2] || ".");
-const SKIP_DIRS = new Set(["node_modules", ".git", "data", "dist", "dist-desktop", ".cache", ".stage", ".x"]);
-const EXTS = new Set([".js", ".mjs", ".cjs"]);
+// .ppxtest 是冒烟/探针的临时归档目录 (git 忽略), 里面的脚本会引用随时可能被删的模块 ——
+//   2026-11-08: boundary-probe.mjs 引用已移除的 seam/registry.js, 让整个 depcheck 变成 P0 阻塞。
+//   临时产物不参与依赖完整性判定。
+const SKIP_DIRS = ["node_modules", ".git", "data", "dist", "dist-desktop", ".cache", ".stage", ".x", ".ppxtest"];
 const RESOLVE_SUFFIXES = ["", ".js", ".mjs", ".cjs", ".json"];
 
-// ---- 收集待扫文件 ----
-function walk(dir, out = []) {
-  let entries;
-  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return out; }
-  for (const e of entries) {
-    if (e.isDirectory()) {
-      if (SKIP_DIRS.has(e.name)) continue;
-      walk(path.join(dir, e.name), out);
-    } else if (EXTS.has(path.extname(e.name))) {
-      out.push(path.join(dir, e.name));
-    }
-  }
-  return out;
-}
+// ---- 收集待扫文件 (读不了的目录跳过, 不因一个坏目录中断整轮体检) ----
+const files = walkFiles(ROOT, { exts: [".js", ".mjs", ".cjs"], skipDirs: SKIP_DIRS, tolerant: true });
+
+// ---- 夹具生成器豁免 (2026-11-14): bench/tasks.js + bench/offline-plans.js 的字符串里
+//   故意含有 "import ... from \"./x.js\"" —— 那是**写给沙箱的夹具内容** (多步链任务素材),
+//   不是本仓真实依赖; 其正确性由 bench/falsify.js (oracle 判正/变异体判负) 与离线基准双门
+//   单独覆盖。depcheck 的字符串保真扫描对它们是误报源, 显式豁免而不是全局削弱字符串检测。
+const IGNORE_FILES = [/^bench[\\/]tasks\.js$/, /^bench[\\/]offline-plans\.js$/];
 
 // ---- 去注释 / 去字符串: 避免把注释里的示例 import 当成真实依赖 ----
 // 用状态机而不是正则 —— 正则在 "http://..." / 模板串 / 正则字面量上会误判。
@@ -49,7 +46,6 @@ function stripComments(src) {
   let i = 0;
   const n = src.length;
   let state = "code"; // code | line | block | single | double | template
-  let prev = "";
   while (i < n) {
     const c = src[i];
     const c2 = src[i + 1];
@@ -59,7 +55,7 @@ function stripComments(src) {
       if (c === '"') { state = "double"; out += c; i++; continue; }
       if (c === "'") { state = "single"; out += c; i++; continue; }
       if (c === "`") { state = "template"; out += c; i++; continue; }
-      out += c; prev = c; i++; continue;
+      out += c; i++; continue;
     }
     if (state === "line") { if (c === "\n") { state = "code"; out += "\n"; } i++; continue; }
     if (state === "block") {
@@ -72,7 +68,7 @@ function stripComments(src) {
     if ((state === "double" && c === '"') || (state === "single" && c === "'") || (state === "template" && c === "`")) {
       state = "code";
     }
-    out += c; prev = c; i++;
+    out += c; i++;
   }
   return out;
 }
@@ -94,10 +90,11 @@ function resolveTarget(fromFile, spec) {
 }
 
 // ---- 主流程 ----
-const files = walk(ROOT);
 const missing = new Map(); // 目标绝对路径 -> 引用方相对路径集合
 
 for (const f of files) {
+  const relFile = path.relative(ROOT, f);
+  if (IGNORE_FILES.some((re) => re.test(relFile))) continue;
   let src;
   try { src = fs.readFileSync(f, "utf8"); } catch { continue; }
   const code = stripComments(src);

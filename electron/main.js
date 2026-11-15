@@ -1,6 +1,7 @@
 // electron/main.js — 皮皮虾桌面端主进程
 //
-// 职责边界: Electron 只做"壳", 内核仍是 bin/ppx-web.js 的同源单端口服务。
+// 职责边界: Electron 是唯一的用户入口; 内核以本地回环服务在应用内部运行,
+//   端口与地址不对用户暴露 (无浏览器、无面板地址、无需手动起服务)。
 //   1) 单实例: 重复启动只聚焦已有窗口
 //   2) 工作副本: 打包版把内置代码播种到可写目录 (自改代码闭环需要可写 root)
 //   3) 服务生命周期: 以 ELECTRON_RUN_AS_NODE 拉起子进程, 窗口关闭即回收
@@ -8,153 +9,105 @@
 //
 // 端口策略: 首选配置端口; 若已被本应用占用则直接接入; 否则向后找空闲端口。
 //
+// 结构 (2026-11-03 拆分): 纯函数域已拆到 app-meta / app-log / seed / server-proc /
+//   update-flow / smoke / diagnostics; 本文件保留生命周期状态的唯一所有权
+//   (win/tray/serverChild/quitting/quit 链…), 域模块经 ctx getter 借读, 不共享可变量。
+//
 // 环境变量:
 //   PPX_ROOT          覆盖工作副本目录 (dev 默认仓库根, 打包版默认 userData/workspace)
 //   PPX_PORT          覆盖首选端口
-//   PPX_DESKTOP_SMOKE 1 = 冒烟模式: 不显示窗口, 加载完成后截图退出
+//   PPX_DESKTOP_SMOKE 1 = 冒烟模式: 不显示窗口, 加载后跑 DOM/API 断言, 截图并写 JSON 结果
 //   PPX_DESKTOP_SMOKE_OUT 冒烟截图输出路径
-import { app, BrowserWindow, Menu, dialog, shell, session, clipboard, screen } from "electron";
-import crypto from "node:crypto";
+//   PPX_DESKTOP_SMOKE_RESULT 冒烟结果 JSON 路径 (缺省 = 截图同目录 .result.json)
+//   PPX_DESKTOP_USER_DATA 覆盖桌面 userData 目录 (冒烟/多实例测试隔离)
+//   PPX_DATA_DIR 透传给内核, 隔离 data/ (冒烟脚本使用临时目录)
+import { app, BrowserWindow, Menu, Tray, Notification, dialog, globalShortcut, nativeImage, shell, session, screen } from "electron";
 import fs from "node:fs";
-import http from "node:http";
-import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { spawn, spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { readPrefs, setPref } from "../src/services/desktop/prefs.js";
+import { APP_ROOT, APP_NAME, APP_DATA_HOME, DEV_ROOT, ICON, SMOKE } from "./app-meta.js";
+import { log } from "./app-log.js";
+import { seedWorkspace, resetWorkspace } from "./seed.js";
+import { createWindowState, isAppUrl } from "./window-state.js";
+import { configPort, pickPort, requestGracefulShutdown, createServerProc, probe, desktopSecret } from "./server-proc.js";
+import { createLivenessSupervisor } from "./liveness.js";
+import { createUpdateFlow } from "./update-flow.js";
+import { smokeErrors, createSmoke } from "./smoke.js";
+import { createDiagnostics } from "./diagnostics.js";
 
-const HERE = path.dirname(fileURLToPath(import.meta.url));
-const DEV_ROOT = path.resolve(HERE, "..");
-// 打包后 electron/main.js 位于 resources/app/electron/, 代码根是上一级
-const APP_ROOT = app.isPackaged ? path.join(process.resourcesPath, "app") : DEV_ROOT;
-const APP_NAME = "皮皮虾";
-const SPAWN_DIRS = ["bin", "src", "skills", "experts", "plugins", "references", "public", "scripts", "test", "bench", "fixtures"];
-// config 不再整目录播种: ppx.json 是用户配置, 打包机上的版本绝不能被复制给用户。
-const SPAWN_CONFIG_FILES = ["ppx.json.example", "identity.md", "ishiki.md"];
-const SPAWN_FILES = ["package.json", "README.md", "LICENSE", "CHANGELOG.md", "PPX.md"];
-// 升级时这些用户资产已存在就不覆盖 (代码目录仍整体更新, 旧版先完整备份)
-const USER_OWNED = new Set(["config/ppx.json", "config/identity.md", "config/ishiki.md", "PPX.md"]);
-const UPGRADE_BACKUP_DIRS = [...SPAWN_DIRS, "config"];
-
-// 桌面端数据统一放"本机应用数据目录" (工作副本含代码, 不适合漫游):
-//   Windows %LOCALAPPDATA% / macOS ~/Library/Application Support / Linux ~/.config
-const APP_DATA_HOME = process.platform === "win32"
-  ? (process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"))
-  : app.getPath("appData");
-app.setPath("userData", path.join(APP_DATA_HOME, "PPXANS-Harness-Desktop"));
-
-const SMOKE = process.env.PPX_DESKTOP_SMOKE === "1";
-const ICON = path.join(APP_ROOT, "electron", process.platform === "win32" ? "icon.ico" : "icon.png");
+app.setPath("userData", process.env.PPX_DESKTOP_USER_DATA
+  ? path.resolve(process.env.PPX_DESKTOP_USER_DATA)
+  : path.join(APP_DATA_HOME, "PPXANS-Harness-Desktop"));
 
 // 任务栏分组与通知归属 (Windows)
 if (process.platform === "win32") app.setAppUserModelId("com.ppxans.harness");
 
 let win = null;
+let tray = null;
+let prefs = readPrefs(path.join(app.getPath("userData"), "desktop-prefs.json"));
+const windowState = createWindowState({ app, screen });
+let currentRoot = "";
+let trayHintShown = false;
 let serverChild = null;
 let serverOwned = false;
+let serverPort = 0;
+let renderService = null; // 桌面渲染服务 (v5.0: browse 工具的 Chromium 通道)
 let appUrl = "";
 let booted = false;
 let quitting = false;
 let quitReady = false;
-let logStream = null;
-// 每次启动生成的一次性握手密钥: 只有自己拉起的子进程知道, 用来证明端口上的服务确实是本实例。
-const DESKTOP_SECRET = crypto.randomBytes(32).toString("hex");
+let quitPending = false; // 优雅退出链已启动 (before-quit 可能因 window-all-closed 再次进入)
+
+// 域模块接线: 状态所有权在本文件, 域模块经 ctx 借读 (getter, 不持有引用)
+const serverProc = createServerProc({
+  isQuitting: () => quitting,
+  isBooted: () => booted,
+  isOwned: () => serverOwned,
+  getServerChild: () => serverChild,
+  setServerChild: (c) => { serverChild = c; },
+  onGone: (...a) => onServerGone(...a),
+});
+
+// 外部存活监督 (2026-11-05): 跑在主进程 —— agent 进程死掉后它仍活着, 负责自动拉起。
+//   探活覆盖"进程在但服务卡死"; 指数退避 + 5 分钟窗口最多 3 次, 超限才交回人工对话框。
+const liveness = createLivenessSupervisor({
+  probe: () => probe(serverPort, 1200),
+  restart: restartServer,
+  onExhausted: (reason) => showServerGoneDialog(reason),
+  onEvent: (type, payload) => log(`[supervisor] ${type} ${JSON.stringify(payload || {})}`),
+  isQuitting: () => quitting,
+});
+
+function killServer() {
+  liveness.stop();
+  serverProc.killServerTree();
+}
+
+const { checkForUpdatesInteractive, promptUpdate } = createUpdateFlow({
+  getWin: () => win,
+  notify,
+  setQuitting: (v) => { quitting = v; },
+});
+
+const { runSmoke } = createSmoke({
+  getWin: () => win,
+  getServerPort: () => serverPort,
+  getAppUrl: () => appUrl,
+  killServer,
+  setQuitting: (v) => { quitting = v; },
+});
+
+const { exportDiagnostics } = createDiagnostics({
+  getWin: () => win,
+  getRoot: () => currentRoot,
+  getServerPort: () => serverPort,
+});
 
 function argOf(name) {
   const argv = process.argv.slice(2);
   const i = argv.indexOf(name);
   return i >= 0 && argv[i + 1] && !argv[i + 1].startsWith("--") ? argv[i + 1] : "";
-}
-
-function log(...args) {
-  const line = `[${new Date().toISOString()}] ${args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" ")}`;
-  if (!app.isPackaged) console.log(line);
-  try { logStream?.write(line + os.EOL); } catch { /* 日志失败不致命 */ }
-}
-
-// ---- 工作副本 ----
-// 2026-10-30: 版本化播种。旧实现只在缺少 bin/ppx-web.js 时播种, 安装包升级后工作副本
-//   永远停在首次安装的代码 —— UI 显示新版本号, 实际跑的是旧内核。现在:
-//   · 首次安装: 全量播种
-//   · 版本变化: 先把旧代码+配置完整备份到 workspace.backup-<旧版本>-<时间>,
-//     再覆盖代码目录; data/uploads/.ppx/用户配置/身份文件/PPX.md 原样保留。
-function readSeedMarker(ws) {
-  try {
-    return JSON.parse(fs.readFileSync(path.join(ws, ".desktop-seed.json"), "utf8")) || {};
-  } catch { return {}; }
-}
-
-function copySpawn(fromRoot, toDir, { skipExisting = false } = {}) {
-  for (const dir of SPAWN_DIRS) {
-    const from = path.join(fromRoot, dir);
-    if (fs.existsSync(from)) fs.cpSync(from, path.join(toDir, dir), { recursive: true, force: true });
-  }
-  fs.mkdirSync(path.join(toDir, "config"), { recursive: true });
-  for (const f of SPAWN_CONFIG_FILES) {
-    const from = path.join(fromRoot, "config", f);
-    const to = path.join(toDir, "config", f);
-    if (!fs.existsSync(from)) continue;
-    if (skipExisting && fs.existsSync(to)) continue;
-    fs.copyFileSync(from, to);
-  }
-  for (const f of SPAWN_FILES) {
-    const from = path.join(fromRoot, f);
-    const to = path.join(toDir, f);
-    if (!fs.existsSync(from)) continue;
-    if (skipExisting && USER_OWNED.has(f) && fs.existsSync(to)) continue;
-    fs.copyFileSync(from, to);
-  }
-}
-
-function writeSeedMarker(ws, extra = {}) {
-  fs.writeFileSync(path.join(ws, ".desktop-seed.json"), JSON.stringify({
-    version: app.getVersion(), seededAt: new Date().toISOString(), source: APP_ROOT, ...extra,
-  }, null, 2));
-}
-
-function seedWorkspace(ws) {
-  const hasCode = fs.existsSync(path.join(ws, "bin", "ppx-web.js"));
-  const marker = readSeedMarker(ws);
-  const version = app.getVersion();
-
-  if (!hasCode) {
-    const tmp = ws + ".seeding";
-    fs.rmSync(tmp, { recursive: true, force: true });
-    fs.mkdirSync(tmp, { recursive: true });
-    copySpawn(APP_ROOT, tmp);
-    fs.mkdirSync(path.join(tmp, "uploads"), { recursive: true });
-    writeSeedMarker(tmp);
-    // 播种目录整体替换, 避免半成品被当成已完成
-    fs.rmSync(ws, { recursive: true, force: true });
-    fs.renameSync(tmp, ws);
-    log(`工作副本已播种: ${ws} (v${version})`);
-    return;
-  }
-
-  // 版本未变: 不动盘 (尊重用户自改后的代码)
-  if (marker.version === version) return;
-
-  // 版本升级: 备份旧代码+配置, 再覆盖代码; 数据与用户配置保留
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const backup = `${ws}.backup-${marker.version || "unknown"}-${stamp}`;
-  try {
-    fs.mkdirSync(backup, { recursive: true });
-    for (const dir of UPGRADE_BACKUP_DIRS) {
-      const from = path.join(ws, dir);
-      if (fs.existsSync(from)) fs.cpSync(from, path.join(backup, dir), { recursive: true, force: true });
-    }
-    for (const f of SPAWN_FILES) {
-      const from = path.join(ws, f);
-      if (fs.existsSync(from)) fs.copyFileSync(from, path.join(backup, f));
-    }
-    copySpawn(APP_ROOT, ws, { skipExisting: true });
-    fs.mkdirSync(path.join(ws, "uploads"), { recursive: true });
-    writeSeedMarker(ws, { upgradedFrom: marker.version || null, backup });
-    log(`工作副本已升级: v${marker.version || "?"} → v${version}; 旧代码备份于 ${backup}`);
-  } catch (e) {
-    // 升级失败不阻断启动: 旧工作副本仍可运行, 错误留给日志排查
-    log(`工作副本升级失败 (继续使用旧代码): ${e?.message || e}`);
-  }
 }
 
 function resolveRoot() {
@@ -166,178 +119,131 @@ function resolveRoot() {
   return ws;
 }
 
-function configPort(root) {
-  try {
-    const p = path.join(root, "config", "ppx.json");
-    if (fs.existsSync(p)) {
-      const n = Number(JSON.parse(fs.readFileSync(p, "utf8"))?.channels?.http?.port);
-      if (Number.isFinite(n) && n > 0) return n;
-    }
-  } catch { /* 配置缺失/损坏 → 默认端口 */ }
-  return 8899;
+// ---- 桌面常驻 (2026-11-03): 托盘 / 自启 / 全局热键 / 通知 ----
+function prefsFile() {
+  return path.join(app.getPath("userData"), "desktop-prefs.json");
 }
 
-// ---- 端口探测 ----
-// 2026-10-30: 不再只看 /health.app 字符串 —— 本机任何服务都能返回同名 JSON。
-//   端口上跑的是不是"我们拉起的那个内核", 用一次性密钥的 HMAC 挑战应答证明。
-function probe(port, timeout = 1200, secret = DESKTOP_SECRET) {
-  return new Promise((resolve) => {
-    const challenge = crypto.randomBytes(16).toString("hex");
-    const req = http.get({
-      host: "127.0.0.1", port, path: "/health", timeout,
-      headers: { "x-ppx-desktop-challenge": challenge },
-    }, (res) => {
-      let body = "";
-      res.setEncoding("utf8");
-      res.on("data", (c) => { body += c; });
-      res.on("end", () => {
-        try {
-          const j = JSON.parse(body);
-          if (secret && res.headers["x-ppx-desktop-proof"]) {
-            const want = crypto.createHmac("sha256", secret).update(challenge).digest("hex");
-            const got = String(res.headers["x-ppx-desktop-proof"]);
-            const a = Buffer.from(want), b = Buffer.from(got);
-            j.__verified = a.length === b.length && crypto.timingSafeEqual(a, b);
-          }
-          resolve(j);
-        } catch { resolve(null); }
-      });
-    });
-    req.on("error", () => resolve(null));
-    req.on("timeout", () => { req.destroy(); resolve(null); });
-  });
-}
-
-function portFree(port) {
-  return new Promise((resolve) => {
-    const srv = net.createServer();
-    srv.once("error", () => resolve(false));
-    srv.once("listening", () => srv.close(() => resolve(true)));
-    srv.listen(port, "127.0.0.1");
-  });
-}
-
-async function pickPort(preferred) {
-  const health = await probe(preferred);
-  if (health?.app === "ppxans-harness" && health.__verified) {
-    log(`端口 ${preferred} 已有本实例验证通过的服务, 直接接入`);
-    return { port: preferred, owned: false };
-  }
-  if (health?.app === "ppxans-harness" && !health.__verified) {
-    log(`端口 ${preferred} 上有同名但未通过握手验证的服务, 不复用 (避免接入伪造/旧实例)`);
-  }
-  if (await portFree(preferred)) return { port: preferred, owned: true };
-  for (let p = preferred + 1; p <= preferred + 30; p++) {
-    if (await portFree(p)) {
-      log(`端口 ${preferred} 被占用, 改用 ${p}`);
-      return { port: p, owned: true };
-    }
-  }
-  throw new Error(`端口 ${preferred} 及后续 30 个端口均不可用`);
-}
-
-// ---- 服务子进程 ----
-function openLog() {
-  try {
-    const dir = path.join(app.getPath("userData"), "logs");
-    fs.mkdirSync(dir, { recursive: true });
-    const file = path.join(dir, `server-${new Date().toISOString().slice(0, 10)}.log`);
-    if (fs.existsSync(file) && fs.statSync(file).size > 5 * 1024 * 1024) fs.truncateSync(file, 0);
-    logStream = fs.createWriteStream(file, { flags: "a" });
-  } catch { /* 日志不可写不阻塞启动 */ }
-}
-
-function startServer(root, port) {
-  openLog();
-  const env = {
-    ...process.env,
-    ELECTRON_RUN_AS_NODE: "1",
-    PPX_ROOT: root,
-    PPX_DESKTOP: "1",
-    PPX_DESKTOP_SECRET: DESKTOP_SECRET,
-  };
-  delete env.ELECTRON_NO_ATTACH_CONSOLE;
-  const child = spawn(process.execPath, [
-    path.join(root, "bin", "ppx-web.js"), "--no-open", "--root", root, "--port", String(port),
-  ], {
-    env,
-    stdio: ["ignore", "pipe", "pipe"],
-    windowsHide: true,
-    // POSIX: 独立进程组, 退出时能一次回收内核派生的工具子进程
-    detached: process.platform !== "win32",
-  });
-
-  const pipe = (stream, tag) => {
-    stream.setEncoding("utf8");
-    let buf = "";
-    stream.on("data", (chunk) => {
-      buf += chunk;
-      let i;
-      while ((i = buf.indexOf("\n")) >= 0) {
-        const line = buf.slice(0, i).trimEnd();
-        buf = buf.slice(i + 1);
-        if (line) log(`[${tag}] ${line}`);
-      }
-    });
-  };
-  pipe(child.stdout, "svc");
-  pipe(child.stderr, "svc!");
-
-  child.on("exit", (code, sig) => {
-    if (serverChild === child) serverChild = null;
-    if (quitting) return;
-    if (serverOwned && booted) onServerGone(code ?? sig);
-  });
-  return child;
-}
-
-async function waitReady(port, timeoutMs = 60000) {
-  const t0 = Date.now();
-  while (Date.now() - t0 < timeoutMs) {
-    const h = await probe(port, 800);
-    if (h?.app === "ppxans-harness") return true;
-    if (serverOwned && !serverChild) return false;
-    await new Promise((r) => setTimeout(r, 300));
-  }
-  return false;
-}
-
-// ---- 窗口 ----
-function loadState() {
-  try {
-    const s = JSON.parse(fs.readFileSync(path.join(app.getPath("userData"), "window-state.json"), "utf8"));
-    if (Number.isFinite(s.width) && Number.isFinite(s.height)) return s;
-  } catch { /* 首次启动 */ }
-  return { width: 1280, height: 860 };
-}
-
-function saveState() {
+function showWindow() {
   if (!win || win.isDestroyed()) return;
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+}
+
+function toggleWindow() {
+  if (!win || win.isDestroyed()) return;
+  if (win.isVisible() && win.isFocused()) win.hide();
+  else showWindow();
+}
+
+function notify(title, body, onClick) {
   try {
-    const b = win.getNormalBounds();
-    fs.writeFileSync(path.join(app.getPath("userData"), "window-state.json"), JSON.stringify({
-      x: b.x, y: b.y, width: b.width, height: b.height, maximized: win.isMaximized(),
-    }));
-  } catch { /* 状态记忆失败不致命 */ }
+    if (!Notification.isSupported()) return null;
+    const n = new Notification({ title, body, icon: ICON });
+    if (onClick) n.on("click", onClick);
+    n.show();
+    return n;
+  } catch (e) {
+    log(`系统通知失败: ${e?.message || e}`);
+    return null;
+  }
 }
 
-function withinDisplays(s) {
-  if (!Number.isFinite(s.x) || !Number.isFinite(s.y)) return false;
-  return screen.getAllDisplays().some((d) => {
-    const a = d.workArea;
-    return s.x >= a.x - 40 && s.y >= a.y - 40 && s.x < a.x + a.width - 120 && s.y < a.y + a.height - 80;
-  });
+function applyLoginItem(enabled) {
+  try {
+    if (process.platform === "linux") {
+      const dir = path.join(os.homedir(), ".config", "autostart");
+      const file = path.join(dir, "ppxans-harness.desktop");
+      if (!enabled) { fs.rmSync(file, { force: true }); return; }
+      const devArg = app.isPackaged ? "" : ` "${path.join(APP_ROOT, "electron", "main.js").replace(/"/g, '\\"')}"`;
+      const exec = `"${process.execPath.replace(/"/g, '\\"')}"${devArg}`;
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(file, [
+        "[Desktop Entry]",
+        "Type=Application",
+        `Name=${APP_NAME}`,
+        `Exec=${exec}`,
+        "X-GNOME-Autostart-enabled=true",
+        "Terminal=false",
+        "",
+      ].join("\n"));
+      return;
+    }
+    app.setLoginItemSettings({
+      openAtLogin: Boolean(enabled),
+      openAsHidden: true,
+      path: process.execPath,
+      args: app.isPackaged ? [] : [path.join(APP_ROOT, "electron", "main.js")],
+    });
+  } catch (e) {
+    log(`开机自启设置失败: ${e?.message || e}`); // swallowed-ok(2026-11-03): 已 log 记录
+  }
 }
 
-function isAppUrl(url) {
-  if (!appUrl) return false;
-  return url === appUrl || url.startsWith(appUrl);
+function registerHotkey() {
+  try { globalShortcut.unregisterAll(); } catch { /* 未注册 */ }
+  if (!prefs.hotkeyEnabled || !prefs.globalHotkey) return;
+  try {
+    const ok = globalShortcut.register(prefs.globalHotkey, toggleWindow);
+    if (!ok) log(`全局快捷键注册失败 (可能被占用): ${prefs.globalHotkey}`);
+  } catch (e) {
+    log(`全局快捷键注册异常: ${e?.message || e}`);
+  }
+}
+
+function updatePref(key, value) {
+  prefs = setPref(prefsFile(), prefs, key, value);
+  if (key === "launchAtLogin") applyLoginItem(prefs.launchAtLogin);
+  if (key === "hotkeyEnabled" || key === "globalHotkey") registerHotkey();
+  if (currentRoot) buildMenu(currentRoot);
+  refreshTrayMenu();
+}
+
+function newChat() {
+  showWindow();
+  if (!win || win.isDestroyed()) return;
+  win.webContents.executeJavaScript(
+    `(() => { const b = document.getElementById("btnNew"); if (b && b.offsetParent !== null) b.click(); })()`
+  ).catch(() => {});
+}
+
+function refreshTrayMenu() {
+  if (!tray || tray.isDestroyed()) return;
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: "显示皮皮虾", click: showWindow },
+    { label: "新建对话", click: newChat },
+    { type: "separator" },
+    { label: "检查更新…", click: () => { checkForUpdatesInteractive().catch((e) => log(`检查更新失败: ${e?.message || e}`)); } },
+    { label: "打开日志目录", click: () => shell.openPath(path.join(app.getPath("userData"), "logs")) },
+    { type: "separator" },
+    { label: "退出", click: () => app.quit() },
+  ]));
+}
+
+function createTray() {
+  if (SMOKE) return;
+  try {
+    let img = nativeImage.createFromPath(path.join(APP_ROOT, "electron", "icon.png"));
+    if (img.isEmpty()) {
+      log("托盘图标缺失, 跳过托盘");
+      return;
+    }
+    if (process.platform !== "darwin") img = img.resize({ width: 16, height: 16 });
+    tray = new Tray(img);
+    tray.setToolTip(APP_NAME);
+    tray.on("click", toggleWindow);
+    tray.on("double-click", showWindow);
+    refreshTrayMenu();
+  } catch (e) {
+    log(`托盘创建失败: ${e?.message || e}`);
+  }
 }
 
 function createWindow() {
-  const st = loadState();
+  const st = windowState.load();
   win = new BrowserWindow({
-    ...(withinDisplays(st) ? { x: st.x, y: st.y } : {}),
+    ...(windowState.withinDisplays(st) ? { x: st.x, y: st.y } : {}),
     width: st.width,
     height: st.height,
     minWidth: 960,
@@ -357,19 +263,38 @@ function createWindow() {
   });
   if (st.maximized) win.maximize();
   win.once("ready-to-show", () => { if (!SMOKE) win.show(); });
-  win.on("close", saveState);
+  win.on("close", (e) => {
+    windowState.save(win);
+    if (quitting || !prefs.closeToTray) return;
+    e.preventDefault();
+    win.hide();
+    if (!trayHintShown) {
+      trayHintShown = true;
+      notify("皮皮虾仍在后台运行", "点击托盘图标或按全局快捷键恢复窗口；从菜单可退出。", showWindow);
+    }
+  });
   win.on("closed", () => { win = null; });
 
   win.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:/i.test(url) && !isAppUrl(url)) shell.openExternal(url);
+    if (/^https?:/i.test(url) && !isAppUrl(url, appUrl)) shell.openExternal(url);
     return { action: "deny" };
   });
   win.webContents.on("will-navigate", (e, url) => {
-    if (!isAppUrl(url)) {
+    if (!isAppUrl(url, appUrl)) {
       e.preventDefault();
       if (/^https?:/i.test(url)) shell.openExternal(url);
     }
   });
+  // 冒烟: 收集渲染进程的 error/warning 与加载失败, 写进结果 JSON (只看截图不够 ——
+  //   白屏也能截出一张纯色图)。仅 SMOKE 模式挂监听, 正常桌面运行零开销。
+  if (SMOKE) {
+    win.webContents.on("console-message", (_e, level, message, line, sourceId) => {
+      if (level >= 2) smokeErrors.push({ level, message: String(message).slice(0, 500), line: line || 0, source: String(sourceId || "") });
+    });
+    win.webContents.on("did-fail-load", (_e, code, desc, url) => {
+      smokeErrors.push({ level: 3, message: `did-fail-load ${code} ${desc} ${url}` });
+    });
+  }
   win.webContents.on("render-process-gone", (_e, details) => {
     if (quitting) return;
     log("渲染进程异常退出", details);
@@ -406,12 +331,31 @@ async function showFailure(title, detail) {
   if (r.response === 0) { app.relaunch(); app.quit(); } else app.quit();
 }
 
-function onServerGone(code) {
+async function restartServer() {
+  if (!serverOwned || quitting) return false;
+  try {
+    setStatus("内核服务重启中…");
+    serverChild = serverProc.startServer(currentRoot, serverPort);
+    const ok = await serverProc.waitReady(serverPort);
+    if (!ok) return false;
+    if (win && !win.isDestroyed()) {
+      try { await win.loadURL(appUrl); } catch { try { win.reload(); } catch { /* 窗口已销毁 */ } }
+    }
+    setStatus("已恢复");
+    return true;
+  } catch (e) {
+    log(`内核服务重启失败: ${e?.message || e}`);
+    return false;
+  }
+}
+
+// 自动重启次数耗尽 (或非本实例拥有的服务) 才回到人工处置
+function showServerGoneDialog(code) {
   dialog.showMessageBox(win ?? undefined, {
     type: "error", title: APP_NAME,
     message: "内核服务已退出",
-    detail: `退出码: ${code ?? "未知"}。可查看日志定位原因。`,
-    buttons: ["重启服务", "查看日志", "退出"], defaultId: 0, cancelId: 2,
+    detail: `退出码: ${code ?? "未知"}；自动重启多次未恢复。可查看日志定位原因。`,
+    buttons: ["重启应用", "查看日志", "退出"], defaultId: 0, cancelId: 2,
   }).then((r) => {
     if (r.response === 0) { app.relaunch(); app.quit(); }
     else if (r.response === 1) shell.openPath(path.join(app.getPath("userData"), "logs"));
@@ -419,16 +363,22 @@ function onServerGone(code) {
   });
 }
 
+function onServerGone(code) {
+  if (quitting) return;
+  liveness.noteGone(code).catch((e) => log(`监督重启异常: ${e?.message || e}`));
+}
+
 // ---- 权限: 只放行本应用窗口的麦克风/通知 ----
 function hardenSession() {
   const allowed = new Set(["media", "notifications", "clipboard-sanitized-write", "fullscreen", "pointerLock"]);
   session.defaultSession.setPermissionRequestHandler((wc, permission, cb, details) => {
-    if (!isAppUrl(wc.getURL()) || !allowed.has(permission)) return cb(false);
+    // appUrl 必须显式传入: 少传时 isAppUrl 一律 false, 麦克风/通知会被全部拒掉。
+    if (!isAppUrl(wc.getURL(), appUrl) || !allowed.has(permission)) return cb(false);
     if (permission === "media" && (details?.mediaTypes || []).includes("video")) return cb(false);
     cb(true);
   });
   session.defaultSession.setPermissionCheckHandler((_wc, permission, origin) => {
-    const ok = origin === appUrl || origin === appUrl.replace(/\/$/, "");
+    const ok = isAppUrl(origin, appUrl);
     return ok && allowed.has(permission);
   });
 }
@@ -440,48 +390,24 @@ function buildMenu(root) {
     {
       label: "应用",
       submenu: [
+        { label: "显示窗口", click: showWindow },
+        { label: "新建对话", click: newChat },
+        { type: "separator" },
+        { label: "关闭时隐藏到托盘", type: "checkbox", checked: prefs.closeToTray, click: (item) => updatePref("closeToTray", item.checked) },
+        { label: "开机自启", type: "checkbox", checked: prefs.launchAtLogin, click: (item) => updatePref("launchAtLogin", item.checked) },
+        { label: `全局快捷键 (${prefs.globalHotkey})`, type: "checkbox", checked: prefs.hotkeyEnabled, click: (item) => updatePref("hotkeyEnabled", item.checked) },
+        { type: "separator" },
+        { label: "检查更新…", click: () => { checkForUpdatesInteractive().catch((e) => log(`检查更新失败: ${e?.message || e}`)); } },
+        { label: "导出诊断包…", click: () => { exportDiagnostics().catch((e) => log(`诊断导出失败: ${e?.message || e}`)); } },
+        { type: "separator" },
         { label: "打开工作副本目录", click: () => shell.openPath(root) },
         { label: "打开日志目录", click: () => shell.openPath(path.join(app.getPath("userData"), "logs")) },
-        { label: "复制面板地址", click: () => appUrl && clipboard.writeText(appUrl) },
         { type: "separator" },
         {
           label: "重置工作副本…",
-          click: async () => {
-            const r = await dialog.showMessageBox(win ?? undefined, {
-              type: "warning", title: APP_NAME,
-              message: "重置工作副本？",
-              detail: "当前工作副本会备份到同目录的 workspace.backup-<时间>，然后用内置版本重新播种。数据目录 (data/uploads/config/ppx.json) 会保留。",
-              buttons: ["取消", "重置并重启"], defaultId: 0, cancelId: 0,
-            });
-            if (r.response !== 1) return;
-            try {
-              const backup = `${root}.backup-${Date.now()}`;
-              fs.renameSync(root, backup);
-              const tmp = `${root}.seeding`;
-              fs.rmSync(tmp, { recursive: true, force: true });
-              fs.mkdirSync(tmp, { recursive: true });
-              for (const dir of SPAWN_DIRS) {
-                const from = path.join(APP_ROOT, dir);
-                if (fs.existsSync(from)) fs.cpSync(from, path.join(tmp, dir), { recursive: true });
-              }
-              for (const file of SPAWN_FILES) {
-                const from = path.join(APP_ROOT, file);
-                if (fs.existsSync(from)) fs.cpSync(from, path.join(tmp, file));
-              }
-              for (const keep of ["data", "uploads", ".ppx", "config/ppx.json", "PPX.md"]) {
-                const from = path.join(backup, keep);
-                if (fs.existsSync(from)) fs.cpSync(from, path.join(tmp, keep), { recursive: true });
-              }
-              fs.renameSync(tmp, root);
-              log(`工作副本已重置, 备份: ${backup}`);
-            } catch (e) {
-              dialog.showErrorBox(APP_NAME, `重置失败: ${e.message}`);
-              return;
-            }
-            quitting = true;
-            killServer();
-            app.relaunch();
-            app.quit();
+          click: () => {
+            resetWorkspace({ root, win, onBeforeRelaunch: () => { quitting = true; killServer(); } })
+              .catch((e) => log(`重置失败: ${e?.message || e}`));
           },
         },
         { type: "separator" },
@@ -512,7 +438,7 @@ function buildMenu(root) {
       submenu: [
         { label: `关于 ${APP_NAME}`, click: () => dialog.showMessageBox(win ?? undefined, {
           type: "info", title: `关于 ${APP_NAME}`, message: `${APP_NAME} ${app.getVersion()}`,
-          detail: `PPXANS-Harness 桌面端\n工作副本: ${root}\n内核地址: ${appUrl || "(启动中)"}`,
+          detail: `PPXANS-Harness 桌面端\n工作副本: ${root}`,
         }) },
       ],
     },
@@ -520,44 +446,37 @@ function buildMenu(root) {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
-// ---- 生命周期 ----
-// Windows 上 child.kill() 只结束直接子进程, 内核派生的工具子进程会变成孤儿继续跑。
-// 用 taskkill /T 结束整棵进程树; POSIX 用进程组 (spawn 时 detached) 兜底。
-function killServerTree({ graceful = false } = {}) {
-  const child = serverChild;
-  if (!child || child.killed) { serverChild = null; return; }
-  const pid = child.pid;
-  serverChild = null;
-  if (process.platform === "win32") {
-    const r = spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
-    if (r.error) { try { child.kill(); } catch { /* 已退出 */ } }
-    return;
-  }
-  try {
-    process.kill(-pid, graceful ? "SIGTERM" : "SIGKILL");
-  } catch {
-    try { child.kill(graceful ? "SIGTERM" : "SIGKILL"); } catch { /* 已退出 */ }
-  }
-}
-
-function killServer() {
-  killServerTree();
-}
-
 async function boot() {
   createWindow();
   const root = resolveRoot();
+  currentRoot = root;
+  if (prefs.launchAtLogin) applyLoginItem(true);
+  registerHotkey();
+  createTray();
   const preferred = Number(argOf("--port") || process.env.PPX_PORT || 0) || configPort(root);
   const { port, owned } = await pickPort(preferred);
   serverOwned = owned;
+  serverPort = port;
   appUrl = `http://127.0.0.1:${port}/`;
   log(`启动桌面端 root=${root} url=${appUrl} owned=${owned}`);
 
   if (owned) {
     setStatus("正在启动内核服务…");
-    serverChild = startServer(root, port);
+    // 桌面渲染服务 (v5.0 P2.3): browse 工具的 Chromium 渲染通道 —— 端口经环境变量
+    // 传给内核子进程 (server-proc 的 env 透传 process.env)。失败不阻断启动 (browse 退直抓)。
+    try {
+      const { startRenderService } = await import("./render-svc.js");
+      const svc = await startRenderService({ secret: desktopSecret() });
+      if (svc) {
+        renderService = svc;
+        process.env.PPX_DESKTOP_RENDER_PORT = String(svc.port);
+      }
+    } catch (e) {
+      log(`[render] 渲染服务启动失败 (browse 将退化为直抓): ${e?.message || e}`);
+    }
+    serverChild = serverProc.startServer(root, port);
   }
-  const ok = await waitReady(port);
+  const ok = await serverProc.waitReady(port);
   if (!ok) {
     return showFailure("内核服务启动失败", "服务未在 60 秒内就绪。请查看日志目录了解详情。");
   }
@@ -565,49 +484,31 @@ async function boot() {
   hardenSession();
   buildMenu(root);
   booted = true;
+  if (owned) liveness.startProbeLoop();
   setStatus("正在加载界面…");
   await win.loadURL(appUrl);
 
   if (SMOKE) {
-    const out = process.env.PPX_DESKTOP_SMOKE_OUT || path.join(app.getPath("userData"), "smoke.png");
-    setTimeout(async () => {
-      try {
-        const img = await win.webContents.capturePage();
-        fs.writeFileSync(out, img.toPNG());
-        log(`smoke 截图: ${out}`);
-        app.quit();
-      } catch (e) {
-        log(`smoke 失败: ${e.message}`);
-        quitting = true;
-        killServer();
-        app.exit(1);
-      }
-    }, 3000);
+    // 给前端首屏请求留出时间; runSmoke 内部还会轮询一级导航渲染 直到完成/8s 超时
+    setTimeout(() => { runSmoke().catch((e) => { log(`smoke 失败: ${e.message}`); quitting = true; killServer(); app.exit(1); }); }, 1500);
   }
 
-  // 2026-10-31 (队列⑤): 桌面端更新检查 —— 查 GitHub Releases latest tag, 24h TTL 缓存
-  //   (userData/update-check.json), 有新版弹系统通知, 点击打开下载页。只提示不代装:
-  //   安装包未签名时静默自装会撞 SmartScreen, 且 electron-updater 是重依赖 (零依赖红线)。
+  // 桌面端更新检查: 查 GitHub Releases latest tag, 24h TTL 缓存; 有新版弹系统通知,
+  //   点击进入"下载 → SHA-256 校验 → 启动安装器"流程。启动检查只提示, 不静默安装。
   //   仅打包版检查 (dev 源码版走 git pull / ppx update); SMOKE 冒烟与 PPX_UPDATE_CHECK=0 跳过。
   if (app.isPackaged && !SMOKE && process.env.PPX_UPDATE_CHECK !== "0") {
-    const { checkForUpdate, RELEASES_URL } = await import("../src/update/index.js");
+    const { checkForUpdate } = await import("../src/services/update.js");
     const check = await checkForUpdate({
       currentVersion: app.getVersion(),
       dataDir: app.getPath("userData"),
       channel: "github",
     }).catch(() => null);
     if (check && check.ok && check.updateAvailable) {
-      try {
-        const { Notification } = await import("electron");
-        const n = new Notification({
-          title: `皮皮虾有新版本 v${check.latest}`,
-          body: `当前 v${check.current} — 点击前往下载页 (运行 ppx update 也可升级 CLI)`,
-        });
-        n.on("click", () => shell.openExternal(RELEASES_URL));
-        n.show();
-      } catch (e) {
-        log(`更新通知不可用: ${e.message}`);
-      }
+      notify(
+        `皮皮虾有新版本 v${check.latest}`,
+        `当前 v${check.current} — 点击查看更新`,
+        () => { promptUpdate(check).catch((e) => log(`更新流程失败: ${e?.message || e}`)); }
+      );
     }
   }
 }
@@ -615,32 +516,52 @@ async function boot() {
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
-  app.on("second-instance", () => {
-    if (win) {
-      if (win.isMinimized()) win.restore();
-      win.show();
-      win.focus();
-    }
-  });
+  app.on("second-instance", () => showWindow());
+  app.on("activate", () => showWindow());
 
   app.on("window-all-closed", () => app.quit());
+
+  app.on("will-quit", () => {
+    try { globalShortcut.unregisterAll(); } catch { /* 未注册 */ }
+    try { tray?.destroy(); } catch { /* 已销毁 */ }
+    tray = null;
+    try { renderService?.close?.(); renderService = null; } catch { /* 已关 */ }
+  });
 
   app.on("before-quit", (e) => {
     if (quitReady) return;
     quitting = true;
-    saveState();
-    // 自己拉起的服务: 先回收整棵进程树再退出, 给内核一点落盘时间 (最多 3 秒)
+    windowState.save(win);
+    // 自己拉起的服务: 先请内核优雅收口 (记忆落盘/军团回收/投递队列), 超时才强制结束进程树。
+    // 2026-11-02: Windows 原先这里直接 taskkill /F, 内核收不到任何退出信号, shutdown 链被跳过。
     if (serverOwned && serverChild && !serverChild.killed) {
       e.preventDefault();
+      if (quitPending) return; // 退出链已在跑, 重复的 before-quit 只取消本次 quit
+      quitPending = true;
       const child = serverChild;
+      let hardTimer = null;
+      let finishTimer = null;
       const finish = () => {
         if (quitReady) return;
         quitReady = true;
+        quitPending = false;
+        if (hardTimer) clearTimeout(hardTimer);
+        if (finishTimer) clearTimeout(finishTimer);
         app.quit();
       };
-      const timer = setTimeout(finish, 3000);
-      child.once("exit", () => { clearTimeout(timer); serverChild = null; finish(); });
-      killServerTree({ graceful: true });
+      finishTimer = setTimeout(finish, 4000);
+      hardTimer = setTimeout(() => {
+        if (quitReady) return;
+        log("优雅退出超时, 强制结束内核进程树");
+        serverProc.killServerTree();
+      }, 2800);
+      child.once("exit", () => { serverChild = null; finish(); });
+      requestGracefulShutdown(serverPort).then((accepted) => {
+        if (!accepted && !quitReady) {
+          // 旧内核没有该端点 / 请求失败: 留一点响应时间后走硬杀兜底
+          setTimeout(() => { if (!quitReady) serverProc.killServerTree(); }, 200);
+        }
+      });
       return;
     }
     killServer();

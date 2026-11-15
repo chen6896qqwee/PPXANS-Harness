@@ -19,8 +19,96 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { PPXAgent } from "../src/agent/index.js";
 import { withTimeout } from "../src/utils/async.js";
-import { triageFailure } from "../src/services/triage.js";
+import { stableJson } from "../src/utils/canonical.js";
 import { TASKS, summarize } from "../bench/tasks.js";
+
+// ---- 失败归因 (2026-11-08 自 src/services/triage.js 内联, 该模块已删除) ----
+// triage.js 全仓唯一消费方就是本文件; 作为评测器的私有逻辑内联, 免得 src/ 里养一个无主模块。
+// 输入一次任务的执行轨迹 (最终回复 + 工具调用序列 + 耗时 + 判分结果),
+// 输出 { cause, confidence, evidence[], action } —— action 对应"按症状下药"表。
+const TRIAGE_CAUSE = {
+  LLM_STALL: "llm_stall", LOOP: "loop", TIMEOUT_UNKNOWN: "timeout_unknown",
+  TOOL_USE: "tool_use", PLANNING: "planning", VERIFICATION: "verification",
+  KNOWLEDGE: "knowledge", UNKNOWN: "unknown",
+};
+const TRIAGE_PRESCRIPTION = {
+  [TRIAGE_CAUSE.LLM_STALL]: "taskbench 已强制单次 LLM 超时=任务预算/3 且含重试封顶<预算 (见下方 benchLlmGuard); 仍 stall → 连续慢调用烧穿预算, 查 provider 延迟/换更快模型档或调大 TASK_BUDGET_MS, 勿调低进程级 timeout_ms",
+  [TRIAGE_CAUSE.LOOP]: "任务分解 + 验证器 + 重规划; 检查探索熔断阈值是否过松",
+  [TRIAGE_CAUSE.TIMEOUT_UNKNOWN]: "补全轨迹采集后重跑定位 (当前轨迹不足以归因)",
+  [TRIAGE_CAUSE.TOOL_USE]: "结构化输出 + 参数校验 + 失败重试 + 沙箱; 优先修该工具的 schema 与示例",
+  [TRIAGE_CAUSE.PLANNING]: "任务分解 + 验证器 + 重规划 (轮次逼近上限仍未收敛)",
+  [TRIAGE_CAUSE.VERIFICATION]: "生成 → 验证 → 修正: 给这类任务配确定性校验器, 让 agent 自查后再作答",
+  [TRIAGE_CAUSE.KNOWLEDGE]: "RAG + 引用核验 + 工具查询 (先查再答, 不要凭记忆作答)",
+  [TRIAGE_CAUSE.UNKNOWN]: "采集更多轨迹样本后重判",
+};
+// 工具调用签名 (同工具同参数视为重复; 键序无关稳定序列化, 换键序重发不算两次调用)
+function triageSig(c) {
+  try {
+    return `${c.tool}::${stableJson(c.args || {}, 120)}`;
+  } catch {
+    return String(c.tool);
+  }
+}
+export const CAUSE = TRIAGE_CAUSE;
+export function triageFailure({ reply = "", toolCalls = [], ms = 0, budgetMs = 90000, maxRounds = 8, detail = "" } = {}) {
+  const calls = Array.isArray(toolCalls) ? toolCalls : [];
+  const evidence = [];
+  const fail = (cause, confidence) => ({ cause, confidence, evidence, action: TRIAGE_PRESCRIPTION[cause] });
+
+  const failedCalls = calls.filter((c) => c && c.ok === false);
+  const calledTools = new Set(calls.map((c) => c && c.tool).filter(Boolean));
+
+  // ---- 1. 超时族: 跑满时限才被砍 ----
+  const timedOut = ms >= budgetMs * 0.98 || /超时|timeout/i.test(String(reply || ""));
+  if (timedOut) {
+    evidence.push(`耗时 ${ms}ms 已达任务时限 ${budgetMs}ms`);
+    const counts = new Map();
+    for (const c of calls) {
+      const k = triageSig(c);
+      counts.set(k, (counts.get(k) || 0) + 1);
+    }
+    const worst = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
+    if (worst && worst[1] >= 3) {
+      evidence.push(`同一调用重复 ${worst[1]} 次: ${worst[0]}`);
+      return fail(TRIAGE_CAUSE.LOOP, 0.85);
+    }
+    if (calls.length <= 2) {
+      evidence.push(`整个任务只发生 ${calls.length} 次工具调用, 时间几乎全在 LLM 往返`);
+      return fail(TRIAGE_CAUSE.LLM_STALL, 0.7);
+    }
+    evidence.push(`工具调用 ${calls.length} 次, 无重复签名, 但仍未收敛`);
+    return fail(TRIAGE_CAUSE.TIMEOUT_UNKNOWN, 0.4);
+  }
+  // ---- 2. 工具不会用: 有工具返回错误 ----
+  if (failedCalls.length) {
+    const kinds = new Map();
+    for (const c of failedCalls) {
+      const e = String(c.error || "");
+      const k = /参数错误|应为|必填/.test(e) ? "参数校验被拦"
+        : /未知工具|已禁用/.test(e) ? "工具不可用"
+        : /策略拦截|权限|审批/.test(e) ? "权限/策略拦截"
+        : /超时/.test(e) ? "工具超时"
+        : "执行报错";
+      kinds.set(k, (kinds.get(k) || 0) + 1);
+    }
+    for (const [k, n] of kinds) evidence.push(`${k} × ${n} (涉及工具: ${[...new Set(failedCalls.map((c) => c.tool))].slice(0, 3).join(", ")})`);
+    return fail(TRIAGE_CAUSE.TOOL_USE, 0.9);
+  }
+  // ---- 3. 规划错: 轮次逼近上限仍未收敛 ----
+  if (maxRounds > 0 && calls.length >= Math.max(3, Math.floor(maxRounds * 0.75))) {
+    evidence.push(`工具调用 ${calls.length} 次, 逼近轮次上限 ${maxRounds}, 无错误但未收敛`);
+    return fail(TRIAGE_CAUSE.PLANNING, 0.7);
+  }
+  // ---- 4. 验证缺失: 该查的都查了、没错、有产出, 但结果不对 ----
+  if (calls.length >= 1) {
+    evidence.push(`工具调用 ${calls.length} 次且全部成功, 但判分失败 (${detail || "结果不符"})`);
+    evidence.push(`涉及工具: ${[...calledTools].join(", ")}`);
+    return fail(TRIAGE_CAUSE.VERIFICATION, 0.75);
+  }
+  // ---- 5. 知识不够: 几乎没查就作答 ----
+  evidence.push(`工具调用 ${calls.length} 次 —— 基本没查就作答, 判分失败 (${detail || "结果不符"})`);
+  return fail(TRIAGE_CAUSE.KNOWLEDGE, 0.8);
+}
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const BASELINE = path.join(ROOT, "bench", "baseline.json");
@@ -109,6 +197,15 @@ export const TASK_PLANS = {
   "conditional-write": ["read_file", "write_file"],
   "src-listing": ["list_dir", "write_file"],
   "extract-field": ["read_file"],
+  // ---- F. 多步链 (2026-11-14): 链上每个关键域都必须用到 (锚点编辑/grep 确认/撤销/执行) ----
+  "ms-anchored-refactor": ["read_file", "edit_lines", "grep"],
+  "ms-grep-rename": ["grep", "edit_lines"],
+  "ms-undo-roundtrip": ["write_file", "undo_file", "delete_file"],
+  "ms-fg-exec": ["read_file", "run_command"],
+  "ms-write-exec-gate": ["write_file", "run_command"],
+  "ms-memory-long": ["memory_add", "memory_search"],
+  "ms-anchored-multi-edit": ["read_file", "edit_lines", "grep"],
+  "ms-cross-file-rename": ["read_file", "edit_lines", "grep"],
 };
 
 const round3 = (x) => Math.round(x * 1000) / 1000;
@@ -333,7 +430,7 @@ export async function runOne(taskDef, { quiet = false, budgetMs = TASK_BUDGET_MS
   };
 }
 
-export async function runAll(list, opts = {}) {
+async function runAll(list, opts = {}) {
   const results = [];
   for (const t of list) {
     try {
@@ -344,15 +441,6 @@ export async function runAll(list, opts = {}) {
     }
   }
   return results;
-}
-
-// 多数投票跑法: 同一任务跑 N 次取多数 (吸收计数类任务的单次方差)
-export async function runWithMajority(taskDef, { runs = 3, ...opts } = {}) {
-  const attempts = [];
-  for (let i = 0; i < runs; i++) attempts.push(await runOne(taskDef, opts));
-  const verdict = majorityVerdict(attempts.map((a) => a.pass));
-  const first = attempts[0];
-  return { ...first, pass: verdict.pass, vote: verdict, attempts: attempts.map((a) => ({ pass: a.pass, ms: a.ms })) };
 }
 
 /* ==================== CLI (仅在作为主模块运行时执行) ==================== */

@@ -1,64 +1,48 @@
 @echo off
-setlocal enabledelayedexpansion
-chcp 936 >nul 2>&1
-title Æ¤Æ¤Ïº Ò»¼üÆô¶¯
+setlocal
+chcp 65001 >nul 2>&1
+title çš®çš®è™¾
 cd /d "%~dp0"
 
-echo.
-echo   Æ¤Æ¤Ïº PPXANS-Harness ¡¤ Web Ó¦ÓÃÒ»¼üÆô¶¯
-echo   ============================================
-echo.
+REM æœ¬æœºè‹¥ç»§æ‰¿ ELECTRON_RUN_AS_NODE, electron.exe ä¼šé€€åŒ–æˆ node, å¿…é¡»æ¸…æ‰
+set "ELECTRON_RUN_AS_NODE="
+set "ELECTRON_NO_ATTACH_CONSOLE=1"
 
-REM ÓÅÏÈÊ¹ÓÃ×Ô´ø runtime\node.exe£¬·ñÔòÓÃÏµÍ³ node
-set "NODE=node"
-if exist "%~dp0runtime\node.exe" set "NODE=%~dp0runtime\node.exe"
+set "ELECTRON=%~dp0node_modules\electron\dist\electron.exe"
+if exist "%ELECTRON%" goto :run
 
-where node >nul 2>&1
+echo.
+echo   é¦–æ¬¡å¯åŠ¨éœ€è¦å®‰è£…æ¡Œé¢è¿è¡Œæ—¶ (Electron, çº¦ 100MB, åªéœ€ä¸€æ¬¡)ã€‚
+echo   æŒ‰ä»»æ„é”®å¼€å§‹å®‰è£…, æŒ‰ Ctrl+C å–æ¶ˆã€‚
+echo.
+pause >nul
+
+where npm >nul 2>&1
 if errorlevel 1 (
-  echo   [´íÎó] Î´¼ì²âµ½ Node.js£¬ÇëÏÈ°²×° Node 20 »ò¸ü¸ß°æ±¾:
-  echo          https://nodejs.org
-  echo.
+  echo   [å¤±è´¥] æœªæ£€æµ‹åˆ° npm, è¯·å…ˆå®‰è£… Node.js 20 æˆ–æ›´é«˜ç‰ˆæœ¬: https://nodejs.org
   pause
   exit /b 1
 )
 
-REM »ñÈ¡¶Ë¿Ú£¨Óëºó¶ËÍ¬Ô´£¬·ÀÖ¹Ğ´ËÀ£©
-set "PORT="
-for /f "delims=" %%p in ('"%NODE%" "%~dp0bin\ppx-web.js" --print-port 2^>nul') do set "PORT=%%p"
-if "%PORT%"=="" set "PORT=8899"
-
-REM ÇåÀí¾É¼àÌı£¨Èô¶Ë¿Ú±»Õ¼ÓÃ£©
-set "OLD="
-for /f "tokens=5" %%p in ('netstat -ano ^| findstr /C:":%PORT% " ^| findstr LISTENING') do set "OLD=%%p"
-if defined OLD (
-  echo   [ÇåÀí] ¼ì²âµ½¾É·şÎñ½ø³Ì PID !OLD!£¬ÕıÔÚ½áÊø...
-  taskkill /F /PID !OLD! >nul 2>&1
-  ping -n 2 127.0.0.1 >nul
+call npm install
+if errorlevel 1 (
+  echo.
+  echo   [å¤±è´¥] ä¾èµ–å®‰è£…å¤±è´¥, è¯·æ£€æŸ¥ç½‘ç»œåé‡è¯•ã€‚
+  pause
+  exit /b 1
 )
 
-REM ºóÌ¨×îĞ¡»¯Æô¶¯
-echo   [Æô¶¯] ÄÚºË + ½çÃæ£¨×Ô¶¯¿ªä¯ÀÀÆ÷£¬¶Ë¿Ú %PORT%£©
-start "Æ¤Æ¤Ïº Web" /min /d "%~dp0" "%NODE%" "%~dp0bin\ppx-web.js" --port %PORT%
+if not exist "%ELECTRON%" (
+  echo.
+  echo   [å¤±è´¥] æœªæ‰¾åˆ° Electron è¿è¡Œæ—¶, è¯·æŸ¥çœ‹ä¸Šæ–¹ npm è¾“å‡ºã€‚
+  pause
+  exit /b 1
+)
 
-REM µÈ´ı¶Ë¿Ú¾ÍĞ÷£¨×î¶àÔ¼ 30 Ãë£©
-set /a N=0
-:wait
-ping -n 2 127.0.0.1 >nul
-netstat -ano | findstr /C:":%PORT% " | findstr LISTENING >nul && goto up
-set /a N+=1
-if %N% GEQ 15 goto fail
-goto wait
-
-:up
-echo   [¾ÍĞ÷] http://127.0.0.1:%PORT%
-echo   [ÌáÊ¾] ¹Ø±Õ×îĞ¡»¯´°¿Ú¼´Í£Ö¹·şÎñ£»»òË«»÷ Í£Ö¹Æ¤Æ¤Ïº.bat
+:run
 echo.
+echo   çš®çš®è™¾ æ¡Œé¢ç«¯ â€”â€” æ­£åœ¨å¯åŠ¨...
+echo   æ•°æ®ä¸æ—¥å¿—: %LOCALAPPDATA%\PPXANS-Harness-Desktop
+echo.
+start "" "%ELECTRON%" "%~dp0electron\main.js"
 exit /b 0
-
-:fail
-echo   [Ê§°Ü] 30 ÃëÄÚÎ´¼àÌıµ½¶Ë¿Ú %PORT%
-echo   ÇëÔÚ±¾Ä¿Â¼ÊÖ¶¯ÔËĞĞ²é¿´±¨´í:
-echo          node bin\ppx-web.js
-echo.
-pause
-exit /b 1

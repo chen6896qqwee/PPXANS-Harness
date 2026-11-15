@@ -1,6 +1,7 @@
-// src/orchestrator/expert-pack.js - 专家包体系 (2026-10-07 吸收自 TencentCloud/Octop)
+// src/orchestrator/expert-pack.js - 专家包体系 (设计溯源 docs/PROVENANCE.md#octop)
 //
-// 吸收来源: Octop 的 `infra/agents/experts/catalog.py` + `experts/library/` 目录格式。
+// 设计对照: Octop 的 `infra/agents/experts/catalog.py` + `experts/library/` 目录格式;
+// 本文件是零依赖原生实现。
 //   Octop 的关键判断 (原文): "An *expert* is metadata in ``manifest.json`` plus files on disk
 //   under ``library/<id>/``" —— **专家不是代码里的常量, 是可分发的内容资产**。
 //   它在服务启动时扫目录建目录册 (ExpertCatalog), 于是"加一个专家"等于"加一个目录",
@@ -29,7 +30,8 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { renderPersona, getProfile, hasProfile } from "./personas.js";
-import { DOMAIN_IDS } from "../skills/registry.js";
+import { DOMAIN_IDS, dedupeRoots } from "../skills/registry.js";
+import { expandHome } from "../utils/expand-home.js";
 import { HIGH_RISK_DOMAINS } from "./experts.js";
 
 // 合法的 domain = 12 个技能能力域 ∪ 5 个高风险域。
@@ -38,9 +40,9 @@ import { HIGH_RISK_DOMAINS } from "./experts.js";
 // 风险属性走 requires_human 表达。这里放宽域取值只为让"法务/金融/医疗"这类专家能落到贴切的域。
 export const KNOWN_DOMAINS = new Set([...DOMAIN_IDS, ...HIGH_RISK_DOMAINS]);
 
-export const PACK_MANIFEST = "manifest.json";
-export const PACK_SOUL = "SOUL.md";
-export const PACK_AGENTS = "AGENTS.md";
+const PACK_MANIFEST = "manifest.json";
+const PACK_SOUL = "SOUL.md";
+const PACK_AGENTS = "AGENTS.md";
 
 // 导入包的安全上限 (包是外部不可信内容 —— 与技能导入同一套纪律)
 export const PACK_LIMITS = {
@@ -54,7 +56,7 @@ const ALLOWED_EXT = /\.(md|json|txt|ya?ml|csv|jsonl)$/i;
 
 const ID_RE = /^[a-z0-9][a-z0-9-]{1,47}$/;
 
-// 市场分类 (照 Octop 的"分 15 个类目"心意, 收敛到 PPX 用得上的粒度)
+// 市场分类 (设计对照 Octop 的类目粒度, 收敛到 PPX 用得上的粒度)
 export const PACK_CATEGORIES = [
   { id: "assistant", name: "通用助理" },
   { id: "engineering", name: "工程与运维" },
@@ -67,14 +69,14 @@ export const PACK_CATEGORIES = [
   { id: "meta", name: "元能力与协作" },
 ];
 
-export const CATEGORY_IDS = new Set(PACK_CATEGORIES.map((c) => c.id));
+const CATEGORY_IDS = new Set(PACK_CATEGORIES.map((c) => c.id));
 
 // 本机用户级专家包根 (与内置隔离: 用户加包不动源码)
 export function userExpertsDir() {
   return path.join(os.homedir(), ".ppx", "experts");
 }
 
-export function builtinExpertsDir(root) {
+function builtinExpertsDir(root) {
   return path.join(root, "experts");
 }
 
@@ -91,20 +93,8 @@ export function packRootsFromConfig(config, root) {
     if (d) roots.push({ id: `extra${i}`, dir: expandHome(d), kind: "extra" });
   }
   if (!roots.length) roots.push({ id: "builtin", dir: builtinExpertsDir(root), kind: "builtin", writable: true });
-  const seen = new Set();
-  return roots.filter((r) => {
-    const k = path.resolve(r.dir).toLowerCase();
-    if (seen.has(k)) return false;
-    seen.add(k);
-    return true;
-  });
-}
-
-export function expandHome(p) {
-  const s = String(p || "");
-  if (s === "~") return os.homedir();
-  if (s.startsWith("~/") || s.startsWith("~\\")) return path.join(os.homedir(), s.slice(2));
-  return s;
+  // 去重实现单源 dedupeRoots (skills/registry.js) —— 与技能根同语义: first-wins
+  return dedupeRoots(roots);
 }
 
 // 取本地化字段: {zh, en} 或裸字符串; 缺失时回落到中文再回落英文
@@ -392,7 +382,7 @@ export function installPack(srcDir, { destRoot, force = false, source = "importe
     }
     return { ok: true, id: r.pack.id, label: r.pack.label, dir: outDir, files: written, bytes };
   } catch (e) {
-    return { ok: false, reason: `写入失败: ${e.message}` };
+    return { ok: false, reason: `写入失败: ${e.message}` }; /* swallowed-ok(2026-11-03): 失败原因随返回值上报 */
   }
 }
 

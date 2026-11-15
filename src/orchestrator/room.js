@@ -1,6 +1,7 @@
-// src/orchestrator/room.js - 团队房间运行时 (2026-10-07 吸收自 TencentCloud/Octop)
+// src/orchestrator/room.js - 团队房间运行时 (设计溯源 docs/PROVENANCE.md#octop)
 //
-// 吸收来源: Octop 的 `docs/expert-teams.md` + `docs/agent-interop-mailbox.md`。
+// 设计对照: Octop 的 `docs/expert-teams.md` + `docs/agent-interop-mailbox.md`;
+// 本文件是零依赖原生实现。
 //   Octop 把"多 Agent 协作"落成一个具体形态, 而不是一句口号:
 //
 //     主持人 (kind=team) ── 只调度, 不干活 ── 轻量工具集 (agent_list / ask_agent / 记忆 / 时间)
@@ -50,7 +51,7 @@ function newId(prefix) {
 }
 
 // ---- 默认 TeamProcessor (Octop 的 compose_followup 默认实现) ----
-// 组合「成员结果 → 给主持人的提示词」。要点照抄 Octop:
+// 组合「成员结果 → 给主持人的提示词」。设计溯源 docs/PROVENANCE.md#octop; 要点:
 //   要求主持人判收工、不复述成员已上墙的正文 (正文已经在时间线上, 复述等于刷屏)。
 export function composeFollowup(msg, resultText) {
   const body = String(resultText || "").trim() || "(成员无回复)";
@@ -424,7 +425,7 @@ export class TeamRoom {
 
 // ---- 主持人缺省回复 (没有 hostExecutor 时的规则兜底) ----
 // 刻意做得"像调度者而不像业务专家": 主持人不该抢成员的活, 也不该编内容。
-export function fallbackHostReply(message, room) {
+function fallbackHostReply(message, room) {
   const m = String(message || "");
   if (m.startsWith("【成员回报】")) {
     const name = (m.match(/【成员回报】(\S+)/) || [])[1] || "成员";

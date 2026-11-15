@@ -1,6 +1,6 @@
 // src/tools/selfiterate.js - 自主迭代 + 进化状态工具 (2026-10-25)
 //
-// 把 evolve/selfiterate.js 的「测试→诊断→补丁→验证→沉淀/回滚」闭环暴露为 agent
+// 把 selfcode/selfiterate.js 的「测试→诊断→补丁→验证→沉淀/回滚」闭环暴露为 agent
 // 可自调用的工具: agent 检出失败测试后可自主发起对自己的修复。安全边界全部
 // 沿用引擎层 (propose 默认 / root 内 .js / 不碰测试文件 / 预算上限 / 审计链)。
 // 注意: riskLevel=high —— 走权限引擎时会按高风险处理 (默认策略下 headless 直接拒,
@@ -8,7 +8,7 @@
 // evolution_status (2026-10-25 第二层): 只读的进化报告 —— journal 曲线 + 能力快照,
 // "变强"有账可查。
 import path from "node:path";
-import { SelfIterationEngine } from "../evolve/selfiterate.js";
+import { SelfIterationEngine } from "../selfcode/selfiterate.js";
 import { EvolutionLoop } from "../evolve/loop.js";
 import { SelfCodeLedger } from "../selfcode/ledger.js";
 

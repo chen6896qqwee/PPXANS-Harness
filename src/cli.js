@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 // src/cli.js - 皮皮虾 CLI 交互入口 (readline 历史 + interrupt 中断)
-import { ensureUTF8Console } from "./utils/winutf8.js";
+import { ensureUTF8Console } from "./boot/winutf8.js";
 import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import { PPXAgent } from "./agent/index.js";
 import { suggestProactive } from "./ans/proactive.js";
-import { cliBanner, colors, paint } from "./utils/banner.js";
+import { cliBanner, colors, paint } from "./boot/banner.js";
 import { isUsableProvider } from "./llm/router.js";
-import { commandCompleter } from "./commands/index.js";
+import { commandCompleter } from "./agent/command-registry.js";
 
 ensureUTF8Console();
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -41,11 +41,12 @@ if (ARGV.includes("--help") || ARGV.includes("-h")) {
   ppx update [--check]  检查并升级到最新版 (--check 只查不装; 源码装机打印手动步骤)
   ppx mcp serve         MCP stdio 宿主 (Claude Code / ZCode / Cursor 直接接入)
 
-其他入口:
-  ppx-serve             仅启动 HTTP 服务 (无 Web 界面)
-  ppx-web               启动 Web UI 并自动打开浏览器
-  ppx-channels          渠道 (飞书/微信) 配置与连通测试
-  ppx-setup             模型配置向导
+服务与配置子命令 (2026-11-08 起 8 个 bin 收敛为单一 CLI):
+  ppx serve             仅启动 HTTP 服务 (无 Web 界面)
+  ppx web               启动 Web UI 并自动打开浏览器 (--no-open / --port / --host / --root)
+  ppx channels          渠道 (飞书/微信) 配置与连通测试 (list/add/test/enable/disable/remove)
+  ppx daemon            端侧守护进程控制台 (start/stop/status/restart)
+  ppx setup             模型配置向导 (--list / --provider deepseek --key sk-xxx)
 
 REPL 内命令:
   quit | exit | q       退出
@@ -54,6 +55,34 @@ REPL 内命令:
   /proactive            主动提醒 (扫描记忆待办)
   /<Tab>                补全命令 (15 条内置 + .ppx/commands 用户命令)
   /help                 查看全部命令 (/status /model /plan /task /memory ...)`);
+  process.exit(0);
+}
+
+// ---- 子命令分派 (2026-11-08: bin/ppx-serve|web|channels|daemon|setup|mcp 六个薄壳并入) ----
+// 必须在 positional 分支之前: 否则 "serve"/"web" 等会被当成一句提问去启动全家桶。
+if (ARGV[0] === "serve") {
+  const { runServer } = await import("./server.js");
+  await runServer({ root: process.cwd() });
+  // 常驻 (2026-11-08 修复): runServer 启动完成即返回 —— 原始 bin/ppx-serve.js 没有
+  //   process.exit, 进程靠事件循环句柄 (HTTP 监听/定时器) 维持。bin 合一时误加的
+  //   exit 让内核"就绪即退", 桌面端 waitReady 探到子进程消失, 误报"60 秒未就绪"。
+  //   这里停驻等待, 退出走信号 / /desktop/shutdown 优雅链。
+  await new Promise(() => {});
+}
+if (ARGV[0] === "web") {
+  await import("./web-entry.js");             // 启动完成后返回 (常驻语义同上, 靠句柄不靠 pending promise)
+  await new Promise(() => {});
+}
+if (ARGV[0] === "channels") {
+  await import("./channels-cli.js");
+  process.exit(0);
+}
+if (ARGV[0] === "daemon") {
+  await import("./entry-daemon.js");
+  process.exit(0);
+}
+if (ARGV[0] === "setup") {
+  await import("./entry-setup.js");
   process.exit(0);
 }
 
@@ -81,7 +110,7 @@ if (ARGV[0] === "update") {
   const { resolveDataDir } = await import("./utils/datadir.js");
   const {
     checkWithConfig, detectInstallMode, planApply, updateNotice, RELEASES_URL,
-  } = await import("./update/index.js");
+  } = await import("./services/update.js");
   const { spawnSync } = await import("node:child_process");
   const checkOnly = ARGV.includes("--check");
   const current = pkgVersion();
@@ -130,12 +159,14 @@ if (positional.length) {
   if (!usable) {
     console.log("\n还没有可用的模型 — 配置只要 1 分钟:");
     console.log("  ① 交互式向导:  npm run setup      (选厂商 → 粘贴 Key → 自动探活)");
-    console.log("  ② 一条命令:    ppx-setup --provider deepseek --key sk-xxx   (ppx-setup --list 看厂商)\n");
+    console.log("  ② 一条命令:    ppx setup --provider deepseek --key sk-xxx   (ppx setup --list 看厂商)\n");
     await agent.shutdown();
     process.exit(1);
   }
   try {
-    const r = await agent.chat(q);
+    const r = await agent.chatTracked(q, {
+      source: "cli", from: "local", sessionKey: "default", run: () => agent.chat(q),
+    }).then((x) => x.reply);
     console.log("\n" + r + "\n");
   } catch (e) {
     console.error("\n[错误] " + e.message + "\n");
@@ -175,7 +206,7 @@ if (!hasUsable) {
 // 2026-10-31 (队列⑤): 启动更新通知 —— fire-and-forget 非阻塞, 24h TTL 缓存 (dataDir/update-check.json),
 //   网络失败静默不打扰对话; PPX_UPDATE_CHECK=0 关闭。`ppx update` 显式升级不受开关影响。
 if (process.env.PPX_UPDATE_CHECK !== "0") {
-  Promise.all([import("./update/index.js"), import("./config/index.js"), import("./utils/datadir.js")])
+  Promise.all([import("./services/update.js"), import("./config/index.js"), import("./utils/datadir.js")])
     .then(async ([u, { loadConfig }, { resolveDataDir }]) => {
       const check = await u.checkWithConfig({
         config: loadConfig(ROOT),
@@ -292,7 +323,9 @@ rl.on("line", async (line) => {
 
   busy = true;
   try {
-    const r = await agent.chat(text);
+    const r = await agent.chatTracked(text, {
+      source: "cli", from: "local", sessionKey: "default", run: () => agent.chat(text),
+    }).then((x) => x.reply);
     console.log("\n" + r + "\n");
   } catch (e) {
     console.log("\n[错误] " + e.message + "\n");

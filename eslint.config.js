@@ -15,12 +15,12 @@ export default [
       "node_modules/**",
       "dist/**",
       "dist-desktop/**", // electron-builder 产物 (内含打包后的源码副本, 不应重复 lint)
+      "webapp/dist/**",  // v5.0 前端构建产物 (源码在 webapp/src, 产物不入 lint)
       "build/**",
       ".ppxtest/**",
       "data/**",
       "uploads/**",
       "references/**",
-      "fixtures/**",
       "skills/content/**", // 第三方/参考素材模板 (如 p5.js 画布脚本), 非本仓维护代码
       "**/*.min.js",
     ],
@@ -50,10 +50,21 @@ export default [
   },
   {
     // 浏览器侧代码: public/ 下的 Web UI
-    files: ["public/**/*.js"],
+    files: ["public/**/*.js", "webapp/public/**/*.js"],
     languageOptions: {
       ecmaVersion: "latest",
       sourceType: "script",
+      globals: { ...globals.browser },
+    },
+  },
+  {
+    // 浏览器侧代码: webapp/ (v5.0 Vue3+Vite 前端源码)
+    // 注: .vue 文件不进 eslint (需要 vue-eslint-parser) —— SFC 由 vite build 与
+    //   scripts/check-web.mjs 把关, 这里只 lint 纯 JS 模块 (store/api/工具)。
+    files: ["webapp/src/**/*.js"],
+    languageOptions: {
+      ecmaVersion: "latest",
+      sourceType: "module",
       globals: { ...globals.browser },
     },
   },

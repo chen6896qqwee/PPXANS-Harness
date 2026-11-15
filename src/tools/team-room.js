@@ -1,4 +1,4 @@
-// src/tools/team-room.js - 团队房间工具 (2026-10-07 吸收自 TencentCloud/Octop)
+// src/tools/team-room.js - 团队房间工具 (设计溯源 docs/PROVENANCE.md#octop)
 //
 // 把 room.js 的常驻团队会话接成 agent 可自主使用的工具。
 //   team_room_open / say / dispatch / status / history / manage / close
@@ -18,6 +18,8 @@ import path from "node:path";
 import fs from "node:fs";
 import { TeamRoom, INBOX_STATUS, SPEAKER } from "../orchestrator/room.js";
 import { resolveExpert, HIGH_RISK_DOMAINS } from "../orchestrator/experts.js";
+import { currentTrace } from "../core/trace.js";
+import { beginWorkerRun } from "../flow/router.js";
 import { resolveTeam } from "../orchestrator/teams.js";
 import { roomKey } from "../utils/session-key.js";
 import { debug } from "../utils/logger.js";
@@ -25,7 +27,7 @@ import { debug } from "../utils/logger.js";
 const DEFAULT_DISPATCH_TIMEOUT_MS = 180000;
 
 // ---- 成员规格解析: 支持 专家包 id / EXPERTS id / 班组名 ----
-export function resolveMemberSpec(agent, key) {
+function resolveMemberSpec(agent, key) {
   const raw = String(key || "").trim();
   if (!raw) return null;
 
@@ -53,7 +55,7 @@ export function resolveMemberSpec(agent, key) {
 }
 
 // 把 members 参数展开: 班组名展开为其成员, 其余按单个专家解析
-export function expandMembers(agent, list) {
+function expandMembers(agent, list) {
   const out = [];
   const seen = new Set();
   for (const item of Array.isArray(list) ? list : []) {
@@ -89,8 +91,25 @@ export function makeLegionExecutor(agent, { timeoutMs = DEFAULT_DISPATCH_TIMEOUT
       if (typeof L.spawnAgents === "function") await L.spawnAgents([{ name, opts }]);
       else L.spawnAgent(name, opts);
     }
-    const r = await L.send(name, { type: "chat", message, perspective: ctx?.perspective || null }, { timeout: timeoutMs + 5000 });
-    return r?.reply || "(成员无回复)";
+    const run = beginWorkerRun(agent, {
+      task: message, worker: name, role: memberId,
+      expert: memberId, sessionKey: currentTrace()?.sessionKey || "default",
+    });
+    const startedAt = Date.now();
+    try {
+      const r = await L.send(name, {
+        type: "chat", message, perspective: ctx?.perspective || null,
+        ticketId: run.ticketId, assignmentId: run.assignmentId,
+      }, { timeout: timeoutMs + 5000 });
+      run.finish({
+        ok: true, envelope: r?.envelope || null, reply: String(r?.reply || ""),
+        durationMs: Date.now() - startedAt,
+      });
+      return r?.reply || "(成员无回复)";
+    } catch (e) {
+      run.finish({ ok: false, errorKind: "worker_error", durationMs: Date.now() - startedAt });
+      throw e;
+    }
   };
 }
 
@@ -410,7 +429,7 @@ export function registerTeamRoomTools(catalog, { getAgent = () => null } = {}) {
 }
 
 // ---- 主持人 executor: 用主 agent 的 LLM 做调度决策 (不是子进程 —— 主持人是"轻量协调者") ----
-export function makeHostExecutor(agent) {
+function makeHostExecutor(agent) {
   return async (message, ctx) => {
     const room = ctx?.room;
     const llm = agent?.auxLLM || agent?.llm;

@@ -1,15 +1,15 @@
 #!/usr/bin/env node
-// src/channels-cli.js - `ppx channels` 通道管理 CLI (借鉴 openclaw `channels add`)
+// src/channels-cli.js - `ppx channels` 通道管理 CLI (设计溯源 docs/PROVENANCE.md#openclaw `channels add`)
 // 让用户自己连通道: 交互式配置 → 写 config/ppx.json → 测试连通性 → 重启服务生效
 //
 // 用法:
-//   ppx-channels list                    列出全部通道 + 启用状态
-//   ppx-channels add <name>              交互式配置通道 (默认写盘并启用)
-//   ppx-channels test <name>             测试连通性 (网络探测)
-//   ppx-channels enable|disable <name>   启用/禁用
-//   ppx-channels remove <name>           移除配置 (恢复默认)
-//   ppx-channels --root <dir> ...        指定项目根目录 (默认当前目录)
-import { ensureUTF8Console } from "./utils/winutf8.js";
+//   ppx channels list                    列出全部通道 + 启用状态
+//   ppx channels add <name>              交互式配置通道 (默认写盘并启用)
+//   ppx channels test <name>             测试连通性 (网络探测)
+//   ppx channels enable|disable <name>   启用/禁用
+//   ppx channels remove <name>           移除配置 (恢复默认)
+//   ppx channels --root <dir> ...        指定项目根目录 (默认当前目录)
+import { ensureUTF8Console } from "./boot/winutf8.js";
 import path from "node:path";
 import readline from "node:readline/promises";
 import {
@@ -22,19 +22,21 @@ import { ChannelManager } from "./channels/index.js";
 ensureUTF8Console();
 
 const args = process.argv.slice(2);
+// 经由 `ppx channels ...` 分派时首参是子命令名本身, 直接运行本文件时则没有
+if (args[0] === "channels") args.shift();
 let root = process.cwd();
 if (args[0] === "--root") { root = path.resolve(args[1]); args.splice(0, 2); }
 const [cmd, name] = args;
 
-const HELP = `ppx-channels - 皮皮虾通道管理 (让用户自己连)
+const HELP = `ppx channels - 皮皮虾通道管理 (让用户自己连)
 用法:
-  ppx-channels list                   列出全部通道 + 启用状态
-  ppx-channels add <name>             交互式配置通道
-  ppx-channels test <name>            测试连通性
-  ppx-channels enable <name>          启用通道
-  ppx-channels disable <name>         禁用通道
-  ppx-channels remove <name>          移除配置 (恢复默认)
-  ppx-channels --root <dir> <cmd>     指定项目根目录
+  ppx channels list                   列出全部通道 + 启用状态
+  ppx channels add <name>             交互式配置通道
+  ppx channels test <name>            测试连通性
+  ppx channels enable <name>          启用通道
+  ppx channels disable <name>         禁用通道
+  ppx channels remove <name>          移除配置 (恢复默认)
+  ppx channels --root <dir> <cmd>     指定项目根目录
 可用通道: ${Object.keys(CHANNEL_SCHEMAS).join(" / ")}`;
 
 // ---- list ----
@@ -50,7 +52,7 @@ function doList() {
   console.log(`\n${enabled.length ? "已启用: " + enabled.join(", ") : "全部未启用 — 用 add <name> 配置一个"}`);
 }
 
-// ---- add (交互式引导, 借鉴 openclaw channels add) ----
+// ---- add (交互式引导, 设计溯源 docs/PROVENANCE.md#openclaw channels add) ----
 async function doAdd(name) {
   const schema = CHANNEL_SCHEMAS[name];
   if (!schema) {
@@ -74,8 +76,8 @@ async function doAdd(name) {
   try {
     updateChannel(root, name, { ...patch, enabled: true });
     console.log(`\n✓ ${name} 已配置并启用 (config/ppx.json 已原子写盘, 原文件已备份).`);
-    console.log(`  重启服务生效: ppx-serve`);
-    console.log(`  验证连通性: ppx-channels test ${name}`);
+    console.log(`  重启服务生效: ppx serve`);
+    console.log(`  验证连通性: ppx channels test ${name}`);
   } catch (e) {
     console.error(`✗ 保存失败: ${e.message}`);
     process.exit(1);

@@ -495,4 +495,4 @@ export function extractResourceText(result) {
   return JSON.stringify(result);
 }
 
-export { parseXMcpHeaders, hasXMcpHeader };
+export { parseXMcpHeaders };

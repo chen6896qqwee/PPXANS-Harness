@@ -1,5 +1,5 @@
 // src/llm/dsml.js - DSML (DeepSeek Markup Language) 工具调用解析/构造
-// 吸收自 DeepSeek V4 Flash 官方工具调用格式 (encoding/encoding_dsv4):
+// 设计溯源 docs/PROVENANCE.md#deepseek-v4-format; 对齐 DeepSeek V4 Flash 官方工具调用格式 (encoding/encoding_dsv4):
 //   工具块: <｜DSML｜tool_calls> ... </｜DSML｜tool_calls>
 //   单调用: <｜DSML｜invoke name="工具名"> ... </｜DSML｜invoke>
 //   参数:   <｜DSML｜parameter name="名" string="true|false">值</｜DSML｜parameter>
@@ -35,7 +35,7 @@ export function parseDsml(text) {
       const isString = pm[2] === "true";
       const raw = pm[3].trim();
       if (isString) args[pname] = raw;
-      else { try { args[pname] = JSON.parse(raw); } catch { args[pname] = raw; } }
+      else { try { args[pname] = JSON.parse(raw); } catch { args[pname] = raw; /* swallowed-ok(2026-11-03): 非 JSON 参数保留原文 */ } }
     }
     calls.push({ name, args });
   }
@@ -57,6 +57,7 @@ export const MAX_TOOL_DESC_CHARS = 240;
 export function buildDsmlPrompt(tools) {
   const lines = (tools || []).map((t) => {
     const fn = t.function || t;
+    // eslint-disable-next-line no-useless-escape
     const rawDesc = String(fn.description || "(无描述)").replace(/[＜＞｜<>\|]/g, "");
     const desc = rawDesc.length > MAX_TOOL_DESC_CHARS ? rawDesc.slice(0, MAX_TOOL_DESC_CHARS) + "…" : rawDesc;
     return `- ${fn.name}: ${desc}`;

@@ -9,7 +9,7 @@
 ```bash
 claude mcp add ppx -- ppx mcp serve
 # 或指定完整路径 (未全局安装时):
-claude mcp add ppx -- node /path/to/PPXANS-Harness/bin/ppx-mcp.js
+claude mcp add ppx -- ppx mcp serve
 ```
 
 **Cursor / ZCode / 通用 `.mcp.json`**
@@ -19,7 +19,7 @@ claude mcp add ppx -- node /path/to/PPXANS-Harness/bin/ppx-mcp.js
   "mcpServers": {
     "ppx": {
       "command": "ppx",          // 未全局安装: "node"
-      "args": ["mcp", "serve"]   // 未全局安装: ["/path/to/PPXANS-Harness/bin/ppx-mcp.js"]
+      "args": ["mcp", "serve"]   // 未全局安装: ["ppx mcp serve (单一 CLI 入口)"]
     }
   }
 }

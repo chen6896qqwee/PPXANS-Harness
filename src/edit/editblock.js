@@ -40,6 +40,7 @@ export function parseEditBlocks(text) {
       //   不像路径则本行回落为 search 正文首行 (不 continue, 继续走下面的 search 分支)。
       state = "search";
       if (looksLikePath(line)) {
+        // eslint-disable-next-line no-useless-escape
         cur.path = line.replace(/[\[\]`]/g, "").replace(/^[\s:]+|[\s:]+$/g, "").trim() || null;
         continue;
       }
@@ -268,9 +269,6 @@ export function formatRetryFeedback(results, fileContent = "") {
   return out.join("\n");
 }
 
-// 供测试断言一致性 (非公开 API 也导出以便内部复用验证)
-export const __internal = { stripEdgeBlanks, countOccurrences, fuzzyPlan };
-
 // ================= codex 风格统一 diff 解析 (2026-10-09 补) =================
 // 背景: 工具描述只教 SEARCH/REPLACE 两种写法, 但模型实测还会吐 codex 风格:
 //   *** Begin Patch / *** Update File: 路径 / @@ / -旧行 +新行 / *** End Patch
@@ -387,6 +385,7 @@ export function parseCodexPatch(text) {
 // `  return a - b;` 这种代码行含空格与分号, 必须判为"不是路径" —— 否则会去改一个叫
 // "return a - b;" 的文件, 或更糟: 权限层据此认为落点可证明而放行。
 export function looksLikePath(s) {
+  // eslint-disable-next-line no-useless-escape
   const t = String(s == null ? "" : s).trim().replace(/^[\[\]`"']+|[\[\]`"']+$/g, "");
   if (!t || t.length > 200) return false;
   if (/\s/.test(t)) return false;
@@ -423,4 +422,32 @@ export function resolvePatchTargets(content, blocks) {
     out.push(looksLikePath(inside) ? inside : (looksLikePath(above) ? above : null));
   }
   return out;
+}
+
+/**
+ * 粗解析补丁涉及的文件 (只判落点, 不校验内容)。给"改完即验证"的测试映射用:
+ * 解析失败不抛错 —— 真正的错误留给引擎给出完整诊断, 这里只需要一个尽力而为的文件清单。
+ * @returns {Array<string>} 去重后的相对路径 (正斜杠)
+ */
+export function patchTargetFiles(content) {
+  const raw = String(content || "");
+  let blocks = [];
+  try {
+    blocks = parseEditBlocks(raw);
+    if (!blocks.length) {
+      const cx = parseCodexPatch(raw);
+      if (cx.detected) blocks = cx.blocks || [];
+    }
+  } catch { return []; }
+  if (!blocks.length) {
+    // 连块都解析不出时, 至少收 codex 表头里的文件名 (引擎稍后会给出真正的错误)
+    return [...new Set([...raw.matchAll(/\*\*\* (?:Update|Add|Move) File: ([^\s*]+)/g)].map((m) => m[1].replace(/\\/g, "/")))];
+  }
+  const targets = resolvePatchTargets(raw, blocks);
+  const files = new Set();
+  blocks.forEach((b, i) => {
+    const p = looksLikePath(b.path) ? b.path : (targets[i] || "");
+    if (p) files.add(String(p).replace(/\\/g, "/"));
+  });
+  return [...files];
 }

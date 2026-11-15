@@ -1,4 +1,4 @@
-// src/config/channels.js - 通道配置 CRUD (借鉴 providers.js 模式)
+// src/config/channels.js - 通道配置 CRUD (沿用 providers.js 的读写模式)
 // 唯一事实源 = config/ppx.json 的 channels 对象; 原子写盘 + 备份
 // 用途: `ppx channels` CLI / HTTP API 让用户自己连通道, 不改源码
 import { withFileLock } from "../utils/store.js";
@@ -29,13 +29,21 @@ export const CHANNEL_SCHEMAS = {
     corpSecret: { type: "string", label: "企业密钥 (corp_secret)", secret: true, prompt: "企业微信应用 Secret, 用于主动推送" },
     agentId: { type: "string", label: "应用 AgentID", prompt: "企业微信自建应用 AgentID, 用于主动推送" },
   },
+  telegram: {
+    enabled: { type: "boolean", label: "启用", def: false },
+    botToken: { type: "string", label: "Bot Token", secret: true, prompt: "找 @BotFather 创建 bot 取 token" },
+    api_base: { type: "string", label: "API 地址", def: "https://api.telegram.org", prompt: "默认官方端点; 自建代理可改" },
+    poll_timeout_seconds: { type: "number", label: "长轮询秒数", def: 50 },
+    poll_interval_ms: { type: "number", label: "轮询间隔 (毫秒)", def: 0 },
+    allowed_chats: { type: "string", label: "chat_id 白名单 (逗号分隔, 留空不限)", def: "" },
+  },
   log: {
     enabled: { type: "boolean", label: "启用", def: false },
     target: { type: "string", label: "输出目标", def: "console" },
   },
 };
 
-export const CHANNEL_NAMES = Object.keys(CHANNEL_SCHEMAS);
+const CHANNEL_NAMES = Object.keys(CHANNEL_SCHEMAS);
 
 const getConfigPath = configFilePath;
 
@@ -73,7 +81,7 @@ export function validateChannel(name, patch) {
 }
 
 // 脱敏视图: secret 字段只暴露 "已设置" 标志 (供 list 展示)
-export function sanitizeChannel(name, cfg) {
+function sanitizeChannel(name, cfg) {
   const schema = CHANNEL_SCHEMAS[name] || {};
   const out = {};
   for (const key of Object.keys(schema)) {

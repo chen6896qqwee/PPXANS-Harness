@@ -11,6 +11,7 @@
 // 自改跨会话、跨进程 —— 账本必须能活过重启, 否则"改坏了"就真的回不去了。
 import fs from "node:fs";
 import path from "node:path";
+import { verifierDigest } from "./verify.js";
 
 // 单文件备份上限 2MB: 超了不备份但整次自改被拒 (宁可拒绝, 不留"改得进、退不回"的局面)
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
@@ -68,8 +69,10 @@ export class SelfCodeLedger {
 
   append(record) {
     this._ensure();
-    fs.appendFileSync(this.ledgerFile, JSON.stringify(record) + "\n", "utf8");
-    return record;
+    // 每条记录带上当时验证器的指纹: 事后可判定"这次自改是在哪版边界下通过判定的"
+    const row = { ...record, verifier: record.verifier || verifierDigest() };
+    fs.appendFileSync(this.ledgerFile, JSON.stringify(row) + "\n", "utf8");
+    return row;
   }
 
   all() {

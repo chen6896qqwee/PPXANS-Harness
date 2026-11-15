@@ -1,5 +1,5 @@
 // src/security/shell-parse.js - 结构化 shell 命令解析 (2026-10-24)
-// 设计吸收 ljharb/shell-quote 与 vorpaljs/bash-parser 的"先分词后分析"思路, 源码自研、零依赖。
+// 设计溯源 docs/PROVENANCE.md#shell-quote-bash-parser; "先分词后分析"思路, 源码自研、零依赖。
 // 动机: command-guard 旧链路对"规范化副本"做整串正则, 而执行层是 `sh -c 原串` ——
 //   检测串 ≠ 执行串。典型逃逸: `echo $(rm -rf /)` 在 allow_all 下穿过全部黑名单直达 shell。
 // 本模块提供:

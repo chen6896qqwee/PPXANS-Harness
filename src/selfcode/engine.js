@@ -23,8 +23,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { parseEditBlocks, applyAll, formatRetryFeedback, PATCH_FORMAT_HELP, parseCodexPatch, looksLikePath, resolvePatchTargets, patchTargetPreview, MISSING_TARGET_HELP } from "../edit/editblock.js";
 import { SelfCodeLedger } from "./ledger.js";
-import { guardPath, verifyChange } from "./verify.js";
+import { guardPath, verifyChange, checkVerifierPin } from "./verify.js";
 import { info, warn } from "../utils/logger.js";
+import { noteCatch } from "../utils/catch-log.js";
 
 // ---- 紧凑 diff: 行数统计 + 变化预览 (不做完整 LCS, 够看就行) ----
 export function compactDiff(before, after, maxPreview = 6) {
@@ -45,13 +46,10 @@ export function compactDiff(before, after, maxPreview = 6) {
   return { added, removed, linesBefore: a.length, linesAfter: b.length, preview };
 }
 
-function atomicWrite(abs, content) {
-  const dir = path.dirname(abs);
-  fs.mkdirSync(dir, { recursive: true });
-  const tmp = abs + ".ppx-selfcode-" + Math.random().toString(36).slice(2, 10);
-  fs.writeFileSync(tmp, content, "utf8");
-  fs.renameSync(tmp, abs);
-}
+// atomicWrite 收敛 (2026-11-08): 原私有实现与 utils/store.js 同语义 (tmp+rename),
+// 收敛到唯一实现以获得 Windows EPERM 指数退避等已修好的落盘原语。
+import { atomicWrite } from "../utils/store.js";
+export { atomicWrite };
 
 export class SelfCodeEngine {
   /**
@@ -147,6 +145,9 @@ export class SelfCodeEngine {
    */
   async run({ patch, tests = [], mode, reason = "" } = {}) {
     const started = Date.now();
+    // 验证器指纹钉: 人类可用 PPX_VERIFIER_DIGEST 钉住期望的校验器版本
+    const pin = checkVerifierPin(this.root);
+    if (!pin.ok) return { ok: false, stage: "verifier", error: pin.error, verifier: pin.digest };
     const effMode = mode === "apply" ? "apply" : mode === "propose" ? "propose" : this.mode;
     const testList = (Array.isArray(tests) ? tests : []).map(String).slice(0, 12);
 
@@ -186,7 +187,7 @@ export class SelfCodeEngine {
         try {
           if (entry.existed && orig !== null) atomicWrite(entry.path, orig);
           else if (!entry.existed && fs.existsSync(entry.path)) fs.unlinkSync(entry.path);
-        } catch {}
+        } catch (e) { noteCatch(e); /* 回滚失败: 文件可能停在半改状态, 必须留痕 */ }
       }
       const rec = this.ledger.append({ id, ts: new Date().toISOString(), status: "write_failed", mode: effMode, reason, fileBackups, files: planned.plans.map((p) => p.rel), error: String(e?.message || e), durationMs: Date.now() - started });
       return { ok: false, stage: "write", mode: effMode, ledgerId: rec.id, error: `落盘失败已回滚: ${e?.message || e}` };
@@ -210,7 +211,7 @@ export class SelfCodeEngine {
         try {
           if (entry.existed && orig !== null) { atomicWrite(entry.path, orig); restored++; }
           else if (!entry.existed) { if (fs.existsSync(entry.path)) fs.unlinkSync(entry.path); restored++; }
-        } catch (e) { failures.push({ path: entry.path, error: String(e?.message || e) }); }
+        } catch (e) { failures.push({ path: entry.path, error: String(e?.message || e) }); /* swallowed-ok(2026-11-03): 失败逐文件回传 */ }
       }
       const rec = this.ledger.append({
         id, ts: new Date().toISOString(), status: "rolled_back", mode: effMode, reason, fileBackups,
@@ -272,7 +273,7 @@ export class SelfCodeEngine {
       try {
         if (e.existed && orig !== null) { atomicWrite(e.path, orig); restored++; }
         else if (!e.existed) { if (fs.existsSync(e.path)) fs.unlinkSync(e.path); restored++; }
-      } catch (err) { failures.push({ path: e.path, error: String(err?.message || err) }); }
+      } catch (err) { failures.push({ path: e.path, error: String(err?.message || err) }); /* swallowed-ok(2026-11-03): 失败逐文件回传 */ }
     }
     const rec2 = this.ledger.append({
       id: this.ledger.nextId(), ts: new Date().toISOString(), status: "rewound", rewoundFrom: rec.id,

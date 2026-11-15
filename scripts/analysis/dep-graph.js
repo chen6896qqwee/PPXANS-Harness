@@ -2,21 +2,12 @@
 // 用法: node scripts/analysis/dep-graph.js <root>
 import fs from "node:fs";
 import path from "node:path";
+import { walkFiles } from "../lib/walk-js.js";
 
 const root = process.argv[2] || ".";
 const srcDir = path.join(root, "src");
 
-function walk(dir, out = []) {
-  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-    if (e.name.startsWith(".")) continue;
-    const p = path.join(dir, e.name);
-    if (e.isDirectory()) walk(p, out);
-    else if (e.name.endsWith(".js") || e.name.endsWith(".mjs")) out.push(p);
-  }
-  return out;
-}
-
-const files = walk(srcDir);
+const files = walkFiles(srcDir, { exts: [".js", ".mjs"], skipDot: true });
 const mods = new Map(); // abs -> rel
 
 for (const f of files) {

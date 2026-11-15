@@ -1,11 +1,11 @@
 ﻿// src/tools/seam.js - 能力缝(Capability Seam)辅助层
-// 参考 deepseek-harness 的 Capability Seam 三分法:
+// 设计溯源 docs/PROVENANCE.md#dsh; Capability Seam 三分法:
 //   Service Definition(声明/元数据) / Service Provider(execute 实现) / Consumer(runWithPolicy 统一策略入口)
 // 零依赖, 纯 Node 原生。保留皮皮虾原有错误语义, 追加超时门禁/禁用门禁/追踪回调。
 
 export const TOOL_ERROR_PREFIX = "[工具错误]";
 
-// ---- B1: 工具结果标准化 (吸收 codex format_exec_output_for_model) ----
+// ---- B1: 工具结果标准化 (设计溯源 docs/PROVENANCE.md#codex) ----
 // 命令类工具返回统一元数据头, 模型不靠猜判断成败:
 //   [exit=0 time=0.42s out=3行] <内容>
 //   [exit=1 time=1.02s out=0行][stderr] <错误>
@@ -36,7 +36,7 @@ export function countLines(text) {
 }
 
 // power 权限级: user < agent < super
-export const POWER_LEVEL = { user: 0, agent: 1, super: 2 };
+const POWER_LEVEL = { user: 0, agent: 1, super: 2 };
 
 // ---- Definition 层: 元数据归一化 + 校验 ----
 export function normalizeMeta(def = {}) {
@@ -53,7 +53,7 @@ export function normalizeMeta(def = {}) {
     timeoutMs: Number(def.timeoutMs) || 0,   // 0 = 不限时
     idempotent: !!def.idempotent,            // 是否可安全重试
     enabled: def.enabled !== false,          // 默认启用
-    // 工具能力声明 (2026-10-02 吸收 ZCode PermissionToolCapability):
+    // 工具能力声明 (2026-10-02 设计溯源 docs/PROVENANCE.md#zcode PermissionToolCapability):
     //   readOnly    只读不产生副作用
     //   destructive 破坏性操作 (不可逆/删数据)
     //   riskLevel   low | medium | high | critical
@@ -65,7 +65,7 @@ export function normalizeMeta(def = {}) {
     //   不可能命中基于名字的审批名单, 必须随注册元数据显式携带信任状态。
     mcpTrusted: def.mcpTrusted === true,
     execute: def.execute,
-    // 工具钩子链 (吸收 OpenClaw before/after 钩子):
+    // 工具钩子链 (设计溯源 docs/PROVENANCE.md#openclaw before/after 钩子):
     //  before(args, ctx) -> undefined 继续 | 字符串短路 | throw 拒绝
     //  after(args, result, ctx) -> 后处理(结果审计/清理), 错误不阻塞
     before: typeof def.before === "function" ? def.before : null,

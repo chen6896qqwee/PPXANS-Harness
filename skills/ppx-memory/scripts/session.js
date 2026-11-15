@@ -22,7 +22,23 @@
 //  ③ 压缩事件的 data.upToSeq 跟着同批 seq 一起重排, 且永不追平自身 seq (W3)。
 import fs from "node:fs";
 import path from "node:path";
-import { ensureDir, logicalDay, withFileLock, withFileLocks } from "./store.js";
+import { ensureDir, logicalDay, atomicWrite, withFileLock, withFileLocks } from "./store.js";
+
+// 元数据落盘/加载统一实现 (2026-11-12): 固定 `.tmp` 名 + 无锁的多进程双写会互相覆盖临时文件、
+// 且整表覆盖丢别进程刚写的键。改为唯一临时名原子写 + 文件锁, 锁内以磁盘现状为底只叠加
+// 本实例自加载以来的 diff (删除通过 base 中消失的键传播)。
+function _applyDiff(base, current, disk) {
+  const out = { ...disk };
+  for (const k of Object.keys(current)) {
+    if (!(k in base) || base[k] !== current[k]) out[k] = current[k];
+  }
+  for (const k of Object.keys(base)) if (!(k in current)) delete out[k];
+  return out;
+}
+function _resetTo(obj, next) {
+  for (const k of Object.keys(obj)) delete obj[k];
+  Object.assign(obj, next);
+}
 
 // 事件类型集 (对齐 dsh 事件域: user/assistant/tool/system)
 export const EVENTS = {
@@ -37,27 +53,73 @@ export const EVENTS = {
 // default 会话按天分片: default-YYYY-MM-DD.jsonl
 const DEFAULT_SHARD_RE = /^default-\d{4}-\d{2}-\d{2}\.jsonl$/;
 
+// 进程退出兜底: 一个进程只装一个监听器, 写后置实例登记在模块级集合里。
+// 原实现每个实例各挂一个 process.once("exit") —— 构造 N 个 agent 就有 N 个监听器
+// (20 个 agent 的基准就触发了 MaxListenersExceededWarning), 且存的 _exitHandler 从不摘除。
+const LIVE_WRITE_BEHIND = new Set();
+let _exitHookInstalled = false;
+function _trackForExit(store) {
+  LIVE_WRITE_BEHIND.add(store);
+  if (_exitHookInstalled) return;
+  _exitHookInstalled = true;
+  process.once("exit", () => {
+    for (const s of [...LIVE_WRITE_BEHIND]) {
+      try { s.flushAll({ sync: true }); } catch { /* 退出路径不抛 */ }
+    }
+  });
+}
+
 export class SessionStore {
-  constructor(dataDir) {
+  // 2026-11-02 (L3 写盘批量化): writeBehind 模式把"请求栈内的同步落盘"推迟到下一个
+  //   setImmediate —— 同一轮 tick 里多个 append/flush 合并成每 key 一次写入, 事件循环
+  //   不再为每条会话记录付一次 appendFileSync + 文件锁。内存日志仍是唯一事实源 (先写内存,
+  //   derive/replay 立即可见); 崩溃窗口 = 最多一个 tick 的会话事件, 优雅退出由 flushAll()
+  //   收口 (agent.shutdown / process exit 均接线)。
+  //   注意: 这不是 worker 线程并行 I/O —— 真正的并行需要重写 withFileLock 为异步锁,
+  //   本模式只消除"调用方等待磁盘"。直接 new SessionStore(dir) 默认仍是同步语义。
+  constructor(dataDir, { writeBehind = false, writeBehindDelayMs = 0 } = {}) {
     this.dir = path.join(dataDir, "sessions");
     ensureDir(this.dir);
+    this._writeBehind = writeBehind === true;
+    this._writeBehindDelayMs = Number.isFinite(Number(writeBehindDelayMs)) && Number(writeBehindDelayMs) > 0
+      ? Math.trunc(Number(writeBehindDelayMs)) : 0;
+    this._pendingFlushKeys = new Set();
+    this._flushTimer = null;
+    this._deferredBatches = 0;
+    this._deferredEvents = 0;
+    this._lastDeferredAt = 0;
+    if (this._writeBehind) {
+      // 兜底: 正常退出路径会显式 flushAll, 但 process.exit 可能绕过 agent.shutdown。
+      //   'exit' 里只允许同步操作, 正好复用同步落盘; 监听器进程级唯一, 见 _trackForExit。
+      _trackForExit(this);
+    }
     this._logs = new Map();    // key -> event[] (不可变, append-only)
     this._nextSeq = new Map(); // key -> 下一个 seq
     this._flushedSeq = new Map(); // key -> 已落盘的最大 seq (增量追加用)
     // 会话归档标记 (2026-10-11): { key: archivedAt }, 独立于事件日志
     this._archived = this._loadArchive();
+    this._archivedBase = { ...this._archived }; // 加载基线: 落盘只叠加相对基线的变更 (跨进程不吞键)
     // 会话标题覆盖 (2026-10-11): { key: title }, 独立于事件日志内容 (改名不改内容/归属/排序)
     this._titles = this._loadTitles();
+    this._titlesBase = { ...this._titles };
+    // 孤儿标题回收 (评测-II P2-3, 与 src 同源): 正文已删的 s_* 标题移出台账 (备份可追溯)
+    this._reconcileOrphanTitles();
+    // 会话置顶 (2026-11-03): { key: pinnedAt }, 只影响列表排序, 不动事件日志
+    this._pinned = this._loadPinned();
+    this._pinnedBase = { ...this._pinned };
     this._loadAll();
     // --- 派生缓存 (v1.1.1 性能优化) ---
     // eventsByDay / deriveCompacted 在每一轮/每一工具轮都被调用, 旧实现每次全量扫描 O(T)。
     // 事件日志是 append-only 不可变, 一个 key 的 events 数组只增不改（set/rename/fork 会换新数组）。
     //   · deriveCompacted: 以"数组引用标识"做增量缓存——数组没换就只把尾部新事件追加进 msgs, 命中 O(Δ)；
     //     数组被替换(重命名/重建)则重算。compaction 事件追加时检测到也整体重算（它会重投影历史）。
-    //   · eventsByDay: 版本门控的全库按天缓存, 版本变化时整库重扫一次（每轮兜底, 仍远优于每次 O(T)）。
+    //   · eventsByDay: 版本门控的全库按天缓存; v4.2 起版本变化不再整库重扫 —— 同样按"数组引用
+    //     游标"增量: append 原地 push → 只索引尾部新事件 O(Δ); set/rename/fork/load 换新数组或
+    //     删键 → purge 该键旧条目后按键重建 (罕见路径)。每轮成本从 O(全库事件数) 降到 O(当日新增)。
     this._version = 0;                  // 全局版本: 任何 write 递增
-    this._dayCache = new Map();         // day -> 该天结果 (当期 version)
+    this._dayCache = new Map();         // day -> 该天结果 (增量演进, 版本只作命中门控)
     this._dayCacheAt = 0;               // 生成该缓存时的 _version
+    this._dayCursors = new Map();       // key -> { ref, count } 已索引到该 key 事件数组的第几条
     // deriveCompacted 增量缓存: key -> { arrRef, msgs, lastCompSeq }
     this._compactedCache = new Map();
     // OPT-2 (2026-10-30) 批次内磁盘尾读缓存: key -> 本批次开始时读到的磁盘最大 seq。
@@ -113,6 +175,7 @@ export class SessionStore {
     // 删掉了 (Windows 上还会因写入方占用句柄直接 EPERM 让删除静默失败)。
     withFileLocks(this._defaultFiles(), () => {
       for (const f of this._defaultFiles()) {
+        this._archivePathLocked(f);
         try { fs.rmSync(f, { force: true }); } catch {}
       }
     });
@@ -200,16 +263,40 @@ export class SessionStore {
         if (auto) { this._titles[k] = auto; this._saveTitles(); }
       }
     }
-    if (!skipFlush) this._flush(k);
+    // writeBehind: 普通 append 不直接落盘, 排到下一 tick 与同批 flush 合并;
+    // skipFlush 的批量路径仍由调用方 flush(k) 统一收口。
+    if (!skipFlush) {
+      if (this._writeBehind) this._scheduleFlush(k);
+      else this._flush(k);
+    }
     this._bump(); // 使派生缓存失效
     return ev;
   }
 
   _removeFile(k) { this._removePathLocked(this._file(k)); }
 
+  // 2026-11-14 (评测 P2-3): 删除前先归档 —— 会话轨迹是评测/追责的唯一事实源,
+  //   不该随 delete/清理消失。归档到 <sessions>/archive/ (原名+时间戳+pid 防碰撞),
+  //   归档失败不阻断删除。清盘重写路径 (_rmSyncQuiet) 不归档, 否则会自复制。
+  _archivePathLocked(file) {
+    try {
+      if (!fs.existsSync(file)) return;
+      const archDir = path.join(this.dir, "archive");
+      fs.mkdirSync(archDir, { recursive: true });
+      const stamp = new Date().toISOString().replace(/\D/g, "").slice(0, 14);
+      const dest = path.join(archDir, `${path.basename(file, ".jsonl")}-${stamp}-${process.pid}.jsonl`);
+      // rename 同盘原子优先; 失败 (跨设备/占用) 走 copy+rm 兜底, 数据不丢
+      let renamed = false;
+      try { fs.renameSync(file, dest); renamed = true; } catch { renamed = false; }
+      if (renamed) return;
+      fs.copyFileSync(file, dest);
+    } catch {}
+  }
+
   // 单个文件的锁内删除 (W1: 所有 unlink 都走这里, 不再裸 rmSync)
   _removePathLocked(file) {
     withFileLock(file, () => {
+      this._archivePathLocked(file);
       try { fs.rmSync(file, { force: true }); } catch {}
     });
   }
@@ -261,8 +348,88 @@ export class SessionStore {
     }
   }
 
-  // 显式落盘: 把 skipFlush 延后的待写事件写入磁盘 (供批量写入后调用)
-  flush(key) { this._flush(this._safe(key)); }
+  // 显式落盘: 把 skipFlush 延后的待写事件写入磁盘 (供批量写入后调用)。
+  // writeBehind 模式下默认"排到下一 tick"(合并同 tick 的多次 flush), 需要立刻耐久时
+  // 传 { sync: true } —— 压缩/重建等强顺序路径用同步, 普通回合结束用默认。
+  flush(key, { sync = false } = {}) {
+    const k = this._safe(key);
+    if (this._writeBehind && !sync) { this._scheduleFlush(k); return; }
+    this._flush(k);
+  }
+
+  // 排一次写盘: 同一 tick 内可重复调用, 只保留一个 timer 和一组 key。
+  _scheduleFlush(k) {
+    this._pendingFlushKeys.add(k);
+    if (this._flushTimer) return;
+    const run = () => {
+      this._flushTimer = null;
+      this._drainScheduled();
+    };
+    this._flushTimerIsTimeout = this._writeBehindDelayMs > 0;
+    this._flushTimer = this._flushTimerIsTimeout ? setTimeout(run, this._writeBehindDelayMs) : setImmediate(run);
+    if (typeof this._flushTimer?.unref === "function") this._flushTimer.unref(); // 不阻止进程退出
+  }
+
+  // timer 到期: 每个 key 只落盘一次 (内部再按 flushedSeq 增量取整批事件)
+  _drainScheduled() {
+    if (!this._pendingFlushKeys.size) return;
+    const keys = [...this._pendingFlushKeys];
+    this._pendingFlushKeys.clear();
+    const before = keys.reduce((n, k) => n + (this._flushedSeq.get(k) || 0), 0);
+    for (const k of keys) this._flush(k);
+    const after = keys.reduce((n, k) => n + (this._flushedSeq.get(k) || 0), 0);
+    this._deferredBatches += 1;
+    this._deferredEvents += Math.max(0, after - before);
+    this._lastDeferredAt = Date.now();
+  }
+
+  // 优雅收口: 同步落盘后从退出兜底登记里摘除。
+  //   不摘除 = 模块级集合永久强引用旧实例 (长进程里每次 shutdown 都留下整个会话库)。
+  dispose() {
+    LIVE_WRITE_BEHIND.delete(this);
+    return this.flushAll({ sync: true });
+  }
+
+  // 收口: 把所有待写 key 立刻写盘 (优雅退出/测试断言用)。返回处理的 key 数。
+  flushAll({ sync = true } = {}) {
+    if (!this._writeBehind) {
+      for (const [k, evs] of this._logs) {
+        if (evs.length && evs[evs.length - 1].seq > (this._flushedSeq.get(k) || 0)) this._flush(k);
+      }
+      return this._logs.size;
+    }
+    if (!sync) {
+      for (const [k, evs] of this._logs) {
+        if (evs.length && evs[evs.length - 1].seq > (this._flushedSeq.get(k) || 0)) this._scheduleFlush(k);
+      }
+      return this._pendingFlushKeys.size;
+    }
+    if (this._flushTimer) {
+      try {
+        if (this._flushTimerIsTimeout) clearTimeout(this._flushTimer);
+        else clearImmediate(this._flushTimer);
+      } catch { /* 已触发 */ }
+      this._flushTimer = null;
+    }
+    const keys = new Set(this._pendingFlushKeys);
+    for (const [k, evs] of this._logs) {
+      if (evs.length && evs[evs.length - 1].seq > (this._flushedSeq.get(k) || 0)) keys.add(k);
+    }
+    this._pendingFlushKeys.clear();
+    for (const k of keys) this._flush(k);
+    return keys.size;
+  }
+
+  // 诊断 (测试/健康检查): 写盘模式与合并统计
+  stats() {
+    return {
+      writeBehind: this._writeBehind,
+      pendingKeys: this._pendingFlushKeys.size,
+      deferredBatches: this._deferredBatches,
+      deferredEvents: this._deferredEvents,
+      lastDeferredAt: this._lastDeferredAt || null,
+    };
+  }
 
   // 从日志投影模型可见历史 (user/assistant), 无可变状态
   deriveMessages(key) {
@@ -324,33 +491,80 @@ export class SessionStore {
 
   // L0 只读代理 / 按天审计: 遍历所有会话, 派生某天的对话事件 (消除 l0/*.jsonl 重复)
   // v1.1.1: 全库按天缓存, 版本未变则零成本; 保持"本地自然日"语义 (与 _dayOf/logicalDay 一致, 避免时区错位)
+  // v4.2 (2026-11-01): 版本变化改走增量 —— 依据同 deriveCompacted: append 是原地 push (引用不变),
+  //   索引只存不可变字段 (key/type/ts/content, 不含 seq —— _flush 锁内重排 seq 不影响本索引);
+  //   set/rename/fork/load 换新数组 → purge 该键旧条目后按键重建; 键删除 → purge + 清游标。
+  //   排序不变式 (2026-09-18) 保持: 每个被写入过的天在出缓存前都重排时间序。
   eventsByDay(day) {
     const dayStr = String(day).slice(0, 10);
     const dayMs = new Date(dayStr + "T00:00:00").getTime();
     if (Number.isNaN(dayMs)) return [];
-    // 缓存: 版本未变时按 day 命中 (append 后 _bump 使整个缓存失效, 下轮重扫一次)
+    // 缓存命中: 版本未变时按 day 直接返回 (append 后 _bump 失效, 下轮走增量)
     if (this._dayCacheAt === this._version && this._dayCache.size) {
       const hit = this._dayCache.get(dayStr);
       if (hit) return hit;
     }
-    // 全库扫描一次, 按"事件 ts 的本地自然日"聚合缓存所有天 → 之后所有 eventsByDay 调用都命中
-    const byDay = new Map();
+    const fresh = this._dayCacheAt !== this._version || !(this._dayCursors instanceof Map);
+    if (fresh) {
+      // 全库扫描一次 (构造后首次 / 内部状态被弃用), 按"事件 ts 的本地自然日"聚合
+      const byDay = new Map();
+      const cursors = new Map();
+      for (const [key, events] of this._logs) this._indexDayEvents(byDay, cursors, key, events, 0, null);
+      for (const arr of byDay.values()) arr.sort((a, b) => a.timestamp - b.timestamp);
+      this._dayCache = byDay;
+      this._dayCursors = cursors;
+      this._dayCacheAt = this._version;
+      return byDay.get(dayStr) || [];
+    }
+    // 增量: 键消失 → purge + 清游标; 引用未变 → 只索引尾部新增; 引用换新 → purge 后整键重建
+    const byDay = this._dayCache;
+    const cursors = this._dayCursors;
+    const touched = new Set();
+    for (const key of [...cursors.keys()]) {
+      if (!this._logs.has(key)) { this._purgeDayIndex(byDay, key); cursors.delete(key); }
+    }
     for (const [key, events] of this._logs) {
-      for (const e of events) {
-        if (e.type !== EVENTS.USER && e.type !== EVENTS.ASSISTANT) continue;
-        const d = this._dayOf(e.ts);
-        let arr = byDay.get(d);
-        if (!arr) { arr = []; byDay.set(d, arr); }
-        arr.push({ sessionKey: key, role: e.type === EVENTS.USER ? "user" : "assistant", content: e.data?.content, timestamp: e.ts });
+      const cur = cursors.get(key);
+      if (cur && cur.ref === events && events.length >= cur.count) {
+        if (events.length > cur.count) this._indexDayEvents(byDay, cursors, key, events, cur.count, touched);
+      } else {
+        if (cur) this._purgeDayIndex(byDay, key);
+        this._indexDayEvents(byDay, cursors, key, events, 0, touched);
       }
     }
-    this._dayCache = byDay;
+    for (const d of touched) {
+      const arr = byDay.get(d);
+      if (arr) arr.sort((a, b) => a.timestamp - b.timestamp);
+    }
     this._dayCacheAt = this._version;
-    // 2026-09-18 修复: 每一天的缓存数组都必须在入缓存前排好时间序 ——
-    //   原实现只对当次请求的 day 排序, 其余天命中缓存时返回的是事件追加顺序 (乱序)
-    for (const arr of byDay.values()) arr.sort((a, b) => a.timestamp - b.timestamp);
-    const out = byDay.get(dayStr) || [];
-    return out;
+    return byDay.get(dayStr) || [];
+  }
+
+  // events[from..] 中的 user/assistant 事件按天索引进 byDay, 游标推进到 events.length
+  // touched (可选): 收集本次新增过条目的天, 供调用方按天重排时间序; null = 全量重建路径 (调用方统一排序)
+  _indexDayEvents(byDay, cursors, key, events, from, touched) {
+    for (let i = from; i < events.length; i++) {
+      const e = events[i];
+      if (e.type !== EVENTS.USER && e.type !== EVENTS.ASSISTANT) continue;
+      const d = this._dayOf(e.ts);
+      let arr = byDay.get(d);
+      if (!arr) { arr = []; byDay.set(d, arr); }
+      arr.push({ sessionKey: key, role: e.type === EVENTS.USER ? "user" : "assistant", content: e.data?.content, timestamp: e.ts });
+      if (touched) touched.add(d);
+    }
+    cursors.set(key, { ref: events, count: events.length });
+  }
+
+  // 把某 key 的旧索引条目从所有天里清出 (set/rename/fork/reset 等换数组/删键的罕见路径)
+  // filter 保序: 幸存条目的时间序不变, 空天直接删除
+  _purgeDayIndex(byDay, key) {
+    for (const [d, arr] of byDay) {
+      const kept = arr.filter((r) => r.sessionKey !== key);
+      if (kept.length !== arr.length) {
+        if (kept.length) byDay.set(d, kept);
+        else byDay.delete(d);
+      }
+    }
   }
 
   // 返回某自然日的对话事件(带 seq/type/data), 供 memory-ticker 按 seq 去重滚动归档
@@ -387,26 +601,67 @@ export class SessionStore {
   // count: 事件条数
   count(key) { return this._log(this._safe(key)).length; }
 
-  // 列出所有会话: {key, count, lastTs, title} (title 取首条 user 消息前 20 字)
+  // 列出所有会话: {key, count, lastTs, title, archived, pinned}
+  // 排序: 置顶优先, 其余按最近活跃倒序 (置顶只是排序, 不改归属/标题/归档)
   // 供 Web UI 多会话管理 (P1#6)
+  _deriveTitle(events, key) {
+    const firstUser = events.find((e) => e.type === EVENTS.USER);
+    return firstUser?.data?.content ? String(firstUser.data.content).slice(0, 20) : key;
+  }
   list() {
     const out = [];
     for (const [key, events] of this._logs) {
       if (!events.length) continue;
-      const firstUser = events.find((e) => e.type === EVENTS.USER);
-      const derived = firstUser?.data?.content ? String(firstUser.data.content).slice(0, 20) : key;
       // 2026-10-11: 自定义标题覆盖优先 (改名不改内容), 否则回退派生标题
-      const title = this._titles[key] || derived;
+      const title = this._titles[key] || this._deriveTitle(events, key);
       out.push({
         key,
         count: events.length,
         lastTs: events[events.length - 1].ts,
         title,
         archived: !!this._archived[key], // 2026-10-11: 归档标记随列表下发 (前端分组收起)
+        pinned: !!this._pinned[key],     // 2026-11-03: 置顶标记随列表下发 (前端排序/图标)
       });
     }
-    out.sort((a, b) => (b.lastTs || 0) - (a.lastTs || 0));
+    out.sort((a, b) => (Number(b.pinned) - Number(a.pinned)) || ((b.lastTs || 0) - (a.lastTs || 0)));
     return out;
+  }
+
+  // 全文检索 (2026-11-03): 在 user/assistant 消息正文里找关键词, 每会话取最新一条命中。
+  // 返回 [{ key, title, ts, role, snippet }], 按命中时间倒序。纯本地扫描, 不建索引 ——
+  // 会话事件本来就在内存里, 再加一套倒排索引只会多一份一致性负担。
+  search(query, { limit = 20 } = {}) {
+    const q = String(query || "").trim().toLowerCase();
+    if (!q) return [];
+    const hits = [];
+    for (const [key, events] of this._logs) {
+      if (!events.length) continue;
+      let found = null;
+      for (let i = events.length - 1; i >= 0; i--) {
+        const e = events[i];
+        const isUser = e.type === EVENTS.USER;
+        if (!isUser && e.type !== EVENTS.ASSISTANT) continue;
+        const text = String(e.data?.content ?? "");
+        const idx = text.toLowerCase().indexOf(q);
+        if (idx === -1) continue;
+        // 命中片段: 前后各留 24 字, 折叠换行, 两端用省略号标出截断
+        const start = Math.max(0, idx - 24);
+        const end = Math.min(text.length, idx + q.length + 24);
+        const snip = (start > 0 ? "…" : "") + text.slice(start, end).replace(/\s+/g, " ") + (end < text.length ? "…" : "");
+        found = { ts: e.ts, role: isUser ? "user" : "assistant", snippet: snip };
+        break;
+      }
+      if (!found) continue;
+      hits.push({
+        key,
+        title: this._titles[key] || this._deriveTitle(events, key),
+        ts: found.ts,
+        role: found.role,
+        snippet: found.snippet,
+      });
+    }
+    hits.sort((a, b) => (b.ts || 0) - (a.ts || 0));
+    return hits.slice(0, Math.max(1, Number(limit) || 20));
   }
 
   // ---- 兼容旧接口 (agent/CLI 仍可用) ----
@@ -442,6 +697,7 @@ export class SessionStore {
     const lastSeq = copied.length ? copied[copied.length - 1].seq : 0;
     this._nextSeq.set(t, lastSeq);
     this._flushedSeq.delete(t);
+    this._compactedCache.delete(t); // 目标键旧投影作废 (防残留消息常驻)
     // 新键必须从零整批重建 (W1: unlink 与写入同在一把锁内), 别追加到同名旧会话上
     this._flush(t, copied, true);
     this.delete(f);
@@ -452,6 +708,7 @@ export class SessionStore {
     const k = this._safe(key);
     this._tailCache.clear(); // OPT-2: 磁盘内容被删, 缓存里的旧盘面对后续 append 不再成立
     this._logs.delete(k); this._nextSeq.delete(k); this._flushedSeq.delete(k);
+    this._compactedCache.delete(k); // 删除会话必须同时清投影缓存 (防无界增长/残影)
     try {
       if (k === "default") {
         // 删除 default 所有分片 (旧单文件 + 各日 shard) —— 锁内删 (W1)
@@ -485,19 +742,33 @@ export class SessionStore {
   // ---- 会话自动归档 (2026-10-11): 不删数据只打标记, 归档会话在列表收起、可随时恢复 ----
   //   误归档零成本恢复; 事件日志/派生消息不受任何影响, 归档会话点开仍能看完整历史。
   _archivePath() { return path.join(this.dir, "_archive.json"); }
-  _loadArchive() {
+  _metaLoad(file) {
     try {
-      const raw = JSON.parse(fs.readFileSync(this._archivePath(), "utf8"));
+      const raw = JSON.parse(fs.readFileSync(file, "utf8"));
       return (raw && typeof raw === "object" && !Array.isArray(raw)) ? raw : {};
-    } catch { return {}; }
+    } catch (e) {
+      if (e?.code === "ENOENT") return {};
+      try { fs.renameSync(file, `${file}.corrupt-${Date.now()}`); } catch { /* 留档失败不阻塞 */ }
+      return {};
+    }
   }
-  _saveArchive() {
+  _metaSave(file, current, base) {
     try {
-      const tmp = this._archivePath() + ".tmp";
-      fs.writeFileSync(tmp, JSON.stringify(this._archived, null, 2));
-      fs.renameSync(tmp, this._archivePath()); // 原子替换, 避免写一半的损坏状态
-    } catch { /* 标记落盘失败不阻塞主流程 (下次启动重新计算) */ }
+      withFileLock(file, () => {
+        let disk = {};
+        try {
+          const raw = JSON.parse(fs.readFileSync(file, "utf8"));
+          if (raw && typeof raw === "object" && !Array.isArray(raw)) disk = raw;
+        } catch { /* 不存在/损坏 → 以空表为底 */ }
+        const merged = _applyDiff(base || {}, current, disk);
+        atomicWrite(file, JSON.stringify(merged, null, 2));
+        _resetTo(current, merged);
+        if (base) _resetTo(base, merged);
+      });
+    } catch { /* 标记落盘失败不阻塞主流程 */ }
   }
+  _loadArchive() { return this._metaLoad(this._archivePath()); }
+  _saveArchive() { this._metaSave(this._archivePath(), this._archived, this._archivedBase); }
   archive(key) {
     const k = this._safe(key);
     const evs = this._logs.get(k);
@@ -529,23 +800,36 @@ export class SessionStore {
     return done;
   }
 
+  // ---- 会话置顶 (2026-11-03): 只影响 list() 排序 ----
+  // 独立落盘 data/sessions/_pinned.json ({ key: pinnedAt }); 不碰事件日志/标题/归档。
+  // 与归档的关系: 置顶优先于"按最近活跃排序", 但归档分组仍单独处理 —— 置顶一个已归档会话
+  // 不会把它从归档组里拽出来, 避免"置顶 = 悄悄取消归档"的隐性副作用。
+  _pinnedPath() { return path.join(this.dir, "_pinned.json"); }
+  _loadPinned() { return this._metaLoad(this._pinnedPath()); }
+  _savePinned() { this._metaSave(this._pinnedPath(), this._pinned, this._pinnedBase); }
+  pin(key) {
+    const k = this._safe(key);
+    const evs = this._logs.get(k);
+    if (!evs || !evs.length) return false;
+    this._pinned[k] = Date.now();
+    this._savePinned();
+    return true;
+  }
+  unpin(key) {
+    const k = this._safe(key);
+    if (!(k in this._pinned)) return false;
+    delete this._pinned[k];
+    this._savePinned();
+    return true;
+  }
+  isPinned(key) { return !!this._pinned[this._safe(key)]; }
+
   // ---- 会话标题覆盖 (2026-10-11): 改名不改内容/归属/排序/归档 ----
   // 标题默认从第一条用户消息派生 (list 里 slice(0,20)); 本机制提供独立覆盖字段,
   // 存 data/sessions/_titles.json ({ key: title }), 与事件日志 append-only 完全解耦。
   _titlesPath() { return path.join(this.dir, "_titles.json"); }
-  _loadTitles() {
-    try {
-      const raw = JSON.parse(fs.readFileSync(this._titlesPath(), "utf8"));
-      return (raw && typeof raw === "object" && !Array.isArray(raw)) ? raw : {};
-    } catch { return {}; }
-  }
-  _saveTitles() {
-    try {
-      const tmp = this._titlesPath() + ".tmp";
-      fs.writeFileSync(tmp, JSON.stringify(this._titles, null, 2));
-      fs.renameSync(tmp, this._titlesPath());
-    } catch { /* 落盘失败不阻塞主流程 */ }
-  }
+  _loadTitles() { return this._metaLoad(this._titlesPath()); }
+  _saveTitles() { this._metaSave(this._titlesPath(), this._titles, this._titlesBase); }
   // 设置自定义标题; title 为空串则清除覆盖、回退到派生标题。返回是否变更。
   setTitle(key, title) {
     const k = this._safe(key);
@@ -558,6 +842,30 @@ export class SessionStore {
   getTitle(key) {
     const k = this._safe(key);
     return this._titles[k] || "";
+  }
+
+  // ---- 孤儿标题回收 (评测-II P2-3, 与 src/memory/session-meta.js 同源): 标题台账与正文文件对齐 ----
+  // 病根: delete/rename 只删正文文件, _titles.json 键永久残留 —— 生产实测 13 个标题只剩 5 份正文。
+  // 构造时对 s_* 键对账: 正文缺失的标题移出台账, 移除项合并备份到 _titles.orphans.json (可追溯)。
+  // 边界: 只对账 /^s_/ 会话键; default 按天分片与 ppx_cron_* 等非直映键不在职责内。
+  _reconcileOrphanTitles() {
+    const orphans = [];
+    for (const k of Object.keys(this._titles)) {
+      if (!/^s_/.test(k)) continue;
+      try { if (fs.existsSync(this._file(this._safe(k)))) continue; } catch { continue; }
+      orphans.push([k, this._titles[k]]);
+      delete this._titles[k];
+    }
+    if (!orphans.length) return 0;
+    const backupPath = path.join(this.dir, "_titles.orphans.json");
+    try {
+      let prev = {};
+      try { prev = JSON.parse(fs.readFileSync(backupPath, "utf8")); } catch { prev = {}; }
+      for (const [k, t] of orphans) if (!(k in prev)) prev[k] = t;
+      atomicWrite(backupPath, JSON.stringify(prev, null, 2));
+    } catch { /* 备份失败不阻断回收 */ }
+    this._saveTitles();
+    return orphans.length;
   }
 
   // ---- 新会话自动命名 (2026-10-11): 首条用户消息落盘且无自定义标题时生成 "MMDD|类型|主题" ----
@@ -603,6 +911,8 @@ export class SessionStore {
   //   并发写者插不进"文件已删/新行未写"的缝隙。普通增量路径两个参数都不传, 行为不变。
   _flush(key, pending = null, explicit = false) {
     const k = this._safe(key);
+    // 显式/立即落盘覆盖了本 key 的排程意图 (下面会写到最新水位), 不必再被 timer 重复写一次。
+    this._pendingFlushKeys.delete(k);
     const evs = this._logs.get(k) || [];
     const flushed = this._flushedSeq.get(k) || 0;
     const batch = Array.isArray(pending) ? pending
@@ -610,7 +920,7 @@ export class SessionStore {
     if (!explicit && !batch.length) return;
     try {
       if (k === "default") this._flushDaily(k, batch, { rebuild: explicit });
-      else this._flushLegacy(k, batch, flushed, { rebuild: explicit });
+      else this._flushLegacy(k, batch, { rebuild: explicit });
       // 落盘后的游标取"本批最大 seq" (多日重建后数组顺序 != seq 顺序, 不能取尾元素);
       // 重建时旧的 flushed 随清盘一起作废, 所以基准从 0 起算
       let mx = explicit ? 0 : flushed;
@@ -704,10 +1014,9 @@ export class SessionStore {
   // 2026-10-04: 是否全量重写改由"磁盘上有没有行"决定, 不再看本进程的 flushed 标志。
   //   原逻辑 flushed===0 就 writeFileSync 整文件覆盖 —— 另一个进程刚写的会话历史会被这一刀
   //   直接抹掉 (新实例构造时目录还是空的, 它的 flushed 永远是 0)。"重建"意图改由 rebuild
-  //   表达 (锁内 unlink + 整批写), 这里只按磁盘事实走。flushed 参数保留仅为兼容既有调用签名。
-  _flushLegacy(k, pending, _flushed = 0, { rebuild = false } = {}) {
+  //   表达 (锁内 unlink + 整批写), 这里只按磁盘事实走。
+  _flushLegacy(k, pending, { rebuild = false } = {}) {
     const file = this._file(k);
-    void _flushed;
     withFileLock(file, () => {
       if (rebuild) {
         this._rmSyncQuiet(file);          // W1: 清盘与写入同在一把锁内, 不可被并发写者插入

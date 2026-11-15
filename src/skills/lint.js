@@ -15,8 +15,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { parseFrontmatter, stripFrontmatter, parseSections } from "./loader.js";
 
-export const MIN_DESC_LEN = 8;
-export const MIN_BODY_LEN = 40;
+const MIN_DESC_LEN = 8;
+const MIN_BODY_LEN = 40;
 export const MAX_DEPTH = 2;
 const NAME_RE = /^[a-zA-Z0-9-]+$/;
 

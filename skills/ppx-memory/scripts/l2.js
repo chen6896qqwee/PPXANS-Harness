@@ -10,6 +10,12 @@ import { shortId } from "./id.js";
 // scenes.json 当前 schema 版本 (纯数组基线 = 1); 未来数据结构变更时 +1 并注册迁移
 export const SCENES_SCHEMA_VERSION = 1;
 
+// 时间戳落定窗口 (与 FactStore 同值同口径): Windows NTFS 的 mtime 粒度约 16ms, 同一 tick 内
+//   两次同大小写入的 ino:mtimeNs:size 可能完全相同。应用内写入走 atomicWrite (每次 rename 换
+//   inode), 但"原地手改"不改 inode —— 只靠签名会把刚落定前的手改误判成"未变"而永久漏掉。
+//   因此签名命中时额外要求 mtime 已走出窗口, 否则照常重读 (安全侧, 代价只落在写入后的 250ms 内)。
+const SIG_SETTLE_MS = 250;
+
 // 中文简单分词: 提取有意义的词 (2字以上连续片段 + 已知高频概念)
 const STOP = new Set(["这个","那个","我们","你们","他们","什么","怎么","可以","一个","就是","知道","没有","如果","因为","所以","但是","然后","现在","今天","昨天","明天","已经","还有","所有","这样","那样","自己","的时候","一下","一点","一些","这些","那些","东西","事情","问题","觉得","应该","需要","开始","继续","大家","真的","只是","可能","不是","都是","一直","非常","其实","最后","主要","联系","关系"]);
 
@@ -74,9 +80,16 @@ export class SceneStore {
     //   会把空状态整体覆盖回文件 —— 现场消失, 旧场景永久丢失。
     //   现在损坏时先读成空态但打 _corruptPending 标记, 第一次写盘前把损坏文件改名
     //   .corrupt-<ts> 留档 (healer 的体检清单不含本文件, 只能自己保现场)。
+    // 磁盘签名 (2026-11-03 热路径): 每次 assign 都要锁内重读 + 合并整个 scenes.json (~0.6ms)。
+    // 本进程是唯一写者的常态下, 磁盘自上次读/写后根本没变 —— 用 ino:mtimeNs:size 判别,
+    // 未变就跳过重读与合并 (跨进程的写入必然改动这三项之一)。
+    // 顺序必须"先 stat 后读": 读之后才发生的写会让签名失配 → 下次 _reload 重读 (安全侧);
+    //   反过来把"旧内容 + 新签名"记成最新, 才会永久漏掉别人的更新。
+    const preSig = this._diskSigOf();
     const guarded = readJsonGuarded(this.file, []);
     this.scenes = Array.isArray(guarded.data) ? guarded.data : [];
     this._corruptPending = guarded.parseFailed;
+    this._reloadSig = preSig ? preSig.sig : null;
     // schema 版本迁移 (旁挂 .schema 文件; 数据文件保持纯数组)
     const mig = migrateData({
       file: this.file,
@@ -89,6 +102,11 @@ export class SceneStore {
     //   旧 mergeScenes 直接把无 id 场景跳过 —— 一次普通 assign() 之后, 它连同承载的 facts
     //   就从 scenes.json 消失。构造期补号并落盘; 常态 (全部有 id) 一个字节都不写。
     if (this.scenes.some((s) => !s || !s.id)) {
+      // 补号动作本身发生在 _save() 内的 _reload(): mergeScenes 给无 id 场景确定性补号。
+      // 磁盘签名此刻与构造期一致, 签名快路径会跳过这次合并 —— 迁移分支必须显式作废签名,
+      // 否则写出去的还是无 id 的原始行 (内存态/磁盘态都必须全部有 id)。
+      // 只在这条一次性迁移路径上多读一次盘, 常态零成本。
+      this._reloadSig = null;
       try { this._save(); } catch { /* 落盘失败不阻断构造, 下次真实写入会再迁移 */ }
     }
   }
@@ -133,9 +151,24 @@ export class SceneStore {
     return [...byId.values()];
   }
 
+  // 磁盘签名 (ino + 纳秒 mtime + size): 任一外部写入都会改动其中至少一项。
+  // ino 是关键: writeJson 走「临时文件 + rename」, 每次应用内写入都会换 inode;
+  //   原地手改不改 inode, 由 mtime 落定窗口兜住 (见 SIG_SETTLE_MS)。
+  // 文件不存在/读不到 → null (必与任何已记录签名不等, 强制重读)。
+  _diskSigOf() {
+    try {
+      const st = fs.statSync(this.file, { bigint: true });
+      return { sig: `${st.ino}:${st.mtimeNs}:${st.size}`, mtimeMs: Number(st.mtimeNs) / 1e6 };
+    } catch { return null; }
+  }
+
   // 锁内重读: 拿磁盘最新态 + 合并内存未落盘变更
+  // 磁盘签名与上次读/写时一致且时间戳已落定 → 内存即最新, 省掉整次 read+merge。
   _reload() {
+    const cur = this._diskSigOf();
+    if (cur && cur.sig === this._reloadSig && Date.now() - cur.mtimeMs > SIG_SETTLE_MS) return this.scenes;
     this.scenes = SceneStore.mergeScenes(readJson(this.file, []), this.scenes);
+    this._reloadSig = cur ? cur.sig : null;
     return this.scenes;
   }
 
@@ -273,5 +306,8 @@ export class SceneStore {
     }
     writeJson(this.file, this.scenes);
     writeSchema(this.file, "scenes", SCENES_SCHEMA_VERSION);
+    // 本次写完即磁盘最新态 —— 记下签名, 下一次 _reload() 无需重读 (见 _reload 注释)
+    const d = this._diskSigOf();
+    this._reloadSig = d ? d.sig : null;
   }
 }

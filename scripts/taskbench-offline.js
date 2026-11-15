@@ -22,6 +22,7 @@ import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { appendHistory } from "./lib/bench-history.js";
+import { noteCatch } from "../src/utils/catch-log.js";
 import { TASKS } from "../bench/tasks.js";
 import { OFFLINE_PLANS, planCoverage } from "../bench/offline-plans.js";
 import { runOne } from "./taskbench.js";
@@ -167,6 +168,6 @@ try {
   }, null, 2));
   // 追加趋势 (面板的"变好还是变差"靠它; 当日 json 会被下一次覆盖, 趋势不会)
   appendHistory(dir, "taskbench-offline", { total: results.length, passed, rate, ms: totalMs });
-} catch { /* 存档失败不影响基准本身 */ }
+} catch (e) { noteCatch("scripts/taskbench-offline.js#main", e); /* 存档失败不影响基准本身 */ }
 
 process.exit(STRICT && passed < results.length ? 1 : 0);

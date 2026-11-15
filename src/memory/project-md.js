@@ -10,6 +10,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { noteCatch } from "../utils/catch-log.js";
 
 // 支持的项目指令文件 (全部存在时都注入; AGENTS.md 在前 —— 生态标准优先展示)
 export const PROJECT_INSTRUCTION_FILES = ["AGENTS.md", "PPX.md"];
@@ -31,7 +32,7 @@ function readWithCache(absPath, st) {
 // 读取项目指令, 返回注入文本 (无任何文件时为 "")
 export function loadProjectInstructions(root, { maxChars = DEFAULT_MAX_CHARS } = {}) {
   let base;
-  try { base = path.resolve(String(root || ".")); } catch { return ""; }
+  try { base = path.resolve(String(root || ".")); } catch { return ""; /* swallowed-ok(2026-11-03): root 非法 → 不注入 */ }
   const found = [];
   for (const name of PROJECT_INSTRUCTION_FILES) {
     const p = path.join(base, name);
@@ -40,7 +41,7 @@ export function loadProjectInstructions(root, { maxChars = DEFAULT_MAX_CHARS } =
       const st = fs.statSync(p);
       if (!st.isFile()) continue;
       text = readWithCache(p, st);
-    } catch { continue; } // 不存在/不可读 → 跳过 (静默, 零 token)
+    } catch (e) { if (e?.code !== "ENOENT") noteCatch(e); continue; } // 不存在/不可读 → 跳过 (静默, 零 token)
     if (!text) continue;
     if (text.length > maxChars) {
       text = text.slice(0, maxChars).trimEnd() + `\n…[${name} 超出 ${maxChars} 字符预算已截断]`;

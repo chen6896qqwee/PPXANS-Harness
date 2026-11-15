@@ -1,4 +1,4 @@
-// src/evidence/index.js - 证据边界与看板 (吸收 oh-my-hermes / OMH 思路, 纯 JS, 零依赖)
+// src/evidence/index.js - 证据边界与看板 (设计溯源 docs/PROVENANCE.md#hermes; 自研, 纯 JS, 零依赖)
 // 两层证据标记:
 //   PREPARED - 注入上下文的"预备材料"(如检索结果/文档), 禁止由 agent 伪造
 //   OBSERVED - 工具/环境真实产出的"观测结果", 准入时须校验来源
@@ -11,6 +11,7 @@
 //      缺 id 的历史行按**内容哈希**确定性补号 (随机补号会把一条目标裂成两条, 与 memory/l2.js F8 同一不变量)
 //   ④ promptBlock(): 空看板 "" (固定开销 0 token), 有板时条数/长度双闸, 块内零时间戳 (前缀缓存纪律)
 
+import { noteCatch } from "../utils/catch-log.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -139,15 +140,6 @@ export function normalizeStatus(v) {
   throw new Error(`未知状态: ${v} (只接受 ${GOAL_STATUSES.join(" / ")})`);
 }
 
-// 宽松归一: 只用于**盘上已有数据** (历史/手写行) —— 不认识就回落默认档并记 issue, 绝不抛错。
-// 与入参校验的严格路径分开: 用户给错要拒绝, 但历史数据不该让整块看板打不开。
-function lenientPriority(v) {
-  try { return normalizePriority(v); } catch { return "P2"; }
-}
-function lenientStatus(v) {
-  try { return normalizeStatus(v); } catch { return "pending"; }
-}
-
 const normTitle = (t) => String(t ?? "").trim();
 // 标题去重键: 空白/大小写差异算同一条 (计划台账里同一句话出现两次只会让模型再决策一遍)
 const titleKey = (t) => normTitle(t).toLowerCase().replace(/\s+/g, " ");
@@ -255,7 +247,7 @@ export function createGoalBoard({ dataDir = null, maxGoals = GOAL_MAX_GOALS } = 
   let stamp = null;           // 磁盘闸门: `${mtimeMs}:${size}`
 
   const diskStamp = () => {
-    try { const st = fs.statSync(file); return `${st.mtimeMs}:${st.size}`; } catch { return null; }
+    try { const st = fs.statSync(file); return `${st.mtimeMs}:${st.size}`; } catch { return null; /* swallowed-ok(2026-11-03): 文件不存在即无闸门值 */ }
   };
 
   function readDisk() {
@@ -265,7 +257,7 @@ export function createGoalBoard({ dataDir = null, maxGoals = GOAL_MAX_GOALS } = 
       if (!Array.isArray(parsed)) throw new Error("顶层不是数组");
       return { rows: parsed, corrupt: false };
     } catch {
-      return { rows: [], corrupt: true }; // 半截 JSON: 读不出内容, 但现场保留在原位
+      return { rows: [], corrupt: true }; // 半截 JSON: 读不出内容, 但现场保留在原位 /* swallowed-ok(2026-11-03): corrupt 标记已回传调用方 */
     }
   }
 
@@ -275,7 +267,7 @@ export function createGoalBoard({ dataDir = null, maxGoals = GOAL_MAX_GOALS } = 
     if (!file) return;
     ensureDir(path.dirname(file));
     if (corruptPending && fs.existsSync(file)) {
-      try { fs.renameSync(file, `${file}.corrupt-${Date.now()}`); } catch {}
+      try { fs.renameSync(file, `${file}.corrupt-${Date.now()}`); } catch (e) { noteCatch(e); }
       corruptPending = false;
     }
     const sorted = [...list].sort(compareGoals);

@@ -4,20 +4,20 @@
 import fs from "node:fs";
 import path from "node:path";
 import { auditFile } from "../audit/audit-chain.js";
+import { noteCatch } from "../utils/catch-log.js";
+import { readJson } from "../utils/store.js";
 
-function readJson(p, fallback) {
-  try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return fallback; }
-}
+// readJson 收敛 (2026-11-08): utils/store.js readJson 同语义 (缺失静默回退, 损坏留 warn)。
 
 // 读审计链最近 maxLines 条, 聚合出工具级信号
 function readAuditSignals(dataDir, maxLines = 5000) {
   const file = auditFile(dataDir);
   let lines = [];
-  try { lines = fs.readFileSync(file, "utf8").trim().split("\n").filter(Boolean); } catch { return null; }
+  try { lines = fs.readFileSync(file, "utf8").trim().split("\n").filter(Boolean); } catch (e) { if (e?.code !== "ENOENT") noteCatch(e); return null; }
   lines = lines.slice(-maxLines);
   const calls = [];
   for (const line of lines) {
-    try { calls.push(JSON.parse(line)); } catch {}
+    try { calls.push(JSON.parse(line)); } catch (e) { noteCatch(e); }
   }
   if (!calls.length) return null;
   const byTool = new Map(); // tool -> {calls, fails, errors:{}}

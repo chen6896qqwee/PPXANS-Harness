@@ -14,6 +14,7 @@ import path from "node:path";
 import { logsDir, logicalDay } from "../utils/store.js";
 import { shortId } from "../utils/id.js";
 import { scrubPII } from "../utils/pii.js";
+import { noteCatch } from "../utils/catch-log.js";
 
 const als = new AsyncLocalStorage();
 const MAX_PAYLOAD = 2000; // 单条事件载荷上限, 防爆文件
@@ -27,6 +28,15 @@ export function genTraceId() {
 export function runWithTrace(fn, meta = {}) {
   const store = { traceId: genTraceId(), ...meta, t0: Date.now() };
   return als.run(store, fn);
+}
+
+// 补写当前 trace 上下文的元信息 (架构优化 ②, 2026-11-13): 入口包装写成
+//   runWithTrace(async () => {...}) 时没有 meta 参数, 会话/通道/run 类型只能事后补。
+//   只在 ALS 内生效, 无上下文时静默 —— 供 agent 入口一行接线, 不必改闭包收尾括号。
+export function patchTrace(meta = {}) {
+  const store = als.getStore();
+  if (store && meta && typeof meta === "object") Object.assign(store, meta);
+  return store || null;
 }
 
 // 任意深层调用取当前 traceId (无入口上下文时返回 null, 事件照记不丢)
@@ -71,7 +81,7 @@ export class EventTracer {
     const line = JSON.stringify(entry);
     try {
       fs.appendFileSync(this._file(), (line.length > MAX_PAYLOAD * 4 ? line.slice(0, MAX_PAYLOAD * 4) + "…" : line) + "\n", "utf8");
-    } catch (e) { /* 事件写入失败不影响主流程 (可观测性降级不阻塞 agent) */ }
+    } catch (e) { noteCatch(e); /* 事件写入失败不影响主流程 (可观测性降级不阻塞 agent) */ }
     return entry;
   }
 
