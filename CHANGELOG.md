@@ -1,3 +1,18 @@
+## 5.3.1 (2026-11-18) · 发布流水线修复: 工具面与 README 数字口径跨机稳定
+
+### 修什么 (v5.3.0 首次 tag 在 CI 必红, 本机全绿)
+
+- **shell 工具随 bash 存在与否注册**: 无 bash 时整个不注册, 于是工具数 / 核心 schema / 上下文 token /
+  MCP 工具数四项同时浮 1 (本地 Windows 无 bash, CI ubuntu 自带 bash)。改为与 voice / lsp 同款:
+  始终注册, 执行时明确回报不可用并给安装指引; `available` 仍如实反映 bash 可用性, shellSession 注入逻辑不变。
+- **ctx_tokens 测的是本机绝对路径**: 测量用 `mkdtempSync` 随机临时目录, 而【工作目录】段默认把绝对路径
+  写进 system prompt —— 同一份代码换路径差 10 token 上下, 跨机必不对齐。改为固定目录 + `neutral` 口径
+  测量 (该模式本就是仓库为「换机器仍可共用前缀缓存」提供的选项), anchor 变成机器无关的可复现数字。
+- **回归钉子**: 新增 `test/tool-surface-stability-2026-11-18.test.js` 三条 —— 无 bash 也要注册 shell 且
+  执行时如实报错; ctx_tokens 与工作目录路径长度无关; `measure()` 两次调用结果完全一致。
+- **验证**: 全量 2209 项 (2205 通过 / 4 跳过 / 0 失败); `npm run verify` 17/17; eslint 0 error;
+  三平台安装包 (Windows NSIS / macOS dmg+zip / Linux AppImage+deb) 全部构建通过。
+
 ## 5.3.0 (2026-11-18) · 对话体验轮 + 外观/身份系统轮 + 覆盖率补全轮 + 世界模型轮
 
 ### 对话体验吸收 (2026-11-18, WorkBuddy 式思考链路收拢 + 个性化面板 + 对话流基础配置)

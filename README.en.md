@@ -2,7 +2,7 @@
 
 **An auditable, self-healing AI agent kernel in pure Node.js — zero runtime dependencies.**
 
-> Version **5.3.0** · Windows-first, runs on macOS/Linux · Node.js ≥ 20
+> Version **5.3.1** · Windows-first, runs on macOS/Linux · Node.js ≥ 20
 
 PPXANS-Harness (皮皮虾, "mantis shrimp") is a complete local agent harness: tool loop, five-layer memory, audit chain, permissions, MCP server/client, multi-agent orchestration, and a desktop client — with no `node_modules` required at runtime. Point it at any OpenAI-compatible endpoint (cloud or local LM Studio / Ollama) and go.
 
