@@ -57,7 +57,16 @@ export function countVerifyChecks() {
 }
 
 export async function measure() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ppx-readme-sync-"));
+  const root = path.join(os.tmpdir(), "ppx-readme-sync");
+  try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* 清理失败不影响测量 */ }
+  fs.mkdirSync(root, { recursive: true });
+  // 口径固定 (2026-11-18): 【工作目录】段默认写绝对路径 (workspace_prompt_mode=absolute),
+  //   而绝对路径本身就随机器/临时目录而变 (本地 C:\Users\... vs CI /home/runner/work/...),
+  //   于是 ctx_tokens 必然跨机不同 —— 这里统一按 neutral 口径量: 该模式就是仓库为
+  //   “换机器/换工作目录仍可共用前缀缓存” 提供的选项, 也是同一份 prompt 在去掉本机路径后的
+  //   真实长度。anchor 因此变成可复现的机器无关数字。
+  const prevMode = process.env.PPX_PROMPT_WORKSPACE_MODE;
+  process.env.PPX_PROMPT_WORKSPACE_MODE = "neutral";
   const agent = new PPXAgent({ root, configFile: null });
   try {
     const tools = agent.tools.list().length;
@@ -79,6 +88,8 @@ export async function measure() {
       verify_checks: countVerifyChecks(),
     };
   } finally {
+    if (prevMode === undefined) delete process.env.PPX_PROMPT_WORKSPACE_MODE;
+    else process.env.PPX_PROMPT_WORKSPACE_MODE = prevMode;
     try { agent.shutdown(); } catch { /* 关闭失败不影响计数 */ }
     try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* 临时目录清理失败忽略 */ }
   }

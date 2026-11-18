@@ -4,11 +4,11 @@
 
 > 当前版本：**5.3.0** · 对话体验轮（思考链路收拢 + 个性化面板）+ 外观/像素身份系统 + 世界模型 + 覆盖率补全 · 2026-11-18
 
-一个会自我修复、自我学习、自主迭代、可审计验证的超级 Agent：**126 个内置工具 · 能力边界护栏 · L0–L4 五层记忆 · SHA-256 审计哈希链 · 标准 MCP 服务端+客户端 · 多模型路由 · 自愈 7/7 · 可验证自改进闭环（self_improve） · 全量测试 2206 项 (2202 通过 / 4 跳过) · 桌面客户端**。
+一个会自我修复、自我学习、自主迭代、可审计验证的超级 Agent：**127 个内置工具 · 能力边界护栏 · L0–L4 五层记忆 · SHA-256 审计哈希链 · 标准 MCP 服务端+客户端 · 多模型路由 · 自愈 7/7 · 可验证自改进闭环（self_improve） · 全量测试 2209 项 (2205 通过 / 4 跳过) · 桌面客户端**。
 
 > ⚠️ 本节数字为 **2026-11-04 实测**（`node --test test/*.test.js`），请勿手改臆测值 —— 改完请重跑并同步本行。  
 > 机读锚点由 `node scripts/readme-sync-check.js --fix` 维护，手改会被闸门拦下。  
-<!-- readme-sync: {"tools":126,"skills":71,"core_schema":37,"ctx_tokens":6975,"mcp_tools":128,"tests":2206,"test_files":283,"offline_total":28,"offline_legacy_total":20,"verify_checks":17,"pass":2202,"skipped":4} -->
+<!-- readme-sync: {"tools":127,"skills":71,"core_schema":38,"ctx_tokens":7156,"mcp_tools":129,"tests":2209,"test_files":284,"offline_total":28,"offline_legacy_total":20,"verify_checks":17,"pass":2205,"skipped":4} -->
 > 2026-10-25 评估修复轮后全量 0 失败（此前 1 项失败为测试断言过期，已随工具数 113→114 一并修正）；  
 > 主干链路（启动 / 对话 / 记忆 / 审计 / 权限 / HTTP / MCP）全量通过。
 
@@ -107,16 +107,16 @@ npm run desktop:pack     # → dist-desktop/PPXANS-Harness-Setup-<版本>-x64.ex
 | 🔌 **多渠道接入**                              | HTTP + 飞书（官方 encrypt_key 事件解密 + 签名校验 + 防重放）+ 微信（加解密 + 主动推送 + 加密回包）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | 📄 **文档 + RAG + OCR**                     | read_document（txt/md/pdf/html）+ ingest_document 分块入库 + ocr_image（本地 tesseract / 云回退）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | 💬 **CLI 交互**                             | readline 历史 + /stop 中断 + /reset 清会话 + Ctrl+C 单次中断                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| 🧩 **MCP 客户端 + 服务端**                      | 零依赖 MCP 客户端（stdio + HTTP Streamable）接外部工具；`POST /mcp` 暴露 128 工具 + 记忆/轨迹/统计/会话资源 + 方法型 prompts + ppx.* 管理工具                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| 🧩 **MCP 客户端 + 服务端**                      | 零依赖 MCP 客户端（stdio + HTTP Streamable）接外部工具；`POST /mcp` 暴露 129 工具 + 记忆/轨迹/统计/会话资源 + 方法型 prompts + ppx.* 管理工具                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | ✅ **任务面板**                                | 任务队列 + 步骤状态推进 + 结果回填 + 技能模板                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | ✅ **可观测**                                 | 工具轨迹 JSONL + 结构化事件流（traceId 贯穿）+ tool call result 大摘要                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | ✅ **场景系统**                                | 灵魂文件式场景，命中自动切换行为                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | ✅ **流式输出**                                | SSE 逐字流式（含工具轮次：增量 tool_call 累积，文本实时可见）+ 桌面端实时渲染；同会话并发互斥、/rewind 会话回卷（fork 分支）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | 🔐 **HTTP 认证**                            | Bearer Token，未配置自动生成随机 token 持久化                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 
-**126 内置工具**（运行时实测，含 MCP 动态注册）：
+**127 内置工具**（运行时实测，含 MCP 动态注册）：
 
-- **126 内置**：文件/命令/搜索/HTTP/定时/记忆（读图/检索/入库，L1 事实 + L4 程序性记忆）/文档（加载/OCR/入库）/场景/技能（加载/创建/提炼）/重构 refine /回合内提问（`ask_user`：选项/多选/自填，等待真人回答）/子 agent spawn + 治理运维（repo_map/apply_patch/review_code/goal_board/audit_verify/persona/selfheal_run/self_improve/self_audit 等）
+- **127 内置**：文件/命令/搜索/HTTP/定时/记忆（读图/检索/入库，L1 事实 + L4 程序性记忆）/文档（加载/OCR/入库）/场景/技能（加载/创建/提炼）/重构 refine /回合内提问（`ask_user`：选项/多选/自填，等待真人回答）/子 agent spawn + 治理运维（repo_map/apply_patch/review_code/goal_board/audit_verify/persona/selfheal_run/self_improve/self_audit 等）
 - **默认按需曝光**（2026-11-02）：只下发 37 个主干工具 schema（`agent.tool_exposure:"core"`），其余工具保留名字、用 `tool_schema` 按需取参数；取过后下一轮自动进入函数数组。全量模式仍可设 `"all"`。
 - **22 × ppx.*****：** chat.send/stream、sessions.*、providers.(list/add/update/delete/test/reorder)、settings.get/update、task.(templates/create/list/update/step/delete/run)、session.reset
 
@@ -201,7 +201,7 @@ stdio 型 MCP 服务器直接接入，无需开端口与 token（`claude mcp add
 
 **HTTP 端点 (Streamable HTTP)**：`POST http://127.0.0.1:8899/mcp`（同 Bearer token 鉴权）。任何 MCP 客户端（Claude Desktop / Cursor / MCP Inspector 等）可直接接入：
 
-- `tools/list` + `tools/call` — 128 工具全量暴露
+- `tools/list` + `tools/call` — 129 工具全量暴露
 - resources：`memory://` `traces://` `stats://` `sessions://`
 - prompts：`humanize` / `plan` / `debug` / `verify` / `write_article`（方法型技能）
 - `ppx.chat.send` / `ppx.chat.stream`（对话工具，驱动完整工具循环）
@@ -372,13 +372,13 @@ PPXANS-Harness/
 │   ├── plugin/     DI 容器 (Context/compose/loadPlugins, 纯 L0; 2026-11-08 装配器归位 agent/)
 │   ├── workgraph/  [2026-11-02] 工单账本 (Tickets/Assignments + 恢复/重跑)
 │   ├── flow/       [2026-11-02] 入站流内核 (Trigger 归一 / 两级准入 / planIngress 六动作)
-│   ├── tools/      工具系统 (126 个注册工具; MCP 另暴露 22 个 ppx.* 方法)
+│   ├── tools/      工具系统 (127 个注册工具; MCP 另暴露 22 个 ppx.* 方法)
 │   ├── core/  services/  memory/  audit/  ans/  selfheal/  channels/  orchestrator/  llm/  utils/
 ├── webapp/         Vue3+Vite 前端源码; dist/ 为预构建产物 (v5.0 重铸, 发布零运行时依赖)
 ├── bin/            ppx / ppxans 单一入口 (2026-11-08 收敛: 8 个 bin 合一)
 ├── data/           运行时数据 (不进 git)
 ├── references/     第三方项目来源登记
-├── test/           测试 (283 文件, node --test; 总项数以机读锚点为准)
+├── test/           测试 (284 文件, node --test; 总项数以机读锚点为准)
 └── docs/           文档 (ARCHITECTURE-CURRENT / PROJECT-OVERVIEW / PROVENANCE / QUICKSTART / WORK-GRAPH 等)
 ```
 

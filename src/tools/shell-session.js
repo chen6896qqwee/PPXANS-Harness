@@ -232,14 +232,18 @@ export function registerShellSessionTools(catalog, { rootDir, config = null } = 
   const configured = config?.shell_path;
   // 配置了路径但不存在的, 视为"本机没有 bash" —— 不能拿一个 ENOENT 的路径注册工具
   const shellPath = configured ? (fs.existsSync(configured) ? configured : null) : findBash();
-  if (!shellPath) return { available: false };
+  // 工具面必须跨机器稳定 (2026-11-18): 此前无 bash 就整个不注册, 于是工具数 / 核心 schema 数 /
+  //   上下文 token / MCP 工具数全都随环境浮 1 —— README 数字在 CI (ubuntu 自带 bash) 与本地
+  //   Windows (无 bash) 之间永远对不上, release gate 必红。现在与 voice / lsp 同款: **始终注册**,
+  //   执行时明确回报不可用并给出安装指引。available 仍然如实反映 bash 是否可用 (供 shellSession 注入)。
   const env = {};
-  const session = new PersistentShell({
+  const session = shellPath ? new PersistentShell({
     shellPath,
     cwd: rootDir,
     env,
     timeoutMs: Number(config?.timeout_ms) || 120000,
-  });
+  }) : null;
+  const NO_BASH = "本机没有 bash, shell 工具不可用: Windows 请装 Git for Windows (或把 config.agent.shell_session.shell_path 指向 bash.exe), Linux/macOS 装 bash。在不支持常驻 shell 的环境请改用 run_command。";
 
   catalog.register({
     name: "shell",
@@ -259,6 +263,7 @@ export function registerShellSessionTools(catalog, { rootDir, config = null } = 
       required: ["command"],
     },
     execute: async (args, ctx) => {
+      if (!session) return JSON.stringify({ error: NO_BASH, available: false });
       const cmd = String(args.command || "").trim();
       if (!cmd) return JSON.stringify({ error: "空命令" });
       const security = ctx?.agent?.config?.security || config?.security || {};
@@ -277,5 +282,5 @@ export function registerShellSessionTools(catalog, { rootDir, config = null } = 
     },
   });
 
-  return { available: true, session };
+  return { available: !!session, session };
 }
