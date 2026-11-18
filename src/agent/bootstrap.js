@@ -19,6 +19,10 @@ import { Auditor } from "../audit/verifier.js";
 import { Lifecycle } from "../ans/lifecycle.js";
 import { record as rewardRecord } from "../ans/reward.js";
 import { scan as evictionScan } from "../memory/eviction.js";
+import { scanKnowledge, retireLesson, disableSkill } from "../memory/knowledge-governance.js";
+import { EffectTracker } from "../evolve/effect.js";
+import { FinetuneBridge } from "../evolve/finetune-bridge.js";
+import { createWorldModelServer } from "../worldmodel/server.js";
 import { installGuard, installGuardOnCatalog } from "../ans/guard.js";
 import { categorizeFailure } from "../evolve/delta-producer.js";
 import { installEvolutionLoop } from "../evolve/loop.js";
@@ -256,6 +260,14 @@ _initServices() {
     lifecycle: this.lifecycle,
     tracer: this.tracer,
   });
+  // 蒸馏效果闭环 (2026-11-15): cohort 登记 + 前后对照, 只记账不改行为。
+  //   journal Phase 3.5 消费 measure(); 装配失败降级为 null (效果对照缺席, 其余不受影响)。
+  try {
+    this.effect = new EffectTracker({ dataDir: this.dataDir });
+  } catch (e) {
+    this.effect = null;
+    warn(`[effect] 初始化失败 (效果对照不可用): ${e?.message || e}`);
+  }
   this.learningSvc = new LearningService({
     getLlm: () => this.auxLLM || this.llm,
     traces: this.traces,
@@ -269,7 +281,71 @@ _initServices() {
     // 2026-10-24 进化闭环: playbook 收经验 delta, failures 供提炼时检索相似病历
     playbook: this.playbook || null,
     failures: this.failures || null,
+    // 2026-11-15 蒸馏效果闭环: refine/refineSkill 落库时登记 cohort (见 evolve/effect.js)
+    effect: this.effect,
   });
+
+  // 知识治理 (2026-11-15): lessons/skills 退休候选扫描 + 显式退休动作。
+  //   报告不越权 —— scan 只读; retire/disable 是显式调用 (跨重启停用需写 config.skills.disabled)。
+  this.knowledgeGovernance = {
+    scan: () => scanKnowledge({ experience: this.experience, skills: this.skills }),
+    // 退休/停用联动语料撤回 (2026-11-15): 仓库内退休的知识, 已导出的训练语料也必须可
+    //   追溯地作废 (revocations.jsonl) —— 否则退休机制在权重级学习这条链上是断开的。
+    retireLesson: (id, reason = "") => {
+      const hit = retireLesson(this.experience, id, reason);
+      if (hit) this.finetuneBridge?.revokeLesson?.(id, reason || "经验退休");
+      return hit;
+    },
+    disableSkill: (id) => {
+      const r = disableSkill(this.skills, id);
+      if (r?.disabled) this.finetuneBridge?.revokeSkill?.(id, "技能停用");
+      return r;
+    },
+  };
+
+  // 权重级学习回路桥 (2026-11-15): 已验证知识 → 训练语料导出 → (架构外训练) → 版本注册。
+  //   训练本体不在仓库内 (零依赖边界), 回归验证走既有 effect cohort。见 evolve/finetune-bridge.js。
+  //   audit 注入 (2026-11-15): 导出/注册/撤回都在审计链留锚点事件, 不在链外各自落盘。
+  this.finetuneBridge = new FinetuneBridge({
+    dataDir: this.dataDir,
+    experience: this.experience,
+    skills: this.skills,
+    failures: this.failures,
+    audit: this.audit,
+  });
+
+  // 世界模型内置服务 (2026-11-15, 默认关): config.agent.world_model.builtin === true 时
+  //   在 127.0.0.1 起本地文件域模拟服务, 并在 endpoint 未设置时指向内置实例 ——
+  //   tools/world-model.js 的插入点由此真正通电, 工具面零改动。启动失败 fail-open。
+  try {
+    if (this.config?.agent?.world_model?.builtin === true) {
+      const wmPort = Number(this.config.agent.world_model.port) > 0 ? Number(this.config.agent.world_model.port) : 8923;
+      this.worldModel = createWorldModelServer({
+        root: this.root || process.cwd(),
+        port: wmPort,
+        journalFile: path.join(this.dataDir, "worldmodel", "journal.jsonl"),
+        // 审计锚点 (2026-11-15): snapshot/restore/reset 经 appendEvent 进审计链 —— 模拟
+        //   事件域在链上可证明"发生过", 与 finetune 桥同口径 (步骤量太大不逐条进链)。
+        onMutate: (type, payload) => {
+          try {
+            this.audit?.appendEvent?.({ event: `WORLDMODEL_${String(type).toUpperCase()}`, fields: payload || {} });
+          } catch { /* 锚点失败不阻断模拟 */ }
+        },
+      });
+      this.worldModel.start().then((url) => {
+        if (!this.config.agent.world_model.endpoint) {
+          this.config.agent.world_model.endpoint = url + "/"; // 同一 config 对象, 工具 execute 时实时读
+        }
+        try {
+          this.audit?.appendEvent?.({ event: "WORLDMODEL_SERVICE_STARTED", fields: { url, root: this.root } });
+        } catch { /* 锚点失败不阻断 */ }
+        info(`[worldmodel] 内置文件域世界模型已启动: ${url} (虚拟状态 ${this.worldModel.world.stateCount()} 条)`);
+      }).catch((e) => warn(`[worldmodel] 启动失败 (世界模型不可用, 其余不受影响): ${e?.message || e}`));
+    }
+  } catch (e) {
+    this.worldModel = null;
+    warn(`[worldmodel] 装配失败: ${e?.message || e}`);
+  }
   // 注入 LLM 摘要器/提炼器 (依赖 service, 装配后注入)
   this.memory.summarizer = (raw) => this.memorySvc.summarizeMemory(raw);
   this.memory.setExtractor((u, a, related) => this.memorySvc.extractMemory(u, a, related));

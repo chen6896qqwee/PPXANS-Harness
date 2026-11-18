@@ -1,15 +1,13 @@
 #!/usr/bin/env node
 // src/cli.js - 皮皮虾 CLI 交互入口 (readline 历史 + interrupt 中断)
+// REPL 主循环拆在 cli-repl.js (createRepl) —— 本文件只做 argv 闸门与一次性装配。
 import { ensureUTF8Console } from "./boot/winutf8.js";
 import fs from "node:fs";
 import path from "node:path";
-import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import { PPXAgent } from "./agent/index.js";
-import { suggestProactive } from "./ans/proactive.js";
-import { cliBanner, colors, paint } from "./boot/banner.js";
 import { isUsableProvider } from "./llm/router.js";
-import { commandCompleter } from "./agent/command-registry.js";
+import { createRepl } from "./cli-repl.js";
 
 ensureUTF8Console();
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -178,177 +176,9 @@ if (positional.length) {
 
 const agent = new PPXAgent({ root: ROOT });
 
-// 2026-10-31: Tab 补全 —— registry 名单 (15 内置 + 隐藏别名 + .ppx/commands 用户命令)
-//   + CLI 本地命令, 一次合并去重传给纯函数补全器
-const CLI_LOCAL_COMMANDS = ["stop", "reset", "proactive", "proactive-done", "quit", "exit", "q"];
-const REG_NAMES = (agent.commands && typeof agent.commands.list === "function")
-  ? agent.commands.list().map((c) => c.name)
-  : [];
-
-// 2026-10-24 (UI 轮): 启动横幅统一设计 (box-drawing 面板 + codex 橙 + NO_COLOR 降级)
-console.log("\n" + cliBanner({
+// REPL 主循环 (横幅/补全/命令分派/中断) 在 cli-repl.js —— 可注入 IO 进程内测试
+createRepl(agent, {
+  root: ROOT,
   version: pkgVersion(),
-  memory: agent.facts.count(),
-  experience: agent.experience.lessons.length,
-  modelReady: !!agent.llm,
-  tools: agent.tools.list().length,
-}));
-
-// 2026-10-24 (S 轮): 无模型时给"1 分钟上手"路标 —— 替代开发者黑话警告
-const hasUsable = (agent.config.providers || []).some((p) => {
-  try { return isUsableProvider(p); } catch { return false; }
+  updateCheck: process.env.PPX_UPDATE_CHECK !== "0",
 });
-if (!hasUsable) {
-  console.log(paint(colors.accent, "  ⚡ 还没有可用模型 — 运行 npm run setup, 1 分钟配好 (选厂商 → 粘贴 Key → 自动探活)"));
-  console.log(paint(colors.dim, "    也可以在 Web 界面首页点「配置模型」; 本地 LM Studio / Ollama 启动后重启会自动识别\n"));
-}
-
-// 2026-10-31 (队列⑤): 启动更新通知 —— fire-and-forget 非阻塞, 24h TTL 缓存 (dataDir/update-check.json),
-//   网络失败静默不打扰对话; PPX_UPDATE_CHECK=0 关闭。`ppx update` 显式升级不受开关影响。
-if (process.env.PPX_UPDATE_CHECK !== "0") {
-  Promise.all([import("./services/update.js"), import("./config/index.js"), import("./utils/datadir.js")])
-    .then(async ([u, { loadConfig }, { resolveDataDir }]) => {
-      const check = await u.checkWithConfig({
-        config: loadConfig(ROOT),
-        currentVersion: pkgVersion(),
-        dataDir: resolveDataDir(ROOT),
-      });
-      const line = u.updateNotice(check);
-      if (line) console.log(paint(colors.dim, `  ↑ ${line}`));
-    })
-    .catch(() => { /* 检查失败静默: 通知是增强信号, 不是主链 */ });
-}
-
-const rl = readline.createInterface({
-  input: process.stdin,
-  output: process.stdout,
-  prompt: "皮皮虾> ",
-  terminal: true,
-  completer: commandCompleter([...REG_NAMES, ...CLI_LOCAL_COMMANDS]),
-});
-
-let busy = false; // 防止任务执行中重复输入
-
-// 主动任务生成定时器 (ANS 自主性): config.agent.proactive.enabled 时启动
-// 有待办信号才推送 (suggestProactive 无信号返回 null 不打扰), 输出到 stdout
-if (agent.config.agent?.proactive?.enabled) {
-  agent.startProactiveTicker((payload) => {
-    console.log("\n[主动提醒] " + payload.text);
-    rl.prompt();
-  });
-  const proactiveMs = Number(agent.config.agent.proactive.interval_ms) || 3600000;
-  console.log(`  (主动提醒已开启: 每 ${Math.round(proactiveMs / 60000)} 分钟扫描记忆待办)`);
-}
-
-rl.on("line", async (line) => {
-  const text = line.trim();
-  if (!text) return rl.prompt();
-  if (busy) {
-    // 2026-10-31 修复: busy 检查此前在最前面, /stop 也被静默吞掉 —— 帮助文案写着
-    //   "可用 /stop 打断" 但根本到不了处理分支。现在 busy 中 /stop 仍然可用;
-    //   其余输入显式告知 (不再静默丢弃)。
-    if (text === "/stop") {
-      agent.interrupt();
-      console.log("\n(已发送中断信号, 当前任务将尽快停下)");
-      return rl.prompt();
-    }
-    console.log("\n(任务执行中, 本次输入已忽略 — /stop 中断任务, Ctrl+C 两次退出)");
-    return rl.prompt();
-  }
-
-  // 退出
-  if (["quit", "exit", "q"].includes(text.toLowerCase())) {
-    // 2026-10-10 (L2): shutdown 已异步化, await 确保军团子进程回收完成再退出, 不留孤儿进程
-    await agent.shutdown();
-    console.log("皮皮虾 收工, 已保存记忆。");
-    process.exit(0);
-  }
-  // 2026-10-31: 斜杠命令接入统一注册表 —— 此前 CLI 只认 4 条硬编码命令,
-  //   registry 的 15 条内置 + .ppx/commands 用户命令在 CLI 全部不可用 (chat 内有落地层,
-  //   控制面结果不落库不进 LLM)。/stop /reset /proactive /proactive-done 保持 CLI 本地
-  //   实现 (/stop 不在 registry; /reset 与 registry /new 等价, 保留旧习惯)。
-  const first = text.split(/\s/)[0];
-  const CLI_LOCAL = new Set(["/stop", "/reset", "/proactive", "/proactive-done"]);
-  if (first.startsWith("/") && !CLI_LOCAL.has(first)) {
-    busy = true;
-    try {
-      const out = await agent.chat(text);
-      console.log("\n" + out + "\n");
-    } catch (e) {
-      console.log("\n[错误] " + e.message + "\n");
-    } finally {
-      busy = false;
-    }
-    return rl.prompt();
-  }
-  // 中断当前任务 (Human-in-the-loop)
-  if (text === "/stop") {
-    agent.interrupt();
-    console.log("(已发送中断信号, 当前任务将尽快停下)");
-    return rl.prompt();
-  }
-  // 清空会话
-  if (text === "/reset") {
-    agent.resetSession("default");
-    console.log("(会话已清空)");
-    return rl.prompt();
-  }
-  // 主动任务生成: 扫描记忆里的待办/偏好, 给出主动提醒 (ANS 自主性)
-  // 输出含 id, 可用 /proactive-done <id> 标记完成 (窗口去重, 24h 内不重复提醒)
-  if (text === "/proactive") {
-    busy = true;
-    try {
-      const out = await suggestProactive(agent);
-      if (out) {
-        console.log("\n" + out.text + "\n");
-        for (const it of out.items) console.log(`  [${it.id}] ${it.content}`);
-        console.log("\n(用 /proactive-done <id> 标记完成, 之后不再提醒)\n");
-      } else {
-        console.log("\n(暂时没有需要提醒的事项)\n");
-      }
-    } catch (e) {
-      console.log("\n[错误] " + e.message + "\n");
-    } finally {
-      busy = false;
-    }
-    return rl.prompt();
-  }
-  // 标记待办完成: /proactive-done <factId>
-  if (text.startsWith("/proactive-done")) {
-    const id = text.replace("/proactive-done", "").trim();
-    const ok = agent.proactiveMarkDone(id);
-    console.log(ok ? "(已标记完成, 之后不再提醒)" : "(待办不存在: " + id + ")");
-    return rl.prompt();
-  }
-
-  busy = true;
-  try {
-    const r = await agent.chatTracked(text, {
-      source: "cli", from: "local", sessionKey: "default", run: () => agent.chat(text),
-    }).then((x) => x.reply);
-    console.log("\n" + r + "\n");
-  } catch (e) {
-    console.log("\n[错误] " + e.message + "\n");
-  } finally {
-    busy = false;
-  }
-  rl.prompt();
-});
-
-// Ctrl+C: 第一次中断任务, 第二次退出
-let ctrlC = 0;
-rl.on("SIGINT", () => {
-  ctrlC += 1;
-  if (ctrlC >= 2) {
-    // 2026-10-10 (L2): await 军团回收后再退出 (shutdown 已异步化)
-    agent.shutdown().finally(() => { console.log("\n皮皮虾 收工。"); process.exit(0); });
-    return;
-  }
-  agent.interrupt();
-  console.log("\n(已中断, 再按一次 Ctrl+C 退出)");
-  rl.prompt();
-  // 重置计数 (若任务继续则允许再次单次中断)
-  setTimeout(() => { ctrlC = 0; }, 1000);
-});
-
-rl.prompt();

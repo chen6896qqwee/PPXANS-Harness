@@ -9,6 +9,7 @@
 import { registerFileTools } from "./builtin-file.js";
 import { registerExecTools, splitOutputPipeline, applyLinePipeline } from "./builtin-exec.js";
 import { registerMemoryTools } from "./builtin-memory.js";
+import { registerWorldModelTools } from "./world-model.js";
 
 export { sessionWrittenFiles, rememberSessionWrite, imageFileToDataUrl, safePath, sensitiveWriteHint, isNpmManifestPath } from "./builtin-paths.js";
 export { runCodeAct, globToRegex } from "./code-act.js";
@@ -16,7 +17,7 @@ export { runCodeAct, globToRegex } from "./code-act.js";
 export { splitOutputPipeline, applyLinePipeline };
 
 // 注册全部内置工具
-export function registerBuiltinTools(catalog, { rootDir, facts, memory, dataDir = null }) {
+export function registerBuiltinTools(catalog, { rootDir, facts, memory, dataDir = null, config = null }) {
   // 文件域: 读/写/追加/删/移/撤销/列目录/搜索/读图 (撤销栈为域内闭包, 跨盘/快照回退)
   registerFileTools(catalog, { rootDir });
   // 执行域: run_command/code_act/run_background/job (三道启动闸门 + 命令管道 + 拒绝记忆)
@@ -33,6 +34,10 @@ export function registerBuiltinTools(catalog, { rootDir, facts, memory, dataDir 
 
   // 6-7. 记忆工具 (memory_search / memory_add): 见 ./builtin-memory.js
   registerMemoryTools(catalog, { facts });
+
+  // 8. 世界模型推演 (2026-11-15): MCP 插入点, 默认不挂载 —— endpoint 未配置时工具
+  //    自报未配置 (零依赖默认路径不变), 配置后才出网。见 ./world-model.js 头注。
+  registerWorldModelTools(catalog, { config });
 
   return catalog;
 }

@@ -134,7 +134,7 @@ usage 事实链 (2026-10-30 修复后): `streamChat/apiChatStream` 请求带 `st
 | `llm/` | 多协议客户端: `openai-completions` / `openai-responses` / `anthropic-messages` (`adapters/`, 每个适配器一文件 + 共用 wire 工具); 多 provider 回退、思考强度注入 (`_thinkParams`)、fence、定价 | client.js, protocol.js, adapters/*.js, providers.js, router.js |
 | `protocol/` | SQ 提交队列 + EQ 事件流 (WAL) + Turn 模型与投影; `ticket_*` 事件与 `ticketId` 引用键; 内存历史有界 (默认 5000, 更早按需从 WAL 回补); **WAL 按 8MB 轮转, 默认保留 24 个归档段, 回放新到旧有界读取** | index.js |
 | `session/` | Session→Task→Turn 状态机 + 回合投影 + 跨轮任务栈 + 回合内计划 + 任务指针 (pwf) | turn.js, projection.js, workstack.js, plan-live.js, pwf.js |
-| `memory/` | 五层记忆: FactStore(L1) / Experience(L2) / session 日志 / MemoryTicker / 驱逐+生命周期 / 人格画像; **多源召回契约** (RRF 融合 + 每条带来源证据) 与 **压缩引擎** (start/summary/end 事件 + 会话锁) | fact-store.js, retrieval.js, compact-engine.js, memory-ticker.js, session.js, persona.js |
+| `memory/` | 五层记忆: FactStore(L1) / Experience(L2) / session 日志 / MemoryTicker / 驱逐+生命周期 / 人格画像; **多源召回契约** (RRF 融合 + 每条带来源证据; 2026-11-16 起由 `memory_search.multi_source` 消费) 与 **压缩引擎** (start/summary/end 事件 + 会话锁) | fact-store.js, retrieval.js, compact-engine.js, memory-ticker.js, session.js, persona.js |
 | `permissions/` | 能力门 + 审批流 (approval 卡片) + plan 模式 | — |
 | `hooks/` | 七类生命周期钩子链 (PreToolUse/PostToolUse/PreCompact/PostCompact/Session*/SubagentStop) | index.js |
 | `bus/` | 运行时总线 + 熔断器 | circuit-breaker.js |
@@ -144,11 +144,12 @@ usage 事实链 (2026-10-30 修复后): `streamChat/apiChatStream` 请求带 `st
 | `edit/` | SEARCH/REPLACE 编辑块解析 + 快照 + **内容锚点编辑** (行哈希 → 改行/改段, stale 与歧义都拒绝) | editblock.js, snapshot.js, anchors.js |
 | `evidence/` `repomap/` | 证据入上下文 / 仓库地图 + 知识页生成 (`wiki.js`) | repomap/wiki.js |
 | `selfcode/` | 自改与自审: `self_edit` 引擎 (补丁→备份→落盘→语法+测试→绿留红滚→账本); 静态依赖图 (`graph.js`) + 确定性自审 (`audit.js`: 死代码/环/断链/巨石/静默 catch → 0–100 评分) | engine.js, graph.js, audit.js |
-| `evolve/` | **SelfIterationEngine (代码自改进)** + **EvolutionLoop (每日编排)** + playbook/delta + **自愈引擎** (崩溃残留清理/健康探测, 2026-11-12 从 selfheal/ 并入) | selfiterate.js, loop.js, healer.js |
+| `evolve/` | **SelfIterationEngine (代码自改进)** + **EvolutionLoop (每日编排)** + playbook/delta + **效果闭环** (`effect.js` cohort 前后对照) + **权重级学习桥** (`finetune-bridge.js`: 导出→外部微调→版本账本→cohort 回归, 训练本体在架构外) + **自愈引擎** (崩溃残留清理/健康探测, 2026-11-12 从 selfheal/ 并入) | selfiterate.js, loop.js, effect.js, finetune-bridge.js, healer.js |
 | `ans/` | ANS 自治: guard / reward / eviction / lifecycle / proactive / watchdog / boundary / values; EvolutionaryEngine(行为学习) 在 `evolve/trigger.js` | watchdog.js |
 | `intent/` | **分层漏斗意图识别** (v4.2): L1 规则 / L2 上下文打分 / 层流量统计持久化 | funnel.js, state.js |
-| `flow/` | **原生入站流** (v4.2): Trigger 归一 / 两级准入 / 六动作决策内核 (`planIngress`), 纯决策不发送 | trigger.js, policy.js, kernel.js |
-| `workgraph/` | **工单账本** (2026-11-02): append-only JSONL + 折叠 / 工单→指派状态机 / 去重 / 恢复标记 / 安全自动恢复; 快照规整在 `snapshots.js` | store.js, service.js, snapshots.js |
+| `flow/` | **原生入站流** (v4.2): Trigger 归一 / 两级准入 / 六动作决策内核 (`planIngress`), 纯决策不发送; **元认知门控** (2026-11-15): 执行前一次轻量 LLM 打分 `{confidence, rationale, suggested_action}`, 规则三 (2026-11-16, opt-in) 低置信且建议 clarify 时改道提问而非执行 | trigger.js, policy.js, kernel.js, gate.js |
+| `workgraph/` | **工单账本** (2026-11-02): append-only JSONL + 折叠 / 工单→指派状态机 / 去重 / 恢复标记 / 安全自动恢复 / **runId 血缘** (2026-11-16 贯通 trace/审计/事件); 快照规整在 `snapshots.js` | store.js, service.js, snapshots.js |
+| `worldmodel/` | **文件域世界模型** (2026-11-15): 最小可干预模拟本体 `seed/step/snapshot/restore/diff/journal/replay`, 外部本地 HTTP 服务形态 (127.0.0.1); `exec` 步骤 (2026-11-16) 用保守命令解析推演 rm/mv/cp/mkdir/touch/truncate/dd/cd —— 含通配符/变量/管道/子 shell 的命令**明确返回 simulated:false**, 不拿半模拟当安全网 | index.js, server.js |
 | `skills/` | 多根技能加载 (项目 > 用户 > 内置) + 注册表 + 覆盖率 | loader.js |
 | `orchestrator/` | 军团 spawn_agent 多进程 + DAG + SQUAD/experts + ThreadBridge 话题直通 + 治理 | legion.js, dag.js, thread-bridge.js |
 | `tools/` | 工具目录 (capabilities + riskLevel + 审批 + 曝光 + **永久隐藏**); **意图门面** (15 个 action 入口收编 64 个长尾); 检索/代码事实/常驻 shell: `grep`(rg→git→内置三级) `lsp`(JSON-RPC) `shell`(常驻 bash) `edit_lines`(锚点) | index.js, catalog.js, facade.js, grep.js, lsp.js, shell-session.js, anchored-edit.js, builtin.js |
@@ -225,11 +226,26 @@ EvolutionLoop (evolve/loop.js, 每日 cron, 默认 03:30):
                 红了才动手: LLM 诊断 → SEARCH/REPLACE → 备份→落盘→重验 → 绿留/红整体回滚
                 护栏: 单飞锁 · 每轮 max_files · max_llm_calls(6) · allow_test_edit=false
   Phase3 journal data/evolve/journal.jsonl 每轮一条 (能力快照 + 审计分可画曲线)
+  Phase3.5 effect 蒸馏效果对照 (evolve/effect.js, 只读): 每个 skill cohort 的域内成功率
+                基线 vs 产出后窗口 → delta; 轨迹不足标 immature, 不给结论 (防小样本误导)
+                cross-task 层: 轨迹按 assignments 时间窗继承确定性 taskType 再分桶 (不用模型分类)
+  Phase3.6 feedback 效果反哺 (2026-11-16, opt-in, **唯一写行为的段**):
+                mature 且 delta ≤ -degrade_threshold 的 cohort → 给关联 bullet 记 harmful 票
+                (关联规则: playbook 走词法相似度 ≥ relate_threshold, lesson 走 tags/task 确定性包含)
+                → 达 prune_at 由 growAndRefine 淘汰; 幂等靠 cohort.fedBackAt, 单轮限 max_actions
+                默认关闭 (agent.evolution_loop.effect_feedback.enabled), 关闭时零写入
 self_audit  — 只读自审工具 (对话内主动找优化目标; 与 Phase0 同一实现, 数字可复现)
 self_edit   — 对话内改自己源码, 双门: 工具参数 mode=apply + config
 self_verify — 只读验证: 语法关 + 指定测试, 不改文件
 self_rewind — 按账本 id 回滚到任意历史版本
 ```
+
+**为什么 3.5 与 3.6 必须成对** (2026-11-16): 3.5 单独存在时, 系统能测出"这条策略没用"
+却照旧按它跑 —— 测量变成仪表盘, 这是"持续学习"名不副实的最典型形态。3.6 把结论变成
+动作, 且**动作只有一种语义**: 记有害票。淘汰交给既有 `growAndRefine` 阈值, 不在这里
+直接 REMOVE —— 留着可回滚的余地, 也避免"一次错误测量直接删掉一条好策略"。
+三重门槛 (mature + delta ≤ -阈值 + 未反哺过) 是防误杀的主要机制, 不是回归门禁
+(门禁守"新增策略有没有害", 这里管"已证有害的策略退场", 方向相反)。
 
 **静态结构事实源** (`selfcode/graph.js`, 2026-11-02): import/require/动态 import 解析 →
 文件级依赖图; 入口可达性 → 区分 `reserved` (有测试、预留) 与 `unwired` (死代码候选);
@@ -246,9 +262,13 @@ self_rewind — 按账本 id 回滚到任意历史版本
 | `self_iteration.target_files` | 17 个适应度测试 | 循环的"健康定义"——只对跑挂的测试出手 |
 | `evolve.enabled` | `true` | 行为学习引擎 (默认即开, 显式声明) |
 | `evolution_loop.enabled/cron` | `true` / `03:30` | 每日编排定时任务 |
+| `evolution_loop.effect_feedback.enabled` | `false` (2026-11-16 新增) | 效果反哺: 测出退化后给关联策略记有害票, 达阈值淘汰。默认关 —— 先要有可信的测量再开动作 |
+| `agent.metacognition_gate.enabled` | `false` (2026-11-15 新增) | 执行前置信度观测 (一次轻量 LLM 调用); 关闭时零 LLM 调用零写入 |
+| `memory.adaptive_budget` | `true` (2026-11-16 新增) | 历史预算消费全局配额规划: 放得下保持 legacy, 放不下收到 `窗口−output−tools−system−记忆预留`; `false` 回退旧公式 |
+| `agent.metacognition_gate.reroute_enabled` | `false` (2026-11-16 新增) | 规则三: 低置信且建议 clarify 时**不执行**, 改为向来源方提问; 工单判 MANUAL_REVIEW (改道不算完成) |
 | `agent.tool_exposure` | `core` (2026-11-02 起) | `core` = 31 个主干工具下发完整 schema, 其余按需; `all` = 全量; 数组 = 自定义名单 |
 
-**适应度集选取原则** (2026-10-30 定): 文件必须 ①单跑全绿 ②**无 `--test-force-exit` 也能干净退出** (进化引擎裸跑 node --test)。全套 282 个测试文件中有遗留句柄泄漏的会挂住 → 对假失败烧 LLM 预算, 故只收录验证过的文件。当前 17 个覆盖: agent 核心 / 错误语义 / llm fence / 进化体系自身 / 记忆 / PII 安全 / 上下文裁剪 / 工具 / 重试 / 熔断 / 会话 / 自愈 / 配置 / 渠道。
+**适应度集选取原则** (2026-10-30 定): 文件必须 ①单跑全绿 ②**无 `--test-force-exit` 也能干净退出** (进化引擎裸跑 node --test)。全套 253 个测试文件中有遗留句柄泄漏的会挂住 → 对假失败烧 LLM 预算, 故只收录验证过的文件。当前 17 个覆盖: agent 核心 / 错误语义 / llm fence / 进化体系自身 / 记忆 / PII 安全 / 上下文裁剪 / 工具 / 重试 / 熔断 / 会话 / 自愈 / 配置 / 渠道。
 
 ## 7. 配置与事实源
 
@@ -275,14 +295,14 @@ self_rewind — 按账本 id 回滚到任意历史版本
 
 ## 8. 测试与质量门
 
-- **2626 项测试** (2620 通过 / 6 跳过), `npm test` 带 `--test-force-exit`
+- **1957 项测试** (1953 通过 / 4 跳过), `npm test` 带 `--test-force-exit`
   (有历史测试留句柄, 见 §9; 逐个治理中)。数字以 `scripts/readme-sync-check.js --with-tests`
   的实测为准, README 顶部机读锚点与本文同步。
 - `npm run web:check` 前端静态自检; `npm run verify` 聚合校验; `npm run lint` ESLint;
   `npm run desktop:smoke` 真实 Electron 窗口 DOM/API 冒烟 (未装 Electron 时 SKIP);
   `npm run evolve:loop -- --status` 进化报告。
 - **架构守卫** (`node scripts/arch-guard.js --check`): 顶层模块分层 L0–L4 + 依赖环 + 新增越层
-  + 内核行数预算。2026-11-13 实测 **42 个模块 / 132 条边 / 0 环 / 0 越层**; 内核预算同步收紧为
+  + 内核行数预算。2026-11-16 实测 **43 个模块 / 136 条边 / 0 环 / 0 越层**; 内核预算同步收紧为
   core 400 / plugin 320 / utils 1650 / config 1400 行 (当前分别 178 / 266 / 1529 / 1357)。
 - **自研溯源守卫** (`node scripts/native-guard.js`): 禁止上游 import / vendored 源码标记;
   22 个设计来源逐一登记到 `config/native-provenance.json` 与 [PROVENANCE.md](./PROVENANCE.md),
@@ -325,7 +345,7 @@ self_rewind — 按账本 id 回滚到任意历史版本
 
 | 项 | 值 |
 |---|---|
-| 工具 | `scripts/perf-hotpath.mjs`（本轮新增；`--json` 存档、`--repeat=3`） |
+| 工具 | `scripts/perf-hotpath.mjs`（历史测量脚本，未随源码树发布；本节数字仅作历史基线，勿跨机器引用） |
 | 隔离 | `root` = 仓库根；`dataDir/globalDataDir` = `fs.mkdtempSync(os.tmpdir())`；收尾经 `cleanupTmp` 安全护栏删除 |
 | 模型 | `agent.llm / allProviders / auxLLM` 全部换成本地 stub（`chat/apiChat` 固定文本），**零网络**；stub 调用 69 次、失败 0 |
 | 基线（优化前） | `HEAD b90fe9f` + 还原 5 个被优化文件（`src/skills/loader.js`、`src/memory/session.js`、`src/memory/memory-ticker.js`、`src/memory/l3.js`、`skills/ppx-memory/scripts/l3.js`），在 `os.tmpdir` 的仓库快照上跑，工作树零改动 |
@@ -387,6 +407,6 @@ chat 单轮：
 ### 10.8 复现
 
 ```bash
-node scripts/perf-hotpath.mjs --json --repeat=3     # 当前代码
+# 历史脚本未随源码树发布；复现需从 git 历史取回 scripts/perf-hotpath.mjs
 node --test --test-force-exit test/skills-scan-cache.test.js test/perf-memory-hotpath.test.js test/persona-read-cache.test.js
 ```

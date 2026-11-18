@@ -4,6 +4,7 @@
 // 装配顺序不变: bootstrapMethods 在对象字面量里先展开本 mixin, 七段装配照旧按方法名调用。
 import { TurnProjection } from "../session/projection.js";
 import { OpType, EventType } from "../protocol/index.js";
+import { currentTrace } from "../core/trace.js";
 
 export const turnObservationMethods = {
   // ---- 装配阶段 4: 单轮对话运行态 (通知/中断/工具事件) ----
@@ -53,7 +54,12 @@ export const turnObservationMethods = {
   //   占住队列 (队列只增不减 = 装饰性的根因之一); end 把中断轮积累的 INTERRUPT op
   //   一并消费掉 (控制 op 生命周期 = 提交 → 中断生效 → 轮收口消费, 全程在队可观测)。
   _turnObsBegin(sessionKey, userMsg, channel) {
-    if (!this.turnProjection?.enabled) return null;
+    // eval 观测独立于 TurnProjection 开关; 即使投影关闭, 也必须保留可去重的最终轮对象。
+    const observation = {
+      opId: null, turnId: null, channel, sessionKey,
+      taskOk: null, evalTurnRecorded: false,
+    };
+    if (!this.turnProjection?.enabled) return observation;
     let turnId = null;
     let seq = null;
     let opId = null;
@@ -78,11 +84,68 @@ export const turnObservationMethods = {
       }
     } catch { /* 总线异常不阻断 */ }
     try { this.bus?.emit?.("chat/turn/begin", { sessionKey, turnId, opId, seq, channel }, { source: "agent.turn" }); } catch { /* 观测事件不阻断 */ }
-    return { opId, turnId };
+    return { ...observation, opId, turnId };
+  },
+
+  // 在 ALS 内捕获任务级采样身份。final 在 runWithTrace 外执行, 不能只依赖 currentTrace()。
+  _captureEvalTurn(obs) {
+    if (!obs) return null;
+    const trace = currentTrace();
+    if (trace) {
+      obs.taskId = trace.taskId;
+      obs.traceId = trace.traceId;
+      obs.sessionKey = trace.sessionKey || obs.sessionKey;
+      obs.strata = trace.strata;
+      obs.evalSampleRate = trace.evalSampleRate;
+    }
+    return obs;
+  },
+
+  // 自检是确定性事实: 任一输出结构问题使本轮不能算成功; TOOL_ENVELOPE 另记 shadow_call,
+  // 供账本排除这个未真正执行的模型幻觉步骤。
+  _observeEvalSelfCheck(obs, reply, report) {
+    if (!obs || !report || report.ok) return;
+    obs.taskOk = false;
+    obs.selfCheckIssues = (report.issues || []).map((issue) => issue.code || "unknown");
+    if (!obs.selfCheckIssues.includes("tool_envelope")) return;
+    try {
+      this.traces?.recordEval?.("eval/tool", {
+        tool: "shadow_call",
+        name: "shadow_call",
+        result: String(reply ?? ""),
+        ok: false,
+        category: "shadow_call",
+        shadow_call: true,
+        flags: ["shadow_call"],
+        sessionKey: obs.sessionKey,
+        taskId: obs.taskId,
+        traceId: obs.traceId,
+        strata: obs.strata,
+      }, { sampleRate: obs.evalSampleRate });
+    } catch { /* 评测观测不阻断自检与回复 */ }
   },
 
   _turnObsEnd(sessionKey, obs, status = "closed") {
-    if (!obs || !this.turnProjection?.enabled) return;
+    if (!obs) return;
+    if (!obs.evalTurnRecorded) {
+      obs.evalTurnRecorded = true; // 先占位: 写盘异常/重入也不能制造第二条最终轮
+      const taskOk = status === "closed" && typeof obs.taskOk === "boolean" ? obs.taskOk
+        : status === "closed" ? null : false;
+      try {
+        this.traces?.recordEval?.("eval/turn", {
+          turnId: obs.turnId || "unknown",
+          sessionKey: obs.sessionKey || sessionKey || "unknown",
+          taskId: obs.taskId,
+          traceId: obs.traceId,
+          strata: obs.strata,
+          channel: obs.channel || "unknown",
+          status,
+          taskOk,
+          selfCheckIssues: obs.selfCheckIssues || [],
+        }, { sampleRate: obs.evalSampleRate });
+      } catch { /* 评测观测不阻断 TurnProjection 收口 */ }
+    }
+    if (!this.turnProjection?.enabled) return;
     try {
       const bus = this.protocolBus;
       if (obs.opId && bus?.sq) bus.sq.consume(obs.opId); // 收口: 只消费本轮自己的 op

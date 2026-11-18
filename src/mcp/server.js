@@ -143,10 +143,11 @@ export class McpServer {
     this.extraPrompts = opts.prompts || [];
     // 工具名 -> 实现映射 (虚拟工具), 冲突时优先内置工具 (工具名唯一性在 server 内)
     this._virtualTools = new Map(this.extraTools.map((t) => [safeToolName(t.name), t]));
-    // tools/list 真分页 (2026-10-31): 每页工具数。默认 128 —— 当前全量 ~120 个工具单页装得下,
-    //   不发 nextCursor, 存量客户端零感知; 列表更大 (MCP 外接 + admin 虚拟工具) 时客户端按
-    //   nextCursor 翻页 (官方客户端语义)。cursor = base64url(起始偏移)。
-    this.pageSize = Math.max(1, Number(opts.pageSize) || 128);
+    // tools/list 真分页 (2026-10-31): 每页工具数。默认 256 —— 2026-11-16 实测全量
+    //   129 个 (127 catalog + 2 对话虚拟) 已超过旧的 128 单页容量, ppx.chat.* 被挤到
+    //   第二页 —— 只读首页的客户端直接看不到对话入口。单页容量按"当前全量 + 余量"取,
+    //   列表继续增长时客户端仍按 nextCursor 翻页 (官方客户端语义)。
+    this.pageSize = Math.max(1, Number(opts.pageSize) || 256);
   }
 
   // ---- 对外分发入口: 接收 JSON-RPC 消息, 返回 { result } 或抛 McpError ----
@@ -317,7 +318,7 @@ export class McpServer {
       if (t.timeoutMs) tool.annotations = { timeoutMs: t.timeoutMs, idempotent: !!t.idempotent, readOnlyHint: false };
       out.push(tool);
     }
-    // 2. 虚拟工具 (对话等)
+    // 2. 虚拟工具 (对话等) —— 保持殿后顺序 (客户端按目录优先展示)
     for (const [name, t] of this._virtualTools) {
       if (seen.has(name)) continue;
       seen.add(name);

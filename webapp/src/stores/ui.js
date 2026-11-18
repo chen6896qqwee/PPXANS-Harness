@@ -33,7 +33,7 @@ export const ui = reactive({
   sideCollapsed: false,
   fileView: null,        // { path, text } 文件预览
   dirModal: null,        // { mode: "space"|"dir", rel } | null
-  settingsModal: null,   // "general" | "models" | null
+  settingsModal: null,   // "general" | "models" | "appearance" | null
   onboarding: false,     // onboarding replay
   readyBanner: true,     // 首屏「还没接模型」提示条 (readiness 判定后可能自动收起)
 });

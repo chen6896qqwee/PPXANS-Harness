@@ -246,18 +246,13 @@ export const factStoreNormalizeMethods = {
       .filter((f) => f.status === "deleted" || f.status === "archived")
       .filter((f) => matchesTierSelector(tierOfRecord(f), tier));
     if (olderThanMs > 0) doomed = doomed.filter((f) => clockOf(f) <= olderThanMs);
-    // 2026-11-06 (评估 P1-5): 容量口径的淘汰必须尊重 purgeGraceDays 保留期 ——
-    //   保留期内的"最近删除"是 restore 的窗口, 被容量压力物理清掉等于越权清除
-    //   (实测: 墓碑 5→2, 宽限期内 restore 直接返回 null)。保护期内墓碑不参与容量淘汰,
-    //   溢出量留在盘上等 sweepExpired 按年龄回收; purgeGraceDays=0 (关闭年龄回收) 时
-    //   维持旧口径 —— 行数上限是唯一兜底, 语义不变。
-    if (cap > 0) {
-      const graceDays = Number(this.opts.purgeGraceDays) || 0;
-      if (graceDays > 0) {
-        const graceCutoff = Date.now() - graceDays * 86400000;
-        doomed = doomed.filter((f) => clockOf(f) <= graceCutoff);
-      }
-    }
+    // 2026-11-16: 容量上界是硬约束, 宽限期不得把它架空。
+    //   2026-11-06 曾让 purgeGraceDays 把保留期内的墓碑整体排除出容量淘汰 (保护 restore),
+    //   但没有给"保护期内的总量"设上限 —— 600 次遗忘风暴后 live=0 而盘上 600 行,
+    //   每次 add 的锁内重载重新变回 O(累计删除数), F4 的不变量被悄悄推翻。
+    //   现在的口径: 容量淘汰仍**优先保留最近的墓碑** (排序后淘汰最老), 宽限期语义只作用在
+    //   年龄回收路径 (sweepExpired → olderThanMs); 想延长 restore 窗口就调大 maxTombstones,
+    //   而不是让文件无限长。
     if (!doomed.length) return [];
     // 容量口径未超限 = 无一条要回收, 不必排序。add() 每次都会走到这里,
     //   而墓碑总量通常远低于 maxFacts×K —— 原实现无条件 O(T log T) 是纯浪费。

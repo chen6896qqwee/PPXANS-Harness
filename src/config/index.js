@@ -152,6 +152,9 @@ export const DEFAULT_CONFIG = {
     //   >=32K→60 条, 其余 40 条/下限 2K tok); 显式配置的数值仍优先。
     max_history_items: 0,           // 会话历史条数上限 (0 = 随上下文窗口自适应, 信息量感知裁剪)
     history_token_budget: 0,        // 会话历史 token 预算 (0 = 随上下文窗口自适应, clamp(window*0.3, 2K, 24K))
+    // 2026-11-16 (架构优化 ④): true = 历史预算再受全局配额规划约束 (窗口扣 output/tools/system/
+    //   memory 后取 min(legacy, planned), 只收紧不放大); false = 回退纯 legacy 公式。
+    adaptive_budget: true,
     context_window: 8192,           // provider 上下文窗口兜底 (未知窗口时的保守默认, 溢出防护)
     context_window_ratio: 0.6,      // 历史+工具结果占用上下文窗口的安全比例上限
     max_facts: 1000,                // L1 原子记忆总量上限 (防膨胀, 超限裁剪最弱)
@@ -263,18 +266,24 @@ function parseYaml(file) {
     if (arrM) {
       const itemText = text.slice(arrM[0].length);
       while (stack.length && stack[stack.length - 1].indent >= indent) stack.pop();
-      const parent = stack.length ? stack[stack.length - 1].obj : root;
-      const arrKey = stack.length ? stack[stack.length - 1].arrKey : null;
-      if (!arrKey) continue;
-      if (!Array.isArray(parent[arrKey])) parent[arrKey] = [];
+      // 数组项必须挂在"空值键"帧下: 帧记 { obj: 空值键的值, key: 键名, parent: 键的宿主 }。
+      //   首个 `- ` 项到达时把该键从空对象转成真数组。此前的实现要么 arrKey 恒 null (分支
+      //   是死代码, 数组项被静默丢弃), 要么在帧自身 obj 上再嵌一层 —— 两种都产生
+      //   providers 被吞 / providers.providers 双层嵌套。
+      const frame = stack.length ? stack[stack.length - 1] : null;
+      if (!frame || frame.key == null) continue;
+      if (!Array.isArray(frame.obj)) {
+        frame.parent[frame.key] = [];
+        frame.obj = frame.parent[frame.key];
+      }
       const kv = itemText.match(/^([\w-]+):\s*(.*)$/);
-      const item = {};
       if (kv) {
+        const item = {};
         item[kv[1]] = parseScalar(kv[2]);
-        parent[arrKey].push(item);
-        stack.push({ indent, obj: item, arrKey: null });
+        frame.obj.push(item);
+        stack.push({ indent, obj: item, key: null });
       } else {
-        parent[arrKey].push(parseScalar(itemText));
+        frame.obj.push(parseScalar(itemText));
       }
       continue;
     }
@@ -287,10 +296,10 @@ function parseYaml(file) {
     const parent = stack.length ? stack[stack.length - 1].obj : root;
     if (v === "") {
       parent[key] = {};
-      stack.push({ indent, obj: parent[key], arrKey: null });
+      stack.push({ indent, obj: parent[key], key, parent });
     } else {
       parent[key] = parseScalar(v);
-      stack.push({ indent, obj: parent[key] ?? {}, arrKey: key });
+      stack.push({ indent, obj: parent[key] ?? {}, key: null });
       if (typeof parent[key] !== "object") stack[stack.length - 1].arrKey = null;
     }
   }

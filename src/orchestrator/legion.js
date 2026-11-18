@@ -123,7 +123,7 @@ export class Legion extends EventEmitter {
   }
 
   // 冷启动主体 (原 spawnAgent 体, 2026-11-06 评估 P1-7 语义保持)
-  _spawnAgentRaw(name, { dataDir, globalDataDir, env = {} } = {}) {
+  _spawnAgentRaw(name, { dataDir, globalDataDir, env = {}, cwd = null } = {}) {
     // 2026-11-06 (评估 P1-7): 仅当现存 entry 的进程还活着才复用 —— 旧进程已死但 exit
     //   回调尚未落地时, 旧实现会把"已死 entry"原样返回 (send 恒报"未运行", 变幽灵)。
     //   现允许重 spawn 覆盖死 entry; exit 回调的身份校验保证迟到的旧回调不会误删新登记。
@@ -139,12 +139,21 @@ export class Legion extends EventEmitter {
     // 全局共享目录: 跨 agent 共享经验库 (ANS 全局记忆)
     if (globalDataDir) env2.PPX_AGENT_GLOBAL_DATA_DIR = globalDataDir;
     const proc = spawn(this.nodeBin, [this.workerPath], {
-      cwd: ROOT,
+      // 2026-11-16: worktree 隔离时 cwd 指向隔离目录 (worker 以 process.cwd() 为工作区根)
+      cwd: cwd || ROOT,
       env: env2,
       stdio: ["pipe", "pipe", "inherit"],
     });
     const entry = { proc, pending: new Map(), counter: 0 };
     this.agents.set(name, entry);
+
+    // 2026-11-16: stdin 的异步 stream error 必须有人接 —— worker 先退出、回收/迟到消息
+    // 随后 write 时 EPIPE 不走同步 throw, 没有 error listener 就是宿主 uncaught exception。
+    // 处理口径与 proc.on("error") 一致: 拒绝全部 pending, 不吞成"消息已送达"。
+    proc.stdin.on("error", (err) => {
+      for (const [, { reject }] of entry.pending) reject(new Error(`agent ${name} 写入失败: ${err.message}`));
+      entry.pending.clear();
+    });
 
     proc.stdout.setEncoding("utf8");
     const onLine = createLineReader((line) => {
@@ -235,8 +244,9 @@ export class Legion extends EventEmitter {
 
   // 接管判定: 池里有热 worker + 请求不带只读标记 + globalDataDir 与池一致。
   //   接管 = 把 pool-N 的登记换到目标名下 (proc/pending 全部转移), 从池名单摘除。
-  _poolAdopt(name, { globalDataDir, env = {} } = {}) {
+  _poolAdopt(name, { globalDataDir, env = {}, cwd = null } = {}) {
     if (!this._pool.length) return false;
+    if (cwd) return false; // 指定隔离 cwd 的委派不能接管共享池 worker (工作区不同)
     if (env && env.PPX_AGENT_READONLY) return false; // 只读委派不接管 (权限不混用)
     const idx = this._pool.findIndex((n) => {
       const meta = this._poolMeta.get(n);
@@ -287,7 +297,9 @@ export class Legion extends EventEmitter {
   // v1.0.8: 超时兜底 (默认 30s), worker 卡死/异常不导致 pending 永久挂起
   send(name, msg, { onProgress, timeout = 30000 } = {}) {
     const entry = this.agents.get(name);
-    if (!entry || entry.proc.exitCode !== null) {
+    // 2026-11-16: 进程已死或 stdin 已关时不得再写 —— write 会触发 EPIPE (未被 try 捕获的
+    //   异步 stream error), 回收/迟到消息把宿主进程带崩。入口检查先行拒绝。
+    if (!entry || entry.proc.exitCode !== null || entry.proc.stdin?.destroyed) {
       return Promise.reject(new Error(`agent ${name} 未运行`));
     }
     const id = ++entry.counter;

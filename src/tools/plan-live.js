@@ -31,7 +31,7 @@ export function registerPlanLiveTools(catalog, { planLive } = {}) {
       if (!planLive || typeof planLive.set !== "function") {
         return `${TOOL_ERROR_PREFIX} update_plan: 计划存储未初始化`;
       }
-      const sk = (ctx && ctx.agent && (ctx.agent._activeSessionKey || ctx.sessionKey)) || "default";
+      const sk = (ctx && (ctx.agent?._activeSessionKey || ctx.sessionKey)) || "default";
       const plan = planLive.set(sk, args.steps);
       // EQ 事件: UI/wallboard 实时渲染计划卡 (轻负载, 载荷只带步骤概要)
       try {

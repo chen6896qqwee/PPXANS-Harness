@@ -30,10 +30,21 @@ function stubLLM() {
   };
 }
 
+// 每次调用只记录定位与延迟元数据，不记录消息或回复正文。
+async function measuredChat(agent, message, { sessionKey = "default", ...identity }, rawRequests) {
+  const t0 = Date.now();
+  let ok = false;
+  try { ok = Boolean(await agent.chat(message, { sessionKey })); } catch { /* 失败同样进入原始记录 */ }
+  const ms = Date.now() - t0;
+  rawRequests.push({ ...identity, sessionKey, ok, ms });
+  return { ok, ms };
+}
+
 (async () => {
   // 统一数据隔离 helper: 临时根 + 显式 dataDir 覆盖 PPX_DATA_DIR / 清理必经安全护栏 (杜绝误删生产)
   const { root, agent } = makeTmpAgent("bench");
   agent.llm = stubLLM();
+  const rawRequests = [];
 
   console.log(`皮皮虾内核压测 | 并发 ${CONCURRENCY} | 轮次 ${ROUNDS} | stub LLM\n`);
 
@@ -44,12 +55,11 @@ function stubLLM() {
   const per = Math.ceil(ROUNDS / CONCURRENCY);
   await Promise.all(Array.from({ length: CONCURRENCY }, async (_, i) => {
     for (let r = 0; r < per; r++) {
-      const t0 = Date.now();
-      try {
-        const reply = await agent.chat(`并发#${i} 消息${r}`);
-        if (!reply) fails++;
-      } catch { fails++; }
-      lat.push(Date.now() - t0);
+      const { ok, ms } = await measuredChat(agent, `并发#${i} 消息${r}`, {
+        phase: "concurrent", worker: i, round: r,
+      }, rawRequests);
+      if (!ok) fails++;
+      lat.push(ms);
     }
   }));
   lat.sort((a, b) => a - b);
@@ -61,7 +71,10 @@ function stubLLM() {
   let ok = 0;
   const t0 = Date.now();
   for (let i = 0; i < ROUNDS; i++) {
-    try { if (await agent.chat(`长会话第${i}轮`)) ok++; } catch {}
+    const result = await measuredChat(agent, `长会话第${i}轮`, {
+      phase: "long_session", round: i,
+    }, rawRequests);
+    if (result.ok) ok++;
   }
   const ms = Date.now() - t0;
   const sessions = agent.sessionStore.list();
@@ -74,11 +87,11 @@ function stubLLM() {
   const tc0 = Date.now();
   await Promise.all(Array.from({ length: ISO_SESSIONS }, async (_, i) => {
     for (let r = 0; r < ISO_ROUNDS; r++) {
-      const s = Date.now();
-      try {
-        if (!(await agent.chat(`隔离#${i} 第${r}轮`, { sessionKey: `iso-${i}` }))) isoFails++;
-      } catch { isoFails++; }
-      isoLat.push(Date.now() - s);
+      const { ok, ms } = await measuredChat(agent, `隔离#${i} 第${r}轮`, {
+        phase: "isolated_concurrent", worker: i, round: r, sessionKey: `iso-${i}`,
+      }, rawRequests);
+      if (!ok) isoFails++;
+      isoLat.push(ms);
     }
   }));
   const concurrentMs = Date.now() - tc0;
@@ -86,7 +99,9 @@ function stubLLM() {
   const isoTotals = ISO_SESSIONS * ISO_ROUNDS;
   const ts0 = Date.now();
   for (let i = 0; i < isoTotals; i++) {
-    try { await agent.chat(`串行#${i}`, { sessionKey: "seq-one" }); } catch { /* 失败已在上段计入 */ }
+    await measuredChat(agent, `串行#${i}`, {
+      phase: "serial", round: i, sessionKey: "seq-one",
+    }, rawRequests);
   }
   const serialMs = Date.now() - ts0;
   const slowdown = serialMs > 0 ? (concurrentMs / serialMs) : 0;
@@ -98,6 +113,8 @@ function stubLLM() {
 
   cleanupTmp({ root, agent });
   console.log("\n=== bench 完成 (失败数 >0 时退出码 1) ===");
-  process.exit(fails || isoFails ? 1 : 0);
-})().catch((e) => { console.error("✗ bench 失败:", e.message); process.exit(1); });
+  console.log(`PPX_BENCH_RAW_JSON ${JSON.stringify({ raw_schema: 1, count: rawRequests.length, raw_requests: rawRequests })}`);
+  // 让 stdout 完整刷新，避免大段机读 JSON 被 process.exit 截断。
+  process.exitCode = fails || isoFails ? 1 : 0;
+})().catch((e) => { console.error("✗ bench 失败:", e.message); process.exitCode = 1; });
 

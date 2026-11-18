@@ -26,7 +26,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { readPrefs, setPref } from "../src/services/desktop/prefs.js";
-import { APP_ROOT, APP_NAME, APP_DATA_HOME, DEV_ROOT, ICON, SMOKE } from "./app-meta.js";
+import { APP_ROOT, APP_NAME, APP_DATA_HOME, DEV_ROOT, ICON, SMOKE, UI_CAPTURE } from "./app-meta.js";
 import { log } from "./app-log.js";
 import { seedWorkspace, resetWorkspace } from "./seed.js";
 import { createWindowState, isAppUrl } from "./window-state.js";
@@ -35,6 +35,7 @@ import { createLivenessSupervisor } from "./liveness.js";
 import { createUpdateFlow } from "./update-flow.js";
 import { smokeErrors, createSmoke } from "./smoke.js";
 import { createDiagnostics } from "./diagnostics.js";
+import { createUiCapture } from "./ui-capture.js";
 
 app.setPath("userData", process.env.PPX_DESKTOP_USER_DATA
   ? path.resolve(process.env.PPX_DESKTOP_USER_DATA)
@@ -102,6 +103,14 @@ const { exportDiagnostics } = createDiagnostics({
   getWin: () => win,
   getRoot: () => currentRoot,
   getServerPort: () => serverPort,
+});
+
+const { runUiCapture } = createUiCapture({
+  getWin: () => win,
+  getServerPort: () => serverPort,
+  getAppUrl: () => appUrl,
+  killServer,
+  setQuitting: (v) => { quitting = v; },
 });
 
 function argOf(name) {
@@ -243,7 +252,8 @@ function createTray() {
 function createWindow() {
   const st = windowState.load();
   win = new BrowserWindow({
-    ...(windowState.withinDisplays(st) ? { x: st.x, y: st.y } : {}),
+    // UI 截图回合: 固定 x/y≈40 的可见窗口 (隐藏窗口 capturePage 会拿到过期帧)
+    ...(UI_CAPTURE ? { x: 40, y: 40 } : (windowState.withinDisplays(st) ? { x: st.x, y: st.y } : {})),
     width: st.width,
     height: st.height,
     minWidth: 960,
@@ -253,6 +263,7 @@ function createWindow() {
     icon: ICON,
     backgroundColor: "#0b0b0a",
     autoHideMenuBar: true,
+    skipTaskbar: SMOKE || UI_CAPTURE,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -261,8 +272,8 @@ function createWindow() {
       devTools: !app.isPackaged || process.env.PPX_DESKTOP_DEVTOOLS === "1",
     },
   });
-  if (st.maximized) win.maximize();
-  win.once("ready-to-show", () => { if (!SMOKE) win.show(); });
+  if (st.maximized && !UI_CAPTURE) win.maximize();
+  win.once("ready-to-show", () => { if (!SMOKE || UI_CAPTURE) win.show(); });
   win.on("close", (e) => {
     windowState.save(win);
     if (quitting || !prefs.closeToTray) return;
@@ -285,9 +296,9 @@ function createWindow() {
       if (/^https?:/i.test(url)) shell.openExternal(url);
     }
   });
-  // 冒烟: 收集渲染进程的 error/warning 与加载失败, 写进结果 JSON (只看截图不够 ——
-  //   白屏也能截出一张纯色图)。仅 SMOKE 模式挂监听, 正常桌面运行零开销。
-  if (SMOKE) {
+  // 冒烟/截图: 收集渲染进程的 error/warning 与加载失败 (只看截图不够 ——
+  //   白屏也能截出一张纯色图)。仅 SMOKE/UI_CAPTURE 模式挂监听, 正常桌面运行零开销。
+  if (SMOKE || UI_CAPTURE) {
     win.webContents.on("console-message", (_e, level, message, line, sourceId) => {
       if (level >= 2) smokeErrors.push({ level, message: String(message).slice(0, 500), line: line || 0, source: String(sourceId || "") });
     });
@@ -492,6 +503,13 @@ async function boot() {
     // 给前端首屏请求留出时间; runSmoke 内部还会轮询一级导航渲染 直到完成/8s 超时
     setTimeout(() => { runSmoke().catch((e) => { log(`smoke 失败: ${e.message}`); quitting = true; killServer(); app.exit(1); }); }, 1500);
   }
+  if (UI_CAPTURE && !SMOKE) {
+    setTimeout(() => {
+      runUiCapture().then(({ shots, errors }) => {
+        log(`ui-capture 完成: ${shots.length} 帧, ${errors.length} 个错误`);
+      }).catch((e) => { log(`ui-capture 失败: ${e.message}`); quitting = true; killServer(); app.exit(1); });
+    }, 1500);
+  }
 
   // 桌面端更新检查: 查 GitHub Releases latest tag, 24h TTL 缓存; 有新版弹系统通知,
   //   点击进入"下载 → SHA-256 校验 → 启动安装器"流程。启动检查只提示, 不静默安装。
@@ -570,6 +588,9 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(() => {
     if (SMOKE) {
       setTimeout(() => { log("smoke 超时"); quitting = true; killServer(); app.exit(1); }, 90000);
+    }
+    if (UI_CAPTURE && !SMOKE) {
+      setTimeout(() => { log("ui-capture 超时"); quitting = true; killServer(); app.exit(1); }, 120000);
     }
     boot().catch((e) => showFailure("桌面端启动异常", String(e?.message || e)));
   });

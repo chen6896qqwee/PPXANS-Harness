@@ -50,6 +50,59 @@ export const contextMethods = {
     return p;
   },
 
+  // 工具 schema 的 token 开销 (架构优化 ④ 消费侧, 2026-11-16):
+  //   曝光名单在一次装配内恒定, 按 (数量 + 名字序列) 做键缓存; 每轮只做一次 O(n) 拼接,
+  //   不重复 JSON.stringify 十几 KB 的 schema。
+  _toolSchemaTokens() {
+    try {
+      const exposed = this.tools?.toOpenAI?.() || [];
+      const key = exposed.length + ":" + exposed.map((t) => t?.function?.name || "").join(",");
+      if (this._toolSchemaTokensCache?.key === key) return this._toolSchemaTokensCache.tokens;
+      const tokens = estimateTokens(JSON.stringify(exposed));
+      this._toolSchemaTokensCache = { key, tokens };
+      return tokens;
+    } catch { return 0; }
+  },
+
+  // 本轮固定开销 (token): tools schema (缓存) + system (本轮 _context 实测, 未装配则按
+  //   预算上限保守估计)。历史预算从这里扣 —— 固定开销不是"别人的事"。
+  _fixedContextTokens() {
+    const stats = this._lastContextStats || {};
+    const toolTokens = Number.isFinite(stats.toolTokens) ? stats.toolTokens : this._toolSchemaTokens();
+    const systemTokens = Number.isFinite(stats.systemTokens)
+      ? stats.systemTokens
+      : Math.ceil(this._systemCharBudget() / CHARS_PER_TOKEN);
+    return { tools: toolTokens, system: systemTokens };
+  },
+
+  // 历史 token 预算 (单一入口): legacy 公式与全局配额规划取小。
+  //   2026-11-16 (架构优化 ④ 落地): 旧实现只按 window*0.3 给历史发预算, tools/system
+  //   的真实开销不进账 —— 小窗口 + 大 schema 时"公式说放得下, 实际必 400"。
+  //   现在用 planContextBudget 把窗口切块, 历史额度 = min(legacy, planned):
+  //     · 只收紧不放大 —— 大窗口下现网行为不变 (planned >= legacy);
+  //     · 固定开销超出配额时按既定让位顺序从记忆/历史扣;
+  //     · memory.adaptive_budget=false 可回退纯 legacy (逃生开关, 行为逐字不变)。
+  _historyBudget() {
+    const cfgBudgetRaw = Number(this.config.memory?.history_token_budget);
+    const legacy = Math.min(cfgBudgetRaw > 0 ? cfgBudgetRaw : this._autoHistoryBudget(), this._histTokenCap());
+    if (this.config.memory?.adaptive_budget === false) return legacy;
+    const window = Number(this.llm?.context_window) || Number(this.config?.memory?.context_window) || DEFAULT_CONTEXT_WINDOW;
+    let plan = null;
+    try {
+      plan = planContextBudget({ window, fixed: this._fixedContextTokens() });
+    } catch { /* 规划失败退回 legacy, 预算体检不得阻断主链 */ }
+    if (!plan) return legacy;
+    // 硬约束口径: 历史最多能占 = 窗口 − 输出预留 − tools − system − 记忆预留。
+    //   不用 plan.sections.history 原值 —— 那是"配额建议值"(0.3 份额), 直接取会在大窗口下
+    //   无端砍掉 20% 历史。这里只回答一个问题: 现网 formula 会不会超窗?
+    //   不会 → 保持 legacy (行为不变); 会 → 收到放得下的最大值, 但不超过 legacy。
+    const s = plan.sections;
+    const fixed = Number(s.output) + (Number(s.fixedTools) || 0) + (Number(s.fixedSystem) || 0);
+    const memoryReserve = Math.min(Number(s.memory) || 0, Math.max(0, window - fixed - 2000));
+    const maxFit = window - fixed - memoryReserve;
+    return Math.max(200, Math.min(legacy, Math.max(plan.sections.history, maxFit)));
+  },
+
   // provider 上下文窗口 -> 历史 token 预算硬上限:
   // 用 llm.context_window(未配置回退 config.memory.context_window) * 安全比例, 与显式预算取小。
   // 目的: 本地小上下文模型即使没配 history_token_budget, 也不会把历史塞爆窗口。
@@ -76,12 +129,10 @@ export const contextMethods = {
   //   溢出时给出"该从哪让位"的顺序 —— 以前只能等 provider 报 400 才知道超窗。
   contextBudget() {
     const window = Number(this.llm?.context_window) || Number(this.config?.memory?.context_window) || DEFAULT_CONTEXT_WINDOW;
-    let toolTokens = 0;
-    try {
-      const exposed = this.tools?.toOpenAI?.() || [];
-      toolTokens = estimateTokens(JSON.stringify(exposed));
-    } catch { /* schema 取不到就不计, 预算体检不得影响主链 */ }
-    const plan = planContextBudget({ window, fixed: { tools: toolTokens } });
+    // 2026-11-16: 体检与消费同源 —— fixed 必须包含 system 实测, 否则报告里"历史还有多少"
+    //   会系统性偏大 (report 说放得下, 实际 _historyBudget 已经收紧)。
+    const fixed = this._fixedContextTokens();
+    const plan = planContextBudget({ window, fixed });
     const legacyHistory = Math.min(this._autoHistoryBudget(), this._histTokenCap());
     return {
       ...plan,
@@ -101,9 +152,8 @@ export const contextMethods = {
     let h = [...hist];
     const maxItemsCfg = Number(this.config.memory?.max_history_items);
     const maxItems = opts.maxItems != null ? opts.maxItems : (maxItemsCfg > 0 ? maxItemsCfg : this._autoMaxItems());
-    const cfgBudgetRaw = Number(this.config.memory?.history_token_budget);
-    const cfgBudget = cfgBudgetRaw > 0 ? cfgBudgetRaw : this._autoHistoryBudget();
-    const tokenBudget = opts.budget != null ? opts.budget : Math.min(cfgBudget, this._histTokenCap());
+    // 2026-11-16: 预算统一走 _historyBudget (legacy 与全局配额规划取小), 不再各自拼公式
+    const tokenBudget = opts.budget != null ? opts.budget : this._historyBudget();
     const before = h;
     // 1) 条数上限: 超限时按信息量淘汰 (低信息量优先, 从旧到新)
     if (h.length > maxItems) {
@@ -186,7 +236,7 @@ export const contextMethods = {
   // 超 token 则从最新向前贪心保留到预算内 (最近信息优先, 必保最后一条)。
   // 即便 config 异常 (预算极大/极小的模型), 注入的历史也不会超过窗口安全比例。
   // 以「tool_calls 单元」为最小裁剪粒度, 保证永远不产出孤立 tool 消息 (见 _historyUnits)。
-  _ensureContextFit(hist, { budget = this._histTokenCap(), maxItems } = {}) {
+  _ensureContextFit(hist, { budget = this._historyBudget(), maxItems } = {}) {
     let units = this._historyUnits(hist);
     const itemCapCfg = Number(this.config.memory?.max_history_items);
     const itemCap = maxItems != null ? maxItems : (itemCapCfg > 0 ? itemCapCfg : this._autoMaxItems());
@@ -264,7 +314,7 @@ export const contextMethods = {
     const rawBudget = Number(this.config.memory?.history_token_budget);
     return compactSession(this, {
       sessionKey,
-      budget: rawBudget > 0 ? rawBudget : this._autoHistoryBudget(),
+      budget: rawBudget > 0 ? rawBudget : this._historyBudget(),
       reason: "context",
       fidelity: false,
       archive: true,

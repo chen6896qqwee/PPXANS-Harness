@@ -1,3 +1,202 @@
+## 5.3.0 (2026-11-18) · 对话体验轮 + 外观/身份系统轮 + 覆盖率补全轮 + 世界模型轮
+
+### 对话体验吸收 (2026-11-18, WorkBuddy 式思考链路收拢 + 个性化面板 + 对话流基础配置)
+
+- **思考链路回合收拢 (ThoughtChain)**: Timeline 渲染层把连续 think/tool 条目归组为新 chain 节点
+  (`useTimeline.viewItems`), 组头一行 = 状态点 + 「思考与执行」+ 步数/工具数 + 时长。简洁模式 (默认):
+  正文开始输出即整组收拢成一行「思考了 Xs · N 步」(不跟回答抢注意力), 点开随时回看; 等待审批/提问
+  时不收拢 (需要看到正在跑什么才能做决定); 详细模式全平铺如旧, 组头仍可手动收拢。数据模型不变
+  (chat.items 仍是扁平数组, 组是渲染期派生), Ctrl+O 全展开联动组开关。验证: 离线合成回合截图
+  `docs/bench/ui/workbuddy-02/03-*.png`。
+- **个性化面板** (本体设置 → 个性化): **对你的称呼** (`config.user.name`, 走 PUT /api/settings +
+  reloadSettings 热重载, 下轮生效) / **回复风格** (新 `config.agent.reply_style`: 白名单 + 非字符串/超
+  2000 字拒绝 + prompts.js 在 persona 后注入【回复风格】静态段, 不在裁剪表永不裁, 前缀缓存契约不破) /
+  **给助手的指令** (`agent.system_extra` 首次接进 UI) / **人设设定** (`config/identity.md` + `ishiki.md`
+  经 `bot.manage personaWrite` 写盘 + `persona.reload()` 热重载, 文件名固定白名单) / **预览系统提示词**
+  (`GET /api/persona.preview` 调真实 `_context` 返回最终 system 文本; 快照/恢复 `_lastContextStats`,
+  预览不留痕)。测试 `test/persona-panel.test.js` 5 项 (白名单校验/注入与静态位/未设置零 token/
+  personaWrite 落盘+热重载/preview 真实组装+无副作用)。
+- **对话流基础配置** (设置 → 对话, `stores/dialog.js` localStorage 本机持久化): **欢迎语** (开关+文案,
+  空会话首屏 Hero 卡显示) / **显示文件修改过程** (关 = diff 卡折叠成「+x / -y」摘要行, 点开可看) /
+  **队列发送方式** (排队 = 原行为; 新增**立即打断** = 中断当前回合, 流收口后由 finally 优先发送,
+  不进排队队列) / **过程展示** (简洁·自动收拢 | 详细·平铺) / **回合完成提示音** (WebAudio 双音上行 /
+  失败下行三音, 零音频资源; 长回合结束且窗口在后台时与系统通知同触发, 通知改 silent 防双响)。
+  面板映射修复: `ui.settingsModal="dialog"` 打开时不再落到通用设置。
+- **UI 截图回环固化**: 新增 `PPX_UI_CAPTURE=1` 模式 (`electron/ui-capture.js` 逐帧 executeJavaScript
+  注入 + capturePage, `scripts/ui-capture.mjs` 隔离驱动 + 归档), webapp 暴露 `window.__ppx =
+  { chat, dialog, ui }` 截图契约 (window.PPXMarkdown 同款, 只读引用); 6 帧验收截图归档
+  `docs/bench/ui/workbuddy-*.png` (离线合成数据, 非生产回合)。
+- **顺手修复**: `test/web-api-routes-2026-11-17.test.js` usage 夹具日期敏感缺陷 (账本日硬编码
+  2026-11-17, 会话时间戳用 now, 跨天后 streak.current 断言必挂) — 账本日改 `logicalDay()` 参数化。
+- **验证**: 全量 **2206 项 (2202 通过 / 4 跳过 / 0 失败)**; `npm run verify` **17/17** (顺手修掉
+  ui-capture 一处关键路径静默 catch → swallowed-ok 留痕); `npm run web:build` + `web:check` 全绿
+  (主包 197kB ≤250kB); eslint 干净。
+
+### 覆盖率补齐 II (2026-11-17: 通道执行路径 / Web 管理 API 集成 / REPL 进程内测试)
+
+- **通道执行路径**: `src/channels/base.js` 22%→99.7%; 29 个分支测试用 stub agent
+  (chat/chatAsync/threadForward/threadRoute/llm) + 真 workgraph 账本 (临时目录) 走完
+  handleTrigger 全部六种计划 (DROP/REPLAY/DUPLICATE/THREAD/ASYNC/SYNC), 覆盖需求提炼前缀
+  注入、元认知三规则 (低置信回执+工单双路透传 / 同 dedupeKey 重复低置信 escalated /
+  reroute_enabled 真改道 clarify 及其发送失败落账上抛)、delivery 队列 enqueue 与
+  直发/回执链回投三路、账本故障吞错不阻断、THREAD 信封带 ticketId/assignmentId 与
+  onExecuted 收口/兜底、_deliverAsync/_receipts/_syncDeadlineMs/_registrar/兼容壳。
+- **Web 管理 API**: `src/web` 四域真实 HTTP 集成测试 (真 http.createServer + fetch 客户端,
+  channel stub 只实现 _json/_readBody/_requireAuth 最小接口, 落盘全在临时目录):
+  `usage-stats.js` 13%→97.6% (聚合账本/未定价单列/延迟分桶近似/连续天数两天不锚定/
+  超 16MB 会话头尾切片中段不计入/账本抛错 500 兜底); `skills-api.js` 23%→100% (停用启停
+  落盘 config/ppx.json + reloadSettings 契约/未知 id 404/缺加载器 409); `mcp-api.js`
+  19%→100% (增删改查全流程落盘 + 热重连/校验矩阵逐条拒绝/index 定位更新合并原值/
+  密钥只回 set 标志); `plugin-api.js` 16%→93.6% (创建缺省模板/详情/更新/删除回收站/
+  散文件插件只读/坏清单报错/语法与 id 校验/非法 access 400)。
+- **REPL 拆分**: `src/cli.js` 顶层内联的 REPL 主循环提取为 `src/cli-repl.js`
+  `createRepl(agent, opts)` (input/output/onExit/version/updateCheck 可注入), cli.js 只留
+  argv 闸门与一次性装配, 生产行为逐字不变 (输出走 output.write, 退出经 onExit)。11 个
+  进程内测试 (PassThrough 流 + stub agent) 覆盖 busy 忽略与 busy 中 /stop 仍可用、
+  quit/exit/q 三态退出、/stop /reset /proactive (有待办/无待办) /proactive-done 本地命令、
+  registry 斜杠命令直通 chat、chat 抛错不断 REPL、SIGINT 两击退出、主动提醒 ticker 注册。
+- **验证**: 全量 **2201 项 (2197 通过 / 4 跳过 / 0 失败)**; src 行覆盖 **85.70%**
+  (coverage gate 82 通过); `npm run verify` **17/17**; eslint 干净。剩余低覆盖块:
+  pwf.js 52% / advanced.js 51% / update.js 59% / importer.js 65% / browse.js 25%。
+
+### 前端外观系统 (2026-11-16, 吸收 Tobs/DeepSeekBot 设计)
+
+- **5 套配色 + 5 种壁纸 + 面板材质**: 珊瑚默认 / 雾蓝 / 雾紫 / 森林 / 琥珀; 极光 / 薄雾 / 网格 /
+  暮色 纯 CSS 壁纸 (零外部图片); 实色 / 通透 (透明度 + backdrop blur) 两档面板。设计参考
+  Tobs (BotHarness/DeepSeekBot, MIT) 的预设主色与"壁纸降低面板不透明度"分层, 实现为本仓自研
+  CSS 变量, 未复制源码。
+- **首屏与运行时同源**: `webapp/public/theme.js` 在首次绘制前写 `data-palette` /
+  `data-wallpaper` / `data-material` / `--wallpaper-opacity`; `stores/appearance-data.js`
+  是设置面板/首屏/测试共用的 ID 白名单与校验; 坏 JSON/未知 ID 全量回落默认。
+- **入口与持久化**: 设置 → 外观、侧栏底部「外观」、顶栏主题按钮三处入口; 只写本机
+  `localStorage` (`ppx_appearance_v1`), 不影响其他端。
+- **验证**: 全量 **2036 项 (2032 通过 / 4 跳过 / 0 失败)**; `npm run verify` **17/17**;
+  `npm run web:build` + `web:check` 全绿 (主包 181kB ≤250kB); Electron 真实窗口截图
+  (默认深色珊瑚 / 雾蓝极光通透 / 亮色暮色 / 主界面壁纸) 归档 `docs/bench/ui/*.png`。
+
+### 像素身份系统 (2026-11-16, 吸收 Tobs 设计)
+
+- **名字即身份**: `webapp/src/stores/pixel-avatar.js` 用 FNV-1a + mulberry32 生成左右对称
+  8×8 网格, 眼睛/嘴/触角固定, 8 套独立调色板 (默认"皮皮虾"用品牌珊瑚)。同名确定性, 改名换脸。
+- **展示**: 对话头部 32px; 本体设置 54px 身份卡 + 28px 页头; 流式生成时头像内圈轻脉冲。
+- **安全**: 只输出自研 SVG, 名字只参与哈希, 不进入 SVG; 6 个纯函数测试钉住确定/对称/眼嘴/
+  调色板/尺寸/SVG 纯净。
+- **验证**: 全量 **2042 项 (2038 通过 / 4 跳过 / 0 失败)**; `npm run verify` **17/17**;
+  `npm run web:build` + `web:check` 全绿 (主包 184kB ≤250kB); Electron 真实窗口截图
+  (主界面头像 / 皮皮虾身份卡 / 改名 Mira 换脸) 归档 `docs/bench/ui/identity-*.png`。
+
+### 覆盖率补齐 (2026-11-16/17: 世界模型 / 技能导入 / 自改代码图谱 / 通道簇 / 配置与 stdio)
+
+- **世界模型**: `src/worldmodel/index.js` 22.9%→99.3%, `server.js` 16.8%→100%; 新增 23 个
+  行为测试 (shell 效果解析 10 + 引擎/HTTP 13), 覆盖路径逃逸、父目录缺失、非空目录递归、
+  exec 超出模拟域、快照淘汰、journal/replay、diff 与全部 HTTP op。
+- **技能导入**: `src/tools/skill-hub.js` 60%→88%; 覆盖覆盖率自述/域目录/无写目录/未知源/
+  坏仓库/非 GitHub 主机的拒绝路径 (真实 GitHub 导入仍不联网测)。
+- **自改代码图谱**: `src/selfcode/graph.js` 55.7%→99.3%; 临时仓库覆盖四种 import 解析、
+  入口发现、断链、环、unreachable/reserved/unwired、impactOf 与 summarizeGraph。
+- **通道簇**: `ans-lane.js` 21.1%→92.2%, `telegram.js` 27%→100%, `output.js` 53%→100%,
+  `receipts.js` 58%→100%, `workspace.js` 60%→100%; 33 个行为测试覆盖 IM 降噪、回执双身份、
+  sendSync 超时契约、工作区越界/引用上限/搜索、Telegram 分段/游标/白名单、ANS 车道的
+  去重三策略/限流/加严黑名单安装还原/失败回投与 async/sync/直发三条路径 (fetch 桩, 零真实网络)。
+- **配置加载 + stdio 宿主**: `config/index.js` 85.1%→96.7%, `mcp-stdio.js` 73.6%→87.2%;
+  YAML 子集解析 (嵌套/数组项/标量/注释)、环境变量覆盖、validateConfig 各告警分支;
+  progressToken 流式 ctx 构造、通知报错静默、未知工具错误响应 (进程内注入流, 无 spawn)。
+- **修缺陷 ×2**: ① `truncate -s 0 <path>` 的 `0` 被当路径导致文档形态被拒, 已修正参数解析;
+  ② parseYaml 数组项分支是死代码 (arrKey 恒 null) —— `providers:` + `- id:` 列表被静默
+  丢弃, 首版修复又产生 providers.providers 双层嵌套; 终版以帧记 {obj, key, parent} 把
+  "空值键的宿主上的键"转成真数组。
+- **验证**: 全量 **2113 项 (2109 通过 / 4 跳过 / 0 失败)**; src 行覆盖 **82.41%**,
+  `coverage:gate` 阈值 82 并通过; `npm run verify` 17/17。
+
+### 质量基线与契约补全批 (2026-11-16: 回归网恢复 + 三个半接回路 + 声称可核验)
+
+先回答"优化有没有回归网": 没有 —— 源码树里 `test/` 与 `npm test` 都不存在, 文档却还在引用
+2626/2867 项测试。本轮先恢复可验证性, 再修它暴露出的真问题:
+
+- **回归网**: 从 git 历史取回 265 个测试文件。首跑 1646 项 / 95 失败, 分诊为: 36 个文件是
+  2026-11-12 模块收敛后的旧 import 路径 (机械重映射) / 12 项是契约已变更 (core 曝光默认、
+  五档审批、LaneMerger 合并、pageSize) / 15 个文件测的是已按死代码移除的模块 (canvas/assets/
+  memoryHealth/supervisor/triage/rollout/aml-server/sqlite 记忆后端, 退役) / 4 项真缺陷。
+  终态 **253 文件 / 1957 项 / 1953 通过 / 4 跳过 / 0 失败**; `npm test` 脚本补回。
+- **真缺陷**: ① 事实库墓碑在 purgeGraceDays 内无界增长 (600 次 add+forget 后 600 行) —— 容量
+  上界恢复为硬约束, 宽限期只管年龄回收; ② 技能包副本缺 `retire/restore` 与退休过滤 —— 已同步,
+  漂移守卫改按模块族检查; ③ MCP 工具 129 > pageSize 128 把 `ppx.chat.*` 挤到第二页 —— 默认
+  pageSize 上调 256; ④ `contextBudget()` 与历史裁剪不同源 —— 固定开销统一为
+  `_fixedContextTokens()`。
+- **上下文配额落地 (架构优化 ④ 消费侧)**: `_historyBudget()` 成为 `_trimHistory` /
+  `_ensureContextFit` / `_maybeCompact` 的唯一预算入口 —— legacy 放得下时行为不变, 放不下时
+  收到 `窗口 − output − tools − system − 记忆预留`。`memory.adaptive_budget=false` 回退。
+- **记忆召回落地 (③ 消费侧)**: `memory_search({multi_source:true})` 走统一 RRF 契约,
+  事实/经验/场景/画像四源融合、每条带来源标注; 默认单源路径逐字节不变, 单源故障只降级该源。
+- **Run 血缘落地 (② 未做项)**: 工单记录 `runId`, 指派继承/可覆盖, 事件 payload 带血缘;
+  旧账本无该字段按 null 读取。依赖边 +1 (workgraph → core/run-context, 向下)。
+- **声称可核验**: 新增 `scripts/readme-sync-check.js` (README 引用了它但脚本不存在) ——
+  tools/skills/core_schema/ctx_tokens/mcp_tools/test_files 实测对齐, tests 计数走
+  `--with-tests` 缓存; 已进 `npm run verify` (17/17)。同步 README 111→127 工具、2867→1957 项、
+  376→253 文件; 删掉 package 描述里的"符号画布"(模块已移除)。
+- 论证与未做清单: `docs/ARCHITECTURE-OPTIMIZATION-2026-11-16.md`。
+
+### 溢出恢复补全批 (2026-11-16: generation 证明, 借 DSH)
+
+- **无进展不重试**: `runToolLoop` 溢出降档后比较消息列表, 没变化直接抛原提供方错误,
+  不再空烧降档次数; 有真实裁剪才重试 (DSH replaceGeneration 语义)。新增
+  `tool/overflow-no-progress` 事件。
+- **预算同源**: 溢出重试的 `histTokenCap` 注入改走 `_historyBudget()`, 与历史裁剪同一口径。
+- 旧测试的 `m => m` 假裁剪全部改为真实输入; 单条 user 输入无历史可裁时一次请求后抛原错误。
+- 测试: `overflow-generation-guard-2026-11-16` 2 例; 全量 1964 项 0 失败。
+
+### 隔离执行补全批 (2026-11-16: 子 agent worktree + 迟到消息 EPIPE 修复)
+
+- **子 agent 隔离执行**: `spawn_agent({isolation:"worktree"})` 每个子任务从 HEAD 建独立
+  worktree, worker 以其为 cwd; 回执附变更统计与补丁路径 (`git apply --3way` 显式合入),
+  成功/失败/异常都清理目录。非 git 仓库给可行动错误, 不静默退回共享目录。
+- **可靠性**: Legion 支持 cwd 传入 (指定隔离目录时不接管热池); `send` 在进程已死/stdin 已关
+  时先行拒绝, 修掉迟到消息写 EPIPE 的宿主崩溃风险。try 内 const 不可用于 finally 的清理
+  作用域已修正。
+- 测试: `worktree-isolation-2026-11-16` 5 例 (真 git 建收删 / 非 git 报错 / cwd 传递 /
+  回执与清理 / 不降级)。
+
+### 认知闭环接通批 (2026-11-16: 测量→反馈、观测→行为、模拟域扩容)
+
+病根不是"缺认知模块", 而是**五个模块都停在了"就绪但半接"**: 能力造出来了, 回路差最后
+1mm 没闭。本轮不加第六个模块, 只把已有的四条回路各接通一毫米。
+
+- **效果反哺 Phase 3.6 (`evolve/loop.js`)**: `effect.js` 的注释自己写着"只记账不改行为" ——
+  系统能测出某条策略没用, 却照旧按它跑, 这是"持续学习"名不副实的最典型形态。新增
+  `feedbackFromEffect`: mature 且 `delta ≤ -degrade_threshold` 的 cohort 给关联 bullet 记
+  harmful 票, 达 `prune_at` 由既有 `growAndRefine` 淘汰。**动作只有一种语义**(记票, 不直接
+  REMOVE), 三重门槛防误杀 (mature + delta 阈值 + 未反哺过), 幂等靠 `cohort.fedBackAt` 与
+  `EffectTracker.isFedBack` 双闸 (调用方拿旧测量快照来调也不会重复动手), 单轮限
+  `max_actions`。默认关闭 (`evolution_loop.effect_feedback.enabled`) —— 会真改 prompt 内容的事,
+  先看清测量质量再开。
+  配套: `effect.js` 的 measure 行补 `cohortKey`/`fedBackAt`, 新增 `markFedBack`/`isFedBack`。
+- **低置信真改道 (`flow/gate.js` + `channels/base.js` + `workgraph/`)**: gate 原来只有
+  "双路透传"和"重复低置信升级"两条规则 —— 观测得再准也不改变行为。新增纯函数
+  `decideReroute` (不调 LLM、不写状态) 作决策位: 显式开启 `reroute_enabled` 且置信低于阈值
+  且模型建议 `clarify` 时**不进入执行**, 用模型自己给的理由向来源方提问。工单标 `rerouted`,
+  `judgeTicket` 把 `done ∧ delivered` 降级为 `MANUAL_REVIEW` —— **改道不算完成**, 否则"没干活"
+  会混进完成率。三重门槛 (配置开启 / 必须 clarify / 重算置信) 都在纯函数里, 可单测。
+- **世界模型 exec 预演域 (`worldmodel/index.js`)**: v1 只覆盖文件动作, `exec` 显式
+  `simulated:false` —— 等于所有命令类不可逆动作仍在 token 序列上裸奔。新增
+  `parseShellEffects` 保守解析器: 支持 rm/mv/cp/mkdir/touch/truncate/dd/cd 的简单命令,
+  含通配符/变量/管道/子 shell/后台符的**一律 parseable:false**。诚实边界写在代码头注里 ——
+  半模拟比不模拟更危险。`rm -rf` 现在能在执行前看清会删掉什么, 且可 snapshot 回滚。
+  修掉的自身 bug: 第一版在原始命令上扫 `&`, 把每条 `cd x && rm y` 都误杀 —— 危险字符检查
+  必须在 splitSegments 之后 (段内残留才是后台/管道)。
+- **可观测面**: `evolution_status` 新增「效果对照与反哺」段 (cohort 基线→对照→delta、
+  immature 标注、反哺开关、上轮动作与淘汰清单); `ARCHITECTURE-CURRENT.md` §4 补
+  `worldmodel/` 行、§6 补 Phase 3.5/3.6 与"为什么必须成对"; `CONFIG.md` 补
+  `metacognition_gate` 三键与 `effect_feedback` 五键。
+- **注释校准 (防止下次审计被骗)**: `playbook.js` 的"引擎就绪、链路未接"写于 2026-09-17,
+  实际 `prompts.js:221` 早已注入 delta 也已接通 —— 改为逐条列出注入/delta/反哺三个接线点
+  及日期; `effect.js` 的"只记账不改行为"改注"反哺在 loop Phase 3.6"; `gate.js` 的
+  "绝不自行改道"改注"不自行改道, 但导出 decideReroute 作消费方决策位"。
+- **门禁**: 修掉 `evolve/finetune-bridge.js#_anchor` 的关键路径空 catch (silent-catch-guard
+  strict 的唯一 FAIL), 改为 `noteCatch` 留痕。
+  验证: `npm run verify` 16/16 全绿 (含 arch-guard/native-guard/审计链/离线基准/记忆召回/
+  静默 catch/文案词典), silent-catch-guard PASS; 独立验证脚本 37 项断言全过 (命令解析
+  正负例、exec 真推演与快照回滚、改道三重门槛、judge 降级、反哺动作与幂等、默认关闭零副作用)。
+
 ## 5.2.0 (2026-11-15) · 个人最强补全轮 + 评测修复轮 + 架构精简轮 + 自带模型体验轮 + 多步基准轮 + 双轨收敛轮
 
 ### 个人最强补全批 (2026-11-14: 渠道×沙箱×语音×外部基准)

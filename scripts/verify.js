@@ -43,6 +43,9 @@ const CHECKS = [
   // 文案门禁 (2026-11-13): 内核叫法 (本体/空间/工单/身体/轨迹/姿态/生命周期) 不许漏进
   //   用户可见文案 —— 词典 webapp/src/i18n/lexicon.js 是唯一出口, 这条闸门保证它真的生效。
   { name: "界面文案一致性 (lexicon)",       file: "scripts/lexicon-check.js",        args: [] },
+  // README 数字同步 (2026-11-16): 工具/技能/schema/ctx/MCP/测试文件数与机读锚点一致。
+  //   tests/pass/skip 不在这里跑 (全量测试 30s+), 由 readme:sync --with-tests 重建缓存。
+  { name: "README 数字同步",                file: "scripts/readme-sync-check.js",    args: ["--check"] },
 ];
 
 const verbose = process.argv.includes("--verbose");

@@ -49,6 +49,16 @@ export default [
     },
   },
   {
+    // CommonJS 夹具/脚本 (fixtures/*.cjs): 2026-11-16 恢复测试夹具后暴露 —— 旧配置只覆盖
+    //   js/mjs, .cjs 里的 process 被当成未定义全局 (no-undef 报错)。
+    files: ["**/*.cjs"],
+    languageOptions: {
+      ecmaVersion: "latest",
+      sourceType: "commonjs",
+      globals: { ...globals.node },
+    },
+  },
+  {
     // 浏览器侧代码: public/ 下的 Web UI
     files: ["public/**/*.js", "webapp/public/**/*.js"],
     languageOptions: {

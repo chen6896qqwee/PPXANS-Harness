@@ -106,6 +106,8 @@ onBeforeUnmount(() => document.removeEventListener("keydown", onKeydown));
   height: 100vh;
   overflow: hidden;
   background: var(--bg);
+  position: relative;
+  z-index: 1; /* 壁纸层 body::before 是 z-index 0 */
 }
 .app .main {
   flex: 1;

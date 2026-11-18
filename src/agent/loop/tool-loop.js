@@ -33,6 +33,18 @@ import {
 //   onEvent          (type, payload) => void, 可选策略事件回调 (工具失败路径: 溢出降档/熔断/错误重试/超时), 供 trace 埋点
 //   isIdempotentTool (name) => boolean, 工具是否幂等可安全重试 (默认全 true)
 //   toolTimeoutOf    (name) => number|null, 工具超时预算 (事件采集用, 默认 null)
+// 溢出重试的 generation 证明 (2026-11-16): 浅比较消息列表 —— 裁剪通常复用原消息对象,
+//   对象/角色/正文全同即视为无进展; 只有真改变才值得再烧一次上游请求。
+function sameMessageList(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+  return a.every((m, i) => {
+    const n = b[i];
+    if (m === n) return true;
+    return m && n && m.role === n.role && m.content === n.content
+      && JSON.stringify(m.tool_calls || null) === JSON.stringify(n.tool_calls || null);
+  });
+}
+
 export async function runToolLoop({
   seedMessages,
   llm,
@@ -45,6 +57,9 @@ export async function runToolLoop({
   //   采集"轮内中间草稿"(带工具调用的半成品回答), 落进 memory/turns 的可重建上下文。
   //   不影响任何既有语义: 不传即零开销。
   onAssistantMsg = null,
+  // 在 _runTool 之前被拦截的调用 (当前为坏 JSON 参数) 也发一次工具事实。
+  // 回调只负责观测, 不替代原 argError 回传与模型自纠流程。
+  onToolEarlyResult = null,
   isIdempotentTool = () => true,
   toolTimeoutOf = () => null,
   // 2026-10-24: 循环内预算闸门 —— () => string|null, 返回非空文案 = 预算已耗尽。
@@ -178,7 +193,14 @@ export async function runToolLoop({
         const cap = policy.nextOverflowCap(histTokenCap());
         ev("tool/overflow", { round, shrink: policy.overflowShrinks, max: policy.overflowShrinkMax });
         warn(`上下文溢出, 降档裁剪后重试 (${policy.overflowShrinks}/${policy.overflowShrinkMax}): ${String(e?.message || e).slice(0, 120)}`);
-        messages = shrinkMessages(messages, cap);
+        // 2026-11-16 (借 DSH replaceGeneration 语义): 只有模型可见输入真的变了才重试。
+        //   旧实现即使裁剪没有产生任何变化也重发同一请求, 空烧降档次数还拖长失败路径。
+        const next = shrinkMessages(messages, cap);
+        if (sameMessageList(messages, next)) {
+          ev("tool/overflow-no-progress", { round, shrink: policy.overflowShrinks });
+          throw e;
+        }
+        messages = next;
         continue;
       }
       throw e;
@@ -252,7 +274,22 @@ export async function runToolLoop({
     // v1.6.0 第四刀语义保留: 超时检测 + 幂等重试一次 (tool/timeout 事件采集 P50/P95/P99 数据基础)
     const execOne = async ({ tc, args, argError }) => {
       // 坏参数不执行工具: 直接回诊断, 让模型重写参数后重试 (幂等/安全都更优)
-      if (argError) return { tc, result: argError, ok: false, ms: 0 };
+      if (argError) {
+        if (onToolEarlyResult) {
+          try {
+            onToolEarlyResult({
+              tool: tc.function.name || "unknown",
+              args: tc.function.arguments ?? "",
+              result: argError,
+              ok: false,
+              durationMs: 0,
+              callId: tc.id || "unknown",
+              category: "parameter_hallucination",
+            });
+          } catch { /* 早结果观测不阻断模型自纠 */ }
+        }
+        return { tc, result: argError, ok: false, ms: 0 };
+      }
       const r = await callWithTimeoutRetry({
         name: tc.function.name,
         args,

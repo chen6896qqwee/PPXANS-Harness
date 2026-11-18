@@ -40,7 +40,8 @@ export const turnRunnerMethods = {
     this._bgTrim();
     this._eqPushRef?.(EventType.TASK_STARTED, { taskId: id, sessionKey: sk, textPreview: entry.text.slice(0, 200) }, { sessionKey: sk, ref: id });
     // 后台执行: 走 chat() —— 同会话追打自动合并 (Router 批处理语义对后台任务同样生效)
-    const p = this.chat(userMsg, { ...opts, sessionKey: sk });
+    // EQ/回调与评测账本共享同一个后台 taskId, 不再各建一套任务身份。
+    const p = this.chat(userMsg, { ...opts, sessionKey: sk, taskId: opts.taskId || id });
     entry.promise = p.then(
       (reply) => {
         if (entry.status !== "running") return reply; // 已被 bgCancel 标记, 不覆盖终态
@@ -64,7 +65,11 @@ export const turnRunnerMethods = {
     return { id, sessionKey: sk };
   },
 
-  async _chatCore(userMsg, { persist = true, sessionKey = "default", mode = null, turnObs = null, funnelResumed = false, fileRefs = "", resumeCtx = null } = {}) {
+  async _chatCore(userMsg, {
+    persist = true, sessionKey = "default", mode = null, turnObs = null, funnelResumed = false,
+    fileRefs = "", resumeCtx = null, taskId = null, traceId = null, strata = null,
+    evalSampleRate = null, taskOk = null,
+  } = {}) {
     // 2026-10-24 (R9 审计): 重定向必须在 runWithTrace **之前**解析 —— trace 上下文的
     //   options 在调用时求值, 此前回调里的重赋值不会传进去, 导致 _admitToolCall 的
     //   计划态检查 / _turnsUsedTools / _recordDraft 全部读重定向前的旧会话 key
@@ -79,6 +84,7 @@ export const turnRunnerMethods = {
     //   begin 放在所有早退 (预算/命令/计划) 之前: 控制面操作同样是用户轮, 不留悬空 turn。
     const ownObs = !turnObs;
     const obs = turnObs || this._turnObsBegin(sessionKey, userMsg, "chat");
+    if (typeof taskOk === "boolean") obs.taskOk = taskOk;
     let _turnStatus = "closed";
     try {
     // 重构第三刀: 入口生成 traceId, 记忆/工具/学习子调用自动继承 (AsyncLocalStorage)
@@ -86,6 +92,7 @@ export const turnRunnerMethods = {
     // 架构优化 ②(2026-11-13): 把会话/通道/run 类型补进 trace 上下文 —— 审计、工单、
     //   委派 worker 全部按这一条 runId 归组, 不再靠时间戳猜关联。
     patchTrace({ sessionKey, runKind: "turn", channel: "chat" });
+    this._captureEvalTurn(obs);
     this.clearInterrupt(sessionKey); // 新一轮对话开始, 复位本会话中断位 (P1-4: 不殃及其它会话)
     // 2026-10-24 (R2): 回退重放缓存按轮重置 (防双执行, 见 _runTool)。
     //   (R5) 流式降级进本函数时 _turnInProgress 为真 —— 缓存保留, 非幂等工具不双执行。
@@ -101,7 +108,7 @@ export const turnRunnerMethods = {
     // 2026-10-10 修复 (P0-1 孪生): _budgetBlocked() 此前定义了却无任何调用方 —— 预算闸门
     //   即使置位也拦不住下一次 chat。闸门必须在"入口"处消费, 在花任何 token 之前。
     const blocked = this._budgetBlocked();
-    if (blocked) return blocked;
+    if (blocked) { obs.taskOk = false; return blocked; }
     this.bus?.emit("chat/user", { userMsg, sessionKey }, { source: "agent.chat" });
     // 2026-10-24: SessionStart 钩子 (每会话一次): 会话恢复/新会话首次对话时触发,
     //   供外部钩子做会话级预热 (加载项目上下文/欢迎注入)。emit 异常不阻断主链。
@@ -164,11 +171,17 @@ export const turnRunnerMethods = {
         reply = await this.ctx.consume("modes").run(modeName, this, userMsg, { sessionKey });
       } catch (e) {
         error("LLM 调用失败:", e.message);
+        obs.taskOk = false;
         reply = LLM_FAILED_HINT(e.message);
       } finally {
         this._turnIntentHints.delete(sk); // 提示块已烘进本轮 wire 与 _turnHistoryTexts, 轮末回收 (幂等注入, 不再消费即清)
       }
       if (!funnelOn) this._intentRecord(sessionKey, userMsg, "llm", null);
+    }
+    // 工具循环可用普通返回值结束中断, 不一定抛 AbortError; 中断位才是事实来源。
+    if (this._isInterrupted(sessionKey)) {
+      obs.taskOk = false;
+      _turnStatus = "aborted";
     }
 
     const usedTools = this._lastTurnUsedTools;
@@ -188,6 +201,7 @@ export const turnRunnerMethods = {
           const codes = report.issues.map((i) => i.code).join(",");
           warn("回答自检未通过:", codes);
           this.bus?.emit("agent/selfcheck", { codes, issues: report.issues, sessionKey }, { source: "agent.selfcheck" });
+          this._observeEvalSelfCheck(obs, reply, report);
           reply = sanitizeReply(reply, report);
         }
       } catch (e) { noteCatch(e); /* 自检本身异常不得阻断主链路 */
@@ -217,9 +231,10 @@ export const turnRunnerMethods = {
       this.notify(`[降级] ${fb.from} → ${fb.to}`);
     }
     return this._maskReplyPII(reply);
-      }, { sessionKey, channel: "chat", userMsg: String(userMsg).slice(0, 200) });
+      }, { sessionKey, channel: "chat", userMsg: String(userMsg).slice(0, 200), taskId, traceId, strata, evalSampleRate });
     } catch (e) {
       _turnStatus = "aborted"; // 异常逃逸 = 本轮中止 (finally 收口, 不留悬空 open turn)
+      obs.taskOk = false;
       this._clearTurnFailures(sessionKey); // 中止轮不投机复现 (尊重中止语义)
       throw e;
     } finally {

@@ -37,6 +37,7 @@ export class Experience {
       tags,
       ts: nowISO(),
       uses: 0,
+      retiredAt: null, // 退休时间戳 (null=在役; 只由显式治理动作设置)
     };
     if (!entry.lesson || entry.lesson.length < 5) return null;
     // 内容去重: 同一 lesson 已存在则命中加分 (uses+1) 而非新增, 防高频学习路径写放大
@@ -75,6 +76,7 @@ export class Experience {
   recall(taskDesc) {
     const q = String(taskDesc || "").toLowerCase();
     const scored = this.lessons
+      .filter((l) => !l.retiredAt) // 退休经验不回投上下文 (2026-11-15)
       .map((l) => {
         let s = 0;
         const hay = (l.lesson + " " + l.task + " " + l.tags.join(" ")).toLowerCase();
@@ -97,8 +99,8 @@ export class Experience {
 
   // 经验清单 (公开读 API): 默认按命中次数降序, 同次数按时间新→旧
   // 供 fork 快照 / 外部观测使用 (调用方无需触碰 this.lessons 内部数组)
-  list({ limit = 0, sort = "uses" } = {}) {
-    const all = [...this.lessons];
+  list({ limit = 0, sort = "uses", includeRetired = false } = {}) {
+    const all = [...this.lessons].filter((l) => includeRetired || !l.retiredAt);
     if (sort === "uses") {
       all.sort((a, b) => (b.uses || 0) - (a.uses || 0) || new Date(b.ts || 0) - new Date(a.ts || 0));
     } else if (sort === "ts") {
@@ -108,15 +110,42 @@ export class Experience {
     return n > 0 ? all.slice(0, n) : all;
   }
 
-  // 条目数 (可观测)
-  count() {
-    return this.lessons.length;
+  // 退休 (2026-11-15): 只标记不删 —— 条目退出 recall/context/list, 文件保留供审计。
+  retire(id, reason = "") {
+    return withFileLock(this.file, () => {
+      this.lessons = readJson(this.file, []);
+      const l = this.lessons.find((x) => x.id === id);
+      if (!l) return null;
+      l.retiredAt = nowISO();
+      if (reason) l.retireReason = String(reason).slice(0, 200);
+      writeJson(this.file, this.lessons);
+      return l;
+    });
+  }
+
+  // 恢复退休经验 (误判回滚用)
+  restore(id) {
+    return withFileLock(this.file, () => {
+      this.lessons = readJson(this.file, []);
+      const l = this.lessons.find((x) => x.id === id);
+      if (!l) return null;
+      l.retiredAt = null;
+      delete l.retireReason;
+      writeJson(this.file, this.lessons);
+      return l;
+    });
+  }
+
+  // 条目数 (可观测): 默认只数在役; includeRetired 供治理对账
+  count({ includeRetired = false } = {}) {
+    return includeRetired ? this.lessons.length : this.lessons.filter((l) => !l.retiredAt).length;
   }
 
   _prune() {
-    // 最多保留 200 条
+    // 最多保留 200 条; 退休条目优先出清
     if (this.lessons.length > 200) {
-      this.lessons.sort((a, b) => b.uses - a.uses);
+      this.lessons.sort((a, b) =>
+        (Number(Boolean(a.retiredAt)) - Number(Boolean(b.retiredAt))) || (b.uses - a.uses));
       this.lessons = this.lessons.slice(0, 200);
     }
   }
@@ -126,6 +155,7 @@ export class Experience {
     // 同次数按时间新→旧 (近期教训仍可见)。蒸馏接缝: B3 auto-self-review 教训 uses 随复发上涨,
     // 从而在上下文里越来越突出, 形成「经验→长期准则」的浮升链路。
     const picked = [...this.lessons]
+      .filter((l) => !l.retiredAt)
       .sort((a, b) => (b.uses || 0) - (a.uses || 0) || new Date(b.ts || 0) - new Date(a.ts || 0))
       .slice(0, 5);
     return picked.map((l) => `- 经验: ${l.lesson}`).join("\n") || "(暂无经验)";

@@ -155,6 +155,25 @@ export const httpApiCoreMethods = {
       case "/api/settings":
         return this._apiSettings(req, res);
 
+      // 个性化面板 · 系统提示词预览 (2026-11-18): 组装一次真实 _context 返回给前端。
+      //   只读 (检索层均纯读); userMsg 用占位串, 检索段与真实对话会有差异 —— 预览看的是
+      //   身份/风格/指令等静态段的最终形态。
+      case "/api/persona.preview": {
+        if (!get) return false;
+        if (!this._requireAuth(req, res)) return true;
+        try {
+          // _context 会顺手写 _lastContextStats (供本轮历史预算计算)。预览不是真轮次:
+          // 快照/恢复, 不留痕, 防 evidence 路径在下一轮前读到预览时的体积。
+          const prevStats = this.agent._lastContextStats;
+          const preview = String(this.agent._context("__persona_preview__") || "");
+          this.agent._lastContextStats = prevStats;
+          this._json(res, 200, { ok: true, chars: preview.length, preview });
+        } catch (e) {
+          this._json(res, 500, { ok: false, error: String(e?.message || e) });
+        }
+        return true;
+      }
+
       // 工作区文件树 + 读取 (Web UI 项目文件引用)
       case "/api/workspace/tree":
         if (!get) return false;

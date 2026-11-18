@@ -105,3 +105,96 @@
   --shadow-2: 0 4px 16px rgba(20, 20, 30, 0.1);
   --shadow-3: 0 12px 40px rgba(20, 20, 30, 0.16);
 }
+
+/* ---------------------------------------------------------------------------
+ * 外观 v2 (2026-11-16): 配色预设 / 壁纸 / 面板材质
+ * 设计参考 Tobs (BotHarness/DeepSeekBot, MIT) 的四套明暗主色与"壁纸降低面板不透明度"
+ * 思路; 实现为本仓自研 CSS 变量, 组件零改动。珊瑚仍是默认品牌色。
+ * ------------------------------------------------------------------------- */
+
+/* 配色: 非珊瑚预设覆盖 accent 四件套; 深色模式再用更亮的主色校准对比度 */
+[data-palette="blue"] {
+  --accent: #4176e6; --accent-hover: #5a87ea;
+  --accent-soft: rgba(65, 118, 230, 0.14); --accent-border: rgba(65, 118, 230, 0.38);
+}
+[data-theme="dark"][data-palette="blue"] {
+  --accent: #7aaaff; --accent-hover: #93baff;
+  --accent-soft: rgba(122, 170, 255, 0.16); --accent-border: rgba(122, 170, 255, 0.4);
+}
+[data-palette="violet"] {
+  --accent: #7957c9; --accent-hover: #8a68d9;
+  --accent-soft: rgba(121, 87, 201, 0.13); --accent-border: rgba(121, 87, 201, 0.36);
+}
+[data-theme="dark"][data-palette="violet"] {
+  --accent: #b19af0; --accent-hover: #c3b1f5;
+  --accent-soft: rgba(177, 154, 240, 0.16); --accent-border: rgba(177, 154, 240, 0.4);
+}
+[data-palette="forest"] {
+  --accent: #287454; --accent-hover: #2f8a64;
+  --accent-soft: rgba(40, 116, 84, 0.12); --accent-border: rgba(40, 116, 84, 0.34);
+}
+[data-theme="dark"][data-palette="forest"] {
+  --accent: #7cc7a0; --accent-hover: #93d4b2;
+  --accent-soft: rgba(124, 199, 160, 0.15); --accent-border: rgba(124, 199, 160, 0.4);
+}
+[data-palette="amber"] {
+  --accent: #94600d; --accent-hover: #a86e0f;
+  --accent-soft: rgba(148, 96, 13, 0.12); --accent-border: rgba(148, 96, 13, 0.34);
+}
+[data-theme="dark"][data-palette="amber"] {
+  --accent: #e6b75c; --accent-hover: #f0c776;
+  --accent-soft: rgba(230, 183, 92, 0.15); --accent-border: rgba(230, 183, 92, 0.4);
+}
+
+/* 壁纸: 纯 CSS 渐变/图案 (零外部图片, 离线可用); 明暗各一套 */
+:root, [data-theme="dark"] {
+  --wp-aurora:
+    radial-gradient(60% 80% at 15% 10%, rgba(240, 101, 60, 0.34), transparent 60%),
+    radial-gradient(50% 70% at 85% 20%, rgba(122, 170, 255, 0.28), transparent 65%),
+    radial-gradient(70% 90% at 50% 100%, rgba(177, 154, 240, 0.24), transparent 70%),
+    #0b0d16;
+  --wp-mist:
+    radial-gradient(70% 80% at 20% 0%, rgba(255, 255, 255, 0.08), transparent 60%),
+    linear-gradient(160deg, #10151c, #1a2430 55%, #0d1117);
+  --wp-grid:
+    radial-gradient(circle at 1px 1px, rgba(255, 255, 255, 0.10) 1px, transparent 0) 0 0 / 22px 22px,
+    linear-gradient(145deg, #0d1117, #151b24);
+  --wp-dusk: linear-gradient(160deg, #1a1220 0%, #2a1a1a 48%, #10121c 100%);
+}
+[data-theme="light"] {
+  --wp-aurora:
+    radial-gradient(60% 80% at 15% 10%, rgba(224, 83, 44, 0.16), transparent 60%),
+    radial-gradient(50% 70% at 85% 20%, rgba(65, 118, 230, 0.14), transparent 65%),
+    radial-gradient(70% 90% at 50% 100%, rgba(121, 87, 201, 0.12), transparent 70%),
+    #f4f2ff;
+  --wp-mist:
+    radial-gradient(70% 80% at 20% 0%, rgba(255, 255, 255, 0.9), transparent 60%),
+    linear-gradient(160deg, #eef3f7, #f9fbfd 55%, #eef1f6);
+  --wp-grid:
+    radial-gradient(circle at 1px 1px, rgba(20, 30, 50, 0.10) 1px, transparent 0) 0 0 / 22px 22px,
+    linear-gradient(145deg, #f6f7fb, #eef1f7);
+  --wp-dusk: linear-gradient(160deg, #fdf0ea 0%, #f3eefb 48%, #eef1fb 100%);
+}
+[data-wallpaper="none"] { --wp-image: none; }
+[data-wallpaper="aurora"] { --wp-image: var(--wp-aurora); }
+[data-wallpaper="mist"] { --wp-image: var(--wp-mist); }
+[data-wallpaper="grid"] { --wp-image: var(--wp-grid); }
+[data-wallpaper="dusk"] { --wp-image: var(--wp-dusk); }
+
+/* 面板材质: 通透模式把表面变量换成带 alpha 的颜色; 实色保持上面的不透明 token */
+[data-theme="dark"][data-material="translucent"] {
+  --surface: rgba(23, 23, 31, 0.72); --surface-2: rgba(29, 29, 39, 0.66);
+  --surface-3: rgba(36, 36, 47, 0.70); --bg-soft: rgba(18, 18, 24, 0.62);
+}
+[data-theme="light"][data-material="translucent"] {
+  --surface: rgba(255, 255, 255, 0.70); --surface-2: rgba(247, 247, 250, 0.64);
+  --surface-3: rgba(239, 240, 244, 0.68); --bg-soft: rgba(238, 238, 242, 0.60);
+}
+
+/* 有壁纸时画布让出透明度; 面板材质决定面板是否也透 (实色仍有壁纸衬底) */
+[data-theme="dark"][data-wallpaper]:not([data-wallpaper="none"]) { --bg: rgba(14, 14, 18, 0.62); }
+[data-theme="light"][data-wallpaper]:not([data-wallpaper="none"]) { --bg: rgba(245, 245, 247, 0.66); }
+
+/* 模态遮罩随主题: 亮色下用浅遮罩, 不然通透面板叠在深遮罩上会发灰 */
+:root, [data-theme="dark"] { --scrim: rgba(8, 8, 12, 0.55); }
+[data-theme="light"] { --scrim: rgba(20, 20, 30, 0.28); }

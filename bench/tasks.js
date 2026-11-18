@@ -1,5 +1,6 @@
 // bench/tasks.js - 任务级评测基准 (2026-10-02)
-// 20 个可确定性验证的任务: 评测「agent 能不能把事干成」, 区别于守卫型单测 (功能不被破坏)。
+// 28 个可确定性验证的任务: 冻结旧 20 题 + 2026-11-14 新增 8 个多步链任务。
+// 评测「agent 能不能把事干成」, 区别于守卫型单测 (功能不被破坏)。
 // 每个任务: id / category / task (给 agent 的指令) / setup (沙箱夹具) / verify (确定性判分, 不用 LLM 评审)。
 // verify 返回 { pass, detail }; 沙箱目录 ctx.sandbox 隔离, 不污染仓库。
 import fs from "node:fs";
@@ -71,6 +72,31 @@ const hasNum = (reply, n) => {
   const s = String(n).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return new RegExp(`(?<![\\d.])${s}(?![\\d])`).test(String(reply ?? ""));
 };
+
+// 旧版公开口径的任务身份必须稳定: 新增任务只能进入全量口径, 不能悄悄改变旧 20 题。
+// 显式列 ID 而非 slice(0, 20), 防止以后调整 TASKS 顺序时静默改写历史口径。
+export const LEGACY_TASK_IDS = Object.freeze([
+  "version-report",
+  "count-files",
+  "find-symbol",
+  "sum-numbers",
+  "read-secret",
+  "create-file",
+  "append-file",
+  "json-edit",
+  "delete-file",
+  "json-create",
+  "fix-syntax",
+  "fix-logic",
+  "write-function",
+  "rename-symbol",
+  "memory-roundtrip",
+  "board-roundtrip",
+  "analyze-and-report",
+  "conditional-write",
+  "src-listing",
+  "extract-field",
+]);
 
 export const TASKS = [
   // ---- A. 信息检索 ----

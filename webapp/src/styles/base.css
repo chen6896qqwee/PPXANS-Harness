@@ -200,3 +200,21 @@ textarea { resize: vertical; }
 /* ---------- 滚动容器渐隐 ---------- */
 .fade-y { position: relative; }
 .fade-y.more { mask-image: linear-gradient(to bottom, #000 calc(100% - 26px), transparent); }
+
+/* ---------- 外观 v2: 壁纸层 / 通透材质 (2026-11-16) ---------- */
+/* 壁纸层在所有面板之下; --wp-image 由 [data-wallpaper] 切换, none 时为空 */
+body::before {
+  content: "";
+  position: fixed; inset: 0; z-index: 0; pointer-events: none;
+  background: var(--wp-image, none);
+  background-size: cover;
+  background-position: center;
+  opacity: var(--wallpaper-opacity, 0.55);
+}
+[data-material="translucent"] .side,
+[data-material="translucent"] .drawer,
+[data-material="translucent"] .composer,
+[data-material="translucent"] .botbar,
+[data-material="translucent"] .sm {
+  backdrop-filter: blur(14px) saturate(1.05);
+}

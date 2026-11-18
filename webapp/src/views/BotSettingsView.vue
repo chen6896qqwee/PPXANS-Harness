@@ -2,10 +2,12 @@
 <script setup>
 import { computed, onMounted, ref, watch } from "vue";
 import Icon from "../common/Icon.vue";
+import PixelAvatar from "../common/PixelAvatar.vue";
 import { bot, loadState, manage, settingsPatch, openMem, closeMem } from "../stores/bot.js";
 import { showView } from "../stores/ui.js";
 import { showToast } from "../stores/toast.js";
 import { shortAgo, fmtBytes } from "../stores/fmt.js";
+import { settingsApi, settingsPutApi, personaPreviewApi } from "../api/endpoints.js";
 
 const s = computed(() => bot.s);
 const live = computed(() => (s.value && s.value.live) || {});
@@ -129,13 +131,77 @@ function memClick(p) {
   openMem(p);
 }
 
-onMounted(() => loadState());
+/* ---------- 个性化 (WorkBuddy 式面板): 称呼/回复风格/指令 → config; 人设 → identity.md/ishiki.md ---------- */
+const pUserName = ref("");
+const pTone = ref("");
+const pDirectives = ref("");
+const pIdentity = ref("");
+const pIshiki = ref("");
+const pPreview = ref(null);
+const pPreviewOpen = ref(false);
+
+async function loadPersona() {
+  try {
+    const j = await settingsApi();
+    const st = (j && j.settings) || {};
+    pUserName.value = (st.user && st.user.name) || "";
+    pTone.value = (st.agent && st.agent.reply_style) || "";
+    pDirectives.value = (st.agent && st.agent.system_extra) || "";
+  } catch { /* 读取失败: 表单留空, 保存时报错 */ }
+  try {
+    const j = await manage("personaRead", {});
+    pIdentity.value = (j && j.identity) || "";
+    pIshiki.value = (j && j.ishiki) || "";
+  } catch { /* 同上 */ }
+}
+
+async function saveUserName() {
+  try {
+    await settingsPutApi({ patch: { user: { name: pUserName.value.trim() } } });
+    showToast("称呼已保存, 下一轮对话生效");
+  } catch (e) {
+    showToast("保存失败: " + ((e && e.message) || "未知错误"), true);
+  }
+}
+async function saveTone() {
+  try {
+    await settingsPutApi({ patch: { agent: { reply_style: pTone.value } } });
+    showToast("回复风格已保存, 下一轮对话生效");
+  } catch (e) {
+    showToast("保存失败: " + ((e && e.message) || "未知错误"), true);
+  }
+}
+async function saveDirectives() {
+  try {
+    await settingsPutApi({ patch: { agent: { system_extra: pDirectives.value } } });
+    showToast("指令已保存, 下一轮对话生效");
+  } catch (e) {
+    showToast("保存失败: " + ((e && e.message) || "未知错误"), true);
+  }
+}
+function savePersonaFiles() {
+  manage("personaWrite", { identity: pIdentity.value, ishiki: pIshiki.value }, "人设已保存, 下一轮对话生效").catch(() => {});
+}
+async function togglePreview() {
+  pPreviewOpen.value = !pPreviewOpen.value;
+  if (!pPreviewOpen.value) return;
+  pPreview.value = null;
+  try {
+    const j = await personaPreviewApi();
+    pPreview.value = j && j.ok ? j : { ok: false, error: (j && j.error) || "未知错误" };
+  } catch (e) {
+    pPreview.value = { ok: false, error: (e && e.message) || "请求失败" };
+  }
+}
+
+onMounted(() => { loadState(); loadPersona(); });
 </script>
 
 <template>
   <section id="view-settings" class="view">
     <header class="botbar">
       <button class="icobtn" title="返回" aria-label="返回" @click="showView('chat')"><Icon name="back" :size="16" /></button>
+      <PixelAvatar v-if="s && !s.bot.avatarUrl" :name="s.bot.name" :size="28" />
       <div class="bmeta">
         <div class="bname2" id="setTitle">设置{{ s ? " · " + s.bot.name : "" }}</div>
         <div class="bsub" id="setSub">{{ s ? (s.bot.typeName + " · " + s.workspace) : "正在读取助手状态…" }}</div>
@@ -184,6 +250,15 @@ onMounted(() => loadState());
         <!-- 身份 -->
         <div class="ssec">
           <div class="ssec-head">身份</div>
+          <div class="idcard">
+            <PixelAvatar v-if="!s.bot.avatarUrl" :name="s.bot.name" :size="54" />
+            <img v-else class="idimg" :src="s.bot.avatarUrl" alt="">
+            <div class="idmeta">
+              <div class="idname">{{ s.bot.name }}</div>
+              <div class="idtype">{{ s.bot.typeName || "助手" }}<span v-if="s.bot.blurb"> · {{ s.bot.blurb }}</span></div>
+              <div class="idhint">{{ s.bot.avatarUrl ? "使用上传的头像" : "像素头像由名字生成 · 改名会换一张" }}</div>
+            </div>
+          </div>
           <div class="srow"><span class="slab">名字</span>
             <input v-model="setName" type="text" class="grow" maxlength="40">
             <button class="wbtn primary" @click="act('rename')">保存</button>
@@ -199,6 +274,39 @@ onMounted(() => loadState());
             <button class="wbtn danger" @click="act('avatarClear')">移除</button>
           </div>
           <div class="shint">PNG / JPEG / WebP / GIF，≤4MB。按内容类型校验, 不看扩展名。</div>
+        </div>
+
+        <!-- 个性化 -->
+        <div class="ssec">
+          <div class="ssec-head">个性化<span class="flex1" />
+            <button class="wbtn" @click="togglePreview">{{ pPreviewOpen ? "收起预览" : "预览系统提示词" }}</button>
+          </div>
+          <div class="srow"><span class="slab">对你的称呼</span>
+            <input v-model="pUserName" type="text" class="grow" maxlength="24" placeholder="兄弟">
+            <button class="wbtn primary" @click="saveUserName">保存</button>
+          </div>
+          <div class="shint">助手平时怎么叫你。写进每轮系统提示词, 下一轮对话生效。</div>
+          <div class="srow"><span class="slab">回复风格</span><span class="flex1" />
+            <button class="wbtn primary" @click="saveTone">保存</button>
+          </div>
+          <textarea v-model="pTone" class="mempane thin" rows="3" spellcheck="false"
+            placeholder="例如: 简洁直接, 少客套, 先给结论再给证据; 涉及代码时给 文件:行。留空 = 不注入。"></textarea>
+          <div class="srow"><span class="slab">给助手的指令</span><span class="flex1" />
+            <button class="wbtn primary" @click="saveDirectives">保存</button>
+          </div>
+          <textarea v-model="pDirectives" class="mempane thin" rows="4" spellcheck="false"
+            placeholder="工作流约定, 支持 Markdown。例如: 默认先出计划, 我确认后再动手; 高危命令必须先问我。留空 = 不注入。"></textarea>
+          <div class="srow"><span class="slab">人设设定</span><span class="svd">身份 (config/identity.md) · 性格表达 (config/ishiki.md)</span></div>
+          <textarea v-model="pIdentity" class="mempane thin" rows="3" spellcheck="false"
+            placeholder="身份: 我是谁 —— 长期不变的自我描述"></textarea>
+          <textarea v-model="pIshiki" class="mempane thin" rows="3" spellcheck="false"
+            placeholder="性格与表达: 例如 直接、务实"></textarea>
+          <div class="srow"><span class="flex1" />
+            <button class="wbtn primary" @click="savePersonaFiles">保存人设</button>
+          </div>
+          <div v-if="pPreviewOpen && pPreview && pPreview.ok" class="promptpreview">{{ pPreview.preview }}</div>
+          <div v-else-if="pPreviewOpen && pPreview" class="shint">预览失败: {{ pPreview.error }}</div>
+          <div v-else-if="pPreviewOpen" class="shint">正在组装最终系统提示词…</div>
         </div>
 
         <!-- 工作区 -->
@@ -388,4 +496,22 @@ onMounted(() => loadState());
 .sctl-inline { display: flex; align-items: center; gap: 8px; flex: 1; flex-wrap: wrap; }
 .sctl-inline input[type="text"] { flex: 1; min-width: 160px; }
 .srow input[type="number"] { width: 90px; }
+.idcard {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 12px; margin: 2px 0 10px;
+  background: var(--surface-2); border: 1px solid var(--border-soft); border-radius: var(--r-md);
+}
+.idimg { width: 54px; height: 54px; border-radius: 12px; object-fit: cover; flex: none; }
+.idmeta { min-width: 0; }
+.idname { font-weight: 700; font-size: 14px; }
+.idtype { font-size: 12px; color: var(--text-2); margin-top: 1px; }
+.idhint { font-size: 11px; color: var(--text-4); margin-top: 2px; }
+.mempane.thin { min-height: 0; margin-top: 2px; }
+.promptpreview {
+  margin-top: 8px; max-height: 320px; overflow: auto;
+  font-family: ui-monospace, Consolas, monospace; font-size: 11px; line-height: 1.55;
+  white-space: pre-wrap; word-break: break-word; color: var(--text-3);
+  background: var(--bg-soft); border: 1px solid var(--border-soft);
+  border-radius: var(--r-md); padding: 10px 12px;
+}
 </style>

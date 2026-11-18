@@ -1,7 +1,7 @@
 {
   "name": "ppxans-harness",
-  "version": "5.2.0",
-  "description": "PPXANS-Harness - 皮皮虾神经系 (ANS) + Harness 一体化智能体内核. 零运行时依赖纯Node. 自愈 + 自学习 + 五层记忆 + SHA-256 审计哈希链 + 多 Agent 军团 + 治理内核(deny-wins/熔断/seam) + 进化内核(Playbook/故障记忆) + 符号画布 + supervisor. 自研底座: 仅 OpenAI 兼容 HTTP 直连, 无外部引擎依赖. Agent Nervous System harness in pure Node, zero runtime dependencies.",
+  "version": "5.3.0",
+  "description": "PPXANS-Harness - 皮皮虾神经系 (ANS) + Harness 一体化智能体内核. 零运行时依赖纯Node. 自愈 + 自学习 + 五层记忆 + SHA-256 审计哈希链 + 多 Agent 军团 + 治理内核(deny-wins/熔断/seam) + 进化内核(Playbook/故障记忆) + 工单账本 + 世界模型推演. 自研底座: 仅 OpenAI 兼容 HTTP 直连, 无外部引擎依赖. Agent Nervous System harness in pure Node, zero runtime dependencies.",
   "type": "module",
   "license": "Apache-2.0",
   "author": "chen6896qqwee <chen6896qqwee@users.noreply.github.com>",
@@ -22,6 +22,10 @@
     "url": "https://github.com/chen6896qqwee/PPXANS-Harness/issues"
   },
   "scripts": {
+    "test": "node --test --test-force-exit test/",
+    "test:raw": "node --test test/",
+    "test:coverage": "node --test --test-force-exit --experimental-test-coverage --test-coverage-include=\"src/**\" test/",
+    "coverage:gate": "node --test --test-force-exit --experimental-test-coverage --test-coverage-include=\"src/**\" --test-coverage-lines=82 test/",
     "start": "node scripts/desktop-start.mjs",
     "desktop": "node scripts/desktop-start.mjs",
     "desktop:dev": "node scripts/desktop-start.mjs",
@@ -48,6 +52,8 @@
     "evolve:loop": "node scripts/evolution-loop.js",
     "selfheal:run": "node src/evolve/healer-run.js",
     "audit:verify": "node scripts/audit-verify.js",
+    "worldmodel:serve": "node scripts/worldmodel-server.mjs",
+    "finetune:export": "node scripts/finetune-export.mjs",
     "bench": "node scripts/bench.js",
     "bench:gate": "node scripts/bench-gate.js",
     "bench:edit": "node scripts/edit-protocol-bench.js",
@@ -56,6 +62,8 @@
     "lexicon:check": "node scripts/lexicon-check.js",
     "watchdog:external": "node scripts/external-watchdog.mjs",
     "verify": "node scripts/verify.js",
+    "readme:sync": "node scripts/readme-sync-check.js --fix --with-tests",
+    "test:map": "node scripts/test-map.js",
     "version:check": "node scripts/version-sync.js",
     "clean": "node scripts/clean.js",
     "gate:release": "npm run verify && npm run lint",

@@ -85,6 +85,23 @@ npm run chat
 | `router_role.enabled` | false | **Router 角色**（2026-11-04）：主进程收窄为调度层（工具面只留委派/检索/提问），名单外工具在准入链硬拒；子进程恒为 worker，防递归分派。开启需重启 |
 | `router_role.allow` | [] | Router 工具名单追加项（只增不减，`spawn_agent` 不可移除） |
 | `delegate_memory_inject` | false | **委派全局上下文**（2026-11-05）：`spawn_agent` 派发前按任务查语义记忆 top 3 + 同角色共享板近 2 条，以 `[全局上下文] …` 前缀拼进 worker 消息（≤800 字符）。默认关；开启后跨会话关键信息随分派共享，注意内容会进入 worker 子进程提示词 |
+| `metacognition_gate.enabled` | false | **执行前置信度观测**（2026-11-15）：async/sync 路径执行前多一次轻量 LLM 调用，给工单打 `{confidence, rationale, suggested_action}`。关闭时零 LLM 调用零写入，行为逐字节不变；fail-open（门控自身故障只写 `skipped`，绝不影响主链路）。thread 直通与 ANS 自触发不观测 |
+| `metacognition_gate.reroute_enabled` | false | **低置信真改道**（2026-11-16）：开启后，低置信且模型建议 `clarify` 时**不执行任务**，改为向来源方发出澄清提问（附模型自己给的理由）。工单标 `rerouted`，`judgeTicket` 判为 `MANUAL_REVIEW` 而非 `completed` —— 改道不算完成，否则"没干活"会混进完成率。建议动作是 `proceed`/`retrieve` 时不改道 |
+| `metacognition_gate.threshold` | 0.5 | 置信度阈值，低于即判低置信（`decideReroute` 内部会重算一遍，不信任上游标记） |
+
+### 效果反哺（`evolution_loop.effect_feedback`，2026-11-16 新增）
+
+| 字段 | 默认 | 说明 |
+|------|------|------|
+| `enabled` | false | 总开关。关闭时 Phase 3.6 完全不运行，零写入 —— 与 Phase 3.5 的只读测量互不影响 |
+| `degrade_threshold` | 0.15 | 判定"退化"的成功率跌幅（0.15 = 对照窗口比基线低 15 个点以上才动手） |
+| `relate_threshold` | 0.25 | skill 名 ↔ playbook bullet 内容的最低词法相似度。低于此值视为"找不到对应策略"，记 `skipped` 不猜 |
+| `max_actions` | 3 | 单轮最多反哺几条 cohort —— 防一次测量把半个策略库记满有害票 |
+| `prune_at` | 3 | 有害票净额（harmful − helpful）达此值由 `growAndRefine` 淘汰该 bullet |
+
+**为什么默认关**：这一项会**真的改行为**（淘汰策略 = 改 system prompt 内容）。测量本身
+（Phase 3.5）先跑几周、看清 cohort 质量和 delta 分布之后再打开，比一开始就让它动策略安全得多。
+反哺动作只有一种语义 —— 记有害票，淘汰交给既有阈值逻辑，不直接 `REMOVE`，留着可回滚的余地。
 
 ### 权限与可访问范围（2026-11-08 补）
 
@@ -148,8 +165,9 @@ npm run chat
 | `hit_bonus` | 5 | 命中加分（实际生效） |
 | `base_importance` | 10 | 基础重要性（实际生效） |
 | `forget_speed` | 1 | 遗忘速度（实际生效） |
-| `max_history_items` | 40 | 会话历史条数上限 |
-| `history_token_budget` | 4000 | 会话历史 token 预算（超阈值触发压缩） |
+| `max_history_items` | 0 | 会话历史条数上限（0 = 随窗口自适应：≥64K→80 / ≥32K→60 / 其余 40） |
+| `history_token_budget` | 0 | 会话历史 token 预算（0 = 随窗口自适应 clamp(window×0.3, 2K, 24K)；超阈值触发压缩） |
+| `adaptive_budget` | true | 历史预算再受全局配额约束（2026-11-16）：窗口扣 output/tools/system/记忆预留后仍放得下就保持旧公式，放不下才收紧；`false` = 纯旧公式 |
 | `context_window` | 8192 | 上下文窗口兜底（未知窗口时保守默认，溢出防护用）|
 | `context_window_ratio` | 0.6 | 历史+工具结果占用上下文窗口的安全比例上限 |
 | `max_facts` | 1000 | L1 记忆总量上限 |

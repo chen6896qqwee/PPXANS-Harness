@@ -12,6 +12,19 @@ import { ASSIGNMENT_STATUS, TICKET_STATUS, isFinalStatus } from "./store.js";
 import {
   ORIGIN, DELIVERY_STATE, normalizeOrigin, dedupeStrategyOf,
 } from "./state.js";
+import { currentRunId } from "../core/run-context.js";
+
+// taskType 确定性派生 (2026-11-15): origin(cause) + 投递路由 + 工具集合哈希 的三元组。
+//   为什么不用模型分类: 用当前模型给轨迹打标、再用这些标签测"新模型是否泛化"是循环依赖
+//   —— 分错类会污染 cohort 分层, 测出来的"跨任务提升"可能是分类噪声。确定性派生让
+//   cohort 对照的统计口径从第一天就是干净的; 自由文本 taskType 可以后加, 但第一版
+//   必须是事实域派生 (djb2 哈希, 零依赖, 同一事实永远同一标签)。
+export function deriveTaskType({ origin = "ingress", route = null, tools = [] } = {}) {
+  const toolKey = [...new Set((Array.isArray(tools) ? tools : []).map(String))].sort().join(",");
+  let h = 5381;
+  for (let i = 0; i < toolKey.length; i++) h = ((h * 33) ^ toolKey.charCodeAt(i)) >>> 0;
+  return `${String(origin || "ingress").slice(0, 24)}|${String(route || "async").slice(0, 12)}|${h.toString(36).slice(0, 8)}`;
+}
 
 export function createWorkService({
   store,
@@ -39,6 +52,8 @@ export function createWorkService({
       externalId: ticket.externalId || null,
       dedupeKey: ticket.dedupeKey || null,
       dedupeStrategy: ticket.dedupeStrategy || null,
+      // 架构优化 ②(2026-11-16): 工单事件带 runId —— 与 trace/审计/工具轨迹同一条血缘
+      runId: ticket.runId || null,
       ...extra,
     };
     const ref = {
@@ -114,7 +129,7 @@ export function createWorkService({
   //   · 入站三元组覆盖 IM webhook 重试。
   function submit(trigger = {}, {
     sessionKey = null, cause = "ingress", priority = 0,
-    origin = null, externalId = null, dedupeKey = null,
+    origin = null, externalId = null, dedupeKey = null, runId = null,
   } = {}) {
     const src = trigger.source || "";
     const from = trigger.from || "";
@@ -146,6 +161,8 @@ export function createWorkService({
       dedupeKey: key,
       dedupeStrategy: strategy,
       parentId: trigger.meta?.parentId || null,
+      // 血缘单一来源: 当前 trace 上下文; 跨进程重投可用 trigger.meta.runId 显式带入。
+      runId: runId || trigger.meta?.runId || currentRunId() || null,
     });
     emit("ticket_created", ticket, { deduped: false });
     return ticket;
@@ -154,6 +171,7 @@ export function createWorkService({
   function begin(ticketId, {
     worker = "router", sessionKey = null, bgTaskId = null,
     route = null, origin = null, delivery = null,
+    metacognition = null, runId = null,
   } = {}) {
     const before = store.get(ticketId);
     if (!before) return null;
@@ -163,6 +181,11 @@ export function createWorkService({
       route,
       origin: origin || before.cause,
       delivery,
+      // 新指派默认继承工单血缘; 重跑/换轮次时调用方可显式传新 runId
+      runId: runId || before.runId || currentRunId() || null,
+      // 元认知观测字段 (2026-11-15, flow/gate.js): {confidence, rationale, suggested_action}
+      // 随指派落账 —— 审计链从此记录"当时有多确信"。只存不判, 是否改道由 DSH/人工决定。
+      metacognition: metacognition && typeof metacognition === "object" ? metacognition : null,
     });
     const ticket = store.get(ticketId);
     const effectiveRoute = assignment?.route || "async"; // 旧调用点无 route: 结果经队列回投 = async
@@ -306,7 +329,7 @@ export function createWorkService({
     return assignment;
   }
 
-  function complete(ticketId, { result = null, envelope = null, bgTaskId = null } = {}) {
+  function complete(ticketId, { result = null, envelope = null, bgTaskId = null, verification = null, lowConfidence = null, rerouted = null } = {}) {
     const ticket = store.get(ticketId);
     if (!ticket) return null;
     if (isFinalStatus(ticket.status)) return ticket; // 取消/失败后完成回调迟到, 不覆盖终态
@@ -318,6 +341,22 @@ export function createWorkService({
       failureKind: null,
       worker: ticket.worker || "router",
     };
+    // 低置信标记 (2026-11-15, gate.js 消费规则): 执行前元认知门控打了低置信 → 随工单落账,
+    //   judge 读取后透传为人工复核信号。只存不判 (与 verification 同口径)。
+    if (lowConfidence === true) patch.lowConfidence = true;
+    // 改道标记 (2026-11-16, gate.js 规则三): 低置信 → 未执行任务、改为向来源方提问。
+    //   **这不是完成**: judge 读到 rerouted 会把 done∧delivered 降级为 MANUAL_REVIEW,
+    //   否则"什么都没做但工单已收"会污染完成率统计 (调度语义的诚实压过账面好看)。
+    if (rerouted) patch.rerouted = String(rerouted).slice(0, 20);
+    // 验证证据快照 (2026-11-15, judge verified-by-evidence): 完成回调可携带
+    //   {ref, kind, ts} —— 随工单落账, DSH 判定与 UI 工单详情可读。只存不判 (判定在 judge.js)。
+    if (verification && typeof verification === "object" && verification.ref) {
+      patch.verification = {
+        ref: String(verification.ref).slice(0, 200),
+        kind: String(verification.kind || "unknown").slice(0, 40),
+        ts: verification.ts || now(),
+      };
+    }
     if (envelope && typeof envelope === "object") {
       patch.rounds = Number(envelope.rounds) || 0;
       patch.steps = Number(envelope.steps) || 0;
@@ -326,6 +365,22 @@ export function createWorkService({
       // v5.0 信封 v2: 可验证交付物随工单落账 (UI 工单详情透出)
       if (Array.isArray(envelope.artifacts)) patch.artifacts = envelope.artifacts.slice(0, 16);
       if (Array.isArray(envelope.commands)) patch.commands = envelope.commands.slice(0, 16);
+    }
+    // taskType 确定性派生 (2026-11-15): 任务类型**不由模型分类** —— 用当前模型给轨迹打标,
+    //   再用这些标签测"新模型是否泛化"是循环依赖, 分错类会污染 cohort 分层。改由已有事实
+    //   域派生: origin(cause) + 投递路由 + 工具集合哈希 —— 零 LLM, 同一事实永远同一标签。
+    //   注意必须在 envelope 块之后 (tools 才已落 patch); effect.measure 经
+    //   listRecentAssignments 时间窗联表消费 (见 evolve/effect.js)。
+    {
+      const asg = ticket.assignmentId ? store.getAssignment(ticket.assignmentId) : null;
+      patch.taskType = deriveTaskType({
+        origin: ticket.origin || ticket.cause,
+        route: asg?.route || null,
+        tools: patch.tools || [],
+      });
+      if (ticket.assignmentId) {
+        try { store.updateAssignment(ticket.assignmentId, { taskType: patch.taskType }); } catch { /* 联表标记失败不阻断收单 */ }
+      }
     }
     if (bgTaskId) patch.bgTaskId = String(bgTaskId);
     const next = store.update(ticketId, patch);
@@ -535,6 +590,8 @@ export function createWorkService({
     submit, begin, progress, progressBySession, markUnsafeBySession, checkpointBySession, markDeliveryStarted, markDeliveryState,
     complete, fail, wait, cancel, requeue, recover,
     list, get, stats,
+    // 最近 assignments (2026-11-15): effect cohort 的 taskType 联表数据源
+    listRecentAssignments: (limit = 100) => store.listAssignments(limit),
     _store: store,
   };
 }

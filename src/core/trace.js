@@ -15,18 +15,42 @@ import { logsDir, logicalDay } from "../utils/store.js";
 import { shortId } from "../utils/id.js";
 import { scrubPII } from "../utils/pii.js";
 import { noteCatch } from "../utils/catch-log.js";
+import {
+  DEFAULT_EVAL_SAMPLE_RATE,
+  normalizeEvalSampleRate,
+  normalizeEvalStrata,
+  sampleEvalTask,
+} from "../utils/eval-sampling.js";
+
+export {
+  EVAL_STRATA_KEYS,
+  DEFAULT_EVAL_SAMPLE_RATE,
+  normalizeEvalSampleRate,
+  normalizeEvalStrata,
+  sampleEvalTask,
+} from "../utils/eval-sampling.js";
 
 const als = new AsyncLocalStorage();
 const MAX_PAYLOAD = 2000; // 单条事件载荷上限, 防爆文件
+
+function refreshEvalSampling(store) {
+  store.strata = normalizeEvalStrata(store.strata);
+  store.evalSampleRate = normalizeEvalSampleRate(store.evalSampleRate ?? store.sampleRate);
+  Object.assign(store, sampleEvalTask(store.taskId, store.strata, store.evalSampleRate));
+  return store;
+}
 
 export function genTraceId() {
   return shortId("t_", 8);
 }
 
-// 入口包装: 生成新 traceId, 所有异步子调用自动继承
-// meta 可带 { sessionKey, channel, userMsg } 等上下文, 存于 ALS store
+// 入口包装: 生成新 traceId, 所有异步子调用自动继承。显式 traceId/taskId 可供流式降级
+// 或外部评测执行器延续同一任务; 缺省 taskId=traceId, 不从 sessionKey 合并不同任务。
+// meta 可带 { sessionKey, channel, userMsg, taskId, strata, evalSampleRate } 等上下文。
 export function runWithTrace(fn, meta = {}) {
-  const store = { traceId: genTraceId(), ...meta, t0: Date.now() };
+  const traceId = meta.traceId || genTraceId();
+  const store = { ...meta, traceId, taskId: meta.taskId || traceId, t0: Date.now() };
+  refreshEvalSampling(store);
   return als.run(store, fn);
 }
 
@@ -35,7 +59,14 @@ export function runWithTrace(fn, meta = {}) {
 //   只在 ALS 内生效, 无上下文时静默 —— 供 agent 入口一行接线, 不必改闭包收尾括号。
 export function patchTrace(meta = {}) {
   const store = als.getStore();
-  if (store && meta && typeof meta === "object") Object.assign(store, meta);
+  if (store && meta && typeof meta === "object") {
+    Object.assign(store, meta);
+    if (Object.hasOwn(meta, "taskId") || Object.hasOwn(meta, "strata")
+      || Object.hasOwn(meta, "evalSampleRate") || Object.hasOwn(meta, "sampleRate")) {
+      if (!store.taskId) store.taskId = store.traceId;
+      refreshEvalSampling(store);
+    }
+  }
   return store || null;
 }
 

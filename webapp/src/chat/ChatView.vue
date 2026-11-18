@@ -2,6 +2,7 @@
 <script setup>
 import { computed } from "vue";
 import Icon from "../common/Icon.vue";
+import PixelAvatar from "../common/PixelAvatar.vue";
 import Hero from "./Hero.vue";
 import Timeline from "./Timeline.vue";
 import Composer from "./Composer.vue";
@@ -11,7 +12,7 @@ import { chat, newSession, rewindAndSend } from "../stores/chat.js";
 import { showToast } from "../stores/toast.js";
 import { bot } from "../stores/bot.js";
 import { ui, showView } from "../stores/ui.js";
-import { theme, cycleTheme, LABEL as THEME_LABEL } from "../stores/theme.js";
+import { theme, LABEL as THEME_LABEL } from "../stores/theme.js";
 import { providerLabel, fmtTok } from "../stores/chat.js";
 
 const botState = computed(() => (bot.s && bot.s.bot) || null);
@@ -56,10 +57,6 @@ async function sendRewind() {
   send("/rewind");
   setTimeout(() => import("../stores/rail.js").then((r) => r.loadSessions()), 1200);
 }
-function cycleThemeClick() {
-  const next = cycleTheme();
-  showToast("主题: " + THEME_LABEL[next]);
-}
 </script>
 
 <template>
@@ -67,7 +64,7 @@ function cycleThemeClick() {
     <header class="botbar">
       <div class="avavt">
         <img v-if="avatarUrl" :src="avatarUrl" alt="">
-        <template v-else>{{ String(botName).slice(0, 1) }}</template>
+        <PixelAvatar v-else :name="botName" :size="32" :state="chat.streaming ? 'working' : 'idle'" />
       </div>
       <div class="bmeta">
         <div class="bname2">{{ botName }}</div>
@@ -95,7 +92,7 @@ function cycleThemeClick() {
       <button class="icobtn" title="回退上一轮对话 (/rewind)" aria-label="回退上一轮对话" @click="rewind">
         <Icon name="refresh" :size="16" />
       </button>
-      <button class="icobtn" :title="'主题: ' + themeLabel + ' (点击切换)'" aria-label="切换主题" @click="cycleThemeClick">
+      <button class="icobtn" :title="'外观 · ' + themeLabel + ' / 配色 / 壁纸'" aria-label="外观设置" @click="ui.settingsModal = 'appearance'">
         <Icon :name="themeIcon" :size="16" />
       </button>
       <button class="icobtn" title="工作区面板" aria-label="工作区面板" @click="ui.drawer = !ui.drawer">

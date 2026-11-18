@@ -26,7 +26,8 @@ export const SETTINGS_FIELDS = {
   security: ["command_timeout_ms", "code_act", "deny"],
   // intent_funnel (v4.2): 分层漏斗意图识别开关 (false = 关闭 L2 提示注入, 只留 L1 规则直答)
   // max_tool_rounds (2026-11-03): 工具循环轮次上限, 设置 UI 可调 (1-64)
-  agent: ["name", "mode", "citation_rule", "system_extra", "values", "intent_funnel", "max_tool_rounds"],
+  // reply_style (2026-11-18): 回复风格注入 (个性化面板, 静态段)
+  agent: ["name", "mode", "citation_rule", "system_extra", "values", "intent_funnel", "max_tool_rounds", "reply_style"],
   mcp: ["servers", "auto_connect"],
   tools: ["disabled"],
   skills: ["disabled"],
@@ -63,6 +64,7 @@ function sanitizeSettings(cfg) {
       mode: cfg.agent?.mode || "react",
       citation_rule: cfg.agent?.citation_rule ?? "",
       system_extra: cfg.agent?.system_extra ?? "",
+      reply_style: cfg.agent?.reply_style ?? "",
       values: Array.isArray(cfg.agent?.values) ? cfg.agent.values : (DEFAULT_CONFIG.agent?.values || []),
       max_tool_rounds: Number(cfg.agent?.max_tool_rounds) || (DEFAULT_CONFIG.agent?.max_tool_rounds ?? 24),
     },
@@ -165,6 +167,10 @@ export function updateSettings(root, patch) {
     if (cfg.agent.max_tool_rounds != null) {
       const rounds = cfg.agent.max_tool_rounds;
       if (!Number.isInteger(rounds) || rounds < 1 || rounds > 64) throw new Error("工具轮次上限必须是 1-64 的整数");
+    }
+    if (cfg.agent.reply_style != null) {
+      if (typeof cfg.agent.reply_style !== "string") throw new Error("回复风格必须是字符串");
+      if (cfg.agent.reply_style.length > 2000) throw new Error("回复风格不能超过 2000 字");
     }
     // mcp.servers: 必须是对象数组, 每项至少 command 或 url, 只保留白名单字段
     if (cfg.mcp.servers != null && !Array.isArray(cfg.mcp.servers)) throw new Error("MCP servers 必须是数组");

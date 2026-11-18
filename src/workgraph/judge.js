@@ -3,6 +3,11 @@
 // 契约: docs/dsh-absorb/02-STATE-MATRIX.md §4。唯一收单条件是
 // ticket.status=done 且 deliveryState=delivered; 其它组合只给动作, 不推进状态。
 // 本模块不写账本、不发事件、不重试 —— 判定与执行严格分离。
+//
+// 2026-11-15 证据链维度 (verified-by-evidence): delivered 是调度语义的诚实, correct 是
+// 认知语义的诚实 —— 两者之间补一层"完成是否被验证证据背书"。默认只观测 (结果附
+// verifiedBy 字段, 判定行为逐字节不变); requireEvidence=true (配置显式开启) 时完成判定
+// 升级为 done ∧ delivered ∧ verified, 缺证据降级 MANUAL_REVIEW 交人工, 绝不静默放行。
 
 import { TICKET_STATUS } from "./store.js";
 import { DELIVERY_STATE, foldDeliveryState, isDeliveryState } from "./state.js";
@@ -60,6 +65,8 @@ function _stuckOr(ticket, now, graceMs, deliveryState, verdict, reason) {
  * @param {boolean}[options.useSnapshot]   false 时忽略 ticket.deliveryReceipt (默认读)
  * @param {boolean}[options.recovered]     重启后无法确认 send 结果 → accepted 降级 unknown
  * @param {boolean}[options.hasBegun]      是否已产生过 assignment (默认看 ticket.assignmentId)
+ * @param {object} [options.verified]      验证证据快照 {ref, kind, ts} (2026-11-15; 缺省读不到即 null)
+ * @param {boolean}[options.requireEvidence] true 时完成判定升级为 done ∧ delivered ∧ verified (默认 false)
  * @param {number} [options.now]           时间桩
  * @param {number} [options.graceMs]       收口宽限期 (默认 5 分钟)
  */
@@ -104,7 +111,34 @@ export function judgeTicket(ticket, options = {}) {
 
   if (status === TICKET_STATUS.DONE) {
     if (deliveryState === DELIVERY_STATE.DELIVERED) {
-      return _result(deliveryState, VERDICT.COMPLETED, ACTION.COLLECT, "执行成功且结果已送达");
+      // 改道未执行 (2026-11-16, gate.js 规则三): done ∧ delivered 成立, 但工单标记了
+      //   rerouted —— 实际没有执行任务, 只向来源方提了澄清问题。判 COMPLETED 会让
+      //   "没干活"混进完成率, 与"改道"语义直接冲突, 所以在这里先分流。降级 MANUAL_REVIEW
+      //   而不是 FAILED: 任务本身没失败, 它还在等来源方补信息。可逆 (补信息后重新派单)。
+      if (ticket.rerouted) {
+        return _result(deliveryState, VERDICT.MANUAL_REVIEW, ACTION.MANUAL,
+          `低置信改道为 ${ticket.rerouted}, 任务未执行 (需来源方补充信息后重新派单)`,
+          { rerouted: String(ticket.rerouted), ...(ticket.lowConfidence ? { lowConfidence: true } : {}) });
+      }
+      // 证据链维度 (2026-11-15): verified = {ref, kind, ts} | null, 由调用方从工单
+      // verification 快照或证据库传入。默认 (requireEvidence 缺省) 纯观测:
+      // 判定结果不变, 只多一个 verifiedBy 字段 —— 审计面从此能区分"送达且验证过"与"仅送达"。
+      const verifiedBy = options.verified?.ref ? String(options.verified.ref) : null;
+      if (options.requireEvidence === true && !verifiedBy) {
+        return _result(deliveryState, VERDICT.MANUAL_REVIEW, ACTION.MANUAL,
+          "done ∧ delivered 但缺验证证据 (require_evidence 开启, 不静默放行)");
+      }
+      // 低置信消费规则 (2026-11-15, gate.js 的下游): 元认知门控在执行前打了低置信,
+      //   完成判定把它透传为复核信号 —— 只附字段不改判定 (是否人工复核由消费方决定),
+      //   信号来源优先级: 显式 options > 工单快照 (complete 时随 payload 落账)。
+      const lowConfidence = (options.lowConfidence === true || ticket.lowConfidence === true)
+        ? true : undefined;
+      return _result(deliveryState, VERDICT.COMPLETED, ACTION.COLLECT,
+        verifiedBy ? "执行成功且结果已送达 (含验证证据)" : "执行成功且结果已送达",
+        {
+          verifiedBy,
+          ...(lowConfidence ? { lowConfidence } : {}),
+        });
     }
     if (deliveryState === DELIVERY_STATE.ACCEPTED || deliveryState === DELIVERY_STATE.FAILED) {
       return _stuckOr(ticket, now, graceMs, deliveryState, VERDICT.DELIVERING,

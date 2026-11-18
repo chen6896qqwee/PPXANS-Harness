@@ -28,12 +28,26 @@
       "syntax_timeout_ms": 5000,
       "test_timeout_ms": 120000
     },
+    "metacognition_gate": {
+      "_note": "元认知门控 (2026-11-15): 执行前一次轻量 LLM 调用给任务打 {confidence, rationale, suggested_action}。enabled=只观测 (默认关闭, 关闭时零 LLM 调用零写入); reroute_enabled=规则三, 低置信且模型建议 clarify 时**不执行**, 改为向来源方提问 (工单判 MANUAL_REVIEW, 不计完成)。threshold=置信阈值, 低于即低置信。",
+      "enabled": false,
+      "reroute_enabled": false,
+      "threshold": 0.5
+    },
     "evolution_loop": {
       "_note": "持续进化循环默认关闭 (Daily self-evolution loop is OFF by default)。设 enabled:true 后每天 03:30 自动跑「弱点学习→代码迭代→度量落账」; 手动单轮: npm run evolve:loop",
       "enabled": false,
       "cron": "03:30",
       "weakness_threshold": 3,
-      "min_interval_ms": 60000
+      "min_interval_ms": 60000,
+      "effect_feedback": {
+        "_note": "效果反哺 (2026-11-16): 把「测出来没用」变成实际动作 —— 给关联策略记有害票, 达到 prune_at 由 growAndRefine 淘汰。默认关闭; 只有 effect 对照已产出 mature cohort 时才有输入。degrade_threshold=判退化的成功率跌幅(0.15=跌15个点), relate_threshold=技能名与策略条目最低词法相似度, max_actions=单轮最多动几条, prune_at=有害票净额达此值才淘汰。",
+        "enabled": false,
+        "degrade_threshold": 0.15,
+        "relate_threshold": 0.25,
+        "max_actions": 3,
+        "prune_at": 3
+      }
     },
     "watchdog": {
       "_note": "外部看门狗: 独立会话巡检进程体征与工单/Worker 进展; 只报告不自动重跑。drift_repeat=连续同工具多少次算漂移, drift_rounds=多少轮无工具步算空转。",

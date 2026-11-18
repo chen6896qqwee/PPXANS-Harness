@@ -5,6 +5,32 @@ import { canSupersede, tierOfRecord } from "../memory/provenance.js";
 import { detectContradiction } from "../memory/contradiction.js";
 import { currentTrace } from "../core/trace.js";
 import { warn } from "../utils/logger.js";
+import { buildProviders, retrieveMemory, formatForPrompt } from "../memory/retrieval.js";
+
+// 多源召回 (memory_search multi_source=true): 统一检索契约的唯一工具面消费方。
+//   作用域只约束事实源 —— 经验/场景/画像没有 scope 分区语义, 静默忽略会造成"以为限定了范围"。
+async function recallAcrossSources({ facts, scope, limit, query, ctx }) {
+  const agent = ctx?.agent || null;
+  const scopedFacts = scope
+    ? { query: (q, { perSource } = {}) => facts.query(q, { limit: perSource || limit, scope }) }
+    : facts;
+  const providers = buildProviders({
+    facts: scopedFacts,
+    experience: agent?.experience || null,
+    scenes: agent?.scenes || null,
+    personaStore: agent?.personaStore || null,
+  });
+  const result = await retrieveMemory(String(query || ""), {
+    providers,
+    limit: Math.max(limit, 8),
+    perSource: Math.max(limit * 2, 12),
+  });
+  const body = formatForPrompt(result, { maxChars: 4000 });
+  if (!body) return "(无匹配记忆)";
+  const health = result.sources.map((s) => `${s.name}:${s.ok ? s.count : "降级"}`).join(" / ");
+  const scopeNote = scope ? ` · 事实源限定 scope=${scope}` : "";
+  return `[多源召回] ${health}${scopeNote}\n${body}`;
+}
 
 export function registerMemoryTools(catalog, { facts }) {
   // 记忆作用域解析 (2026-11-05 调度闭环收口 ③): FactStore.scope 参数全链路早已打通,
@@ -29,16 +55,28 @@ export function registerMemoryTools(catalog, { facts }) {
         query: { type: "string", description: "要搜的内容" },
         limit: { type: "number" },
         scope: { type: "string", description: "记忆作用域: 缺省=全局; \"session\"=当前会话分区; 或自定义作用域名" },
+        multi_source: {
+          type: "boolean",
+          description: "多源召回: 事实库 + 经验库 + 场景 + 画像一起检索, RRF 融合, 每条标注来源证据。"
+            + "默认 false = 只查事实库 (旧行为)。问'以前踩过什么坑/有什么相关经验'时打开。",
+        },
       },
       required: ["query"],
     },
-    execute: async (args) => {
+    execute: async (args, ctx) => {
       if (!facts) return JSON.stringify({ error: "记忆未初始化" });
       // scope 检索 (收口 ③): 语义对齐 FactStore 去重的分区口径 ("全局事实对 sA 不可见",
       //   _live(null)=不过滤而非"仅全局") —— 传 scope 即严格作用域视图, 不与全库结果合并。
       //   无 scope 时单路查询, 与旧路径零字节差异。
       const scope = resolveMemoryScope(args.scope);
       const limit = Math.max(1, Number(args.limit) || 5);
+      // 多源召回 (架构优化 ③ 消费侧, 2026-11-16): retrieval.js 的统一契约此前零调用方 ——
+      //   事实/经验/场景/画像各答各的, "为什么召回这条"没有答案。此入口把四源降到 Provider,
+      //   RRF 融合后每条带 evidence 标注。默认关闭 (单源路径逐字节不变); 打开时 scope 仍
+      //   只作用于事实源 (经验/场景没有 scope 分区语义), 并在输出头注明。
+      if (args.multi_source === true) {
+        return recallAcrossSources({ facts, scope, limit, query: args.query, ctx });
+      }
       const results = await facts.querySemantic(args.query, scope ? { limit, scope } : { limit });
       if (!results.length) return "(无匹配记忆)";
       // 来源分级渲染 (2026-10-10 接线): 存储层早已给每条记忆打了 tier (user-stated /

@@ -1,0 +1,40 @@
+{
+  "at": "2026-11-18T05:25:59.427Z",
+  "url": "http://127.0.0.1:58370/",
+  "port": 58370,
+  "shots": [
+    {
+      "step": "hero-welcome",
+      "file": "C:\\Users\\chen\\AppData\\Local\\Temp\\ppx-ui-capture-GEgsFG\\caps\\01-hero-welcome.png"
+    },
+    {
+      "step": "chain-collapsed",
+      "file": "C:\\Users\\chen\\AppData\\Local\\Temp\\ppx-ui-capture-GEgsFG\\caps\\02-chain-collapsed.png"
+    },
+    {
+      "step": "chain-expanded",
+      "file": "C:\\Users\\chen\\AppData\\Local\\Temp\\ppx-ui-capture-GEgsFG\\caps\\03-chain-expanded.png"
+    },
+    {
+      "step": "settings-dialog-panel",
+      "file": "C:\\Users\\chen\\AppData\\Local\\Temp\\ppx-ui-capture-GEgsFG\\caps\\04-settings-dialog-panel.png"
+    },
+    {
+      "step": "persona-panel",
+      "file": "C:\\Users\\chen\\AppData\\Local\\Temp\\ppx-ui-capture-GEgsFG\\caps\\05-persona-panel.png"
+    },
+    {
+      "step": "persona-preview",
+      "file": "C:\\Users\\chen\\AppData\\Local\\Temp\\ppx-ui-capture-GEgsFG\\caps\\06-persona-preview.png"
+    }
+  ],
+  "errors": [],
+  "archived": [
+    "C:\\Users\\chen\\Desktop\\PPXANS-Harness\\docs\\bench\\ui\\workbuddy-01-hero-welcome.png",
+    "C:\\Users\\chen\\Desktop\\PPXANS-Harness\\docs\\bench\\ui\\workbuddy-02-chain-collapsed.png",
+    "C:\\Users\\chen\\Desktop\\PPXANS-Harness\\docs\\bench\\ui\\workbuddy-03-chain-expanded.png",
+    "C:\\Users\\chen\\Desktop\\PPXANS-Harness\\docs\\bench\\ui\\workbuddy-04-settings-dialog-panel.png",
+    "C:\\Users\\chen\\Desktop\\PPXANS-Harness\\docs\\bench\\ui\\workbuddy-05-persona-panel.png",
+    "C:\\Users\\chen\\Desktop\\PPXANS-Harness\\docs\\bench\\ui\\workbuddy-06-persona-preview.png"
+  ]
+}

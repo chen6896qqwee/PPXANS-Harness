@@ -10,8 +10,16 @@ import path from "node:path";
 import { logsDir, logicalDay } from "./store.js";
 import { shortId } from "./id.js";
 import { scrubPII } from "./pii.js";
+import { noteCatch } from "./catch-log.js";
+import {
+  normalizeEvalStrata,
+  sampleEvalTask,
+  DEFAULT_EVAL_SAMPLE_RATE,
+} from "./eval-sampling.js";
 
 const MAX_TRACE_BODY = 2000;   // 单条结果保留上限, 防爆文件
+const EVAL_EVENTS = new Set(["eval/tool", "eval/turn", "eval/request"]);
+const SAFETY_FLAGS = new Set(["denied_by_design", "security", "injection-suspect", "permission"]);
 
 // 事件类型常量 (turn/step 边界)
 export const EVT = {
@@ -20,13 +28,27 @@ export const EVT = {
   STEP_START: "step/start",
   STEP_END: "step/end",
   TOOL: "tool/call",
+  EVAL_TOOL: "eval/tool",
+  EVAL_TURN: "eval/turn",
+  EVAL_REQUEST: "eval/request",
 };
 
+function unknown(value) {
+  return value == null || value === "" ? "unknown" : String(value);
+}
+
+function isSafetyEvalEvent(payload, opts) {
+  if (opts?.safety === true || payload?.safety === true || payload?.security === true) return true;
+  if (payload?.category === "denied_by_design") return true;
+  return Array.isArray(payload?.flags) && payload.flags.some((flag) => SAFETY_FLAGS.has(String(flag)));
+}
+
 export class Traces {
-  constructor(dataDir) {
+  constructor(dataDir, traceContext = null) {
     this.dir = logsDir(dataDir); // 与 core/trace.js 同一目录 (logs/traces)
     this.sessionId = shortId("s_", 6);
     this.count = 0;
+    this.traceContext = traceContext;
   }
 
   _file(day = logicalDay()) { return path.join(this.dir, `${day}.jsonl`); }
@@ -35,6 +57,59 @@ export class Traces {
   record({ tool, args, result, ok, durationMs, error, flags }) {
     const entry = this._entry({ evt: EVT.TOOL, tool, args, result, ok, durationMs, error, flags });
     fs.appendFileSync(this._file(), JSON.stringify(entry) + "\n", "utf8");
+    return entry;
+  }
+
+  // 生产评测事件与普通 tool/call 共存于同一 JSONL, 但只有本方法受任务级采样影响。
+  // 支持 recordEval("eval/tool", payload, opts) 与 recordEval({evt, ...payload}, opts) 两种形态。
+  // 采样/脱敏都在元信息补齐之后执行, taskId/traceId/strata/sampleWeight 不会因 PII 清洗遗漏。
+  recordEval(evt, payload = {}, opts = {}) {
+    let type = evt;
+    let data = payload;
+    let options = opts;
+    if (evt && typeof evt === "object") {
+      data = evt;
+      options = payload && typeof payload === "object" ? payload : {};
+      type = evt.evt;
+    }
+    if (!EVAL_EVENTS.has(type)) return null;
+    const source = data && typeof data === "object" && !Array.isArray(data) ? data : {};
+    const store = this.traceContext?.() || null;
+    const taskId = unknown(source.taskId ?? store?.taskId ?? store?.traceId);
+    const traceId = unknown(source.traceId ?? store?.traceId);
+    const strata = normalizeEvalStrata(source.strata ?? store?.strata);
+    const safety = isSafetyEvalEvent(source, options);
+    const sampling = safety
+      ? { sampled: true, sampleWeight: 1, sampleReason: "safety" }
+      : sampleEvalTask(taskId, strata, options.sampleRate ?? store?.evalSampleRate ?? DEFAULT_EVAL_SAMPLE_RATE);
+    if (!sampling.sampled) return null;
+
+    let safe;
+    try { safe = JSON.parse(scrubPII(JSON.stringify(source)).cleaned); }
+    catch (e) { noteCatch(e); safe = { _raw: "(unserializable)" }; }
+    // 元信息最后覆盖, 既防 payload 伪造采样权重, 也防脱敏器改写关联字段。
+    const entry = {
+      ...this._base(),
+      ...safe,
+      evt: type,
+      taskId,
+      traceId,
+      sessionKey: unknown(source.sessionKey ?? store?.sessionKey),
+      strata,
+      sampled: true,
+      sampleWeight: sampling.sampleWeight,
+      sampleReason: sampling.sampleReason,
+    };
+    if (entry.args !== undefined) {
+      const args = typeof entry.args === "string" ? entry.args : JSON.stringify(entry.args);
+      entry.args = this._truncate(args);
+    }
+    if (typeof entry.result === "string") entry.result = this._truncate(entry.result);
+    if (typeof entry.error === "string") entry.error = this._truncate(entry.error);
+    this.count += 1;
+    entry.seq = this.count;
+    try { fs.appendFileSync(this._file(), JSON.stringify(entry) + "\n", "utf8"); }
+    catch (e) { noteCatch(e); /* 评测留样失败不阻断业务调用 */ }
     return entry;
   }
 
@@ -98,6 +173,7 @@ export class Traces {
     for (let i = 0; i < lines.length; i++) {
       let e;
       try { e = JSON.parse(lines[i]); } catch (err) { errors.push({ line: i + 1, kind: "parse", detail: err.message }); continue; }
+      if (e && EVAL_EVENTS.has(e.evt)) continue; // 评测留样不参与旧 total/turn/step 重放口径
       total++;
       if (!e || !e.evt) { errors.push({ line: i + 1, kind: "no-evt" }); continue; }
       if (e.evt === EVT.TURN_START) turnStack.push(i);

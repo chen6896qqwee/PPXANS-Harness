@@ -26,7 +26,38 @@ function redactApprovalArgs(args) {
   return out;
 }
 
+const DENIED_BY_DESIGN_RE = /\[permission\]|\[role\]|\[ans_lane\]|\[hook\]|\[workgraph\]|plan 模式|策略拦截|需要人工审批|审批被拒绝|白名单|未开启|路径越界/i;
+
+export function evalToolCategory(result, ok = !isToolErrorResult(result)) {
+  const text = String(result ?? "");
+  if (/未知工具[:：]/i.test(text)) return "unknown_tool";
+  if (/参数错误|无法解析.*JSON|JSON.*无法解析|参数不是完整 JSON|参数不是 JSON/i.test(text)) return "parameter_hallucination";
+  if (DENIED_BY_DESIGN_RE.test(text)) return "denied_by_design";
+  if (!ok) return "hard_fail";
+  if (/^\[exit=\d+/i.test(text)) return "exit_nonzero";
+  if (isToolErrorResult(text)) return "soft_error";
+  return "success";
+}
+
 export const approvalMethods = {
+// 单次工具事实只写一条 eval/tool; category 是账本显式口径, 不再靠结果文本二次猜分类。
+_recordEvalTool({ tool, args, result, ok, durationMs = 0, callId = null, category = null, flags, safety = false, shadow_call = false }) {
+  const resolved = category || evalToolCategory(result, ok);
+  try {
+    return this.traces?.recordEval?.("eval/tool", {
+      tool: tool || "unknown",
+      args: args ?? {},
+      result: String(result ?? ""),
+      ok: ok === true,
+      durationMs: Math.max(0, Math.round(Number(durationMs) || 0)),
+      callId: callId || "unknown",
+      category: resolved,
+      ...(Array.isArray(flags) && flags.length ? { flags } : {}),
+      ...(shadow_call ? { shadow_call: true } : {}),
+    }, { safety: safety || resolved === "denied_by_design" });
+  } catch (e) { noteCatch(e); return null; /* 评测观测不得改变工具执行结果 */ }
+},
+
 // 统一工具执行入口 (http 原生 tool_calls + 文本工具调用修复) [P0#1]
 // v1.0.7: 移除未使用的 llmInstance 死参数, 所有工具执行统一走此入口 (trace/事件只此一份)
 // 2026-09-17 体检修复: start/done 事件带唯一 callId。
@@ -57,7 +88,9 @@ async _runTool(name, args) {
     const prev = this._turnExecCacheFor?.().get(key);
     if (prev && typeof prev.value === "string") {
       this.tracer.event("tool/replay-memo", { tool: name, callId });
-      this._emitToolDone(callId, name, args, !isToolErrorResult(prev.value), 0, prev.value);
+      const ok = !isToolErrorResult(prev.value);
+      this._recordEvalTool({ tool: name, args, result: prev.value, ok, callId, flags: ["replay_memo"] });
+      this._emitToolDone(callId, name, args, ok, 0, prev.value);
       return prev.value + "\n[回放缓存] 此调用在降级前的尝试中已真实执行过, 返回先前结果 (未重复执行)。若确需重复, 请改变参数后再试。";
     }
   }
@@ -75,6 +108,7 @@ async _runTool(name, args) {
         this.bus?.emit("tool/result", {
           name, callId, ok: false, args, durationMs: Date.now() - t0, error: msg.slice(0, 300),
         }, { source: "agent._runTool.hook-blocked" });
+        this._recordEvalTool({ tool: name, args, result: msg, ok: false, durationMs: Date.now() - t0, callId, category: "denied_by_design", safety: true });
         this._emitToolDone(callId, name, args, false, Date.now() - t0, msg);
         return TOOL_ERROR_PREFIX + msg;
       }
@@ -97,6 +131,7 @@ async _runTool(name, args) {
         name, callId, ok: false, args, durationMs: Date.now() - t0,
         error: String(admit.error ?? "").slice(0, 300),
       }, { source: "agent._runTool.admit-denied" });
+      this._recordEvalTool({ tool: name, args, result: admit.error, ok: false, durationMs: Date.now() - t0, callId, category: "denied_by_design", safety: true });
       this._emitToolDone(callId, name, args, false, Date.now() - t0, admit.error);
       return TOOL_ERROR_PREFIX + admit.error;
     }
@@ -120,6 +155,7 @@ async _runTool(name, args) {
         this.bus?.emit("tool/result", {
           name, callId, ok: false, args, durationMs: Date.now() - t0, error: msg.slice(0, 300),
         }, { source: "agent._runTool.replay-fact-failed" });
+        this._recordEvalTool({ tool: name, args, result: msg, ok: false, durationMs: Date.now() - t0, callId, category: "denied_by_design", safety: true });
         this._emitToolDone(callId, name, args, false, Date.now() - t0, msg);
         return TOOL_ERROR_PREFIX + msg;
       }
@@ -134,6 +170,7 @@ async _runTool(name, args) {
       if (hit && hit.tool === name) {
         const cached = String(hit.result ?? "");
         this.tracer.event("tool/resume-memo", { tool: name, callId });
+        this._recordEvalTool({ tool: name, args, result: cached, ok: !isToolErrorResult(cached), callId, flags: ["resume_memo"] });
         this._recordWorkCheckpoint(name, args, cached, true, callId, resumeSk);
         this._emitToolDone(callId, name, args, true, 0, cached);
         return cached + "\n[断点续执行] 此调用在上一轮中断前已完成, 直接复用当时结果 (未重复执行)。若依赖已变化, 请改变参数后重试。";
@@ -143,7 +180,16 @@ async _runTool(name, args) {
   // let 而非 const: PostToolUse 钩子的 additionalContext 会追加到结果尾部
   // (2026-09-18 修复: 原为 const, 钩子追加时抛 "Assignment to constant variable" 被 catch {} 静默吞掉,
   //  additionalContext 特性从未生效)
-  let result = await this.tools.call(name, args, { agent: this, timeoutMs: Number(this.config.agent?.tool_timeout_ms) || 0 });
+  let result;
+  try {
+    result = await this.tools.call(name, args, { agent: this, timeoutMs: Number(this.config.agent?.tool_timeout_ms) || 0 });
+  } catch (e) {
+    this._recordEvalTool({
+      tool: name, args, result: e?.message || String(e), ok: false,
+      durationMs: Date.now() - t0, callId, category: "hard_fail",
+    });
+    throw e;
+  }
   const ok = !isToolErrorResult(result);
   // 提示注入防线 (2026-10-03 红队驱动): 工具输出 = 不可信数据。
   // 疑似注入 → 原文外包"不可信"标注 + 安全事件上 tracer (数据不删, 指令不执行语义靠标注传达给模型)。
@@ -188,6 +234,10 @@ async _runTool(name, args) {
     durationMs: Date.now() - t0,
     error: ok ? null : result,
     flags,
+  });
+  this._recordEvalTool({
+    tool: name, args, result, ok, durationMs: Date.now() - t0, callId, flags,
+    safety: Array.isArray(flags) && flags.includes("injection-suspect"),
   });
 
   // --- v3.0: PostToolUse 钩子链 (可附加上下文, 追加在结果尾部) ---
@@ -455,6 +505,7 @@ async _llmWithTools(seedMessages, llmInstance = this.llm, onDelta = null, signal
       },
       // 轮内中间草稿采集 (2026-10-10): 每轮模型回包内容进草稿桶, 落库时并入 memory/turns
       onAssistantMsg: (ev) => this._recordDraft(ev),
+      onToolEarlyResult: (ev) => this._recordEvalTool(ev),
       runTool: (name, args) => {
         run.steps += 1;
         (run.toolNames ||= []).push(name);
@@ -478,7 +529,8 @@ async _llmWithTools(seedMessages, llmInstance = this.llm, onDelta = null, signal
         return this._runTool(name, args);
       },
       shrinkMessages: (messages, budget) => this._shrinkMessagesForOverflow(messages, budget),
-      histTokenCap: () => this._histTokenCap(),
+      // 2026-11-16: 与 _trimHistory/_ensureContextFit 同一预算入口, 不再绕过全局配额
+      histTokenCap: () => this._historyBudget(),
       onEvent: (type, payload) => { this._onPolicyEvent(type, payload); this.tracer.event(type, payload); },
       // v1.6.0 第四刀: 超时重试决策 (幂等才重试) + 超时预算查询 (事件采集)
       isIdempotentTool: (name) => this._toolIdempotent(name),

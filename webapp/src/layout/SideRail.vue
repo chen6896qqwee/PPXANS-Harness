@@ -181,6 +181,9 @@ function clearSearch() { rail.searchHits = null; rail.searchQuery = ""; }
       <button class="cap guidebtn" :title="T.guide" :aria-label="T.guide" @click="ui.onboarding = true">
         <Icon name="spark" :size="14" />{{ T.guide }}
       </button>
+      <button class="cap guidebtn" title="外观 · 主题 / 配色 / 壁纸" aria-label="外观" @click="ui.settingsModal = 'appearance'">
+        <Icon name="sun" :size="14" />外观
+      </button>
       <div class="agentline">
         <span class="dot" :class="{ on: chat.life }" />
         <span class="lifetxt">{{ T.stage }} {{ chat.life || "—" }}</span>

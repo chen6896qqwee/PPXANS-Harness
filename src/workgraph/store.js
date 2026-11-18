@@ -192,6 +192,9 @@ export function createWorkStore({
       externalId,
       dedupeKey,
       dedupeStrategy,
+      // 架构优化 ②(2026-11-16): runId 贯通工单账本 —— 与 trace/审计/工具轨迹同一血缘。
+      //   旧账本没有该字段 → undefined (读取方按"未记录"处理, 不做推测)。
+      runId: input.runId ? String(input.runId) : null,
       requeueOf: input.requeueOf ? String(input.requeueOf) : null,
       deliveryReceipt: null,
       attempts: 0,
@@ -261,6 +264,7 @@ export function createWorkStore({
   function assign(ticketId, {
     worker = "router", sessionKey = null, bgTaskId = null,
     route = null, origin = null, delivery = null,
+    metacognition = null, runId = null,
   } = {}) {
     const t = tickets.get(ticketId);
     if (!t) return null;
@@ -277,7 +281,13 @@ export function createWorkStore({
       sessionKey: String(sessionKey || t.sessionKey || "default"),
       origin: normalizeOrigin(origin || t.cause, ORIGIN.INGRESS),
       route: normalizeRoute(route),
+      // 执行血缘: 指派继承工单 runId; 重跑/换轮次可由调用方显式覆盖
+      runId: runId ? String(runId) : (t.runId || null),
       delivery: deliverySnap,
+      // 元认知观测字段 (2026-11-15, flow/gate.js): 随指派落账, 只存不判。
+      //   null/非对象一律归一为 null (旧调用点零变化)。
+      metacognition: (metacognition && typeof metacognition === "object")
+        ? { ...metacognition } : null,
       status: ASSIGNMENT_STATUS.RUNNING,
       rounds: 0,
       steps: 0,
@@ -329,7 +339,7 @@ export function createWorkStore({
     }
     if (clean.usage !== undefined) clean.usage = normalizeUsageSnapshot(clean.usage);
     if (clean.delivery !== undefined) clean.delivery = plainObject(clean.delivery);
-    for (const [k, n] of [["errorKind", 100], ["outcome", 40], ["lastTool", 100]]) {
+    for (const [k, n] of [["errorKind", 100], ["outcome", 40], ["lastTool", 100], ["taskType", 120]]) {
       if (clean[k] !== undefined && clean[k] !== null) clean[k] = clip(clean[k], n);
     }
     if (patch.status && patch.endedAt === undefined
@@ -349,6 +359,15 @@ export function createWorkStore({
     return [...assignments.values()]
       .filter((a) => a.ticketId === ticketId)
       .sort((a, b) => a.startedAt - b.startedAt)
+      .map(copyAssignment);
+  }
+
+  // 最近 assignments (2026-11-15, effect cohort 联表用): 按 startedAt 降序取 N 条。
+  //   effect.measure 用 [startedAt, endedAt] 时间窗把 traces 联到确定性 taskType 上。
+  function listAssignments(limit = 100) {
+    return [...assignments.values()]
+      .sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0))
+      .slice(0, Math.max(1, Number(limit) || 100))
       .map(copyAssignment);
   }
 
@@ -538,7 +557,7 @@ export function createWorkStore({
   return {
     instance, journalPath,
     create, update, assign, updateAssignment,
-    get, getAssignment, assignmentsOf, list, findDuplicate,
+    get, getAssignment, assignmentsOf, listAssignments, list, findDuplicate,
     recordCheckpoint, checkpointsOf, dropCheckpoints,
     markInterrupted, requeue, stats, prune, compact, close,
     _raw: () => ({ tickets: [...tickets.values()], assignments: [...assignments.values()] }),

@@ -2,13 +2,13 @@
 
 **皮皮虾神经系（ANS）+ Harness 一体化智能体内核** —— 纯 Node.js、**零运行时依赖**的可审计自主智能体。
 
-> 当前版本：**5.2.0** · 架构优化十项: 契约统一 + 借来三个轮子 (ripgrep / LSP / 常驻 bash) · 2026-11-13
+> 当前版本：**5.3.0** · 对话体验轮（思考链路收拢 + 个性化面板）+ 外观/像素身份系统 + 世界模型 + 覆盖率补全 · 2026-11-18
 
-一个会自我修复、自我学习、自主迭代、可审计验证的超级 Agent：**111 个内置工具 · 能力边界护栏 · L0–L4 五层记忆 · SHA-256 审计哈希链 · 标准 MCP 服务端+客户端 · 多模型路由 · 自愈 7/7 · 可验证自改进闭环（self_improve） · 全量测试 2867 项 (2861 通过 / 6 跳过) · 桌面客户端**。
+一个会自我修复、自我学习、自主迭代、可审计验证的超级 Agent：**126 个内置工具 · 能力边界护栏 · L0–L4 五层记忆 · SHA-256 审计哈希链 · 标准 MCP 服务端+客户端 · 多模型路由 · 自愈 7/7 · 可验证自改进闭环（self_improve） · 全量测试 2206 项 (2202 通过 / 4 跳过) · 桌面客户端**。
 
 > ⚠️ 本节数字为 **2026-11-04 实测**（`node --test test/*.test.js`），请勿手改臆测值 —— 改完请重跑并同步本行。  
 > 机读锚点由 `node scripts/readme-sync-check.js --fix` 维护，手改会被闸门拦下。  
-<!-- readme-sync: {"tools":111,"skills":71,"core_schema":38,"ctx_tokens":7458,"mcp_tools":128,"tests":2867,"test_files":376} -->
+<!-- readme-sync: {"tools":126,"skills":71,"core_schema":37,"ctx_tokens":6975,"mcp_tools":128,"tests":2206,"test_files":283,"offline_total":28,"offline_legacy_total":20,"verify_checks":17,"pass":2202,"skipped":4} -->
 > 2026-10-25 评估修复轮后全量 0 失败（此前 1 项失败为测试断言过期，已随工具数 113→114 一并修正）；  
 > 主干链路（启动 / 对话 / 记忆 / 审计 / 权限 / HTTP / MCP）全量通过。
 
@@ -51,7 +51,7 @@
 **校验安装包**（Release 同时提供 `SHA256SUMS.txt`）：
 
 ```powershell
-certutil -hashfile PPXANS-Harness-Setup-5.2.0-x64.exe SHA256
+certutil -hashfile PPXANS-Harness-Setup-5.3.0-x64.exe SHA256
 ```
 
 > 当前安装包未做代码签名，首次运行 Windows SmartScreen 可能提示“未知发布者”，  
@@ -114,10 +114,10 @@ npm run desktop:pack     # → dist-desktop/PPXANS-Harness-Setup-<版本>-x64.ex
 | ✅ **流式输出**                                | SSE 逐字流式（含工具轮次：增量 tool_call 累积，文本实时可见）+ 桌面端实时渲染；同会话并发互斥、/rewind 会话回卷（fork 分支）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | 🔐 **HTTP 认证**                            | Bearer Token，未配置自动生成随机 token 持久化                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 
-**111 内置工具**（运行时实测，含 MCP 动态注册）：
+**126 内置工具**（运行时实测，含 MCP 动态注册）：
 
-- **105 内置**：文件/命令/搜索/HTTP/定时/记忆（读图/检索/入库，L1 事实 + L4 程序性记忆）/文档（加载/OCR/入库）/场景/技能（加载/创建/提炼）/重构 refine /回合内提问（`ask_user`：选项/多选/自填，等待真人回答）/子 agent spawn + 治理运维（repo_map/apply_patch/review_code/goal_board/audit_verify/persona/selfheal_run/self_improve/self_audit 等）
-- **默认按需曝光**（2026-11-02）：只下发约 31 个主干工具 schema（`agent.tool_exposure:"core"`），其余工具保留名字、用 `tool_schema` 按需取参数；取过后下一轮自动进入函数数组。全量模式仍可设 `"all"`。
+- **126 内置**：文件/命令/搜索/HTTP/定时/记忆（读图/检索/入库，L1 事实 + L4 程序性记忆）/文档（加载/OCR/入库）/场景/技能（加载/创建/提炼）/重构 refine /回合内提问（`ask_user`：选项/多选/自填，等待真人回答）/子 agent spawn + 治理运维（repo_map/apply_patch/review_code/goal_board/audit_verify/persona/selfheal_run/self_improve/self_audit 等）
+- **默认按需曝光**（2026-11-02）：只下发 37 个主干工具 schema（`agent.tool_exposure:"core"`），其余工具保留名字、用 `tool_schema` 按需取参数；取过后下一轮自动进入函数数组。全量模式仍可设 `"all"`。
 - **22 × ppx.*****：** chat.send/stream、sessions.*、providers.(list/add/update/delete/test/reorder)、settings.get/update、task.(templates/create/list/update/step/delete/run)、session.reset
 
 ---
@@ -313,7 +313,7 @@ v4.2 起每个 provider 可声明 `protocol`（`openai-completions` 缺省 / `op
 
 ```bash
 npm test                # 全量测试
-npm run verify          # 一键本地快检 (18 项, 离线, 无需 LLM; 含离线任务基准与记忆召回闸门)
+npm run verify          # 一键本地快检 (17 项, 离线, 无需 LLM; 含离线任务基准与记忆召回闸门)
 npm run verify:full     # 一键快检 + 全量测试
 npm run test:coverage   # 全量测试 + Node 内置覆盖率 (行覆盖 91.9%, 门禁 85%)
 npm run coverage:gate   # 覆盖率门禁 (行覆盖 >= 85%, CI 用)
@@ -372,13 +372,13 @@ PPXANS-Harness/
 │   ├── plugin/     DI 容器 (Context/compose/loadPlugins, 纯 L0; 2026-11-08 装配器归位 agent/)
 │   ├── workgraph/  [2026-11-02] 工单账本 (Tickets/Assignments + 恢复/重跑)
 │   ├── flow/       [2026-11-02] 入站流内核 (Trigger 归一 / 两级准入 / planIngress 六动作)
-│   ├── tools/      工具系统 (105 个注册工具; MCP 另暴露 22 个 ppx.* 方法)
+│   ├── tools/      工具系统 (126 个注册工具; MCP 另暴露 22 个 ppx.* 方法)
 │   ├── core/  services/  memory/  audit/  ans/  selfheal/  channels/  orchestrator/  llm/  utils/
 ├── webapp/         Vue3+Vite 前端源码; dist/ 为预构建产物 (v5.0 重铸, 发布零运行时依赖)
 ├── bin/            ppx / ppxans 单一入口 (2026-11-08 收敛: 8 个 bin 合一)
 ├── data/           运行时数据 (不进 git)
 ├── references/     第三方项目来源登记
-├── test/           测试 (376 文件, node --test; 总项数以机读锚点为准)
+├── test/           测试 (283 文件, node --test; 总项数以机读锚点为准)
 └── docs/           文档 (ARCHITECTURE-CURRENT / PROJECT-OVERVIEW / PROVENANCE / QUICKSTART / WORK-GRAPH 等)
 ```
 

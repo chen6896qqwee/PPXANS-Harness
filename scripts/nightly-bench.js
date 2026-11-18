@@ -22,6 +22,38 @@ const outDirArgIdx = process.argv.indexOf("--out");
 const OUT_DIR = path.join(ROOT, outDirArgIdx >= 0 ? process.argv[outDirArgIdx + 1] : "docs", outDirArgIdx >= 0 ? "" : "bench");
 const date = new Date().toISOString().slice(0, 10);
 const NODE = process.execPath;
+const RAW_MARKER = "PPX_BENCH_RAW_JSON";
+const RAW_PHASES = new Set(["concurrent", "long_session", "isolated_concurrent", "serial"]);
+const validIndex = (value) => Number.isInteger(value) && value >= 0;
+
+function parseRawBenchOutput(out) {
+  const markerLines = out.split(/\r?\n/).filter((line) => new RegExp(`^${RAW_MARKER}(?:\\s|$)`).test(line));
+  if (markerLines.length !== 1) throw new Error(`bench raw marker 应恰好出现一次, 实际 ${markerLines.length}`);
+
+  let payload;
+  try { payload = JSON.parse(markerLines[0].slice(RAW_MARKER.length).trim()); }
+  catch { throw new Error("bench raw marker JSON 损坏"); }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error("bench raw payload 必须是对象");
+  if (payload.raw_schema !== 1) throw new Error("bench raw_schema 缺失或不受支持");
+  if (!validIndex(payload.count)) throw new Error("bench raw count 缺失或无效");
+  if (!Array.isArray(payload.raw_requests) || payload.raw_requests.length !== payload.count) {
+    throw new Error("bench raw_requests 缺失或 count 不一致");
+  }
+
+  payload.raw_requests.forEach((request, index) => {
+    if (!request || typeof request !== "object" || Array.isArray(request)) throw new Error(`raw_requests[${index}] 必须是对象`);
+    if (!RAW_PHASES.has(request.phase)) throw new Error(`raw_requests[${index}].phase 缺失或无效`);
+    if (typeof request.sessionKey !== "string" || !request.sessionKey) throw new Error(`raw_requests[${index}].sessionKey 缺失或无效`);
+    if (typeof request.ok !== "boolean") throw new Error(`raw_requests[${index}].ok 缺失或无效`);
+    if (!Number.isFinite(request.ms) || request.ms < 0) throw new Error(`raw_requests[${index}].ms 缺失或无效`);
+    if (request.worker !== undefined && !validIndex(request.worker)) throw new Error(`raw_requests[${index}].worker 无效`);
+    if (!validIndex(request.round)) throw new Error(`raw_requests[${index}].round 缺失或无效`);
+    if ((request.phase === "concurrent" || request.phase === "isolated_concurrent") && !validIndex(request.worker)) {
+      throw new Error(`raw_requests[${index}].worker 缺失或无效`);
+    }
+  });
+  return { raw_schema: payload.raw_schema, count: payload.count, raw_requests: payload.raw_requests };
+}
 
 // 每个子基准: 命令 + 关键行提取 (正则 → 字段)。提取失败不判死, 原文保留。
 const BENCHES = [
@@ -46,12 +78,20 @@ const results = [];
 let allOk = true;
 for (const b of BENCHES) {
   const t0 = Date.now();
-  const r = spawnSync(NODE, [b.file], { cwd: ROOT, encoding: "utf8", env: { ...process.env, NO_COLOR: "1" }, timeout: 10 * 60 * 1000 });
+  const r = spawnSync(NODE, [b.file], { cwd: ROOT, encoding: "utf8", env: { ...process.env, NO_COLOR: "1" }, timeout: 10 * 60 * 1000, maxBuffer: 64 * 1024 * 1024 });
   const out = `${r.stdout || ""}${r.stderr || ""}`;
   const metrics = r.status === 0 ? b.extract(out) : {};
-  const ok = r.status === 0;
+  let ok = r.status === 0;
+  const result = {
+    key: b.key, name: b.name, ok, exit: r.status, duration_ms: Date.now() - t0, metrics,
+    tail: out.split(/\r?\n/).filter((line) => line && !new RegExp(`^${RAW_MARKER}(?:\\s|$)`).test(line)).slice(-12),
+  };
+  if (b.key === "bench") {
+    try { Object.assign(result, parseRawBenchOutput(out)); }
+    catch { ok = false; result.ok = false; }
+  }
   if (!ok) allOk = false;
-  results.push({ key: b.key, name: b.name, ok, exit: r.status, duration_ms: Date.now() - t0, metrics, tail: out.split(/\r?\n/).filter(Boolean).slice(-12) });
+  results.push(result);
   console.log(`  ${ok ? "✓" : "✗"} ${b.name} (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
 }
 

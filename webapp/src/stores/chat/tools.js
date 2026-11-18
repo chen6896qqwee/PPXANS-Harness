@@ -49,7 +49,15 @@ export function finishToolCard(ev) {
 }
 export function toggleAllTools(force) {
   const more = chat.items.filter((x) => x.kind === "tool" && x.result);
-  if (!more.length) return;
   const anyClosed = force !== undefined ? force : more.some((x) => !x.resultOpen);
+  if (!anyClosed && !more.length) return;
   more.forEach((x) => { x.resultOpen = anyClosed; });
+  // Ctrl+O 联动思考链路组: 展开时连组一起展开, 收起时整组收拢
+  // (chainOpen 记在每组第一个 think/tool 条目上, viewItems 分组时读取)
+  let prevInChain = false;
+  for (const x of chat.items) {
+    const inChain = x.kind === "think" || x.kind === "tool";
+    if (inChain && !prevInChain) x.chainOpen = anyClosed;
+    prevInChain = inChain;
+  }
 }

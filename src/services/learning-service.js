@@ -13,6 +13,7 @@ import { info, warn } from "../utils/logger.js";
 import { Auditor, verifyLesson, heldOutSplit } from "../audit/verifier.js";
 import { verifySkill, verifyUpgradeSkill } from "../skills/verify.js";
 import { recordLesson } from "../evolve/delta-producer.js";
+import { domainRate } from "../evolve/effect.js";
 
 // 辅助 LLM 调用短超时 (经验/技能提炼): 模型不可用/网络不通时快速失败降级
 const AUX_LLM_TIMEOUT_MS = 10000;
@@ -33,6 +34,8 @@ export class LearningService {
     // 2026-10-24 进化闭环: playbook 收经验 delta (语境进化), failures 供提炼时检索相似病历
     this.playbook = deps.playbook || null;
     this.failures = deps.failures || null;
+    // 2026-11-15 蒸馏效果闭环: cohort 登记 + 前后对照 (src/evolve/effect.js, 只记账不改行为)
+    this.effect = deps.effect || null;
     if (!(this.auditor instanceof Auditor)) {
       // 兼容: 外部可能传普通对象 (测试/轻量装配), 不强求 Auditor 实例
     }
@@ -62,13 +65,27 @@ export class LearningService {
         }
       } catch { /* 病历检索失败不阻断提炼 */ }
     }
-    let lesson;
+    let lesson = "";
+    let applicability = null;
     try {
       const r = await llm.chat([
-        { role: "system", content: "你是经验提炼器。从失败的工具调用轨迹中提炼一条可复用的经验教训, 一句话说清: 什么场景、为什么失败、下次怎么做。只输出这一句话, 不要解释。" },
+        { role: "system", content: "你是经验提炼器。从失败的工具调用轨迹中提炼一条可复用的经验教训。只输出 JSON: "
+          + "{\"lesson\": \"一句话: 什么场景、为什么失败、下次怎么做\", "
+          + "\"applicability\": \"适用条件: 这条经验在什么前提下成立 (工具/环境/前提, 缺了会被当作不可复用的泛化结论)\"}。"
+          + "不要解释, 只输出 JSON。" },
         { role: "user", content: (summary + episodeCtx).slice(0, 2400) },
       ], { timeoutMs: AUX_LLM_TIMEOUT_MS, retryMax: 0 });
-      lesson = String(r.content || "").trim();
+      const raw = String(r.content || "").trim().replace(/```(?:json|JSON)?\s*/g, "").replace(/```/g, "").trim();
+      const m = raw.match(/\{[\s\S]*\}/);
+      if (m) {
+        try {
+          const parsed = JSON.parse(m[0]);
+          lesson = String(parsed?.lesson || "").trim();
+          applicability = parsed?.applicability ? String(parsed.applicability).slice(0, 200) : null;
+        } catch { lesson = ""; }
+      }
+      // 兼容回退: 模型没按 JSON 输出时, 整段当作 lesson (旧行为), applicability 置空
+      if (!lesson && !m) lesson = raw;
     } catch { lesson = ""; }
     if (!lesson) return { distilled: 0, reason: "LLM 未产出经验" };
     // Auditor: 经验必须过确定性验证闸门才写回经验库 (不信任模型自评)
@@ -76,10 +93,19 @@ export class LearningService {
     const knownTools = this.toolNames ? this.toolNames() : [];
     const g = await this.auditor.gate(
       "lesson",
-      { lesson, failedTraces: failed, knownTools },
+      { lesson, applicability, failedTraces: failed, knownTools },
       verifyLesson,
       (p) => {
-        this.experience.learn({ task: "自动提炼", lesson: p.lesson, tags: ["auto-refine"] });
+        // cohort 打标 (2026-11-15): 教训按产出日期归组, 效果对照与治理报告可按 cohort 追溯
+        // applicability (2026-11-15): 蒸馏必须携带适用条件 —— "这条经验在什么条件下成立",
+        //   缺条件 = 不可证伪的泛化结论, 治理扫描会单独列出 (见 knowledge-governance)。
+        this.experience.learn({
+          task: "自动提炼",
+          lesson: p.lesson,
+          applicability: p.applicability,
+          tags: ["auto-refine", "cohort:" + new Date().toISOString().slice(0, 10)],
+        });
+        this.effect?.registerLesson?.({ lesson: p.lesson, tool: failed[0]?.tool || null });
         if (this.lifecycle) this.lifecycle.evolve(); // 生命周期: 进化计数 (落盘)
       }
     );
@@ -157,6 +183,15 @@ export class LearningService {
     });
     if (res.startsWith(TOOL_ERROR_PREFIX)) return { created: 0, reason: res };
     if (this.auditor) this.auditor.record("skill_created", { lesson: `创建技能 ${name}` }); // 已过 verifySkill 闸门, 只记账
+    // 效果闭环登记 (2026-11-15): 产出时点该工具域的基线成功率, 供 effect.measure 前后对照。
+    //   基线与对照同口径 (域内轨迹 ok/total), 窗口不足时 measure 会标 immature, 不给结论。
+    try {
+      if (this.effect && this.traces?.read) {
+        const recent = this.traces.read(undefined, 200);
+        const baseline = domainRate(recent, hot, {}); // 产出前的全部近期轨迹 = 基线窗口
+        this.effect.registerSkill({ name, hotTools: hot, baseline });
+      }
+    } catch { /* 效果记账失败不阻断技能落库 */ }
     info(`[refineSkill] 生成技能: ${name}`);
     this.tracer?.event("learning/refine_skill", { name });
     return { created: 1, name };

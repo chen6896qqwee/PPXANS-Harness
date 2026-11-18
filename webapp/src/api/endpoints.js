@@ -54,6 +54,7 @@ export const voiceTranscribeApi = (payload) => post("/api/voice/transcribe", pay
 export const bootstrapApi = () => get("/api/bootstrap");
 export const settingsApi = () => get("/api/settings");
 export const settingsPutApi = (patch) => request("/api/settings", { method: "PUT", body: JSON.stringify({ patch }) });
+export const personaPreviewApi = () => get("/api/persona.preview");
 export const permissionsApi = () => get("/api/permissions");
 export const permissionsPostApi = (payload) => post("/api/permissions", payload);
 export const llmApi = () => get("/api/llm");

@@ -25,6 +25,24 @@ function parseDataUrl(dataUrl) {
   return { buf: Buffer.from(m[2], "base64"), ext };
 }
 
+// 人设文件: 文件名固定白名单 (identity.md / ishiki.md), 读缺省返回空串
+const PERSONA_FILES = new Set(["identity.md", "ishiki.md"]);
+function personaFileText(root, name) {
+  if (!PERSONA_FILES.has(name)) throw new Error("未知人设文件");
+  try {
+    return fs.readFileSync(path.join(root, "config", name), "utf8").slice(0, 40000);
+  } catch {
+    return "";
+  }
+}
+function personaWriteFile(root, name, text, max) {
+  if (!PERSONA_FILES.has(name)) throw new Error("未知人设文件");
+  if (text.length > max) throw new Error(`人设文件不能超过 ${Math.round(max / 1000)}KB`);
+  const dir = path.join(root, "config");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, name), text.endsWith("\n") ? text : text + "\n", "utf8");
+}
+
 // 写操作。返回 { ok, ... } —— 前端凭 ok 决定是否刷新快照。
 async function applyBotAction(channel, body) {
   const agent = channel.agent;
@@ -75,6 +93,27 @@ async function applyBotAction(channel, body) {
       const mod = await import("../ans/proactive.js");
       const out = await mod.suggestProactive(agent);
       return done({ message: out ? out.text : null, items: out ? out.items : [] });
+    }
+    case "personaRead": {
+      // 人设文件只读: 固定 config/identity.md + ishiki.md 两个文件, 不接受任意路径
+      return {
+        ok: true, action,
+        identity: personaFileText(agent.root, "identity.md"),
+        ishiki: personaFileText(agent.root, "ishiki.md"),
+      };
+    }
+    case "personaWrite": {
+      // 人设写入: 只认 identity.md / ishiki.md 两个固定文件名; 写后热重载 persona (下轮对话生效)
+      const MAX = 40000;
+      const written = [];
+      if (typeof body.identity === "string") { personaWriteFile(agent.root, "identity.md", body.identity, MAX); written.push("identity"); }
+      if (typeof body.ishiki === "string") { personaWriteFile(agent.root, "ishiki.md", body.ishiki, MAX); written.push("ishiki"); }
+      if (!written.length) throw new Error("没有要保存的内容");
+      try { agent.persona?.reload?.(); } catch { /* 旧版本无热重载, 重启后生效 */ }
+      try {
+        agent.audit?.appendEvent?.({ event: "persona_updated", fields: { keys: written.join(","), ok: true } });
+      } catch { /* 审计降级不阻断 */ }
+      return done();
     }
     default: {
       // 其余动作全在档案层

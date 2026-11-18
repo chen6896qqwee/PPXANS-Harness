@@ -242,10 +242,50 @@ _installUsageTracking() {
         //   streamChat 结束前按自己的调用回传 usage, 实例槽仅作兼容保留。
         let streamUsage = null;
         const o = { ...(opts || {}), __ppxUsageSink: (u) => { streamUsage = u; } };
-        // 评测-II P2-2: 墙钟延迟采样 (成功调用; 失败路径走异常分支不进记账块)
+        // 每次 provider 请求单独留样: 成功与失败都带模型/延迟/token/成本事实。
         const latencyT0 = Date.now();
-        const r = await orig(msgs, o);
+        let r;
+        try { r = await orig(msgs, o); }
+        catch (e) {
+          const latencyMs = Date.now() - latencyT0;
+          try {
+            this.traces?.recordEval?.("eval/request", {
+              ok: false,
+              model: c.model || "unknown",
+              providerId: c.providerId || "unknown",
+              method: meth,
+              durationMs: latencyMs,
+              latencyMs,
+              usage: null,
+              usageSource: "none",
+              tokens: null,
+              totalTokens: null,
+              promptTokens: null,
+              completionTokens: null,
+              costUsd: null,
+              priced: false,
+              error: String(e?.message || e),
+            });
+          } catch { /* 请求观测失败不改变原异常 */ }
+          throw e;
+        }
         const latencyMs = Date.now() - latencyT0;
+        const requestEval = {
+          ok: true,
+          model: c.model || "unknown",
+          providerId: c.providerId || "unknown",
+          method: meth,
+          durationMs: latencyMs,
+          latencyMs,
+          usage: null,
+          usageSource: "none",
+          tokens: null,
+          totalTokens: null,
+          promptTokens: null,
+          completionTokens: null,
+          costUsd: null,
+          priced: false,
+        };
         try {
           const isStream = meth === "streamChat";
           // streamChat 返回纯文本, usage 由本次调用的 sink 回传
@@ -309,6 +349,17 @@ _installUsageTracking() {
           const costUsage = u || { prompt_tokens: estPrompt, completion_tokens: estCompletion };
           const cost = estimateCost(m, costUsage,
             assume ? { ...(priceOverrides || {}), [m]: assume } : priceOverrides);
+          const priced = this._isLocalClient(c) || isPriced(m, priceOverrides) || !!assume;
+          Object.assign(requestEval, {
+            usage: costUsage,
+            usageSource: u ? "provider" : "estimated",
+            tokens: tk,
+            totalTokens: tk,
+            promptTokens: u?.prompt_tokens != null ? Number(u.prompt_tokens) : (u ? null : estPrompt),
+            completionTokens: u?.completion_tokens != null ? Number(u.completion_tokens) : (u ? null : estCompletion),
+            costUsd: priced ? cost : null,
+            priced,
+          });
           this.usageStats.cost = Math.round((this.usageStats.cost + cost) * 1e9) / 1e9;
           if (cost > 0) this.usageStats.lastCostAt = new Date().toISOString();
           this.usageStats.byModel[m] ??= { calls: 0, tokens: 0, cost: 0, cachedTokens: 0 };
@@ -334,6 +385,8 @@ _installUsageTracking() {
           // 统计失败仍不阻塞调用, 但必须留痕 —— 静默失效比崩溃更难查。
           debug(`[usage] 记账失败 (不阻塞调用): ${e?.message || e}`);
         }
+        try { this.traces?.recordEval?.("eval/request", requestEval); }
+        catch { /* 评测观测失败不阻断 provider 返回值 */ }
         return r;
       };
     }

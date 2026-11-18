@@ -27,6 +27,7 @@ import { createTrigger } from "../flow/trigger.js";
 import {
   ROUTE_KIND, ROUTER_EVENT, buildDelegationBrief, emitRouterEvent, normalizeWorkerReport,
 } from "../flow/router.js";
+import { createWorktree, collectWorktreeChanges, removeWorktree } from "../orchestrator/worktree.js";
 import {
   DELEGATE_TIMEOUT_MS, resolveExpertFor, runTeam, runSupervisorLoop, runReviewLoop,
   arbitrateWithBoard, publishToBoard,
@@ -86,6 +87,13 @@ export function registerDelegateTools(catalog, opts = {}) {
         tasks: { type: "array", items: { type: "string" }, description: "并行子任务列表 (每个子 agent 一个), 适合多角度论证/并行处理; 与 task 二选一" },
         perspectives: { type: "array", items: { type: "string" }, description: "差异化视角列表, 与 tasks 一一对应, 注入每个子 agent 专属视角 (对抗同质失败), 可缺省" },
         role: { type: "string", description: "子 agent 角色名 (如 数据分析师/代码审查员), 默认 helper" },
+        isolation: {
+          type: "string",
+          enum: ["none", "worktree"],
+          default: "none",
+          description: "隔离方式: none=共享当前工作区; worktree=每个子任务在独立 git worktree 执行, "
+            + "回执附变更统计与补丁路径 (git apply --3way 可合入)。需要 git 仓库与 HEAD 提交, 不自动合并",
+        },
         arbitrate: { type: "boolean", description: "是否由主 agent 仲裁聚合所有子结果 (并行/多任务 review 时推荐), 默认 false 直接返回拼接结果" },
         judge: { type: "string", description: "仲裁评审指令 (arbitrate=true 时生效, 如 找出最可靠结论/合并去重); review=true 时为审查准则, 可缺省" },
         review: { type: "boolean", description: "SDD 审查循环: 实施者 -> 只读审查者 -> 发现问题自动修复复审, 达上限熔断, 默认 false。单 task 与多 tasks 均支持" },
@@ -282,16 +290,26 @@ export function registerDelegateTools(catalog, opts = {}) {
             }), { sessionKey, cause: "delegate" }) : null;
           } catch { return null; }
         });
+        // worktree 隔离 (2026-11-16): 每个子任务一个 detached worktree, worker 以其为 cwd。
+        //   注意作用域: 声明必须在 try 外 —— try 块内的 const 在 finally 里不可见。
+        const isolation = args.isolation === "worktree" ? "worktree" : "none";
+        const worktrees = new Array(names.length).fill(null);
         try {
           // 配额治理 (2026-11-05 收口): 此前逐个 L.spawnAgent() 绕过 ConcurrencyGovernor
           //   (README 声称 spawn 已纳治理, 但普通并行路径漏网)。整批走 spawnAgents
           //   (acquire(1)/进程退出归还, legion.js 一期已铺), 缺该口才退回逐个 spawn
           //   (与 delegate-team.runTeam 同款回退, 兼容测试桩)。
+          if (isolation === "worktree") {
+            for (let i = 0; i < names.length; i++) {
+              worktrees[i] = createWorktree(agent.root, { id: names[i] });
+            }
+          }
           const specs = names.map((name, i) => ({
             name,
             opts: {
               dataDir: path.join(agent.dataDir, "legion", name),
               globalDataDir: agent.globalDataDir,
+              cwd: worktrees[i] || undefined,
               env: childSpawnEnv(parentProfile, !!expertList[i]?.readonly),
             },
           }));
@@ -427,7 +445,23 @@ export function registerDelegateTools(catalog, opts = {}) {
             if (s.ok) { try { work.complete(t.id, { result: s.reply, envelope: s.envelope }); } catch { /* 账本不阻断 */ } }
             else { try { work.fail(t.id, s.error, { failureKind: "delegate_error" }); } catch { /* 账本不阻断 */ } }
           }
-          const results = settled.map((s) => s.reply);
+          // worktree 收口: 收集每个隔离目录的变更统计 + 补丁, 再删除工作区。
+          //   失败/超时的子任务也收集 —— 半成品同样是用户需要看见的事实。
+          if (isolation === "worktree") {
+            for (let i = 0; i < settled.length; i++) {
+              const wt = worktrees[i];
+              if (!wt) continue;
+              try {
+                const ch = collectWorktreeChanges(agent.root, wt);
+                settled[i].worktreeNote = ch.stat
+                  ? `\n[worktree 隔离] ${ch.stat}; 补丁已保存 ${ch.patchPath} (git apply --3way "${ch.patchPath}" 合入)`
+                  : "\n[worktree 隔离] 无文件变更";
+              } catch (e) {
+                settled[i].worktreeNote = `\n[worktree 隔离] 变更收集失败: ${e.message}`;
+              }
+            }
+          }
+          const results = settled.map((s) => s.reply + (s.worktreeNote || ""));
           // 汇报信封 → 模型可读摘要 (轮次/步数/工具名): 主 agent 引用 worker 执行证据用
           // 2026-11-05: 附工单号 —— 委派在 /work 账本可查 (收口 ②)
           const envelopeNote = (s) => {
@@ -480,6 +514,10 @@ export function registerDelegateTools(catalog, opts = {}) {
           //   放在 finally 里, 成功/失败/异常三条路径都走到, 不靠成功分支。
           //   回收失败不掩盖真实结果 (逐个 settle, 不抛出)。
           await Promise.allSettled(names.map((n) => (typeof L.killAgent === "function" ? L.killAgent(n) : null)));
+          // worktree 清理: 无论成功/失败/异常都删除隔离目录 (补丁已另存 data/worktrees/*.patch)
+          for (const wt of worktrees) {
+            if (wt) { try { removeWorktree(agent.root, wt); } catch { /* 清理失败不掩盖主结果 */ } }
+          }
           // 2026-10-24: SubagentStop 钩子接线 —— 此前 HOOK_EVENTS 里的该事件全仓无 emit 点,
           //   外部钩子永远收不到"子代理结束"。emit 失败不掩盖真实结果。
           try {

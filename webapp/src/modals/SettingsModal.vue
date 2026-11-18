@@ -13,6 +13,8 @@ import {
 } from "../stores/settings.js";
 import { useGeneralSettings } from "./settings/useGeneralSettings.js";
 import { useModelPanel } from "./settings/useModelPanel.js";
+import AppearancePanel from "./settings/AppearancePanel.vue";
+import { dialog, DEFAULT_WELCOME } from "../stores/dialog.js";
 
 const panel = computed(() => settings.panel);
 const provs = computed(() => settings.providers);
@@ -30,12 +32,19 @@ const {
   catAdd, catDel, presetKeyHint, routingOpen, rtAux, rtPref, saveRouting,
 } = useModelPanel(ed, provs);
 
-watch(() => ui.settingsModal, (v) => { if (v) switchPanel(v === "models" ? "models" : "general"); });
+function panelOf(v) {
+  return v === "models" ? "models" : v === "appearance" ? "appearance" : v === "dialog" ? "dialog" : "general";
+}
+
+watch(() => ui.settingsModal, (v) => {
+  if (!v) return;
+  switchPanel(panelOf(v));
+});
 
 function switchPanel(name) {
   settings.panel = name;
   if (name === "models") loadModelPanel();
-  else loadGeneral();
+  else if (name === "general") loadGeneral();
 }
 function close() {
   ui.settingsModal = null;
@@ -43,7 +52,11 @@ function close() {
   settings.quick.open = false;
 }
 
-onMounted(() => switchPanel(panel.value === "models" ? "models" : "general"));
+onMounted(() => {
+  // 首次挂载时 watch 不会对"打开时的当前值"触发 —— 初始面板必须从 ui.settingsModal 推导,
+  // 不能读 settings.panel (它可能是上一次打开留下的 models/general)。
+  switchPanel(panelOf(ui.settingsModal));
+});
 </script>
 
 <template>
@@ -53,6 +66,12 @@ onMounted(() => switchPanel(panel.value === "models" ? "models" : "general"));
         <div class="sm-nav-title">设置</div>
         <button class="sm-nav-item" :class="{ on: panel === 'general' }" @click="switchPanel('general')">
           <Icon name="settings" :size="14" />通用设置
+        </button>
+        <button class="sm-nav-item" :class="{ on: panel === 'appearance' }" @click="switchPanel('appearance')">
+          <Icon name="sun" :size="14" />外观
+        </button>
+        <button class="sm-nav-item" :class="{ on: panel === 'dialog' }" @click="switchPanel('dialog')">
+          <Icon name="brain" :size="14" />对话
         </button>
         <button class="sm-nav-item" :class="{ on: panel === 'models' }" @click="switchPanel('models')">
           <Icon name="cube" :size="14" />模型
@@ -68,7 +87,7 @@ onMounted(() => switchPanel(panel.value === "models" ? "models" : "general"));
         <!-- 通用设置 -->
         <div v-if="panel === 'general'" class="sm-panel">
           <div class="sm-panel-head">通用设置</div>
-          <div class="sm-panel-sub">审批 / 沙箱 / 外观 / 语音识别</div>
+          <div class="sm-panel-sub">审批 / 沙箱 / 语音识别</div>
           <label class="setrow">审批模式
             <select v-model="approval" @change="onApprovalChange">
               <option value="unless-trusted">unless-trusted（默认审查）</option>
@@ -119,6 +138,68 @@ onMounted(() => switchPanel(panel.value === "models" ? "models" : "general"));
             </div>
           </div>
           <div class="setinfo" id="setInfo">{{ setInfo }}</div>
+        </div>
+
+        <!-- 外观 -->
+        <AppearancePanel v-else-if="panel === 'appearance'" />
+
+        <!-- 对话流基础配置 (WorkBuddy 式): 欢迎语 / 文件修改 / 发送方式 / 过程展示 / 提示音 -->
+        <div v-else-if="panel === 'dialog'" class="sm-panel">
+          <div class="sm-panel-head">对话</div>
+          <div class="sm-panel-sub">欢迎语 / 过程展示 / 发送方式 / 提示音 — 只影响界面呈现, 本机保存。</div>
+          <div class="setgroup">
+            <div class="setgroup-title">欢迎语</div>
+            <label class="setrow">启用
+              <span class="seg-toggle">
+                <button :class="{ on: dialog.welcome.enabled }" @click="dialog.welcome.enabled = true">开</button>
+                <button :class="{ on: !dialog.welcome.enabled }" @click="dialog.welcome.enabled = false">关</button>
+              </span>
+            </label>
+            <label class="setrow col">文案
+              <textarea v-model="dialog.welcome.text" rows="3" :placeholder="DEFAULT_WELCOME" spellcheck="false"></textarea>
+            </label>
+            <div class="setinfo">留空使用默认文案。空会话首屏显示这句话, 改完立即生效。</div>
+          </div>
+          <div class="setgroup">
+            <div class="setgroup-title">文件修改</div>
+            <label class="setrow">显示文件修改过程
+              <span class="seg-toggle">
+                <button :class="{ on: dialog.showFileChanges }" @click="dialog.showFileChanges = true">开</button>
+                <button :class="{ on: !dialog.showFileChanges }" @click="dialog.showFileChanges = false">关</button>
+              </span>
+            </label>
+            <div class="setinfo">关闭后 diff 卡折叠成一行摘要 (含 +x/-y 行数), 点开仍可查看完整变更。</div>
+          </div>
+          <div class="setgroup">
+            <div class="setgroup-title">发送方式 (回合进行中发消息)</div>
+            <label class="setrow">队列发送方式
+              <span class="seg-toggle">
+                <button :class="{ on: dialog.sendMode === 'queue' }" @click="dialog.sendMode = 'queue'">排队</button>
+                <button :class="{ on: dialog.sendMode === 'immediate' }" @click="dialog.sendMode = 'immediate'">立即打断</button>
+              </span>
+            </label>
+            <div class="setinfo">排队 = 当前回合结束后按序发送 (可撤回); 立即打断 = 中断当前回合, 立刻发送新消息。</div>
+          </div>
+          <div class="setgroup">
+            <div class="setgroup-title">过程展示</div>
+            <label class="setrow">思考与工具链
+              <span class="seg-toggle">
+                <button :class="{ on: dialog.processDisplay === 'concise' }" @click="dialog.processDisplay = 'concise'">简洁 · 自动收拢</button>
+                <button :class="{ on: dialog.processDisplay === 'detailed' }" @click="dialog.processDisplay = 'detailed'">详细 · 平铺</button>
+              </span>
+            </label>
+            <div class="setinfo">简洁 = 正文开始输出后把思考链收拢成一行「思考了 Xs · N 步」, 点开回看; 详细 = 全部平铺展开。</div>
+          </div>
+          <div class="setgroup">
+            <div class="setgroup-title">提示音</div>
+            <label class="setrow">回合完成提示音
+              <span class="seg-toggle">
+                <button :class="{ on: dialog.sound }" @click="dialog.sound = true">开</button>
+                <button :class="{ on: !dialog.sound }" @click="dialog.sound = false">关</button>
+              </span>
+            </label>
+            <div class="setinfo">回合结束且窗口不在前台时播放一声短促提示 (成功上行双音 / 失败下行三音)。</div>
+          </div>
         </div>
 
         <!-- 模型面板 -->
@@ -310,7 +391,7 @@ onMounted(() => switchPanel(panel.value === "models" ? "models" : "general"));
 <style scoped>
 .sm-backdrop {
   position: fixed; inset: 0; z-index: 90;
-  background: rgba(8, 8, 12, 0.55); backdrop-filter: blur(3px);
+  background: var(--scrim, rgba(8, 8, 12, 0.55)); backdrop-filter: blur(3px);
   display: flex; align-items: center; justify-content: center;
 }
 .sm {
@@ -335,6 +416,18 @@ onMounted(() => switchPanel(panel.value === "models" ? "models" : "general"));
 .setrow input, .setrow select { flex: 1; min-width: 0; }
 .setgroup { border: 1px solid var(--border-soft); border-radius: var(--r-md); padding: 10px 14px; margin-top: 12px; }
 .setgroup-title { font-weight: 650; font-size: 12.5px; margin-bottom: 4px; }
+.seg-toggle { display: inline-flex; border: 1px solid var(--border); border-radius: var(--r-sm); overflow: hidden; flex: none; }
+.seg-toggle button {
+  border: none; background: var(--surface-2); color: var(--text-3);
+  font-size: 12px; padding: 3px 12px; cursor: pointer;
+}
+.seg-toggle button + button { border-left: 1px solid var(--border); }
+.seg-toggle button.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.setrow.col { flex-direction: column; align-items: stretch; }
+.setrow textarea {
+  width: 100%; font-size: 12.5px; line-height: 1.6; resize: vertical;
+  min-height: 54px; font-family: inherit;
+}
 .setinfo { font-size: 11.5px; color: var(--text-4); margin: 4px 0; }
 .setbtn {
   border: 1px solid var(--accent); background: var(--accent-soft); color: var(--accent);

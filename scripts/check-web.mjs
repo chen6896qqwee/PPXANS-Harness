@@ -91,6 +91,18 @@ if (inlineExec.length) fail("dist/index.html 出现内联可执行脚本 (CSP sc
 else ok("dist 无内联可执行脚本 (CSP 兼容)");
 if (!/<script src="\/theme\.js"><\/script>/.test(distHtml)) fail("dist/index.html 缺少 head 内同步加载的 /theme.js (防 FOUC 契约)");
 else ok("theme.js 同步加载契约保持");
+// 2026-11-16: 外观 v2 的首屏契约与 theme.js 同源 —— 配色/壁纸/材质必须在首次绘制前
+//   写入 data-*, 否则刷新时会先闪一下默认珊瑚色/无壁纸。
+const themeJs = srcOf(path.join(webapp, "public", "theme.js"));
+for (const [name, needle] of [
+  ["外观存储键", "ppx_appearance_v1"],
+  ["配色首屏", 'setAttribute("data-palette"'],
+  ["壁纸首屏", 'setAttribute("data-wallpaper"'],
+  ["材质首屏", 'setAttribute("data-material"'],
+]) {
+  if (!themeJs.includes(needle)) fail(`theme.js 缺少${name}契约: ${needle}`);
+}
+if (!bad) ok("外观首屏契约齐全");
 
 // 4) 结构锚点 id (Electron 菜单/冒烟 + 面板定位依赖; 在 Vue 源码全文中找)
 //    2026-11-08: 侧栏的「本体列表」(id=botList) 随信息架构收拢并入一级导航, 锚点换成

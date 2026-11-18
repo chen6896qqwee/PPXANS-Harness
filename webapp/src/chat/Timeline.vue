@@ -5,23 +5,34 @@
 <script setup>
 import Icon from "../common/Icon.vue";
 import { chat, regenerate, submitQuestion, skipQuestion } from "../stores/chat.js";
+import { dialog } from "../stores/dialog.js";
 import { useTimeline } from "./timeline/useTimeline.js";
 
 const {
-  el, lastUser, lastAgent, showJump,
+  el, lastUser, lastAgent, showJump, viewItems,
   onScroll, jump, copyText, onCopyClick, imgsOf,
   editing, editText, beginEdit, cancelEdit, sendEdit,
   md, fmtTs, dur, toolSummary, toolLabel, thinkBrief,
-  toolLines, toolRest, toggleTool, onApprovalKey,
+  toolLines, toolRest, toggleTool, toggleChain, onApprovalKey,
   qAnswer, qLabelOf, qDescOf, agentColor,
 } = useTimeline();
+
+/* diff 卡折叠摘要: +x / -y 行数 */
+function diffStat(item) {
+  let add = 0, del = 0;
+  for (const l of item.lines || []) {
+    if (l.cls === "add") add += 1;
+    else if (l.cls === "del") del += 1;
+  }
+  return "+" + add + " / -" + del;
+}
 </script>
 
 <template>
   <div class="tl-wrap">
     <button v-show="showJump" class="jumpbtn" @click="jump">↓ 新内容</button>
     <div ref="el" id="stream" class="stream" role="log" aria-live="polite" aria-label="对话消息" @scroll="onScroll">
-      <template v-for="item in chat.items" :key="item.id">
+      <template v-for="item in viewItems" :key="item.id">
         <!-- 用户消息 -->
         <div v-if="item.kind === 'user'" class="ev ev-user" :class="{ 'is-last': item.id === lastUser }">
           <div v-if="editing !== item.id" class="bubble">{{ item.text }}</div>
@@ -66,40 +77,55 @@ const {
           </div>
         </div>
 
-        <!-- 思考行: 一行摘要, 展开看全文 (不再是每条一个卡片) -->
-        <div v-else-if="item.kind === 'think'" class="ev ev-think">
-          <details class="think" :class="{ done: item.ended }" :open="item.open">
-            <summary>
-              <span class="th-mark">✻</span>
-              <span class="tkind">思考</span>
-              <span class="tbrief">{{ thinkBrief(item) || "…" }}</span>
-              <span v-if="item.ended" class="tdur">{{ item.secs }}s</span>
-              <span class="th-chev"><Icon name="chev-d" :size="12" /></span>
-            </summary>
-            <div class="th-body">{{ item.text }}</div>
-          </details>
-        </div>
-
-        <!-- 工具行: 「中文类型 · 参数摘要 · 耗时」, 展开才出参数/结果 -->
-        <div v-else-if="item.kind === 'tool'" class="ev ev-tool">
-          <div class="toolcard" :class="{ open: item.argsOpen, done: item.status !== 'run', failed: item.ok === false }">
-            <div class="head" role="button" tabindex="0" :aria-expanded="item.argsOpen ? 'true' : 'false'" @click="toggleTool(item)" @keydown.enter.prevent="toggleTool(item)" @keydown.space.prevent="toggleTool(item)">
-              <span class="st" :class="item.status" />
-              <span class="tkind">{{ toolLabel(item.tool) }}</span>
-              <span class="tbrief mono" :title="toolSummary(item)">{{ toolSummary(item) }}</span>
-              <span v-if="item.agent" class="agentchip" :style="{ background: agentColor(item.agent) }">{{ item.agent }}</span>
-              <span v-if="item.durationMs != null" class="tdur">{{ dur(item.durationMs) }}</span>
-              <span class="chev"><Icon name="chev-d" :size="13" /></span>
-            </div>
-            <div v-if="item.status !== 'run' && item.result" class="tres" :class="{ open: item.resultOpen, fail: item.ok === false }">
-              <div class="tres-body">
-                <div v-for="(line, i) in toolLines(item)" :key="i" class="tline">{{ line === "" ? " " : line }}</div>
+        <!-- 思考链路: 连续思考/工具归组, 一行头部 + 可折叠正文 (简洁模式回合结束后自动收拢) -->
+        <div v-else-if="item.kind === 'chain'" class="ev ev-chain">
+          <div
+            class="chainrow" :class="{ open: item.open, live: item.live }"
+            role="button" tabindex="0" :aria-expanded="item.open ? 'true' : 'false'"
+            @click="toggleChain(item)" @keydown.enter.prevent="toggleChain(item)"
+          >
+            <span class="st" :class="item.live ? 'run' : 'ok'" />
+            <span class="tkind">思考与执行</span>
+            <span class="tbrief">{{ item.steps }} 步{{ item.tools ? " · " + item.tools + " 个工具" : "" }}</span>
+            <span class="tdur">{{ item.label }}</span>
+            <span class="chev"><Icon name="chev-d" :size="13" /></span>
+          </div>
+          <div v-if="item.open" class="chainbody">
+            <template v-for="child in item.children" :key="child.id">
+              <div v-if="child.kind === 'think'" class="ev ev-think">
+                <details class="think" :class="{ done: child.ended }" :open="child.open">
+                  <summary>
+                    <span class="th-mark">✻</span>
+                    <span class="tkind">思考</span>
+                    <span class="tbrief">{{ thinkBrief(child) || "…" }}</span>
+                    <span v-if="child.ended" class="tdur">{{ child.secs }}s</span>
+                    <span class="th-chev"><Icon name="chev-d" :size="12" /></span>
+                  </summary>
+                  <div class="th-body">{{ child.text }}</div>
+                </details>
               </div>
-              <button v-if="toolRest(item) > 0" class="tmore" @click.stop="item.resultOpen = !item.resultOpen">
-                {{ item.resultOpen ? "收起" : "+" + toolRest(item) + " 行 · 展开" }}
-              </button>
-            </div>
-            <div v-if="item.argsOpen" class="tcbody">{{ JSON.stringify(item.args || {}, null, 2) }}</div>
+              <div v-else-if="child.kind === 'tool'" class="ev ev-tool">
+                <div class="toolcard" :class="{ open: child.argsOpen, done: child.status !== 'run', failed: child.ok === false }">
+                  <div class="head" role="button" tabindex="0" :aria-expanded="child.argsOpen ? 'true' : 'false'" @click="toggleTool(child)" @keydown.enter.prevent="toggleTool(child)" @keydown.space.prevent="toggleTool(child)">
+                    <span class="st" :class="child.status" />
+                    <span class="tkind">{{ toolLabel(child.tool) }}</span>
+                    <span class="tbrief mono" :title="toolSummary(child)">{{ toolSummary(child) }}</span>
+                    <span v-if="child.agent" class="agentchip" :style="{ background: agentColor(child.agent) }">{{ child.agent }}</span>
+                    <span v-if="child.durationMs != null" class="tdur">{{ dur(child.durationMs) }}</span>
+                    <span class="chev"><Icon name="chev-d" :size="13" /></span>
+                  </div>
+                  <div v-if="child.status !== 'run' && child.result" class="tres" :class="{ open: child.resultOpen, fail: child.ok === false }">
+                    <div class="tres-body">
+                      <div v-for="(line, i) in toolLines(child)" :key="i" class="tline">{{ line === "" ? " " : line }}</div>
+                    </div>
+                    <button v-if="toolRest(child) > 0" class="tmore" @click.stop="child.resultOpen = !child.resultOpen">
+                      {{ child.resultOpen ? "收起" : "+" + toolRest(child) + " 行 · 展开" }}
+                    </button>
+                  </div>
+                  <div v-if="child.argsOpen" class="tcbody">{{ JSON.stringify(child.args || {}, null, 2) }}</div>
+                </div>
+              </div>
+            </template>
           </div>
         </div>
 
@@ -188,10 +214,14 @@ const {
           </div>
         </div>
 
-        <!-- diff 卡 -->
+        <!-- diff 卡: 「显示文件修改过程」关闭时折叠成一行摘要 (可点开) -->
         <div v-else-if="item.kind === 'diff'" class="ev ev-diff">
           <div class="who"><span class="mark"><Icon name="diff" :size="12" /></span>变更</div>
-          <div class="diffbox">
+          <button v-if="!dialog.showFileChanges && !item.diffOpen" class="diffsummary" @click="item.diffOpen = true">
+            <Icon name="diff" :size="13" />
+            <span>文件变更已折叠 · {{ diffStat(item) }} · 点开查看</span>
+          </button>
+          <div v-else class="diffbox">
             <div v-for="(l, i) in item.lines" :key="i" class="dline" :class="l.cls">{{ l.text }}</div>
           </div>
         </div>
@@ -254,20 +284,42 @@ const {
 /* ---------- 思考 / 工具: 紧凑行, 不是卡片 ----------
    一个回合动辄十几条思考与工具记录。每条都套一个带边框的卡片, 对话区就变成
    一堆盒子, 扫不动。这里改成"流水账"行: 行高约 28px、无边框、hover 才出色底,
-   细节展开在行下方并缩进对齐。审批/提问/计划这些需要人动手的仍然用卡片。 */
+   细节展开在行下方并缩进对齐。审批/提问/计划这些需要人动手的仍然用卡片。
+   2026-11-18: 思考/工具外面再包一层 chain 组头 —— 简洁模式回合结束后整组收拢
+   成一行「思考了 Xs · N 步」, 正文输出时即刻收拢, 不跟回答抢注意力。 */
 .ev-think, .ev-tool { margin: 1px auto; }
 .think, .toolcard {
   border: none; background: none; border-radius: 6px;
   transition: background var(--t-fast);
 }
-.think summary, .toolcard .head {
+.think summary, .toolcard .head, .chainrow {
   list-style: none; display: flex; align-items: center; gap: 7px;
   padding: 3px 8px; border-radius: 6px; cursor: pointer; user-select: none;
   font-size: 12.5px; line-height: 1.7; color: var(--text-2);
 }
 .think summary::-webkit-details-marker { display: none; }
-.think summary:hover, .toolcard .head:hover { background: var(--surface-2); }
-.think[open] summary, .toolcard.open .head { background: var(--surface-2); }
+.think summary:hover, .toolcard .head:hover, .chainrow:hover { background: var(--surface-2); }
+.think[open] summary, .toolcard.open .head, .chainrow.open { background: var(--surface-2); }
+
+/* chain 组头 */
+.ev-chain { margin: 3px auto; }
+.chainrow { background: var(--surface-2); }
+.chainrow.live { background: var(--accent-soft); }
+.chainrow.live .tkind { color: var(--accent); }
+.chainrow .chev { color: var(--text-4); display: flex; flex: none; opacity: .55; transition: transform var(--t-fast), opacity var(--t-fast); }
+.chainrow:hover .chev, .chainrow.open .chev { opacity: 1; }
+.chainrow.open .chev { transform: rotate(180deg); }
+.chainbody { display: flex; flex-direction: column; }
+.chainbody .ev-think, .chainbody .ev-tool { margin: 0 auto; }
+
+/* diff 折叠摘要行 */
+.diffsummary {
+  display: flex; align-items: center; gap: 7px; width: 100%;
+  border: 1px dashed var(--border); background: none; color: var(--text-3);
+  border-radius: var(--r-sm); padding: 6px 10px; cursor: pointer; font-size: 12px;
+  text-align: left;
+}
+.diffsummary:hover { color: var(--accent); border-color: var(--accent-border); }
 
 .th-mark { color: var(--lv2); flex: none; font-size: 11px; }
 /* 类型名 (思考 / 运行命令 / 查找文件) —— 人话, 不是工具 ID */

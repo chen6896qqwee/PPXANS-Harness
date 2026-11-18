@@ -12,9 +12,12 @@ import { chat, newSession, providerLabel } from "../stores/chat.js";
 import { bot, manage, loadState } from "../stores/bot.js";
 import { ui, showView } from "../stores/ui.js";
 import { rail, rootName, loadSpaces } from "../stores/rail.js";
+import { dialog, DEFAULT_WELCOME } from "../stores/dialog.js";
 import { showToast } from "../stores/toast.js";
 import { fmtTok } from "../stores/fmt.js";
 import { T } from "../i18n/lexicon.js";
+
+const welcomeText = computed(() => (dialog.welcome.text || "").trim() || DEFAULT_WELCOME);
 
 const TYPE_ICONS = { companion: "bot", assistant: "zap", researcher: "scan", scribe: "book" };
 const TYPE_CLS = { companion: "c-comp", assistant: "c-asst", researcher: "c-rsch", scribe: "c-scrb" };
@@ -107,6 +110,7 @@ async function saveType() {
 <template>
   <section id="hero" class="hero">
     <div class="hero-mark"><Icon name="mark" :size="40" /></div>
+    <div v-if="dialog.welcome.enabled" class="hero-welcome" role="status">{{ welcomeText }}</div>
     <h1>要在哪个项目里<em>动手</em>？</h1>
     <p class="hero-sub">选好项目直接说要做的事 —— 它会自己决定读哪个文件、跑哪条命令。</p>
 
@@ -195,6 +199,11 @@ async function saveType() {
   padding: 26px 20px 18px; text-align: center;
 }
 .hero-mark { color: var(--accent); margin-bottom: 8px; }
+.hero-welcome {
+  max-width: 62ch; margin: 0 0 12px; padding: 8px 14px;
+  background: var(--surface-2); border: 1px solid var(--border-soft);
+  border-radius: var(--r-md); font-size: 12.5px; line-height: 1.6; color: var(--text-2);
+}
 h1 { font-size: 23px; margin: 0 0 6px; letter-spacing: 0.2px; font-weight: 700; }
 h1 em { font-style: normal; color: var(--accent); }
 .hero-sub { color: var(--text-3); margin: 0 0 18px; font-size: 13px; max-width: 46ch; }

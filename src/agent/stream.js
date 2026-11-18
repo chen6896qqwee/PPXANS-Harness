@@ -3,7 +3,7 @@
 import { noteCatch } from "../utils/catch-log.js";
 import { warn } from "../utils/logger.js";
 import { selfCheckReply, sanitizeReply } from "../core/selfcheck.js";
-import { runWithTrace, patchTrace } from "../core/trace.js";
+import { runWithTrace, patchTrace, currentTrace } from "../core/trace.js";
 
 class StreamMixin {
   // 流式对话: 返回 { text, history } 或回调 onDelta 推送增量
@@ -15,7 +15,10 @@ class StreamMixin {
     return this._withSessionLock(sk, () => this._chatStreamCore(userMsg, opts));
   }
 
-  async _chatStreamCore(userMsg, { sessionKey = "default", onDelta, onTool, onStep, onReasoning, fileRefs = "" } = {}) {
+  async _chatStreamCore(userMsg, {
+    sessionKey = "default", onDelta, onTool, onStep, onReasoning, fileRefs = "",
+    taskId = null, traceId = null, strata = null, evalSampleRate = null, taskOk = null,
+  } = {}) {
     // (R9 审计) 与 _chatCore 同款: 重定向在 runWithTrace 之前解析, trace 携带真实会话
     sessionKey = this._redirectSession(sessionKey);
     // 轮归属: 与 _chatCore 同口径 (Router 未委派则收口时补 inline 决策事件)。
@@ -23,12 +26,14 @@ class StreamMixin {
     // 2026-10-24 (R12): 轮观测 begin —— 与 chat 同款三件套, begin 在所有早退之前
     //   (命令/预算/无 llm 委托都算用户轮); 异常与用户中断由收口标 aborted。
     const obs = this._turnObsBegin(sessionKey, userMsg, "chatStream");
+    if (typeof taskOk === "boolean") obs.taskOk = taskOk;
     let _turnStatus = "closed";
     try {
     // 重构第三刀: 入口生成 traceId (无 LLM 降级 chat 时嵌套新 trace, 独立可追踪)
     return await runWithTrace(async () => {
     // 架构优化 ②: 流式轮同样落 run 契约 (kind=turn, channel=stream)
     patchTrace({ sessionKey, runKind: "turn", channel: "stream" });
+    this._captureEvalTurn(obs);
     // 2026-10-24 (R8) 修复: 斜杠命令接入流式通道 —— R3 只接了 chat, Web UI 走
     //   chatStream 发 /status /skills /rewind 会被当普通文本喂给 LLM (实测实锤)。
     //   语义与 _chatCore 完全一致: 命令命中 → 直接回文案 (经 onDelta 推给前端),
@@ -58,7 +63,13 @@ class StreamMixin {
         return this._maskReplyPII(String(cmdOut));
       }
     }
-    if (!this.llm) return this.chat(userMsg, { sessionKey, turnObs: obs });
+    if (!this.llm) {
+      const trace = currentTrace();
+      return this.chat(userMsg, {
+        sessionKey, turnObs: obs, taskId: trace?.taskId, traceId: trace?.traceId,
+        strata: trace?.strata, evalSampleRate: trace?.evalSampleRate,
+      });
+    }
     // 2026-10-24 (R2): 流式轮同样重置回退重放缓存
     // 2026-11-06 (评估 P1-4): 缓存按会话分桶 (_turnExecCacheFor), 本轮重置本会话桶
     this._turnAttempt = 0;
@@ -69,7 +80,7 @@ class StreamMixin {
     // 2026-10-10 修复 (P0-1 孪生): 流式入口同样消费预算闸门 —— 超限时不得再发上游请求,
     //   并把提示同时推给 onDelta (否则前端只会看到空白流)。
     const blocked = this._budgetBlocked();
-    if (blocked) { onDelta && onDelta(blocked); return blocked; }
+    if (blocked) { obs.taskOk = false; onDelta && onDelta(blocked); return blocked; }
     // 2026-10-24 (R4): SessionStart 追踪与 chat 对齐 —— 此前流式路径的会话不触发
     //   SessionStart 钩子 (钩子只对 chat 路径的会话可见)。
     {
@@ -153,6 +164,7 @@ class StreamMixin {
       if (isAbort) {
         warn("chatStream 被中断, 保留已生成部分 (不降级重发):", String(e?.message || e));
         _turnStatus = "aborted"; // (R12) 用户叫停 = 本轮中止, 收口如实记录
+        obs.taskOk = false;
         reply = partial;
       } else {
         warn("chatStream 失败, 降级非流式 chat:", e.message);
@@ -163,7 +175,12 @@ class StreamMixin {
         //   _turnInProgress 仍为真 → _chatCore 保留回放缓存, 非幂等工具不双执行。
         //   (R12): 传入本函数已开的 obs —— 降级不重复开 turn, 收口仍归本函数。
         if (partial && onDelta) { try { onDelta("\n\n[流式中断 → 已重新生成]\n\n"); } catch (e) { noteCatch(e); } }
-        reply = await this._chatCore(userMsg, { sessionKey, persist: false, turnObs: obs, funnelResumed: true });
+        const trace = currentTrace();
+        reply = await this._chatCore(userMsg, {
+          sessionKey, persist: false, turnObs: obs, funnelResumed: true,
+          taskId: trace?.taskId, traceId: trace?.traceId,
+          strata: trace?.strata, evalSampleRate: trace?.evalSampleRate,
+        });
         if (onDelta) onDelta(reply);
       }
     } finally {
@@ -173,6 +190,10 @@ class StreamMixin {
       this._turnInProgress = false; // (R5) 轮收口: 后续轮次照常重置回放缓存
       this._turnIntentHints.delete(sk); // v4.2: 提示块轮末回收 (幂等注入; _turnHistoryTexts 留给下方落库)
       this._turnFileRefs?.delete(sk);   // @ 引用块同生命周期: wire 已烘进 historyText, 轮末回收
+    }
+    if (this._isInterrupted(sessionKey)) {
+      obs.taskOk = false;
+      _turnStatus = "aborted";
     }
     // 落库用模型原文 (剥掉本轮降级提示), 与 chat 共用同一路径; afterTurn 与 chat 对齐 ——
     //   流式轮次同样触发 L2 归档 / 经验学习 / L3 画像刷新 (2026-10-04 Task#3)。
@@ -189,6 +210,7 @@ class StreamMixin {
         if (!report.ok) {
           warn("chatStream 回答自检未通过:", report.issues.map((i) => i.code).join(","));
           this.bus?.emit("agent/selfcheck", { codes: report.issues.map((i) => i.code), issues: report.issues, sessionKey, channel: "chatStream" }, { source: "agent.chatStream" });
+          this._observeEvalSelfCheck(obs, reply, report);
           reply = sanitizeReply(reply, report);
         }
       } catch (e) { /* 自检异常不阻断主链 */
@@ -210,9 +232,10 @@ class StreamMixin {
     // 2026-11-01 (三期投机复现): 流式轮收口边界 —— 同 chat
     this._scheduleSpeculative(sessionKey);
     return this._maskReplyPII(reply);
-      }, { sessionKey, channel: "chatStream" });
+      }, { sessionKey, channel: "chatStream", taskId, traceId, strata, evalSampleRate });
     } catch (e) {
       _turnStatus = "aborted";
+      obs.taskOk = false;
       this._clearTurnFailures(sessionKey); // 中止轮不投机复现 (用户已叫停, 尊重语义)
       throw e;
     } finally {

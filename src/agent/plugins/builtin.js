@@ -33,6 +33,7 @@ import { registerSelfIterateTools, registerEvolutionStatusTool } from "../../too
 // 自改代码 (2026-10-27): 补丁→边界→落盘→三关验证→绿留红滚→账本, 让皮皮虾能安全改自己的源码
 import { registerSelfCodeTools } from "../../tools/selfcode.js";
 import { Traces } from "../../utils/trace.js";
+import { currentTrace } from "../../core/trace.js";
 import { AuditLog, loadOrCreateHmacKey } from "../../audit/audit-chain.js";
 import { RuntimeBus } from "../../bus/runtime-bus.js";
 import { PlaybookStore } from "../../evolve/playbook.js";
@@ -207,7 +208,7 @@ const memoryLayersPlugin = (ctx) => {
 };
 
 const tracesPlugin = (ctx) => {
-  ctx.provide("traces", new Traces(ctx.consume("dataDir")));
+  ctx.provide("traces", new Traces(ctx.consume("dataDir"), currentTrace));
 };
 
 export const auditPlugin = (ctx) => {
@@ -234,7 +235,7 @@ export const toolsPlugin = (ctx) => {
   const facts = ctx.consume("facts");
   const memory = ctx.consume("memory");
   const tools = new ToolCatalog();
-  registerBuiltinTools(tools, { rootDir: root, facts, memory, dataDir });
+  registerBuiltinTools(tools, { rootDir: root, facts, memory, dataDir, config });
   // 架构优化 ⑥(2026-11-13): 内容检索工具 —— 借 rg / git grep 这些成熟轮子,
   //   内置扫描只做兜底。此前只有"按文件名 glob", 搜内容得让模型拼 run_command。
   registerGrepTools(tools, { rootDir: root });

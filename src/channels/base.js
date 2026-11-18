@@ -4,6 +4,7 @@
 import { readBody, sendJson } from "../utils/http.js";
 import { createTrigger } from "../flow/trigger.js";
 import { planIngress, FLOW_ACTION } from "../flow/kernel.js";
+import { metacognitionGate, decideReroute, clarifyText } from "../flow/gate.js";
 import { enrichWithTaskBrief } from "../flow/extract.js";
 import { shapeForChannel } from "./output.js";
 import { createDeliveryReceipts, DEFAULT_SYNC_DEADLINE_MS } from "./receipts.js";
@@ -109,7 +110,15 @@ export class Channel {
     const workBegin = (worker, extra = {}) => {
       try { return ticket && work ? work.begin(ticket.id, { worker, sessionKey, ...extra }) : null; } catch { return null; }
     };
-    const workDone = (payload) => { try { if (ticket) work.complete(ticket.id, payload); } catch { /* 账本不阻断回复 */ } };
+    const workDone = (payload) => {
+      try {
+        if (ticket) work.complete(ticket.id, {
+          ...payload,
+          // 低置信透传 (2026-11-15): 随工单落账 → judge 可读为复核信号 (undefined 不落字段)
+          lowConfidence: metacog?.lowConfidence === true ? true : undefined,
+        });
+      } catch { /* 账本不阻断回复 */ }
+    };
     const workFail = (e) => { try { if (ticket) work.fail(ticket.id, e); } catch { /* 账本不阻断回复 */ } };
     const msgMeta = (extra = {}) => ({
       ...meta,
@@ -138,6 +147,62 @@ export class Channel {
       const ex = await enrichWithTaskBrief(trigger, this.agent, plan.sessionKey);
       if (ex?.prefix) taskText = `${ex.prefix}\n\n${trigger.text}`;
     } catch { /* 提炼是增强, 不是闸门 */ }
+
+    // 元认知门控 (2026-11-15, flow/gate.js, 默认关闭): async/sync 执行前的一阶置信度
+    //   观测 —— 只往 assignment 元数据写 {confidence, rationale, suggested_action}, 不改
+    //   路由不阻断 (是否改道由 DSH/人工决定)。thread 直通与 ans 自触发不观测; 门控未启用
+    //   时返回 null, 无 LLM 调用零成本。
+    let metacog = null;
+    if (plan.action === FLOW_ACTION.ASYNC || plan.action === FLOW_ACTION.SYNC) {
+      try { metacog = await metacognitionGate({ agent: this.agent, plan, trigger }); } catch { metacog = null; }
+    }
+
+    // 低置信消费规则 (2026-11-15): 观测不产生价值, 除非预先定义"什么观测值对应什么动作"。
+    //   规则一: lowConfidence → 回执 (DELIVERY meta) 与工单双路透传, judge 读取为复核信号;
+    //   规则二: 同一 dedupeKey 短窗口 (10 分钟) 内重复低置信 → metacognition 元数据升级
+    //   escalated=repeated_low_confidence, 由 DSH/人工决定是否改道。均不新增动作、不阻断。
+    if (metacog?.lowConfidence) {
+      const dedupeKey = plan.ticket?.dedupeKey || trigger.meta?.dedupeKey || trigger.messageId || "";
+      if (dedupeKey) {
+        if (!this._lowConfTracker) this._lowConfTracker = new Map();
+        const WINDOW_MS = 10 * 60 * 1000;
+        const nowMs = Date.now();
+        for (const [k, v] of this._lowConfTracker) {
+          if (nowMs - v.lastAt > WINDOW_MS) this._lowConfTracker.delete(k); // 过期清理
+        }
+        const hit = this._lowConfTracker.get(dedupeKey) || { count: 0, lastAt: 0 };
+        hit.count += 1;
+        hit.lastAt = nowMs;
+        this._lowConfTracker.set(dedupeKey, hit);
+        if (hit.count >= 2) metacog.escalated = "repeated_low_confidence";
+      }
+    }
+
+    // 规则三 (2026-11-16): 低置信真改道 —— opt-in (metacognition_gate.reroute_enabled)。
+    //   规则一/二只把观测送出去, 系统照旧执行; 这一条在"模型自己说该先澄清"且置信度低于
+    //   阈值时**不进入执行**, 用 gate 给出的理由向来源方提问。
+    //   为什么值得单独一条: 前面两条都只是仪表盘, 只有这条让"知道自己不确定"改变行为 ——
+    //   宁可少做一件可能做错的事, 也不为了"看起来在干活"把 token 烧在错方向上。
+    //   工单标 rerouted → judge 把 done∧delivered 降级为 MANUAL_REVIEW (改道不算完成)。
+    const reroute = decideReroute(metacog, this.agent?.config?.agent?.metacognition_gate);
+    if (reroute) {
+      const ask = clarifyText(metacog, reroute);
+      workBegin("gate:clarify", { route: "clarify", metacognition: metacog });
+      workDone({ result: ask, rerouted: "clarify" });
+      try {
+        await this.send(replyTo, shapeForChannel(this.name, ask, outCfg), msgMeta({
+          kind: "clarify", lowConfidence: true, rerouted: "clarify",
+        }));
+      } catch (e) {
+        // 提问送不出去 = 来源方永远不知道要补什么, 这条任务彻底悬空 —— 记失败而不是静默
+        workFail(e);
+        throw e;
+      }
+      return {
+        rerouted: "clarify", reason: reroute.reason,
+        ticketId: ticket?.id || null, confidence: reroute.confidence,
+      };
+    }
 
     // 长驻 worker 直通: 同话题后续事件不进 Router LLM
     if (plan.action === FLOW_ACTION.THREAD) {
@@ -185,6 +250,7 @@ export class Channel {
       const assignment = workBegin("router:async", {
         route: "async",
         delivery: plan.delivery || null,
+        metacognition: metacog,
       });
       // Step 4: 队列按契约 policy 重试/TTL, 不再全部套用通道级常量。
       const policy = plan.delivery?.policy?.kind === "async" ? plan.delivery.policy : null;
@@ -196,6 +262,8 @@ export class Channel {
             workDone({ result: reply, bgTaskId: started?.id });
             this._deliverAsync(replyTo, shapeForChannel(this.name, reply, outCfg), msgMeta({
               bgTaskId: started?.id, assignmentId: assignment?.id || null, kind: "done",
+              // 低置信 → DELIVERY 回执标记 (规则一): DSH/收信方可据此要求人工复核
+              lowConfidence: metacog?.lowConfidence === true ? true : undefined,
             }), policy);
           },
           onError: (e) => {
@@ -219,6 +287,7 @@ export class Channel {
     const assignment = workBegin("router", {
       route: "sync",
       delivery: plan.delivery || null,
+      metacognition: metacog,
     });
     try {
       const reply = await this.agent.chat(taskText, rawSessionKey ? { sessionKey: rawSessionKey } : undefined);
@@ -231,7 +300,8 @@ export class Channel {
         channel: this.name,
         to: replyTo,
         text: shaped,
-        meta,
+        // 低置信 → 同步回执 meta 标记 (规则一): receipts 层透传到 delivery 事实
+        meta: metacog?.lowConfidence ? { ...(meta || {}), lowConfidence: true } : meta,
         sessionKey: rawSessionKey || null,
         deadlineMs: this._syncDeadlineMs(plan.delivery),
       });

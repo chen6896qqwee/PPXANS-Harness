@@ -12,6 +12,8 @@ import { showToast } from "../toast.js";
 import { streamChat } from "../../api/sse.js";
 import { interruptApi, rewindApi, uploadApi } from "../../api/endpoints.js";
 import { loadSessions } from "../rail.js";
+import { dialog } from "../dialog.js";
+import { playChime, playFail } from "../../chat/sound.js";
 import {
   chat, push, setPhase,
   addError, addPlan, addDiff, addAgentCard, makeThinker, liftAnswer,
@@ -39,18 +41,19 @@ function setBusy(on) {
   }
 }
 
-/* 通知: 窗口在后台时, 长回合结束后给一条系统通知 */
+/* 通知 + 提示音: 窗口在后台时, 长回合结束后给一条系统通知和一声提示音 */
 function notifyTurnDone(hadError) {
   try {
+    if (dialog.sound) (hadError ? playFail() : playChime());
     if (typeof Notification === "undefined" || !document.hidden) return;
     const ms = chat.run && chat.run.t0 ? Date.now() - chat.run.t0 : 0;
     if (ms < 5000) return;
-    const n = new Notification("皮皮虾", { body: hadError ? "本轮执行结束，有错误需要查看" : "回答已完成", silent: false });
+    const n = new Notification("皮皮虾", { body: hadError ? "本轮执行结束，有错误需要查看" : "回答已完成", silent: true });
     n.onclick = () => { try { window.focus(); } catch { /* 窗口已关闭 */ } n.close(); };
   } catch { /* 通知失败不影响对话 */ }
 }
 
-/** 发送一条消息 (files = @引用的相对路径)。生成中调用 = 排队。 */
+/** 发送一条消息 (files = @引用的相对路径)。生成中: queue 模式排队, immediate 模式打断后立刻发。 */
 export function send(text, files) {
   const t = String(text == null ? chat.input : text).trim();
   const refs = (files || chat.refFiles).slice();
@@ -60,6 +63,18 @@ export function send(text, files) {
   pushHist(full);
   chat.lastRefFiles = refs;
   if (chat.streaming) {
+    if (dialog.sendMode === "immediate") {
+      // 立即打断: 中断当前回合, 流收口后由 finally 直接发这条 (不进排队队列)
+      chat._pendingImmediate = { text: full, files: refs };
+      chat.interrupted = true;
+      if (chat._abort) { try { chat._abort.abort(); } catch { /* 已结束 */ } }
+      interruptApi(chat.sessionKey).catch(() => {});
+      chat.pendingFiles = [];
+      chat.refFiles = [];
+      chat.input = "";
+      showToast("已打断当前回合, 正在切换到新消息");
+      return;
+    }
     chat.queue.push({ text: full, label, files: refs });
     chat.pendingFiles = [];
     chat.refFiles = [];
@@ -232,6 +247,13 @@ export function doSend(t, files) {
     // 回合已收口: 还挂着的提问卡只可能是中断/超时, 服务端也已收口 —— 本地一并落定
     for (const it of chat.items) {
       if (it.kind === "question" && !it.done) closeQuestion(it.qId, "interrupted");
+    }
+    // immediate 模式: 被打断时抢发的消息优先于排队队列
+    if (chat._pendingImmediate) {
+      const nxt = chat._pendingImmediate;
+      chat._pendingImmediate = null;
+      setTimeout(() => doSend(nxt.text, nxt.files), 30);
+      return;
     }
     flushQueue(); // 排队消息: 上一回合收口后才发下一条
   });

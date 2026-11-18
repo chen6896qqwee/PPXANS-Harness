@@ -7,7 +7,7 @@ import { reactive } from "vue";
 export const ID_RE = /^[a-zA-Z][a-zA-Z0-9_-]{0,29}$/;
 
 export const settings = reactive({
-  panel: "models",         // general | models
+  panel: "models",         // general | models | appearance
   providers: [],
   presets: [],
   protocols: {},

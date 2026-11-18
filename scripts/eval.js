@@ -39,6 +39,51 @@ function tmpRoot() {
   return makeTmpRoot("eval");
 }
 
+// 中英文任务只比较规范化后的稳定事实, 不要求自由文本逐字一致。
+export const MULTILINGUAL_CASES = [
+  { name: "多语言-算术-中文", group: "sum-1-1", lang: "zh", normalize: "number", prompt: "1+1 等于几？只回答数字。", expect: ["2"] },
+  { name: "多语言-算术-English", group: "sum-1-1", lang: "en", normalize: "number", prompt: "What is 1 + 1? Answer with the number only.", expect: ["2"] },
+  { name: "多语言-项目名-中文", group: "package-name", lang: "zh", normalize: "package", prompt: "读 package.json, 告诉我 name 字段中的项目名。", expect: ["ppxans-harness", "ppx-agent"], any: true, useTools: true },
+  { name: "多语言-项目名-English", group: "package-name", lang: "en", normalize: "package", prompt: "Read package.json and tell me the project name in its name field.", expect: ["ppxans-harness", "ppx-agent"], any: true, useTools: true },
+];
+
+export function normalizeFact(content, normalize) {
+  const text = String(content ?? "").normalize("NFKC").toLowerCase();
+  if (normalize === "number") {
+    const matches = text.match(/[+-]?\d+(?:\.\d+)?/g);
+    return matches && matches.length ? String(Number(matches.at(-1))) : null;
+  }
+  if (normalize === "year") {
+    const matches = text.match(/\b(?:19|20)\d{2}\b/g);
+    return matches && matches.length ? matches.at(-1) : null;
+  }
+  if (normalize === "package") {
+    const match = text.match(/(?:^|[^a-z0-9-])(ppxans-harness|ppx-agent)(?![a-z0-9-])/);
+    return match ? "ppxans-harness" : null;
+  }
+  throw new RangeError(`未知事实规范化器: ${normalize}`);
+}
+
+export function evaluateMultilingualConsistency(responses) {
+  const groups = new Map();
+  for (const response of responses) {
+    if (!response.group) continue;
+    if (!groups.has(response.group)) groups.set(response.group, []);
+    groups.get(response.group).push(response);
+  }
+  return [...groups].map(([group, items]) => {
+    const facts = items.map((item) => ({
+      lang: item.lang,
+      fact: normalizeFact(item.content, item.normalize),
+    }));
+    const languages = new Set(items.map((item) => item.lang));
+    const ok = languages.has("zh") && languages.has("en")
+      && facts.every((item) => item.fact !== null)
+      && new Set(facts.map((item) => item.fact)).size === 1;
+    return { group, ok, facts };
+  });
+}
+
 // ---- (1) 本地能力层 ----
 async function localCapabilities() {
   console.log("── (1) 本地能力层 (零依赖) ──");
@@ -139,7 +184,8 @@ async function llmE2E() {
     return "[未知工具]" + name;
   }
 
-  for (const c of CASES) {
+  const multilingualResponses = [];
+  for (const c of [...CASES, ...MULTILINGUAL_CASES]) {
     const messages = [{ role: "user", content: c.prompt }];
     const t0 = Date.now();
     let content = "";
@@ -163,14 +209,22 @@ async function llmE2E() {
     } catch (e) {
       check(`LLM-${c.name}`, false, "异常: " + e.message);
     }
+    if (c.group) multilingualResponses.push({ group: c.group, lang: c.lang, normalize: c.normalize, content });
+  }
+  for (const result of evaluateMultilingualConsistency(multilingualResponses)) {
+    const detail = result.facts.map((item) => `${item.lang}=${item.fact ?? "未识别"}`).join(" ");
+    check(`LLM-多语言一致性-${result.group}`, result.ok, detail);
   }
 }
 
-(async () => {
-  console.log("皮皮虾 E2E 评测 | " + new Date().toISOString().replace("T", " ").slice(0, 19) + "\n");
-  await localCapabilities();
-  if (wantLLM && !wantQuick) await llmE2E();
-  else if (wantLLM && wantQuick) console.log("\n── (2) LLM 端到端层 ──\n  (--quick 跳过 LLM 端到端)");
-  console.log(`\n=== 结果: ${pass} 过 / ${fail} 挂 ===`);
-  process.exit(fail > 0 ? 1 : 0);
-})().catch((e) => { console.error("✗ 评测异常:", e.message); process.exit(1); });
+const directMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (directMain) {
+  (async () => {
+    console.log("皮皮虾 E2E 评测 | " + new Date().toISOString().replace("T", " ").slice(0, 19) + "\n");
+    await localCapabilities();
+    if (wantLLM && !wantQuick) await llmE2E();
+    else if (wantLLM && wantQuick) console.log("\n── (2) LLM 端到端层 ──\n  (--quick 跳过 LLM 端到端)");
+    console.log(`\n=== 结果: ${pass} 过 / ${fail} 挂 ===`);
+    process.exit(fail > 0 ? 1 : 0);
+  })().catch((e) => { console.error("✗ 评测异常:", e.message); process.exit(1); });
+}

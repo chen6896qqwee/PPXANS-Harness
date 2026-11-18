@@ -94,6 +94,33 @@ export function registerEvolutionStatusTool(catalog, { agent } = {}) {
         const itTxt = it.ran === false ? "迭代跳过" : `修复 ${it.fixed ?? 0} / 回滚 ${it.rolledBack ?? 0} / 提案 ${it.proposed ?? 0}`;
         lines.push(`- ${j.ts} (${j.durationMs ?? "?"}ms): 经验+${l.refined ?? 0} 技能+${l.skillsCreated ?? 0}${l.weaknessTargeted ? ` [针对弱点 ${l.weaknessTargeted.tool}×${l.weaknessTargeted.count}]` : ""} | ${itTxt}${j.error ? ` | ⚠ ${j.error}` : ""}`);
       }
+      // 效果对照与反哺 (2026-11-16): 前几段记"做了多少", 这里记"做的到底有没有用"。
+      //   3.5 出结论 (cohort 前后成功率), 3.6 把"没用"变成动作 (记有害票 → 达阈值淘汰)。
+      //   两段必须一起看: 只有测量没有反哺, 这张表就还是仪表盘。
+      lines.push("", "== 效果对照与反哺 ==");
+      try {
+        const eff = loop.effectSnapshot();
+        if (!eff) {
+          lines.push("(effect 未装配 —— 需要 agent.effect 与 traces 才测量)");
+        } else if (eff.error) {
+          lines.push(`(测量失败: ${eff.error})`);
+        } else {
+          lines.push(`skill cohort ${eff.skillCohorts ?? 0} 条 | mature ${eff.matured ?? 0} | 提升 ${eff.improving ?? 0} | 退化 ${eff.degrading ?? 0}`);
+          for (const m of (eff.measured || []).slice(-5)) {
+            const d = m.delta == null ? "样本不足" : `${m.delta > 0 ? "+" : ""}${m.delta}`;
+            lines.push(`- ${m.name}: 基线 ${m.baseline?.rate ?? "?"} → 对照 ${m.post?.rate ?? "?"} (Δ${d})`
+              + `${m.mature ? "" : " [immature, 不给结论]"}${m.fedBackAt ? ` [已反哺 ${m.fedBackAt}]` : ""}`);
+          }
+          const fbCfg = agent.config?.agent?.evolution_loop?.effect_feedback || {};
+          lines.push(`反哺开关: ${fbCfg.enabled === true ? "开启" : "关闭"} (evolution_loop.effect_feedback.enabled)`);
+          const lastFb = journal.slice(-1)[0]?.effectFeedback;
+          for (const a of (lastFb?.actions || []).slice(-5)) {
+            lines.push(`- ${a.cohort ?? "?"}: ${a.kind}${a.target ? ` → ${a.target}` : ""}${a.reason ? ` (${a.reason})` : ""}`);
+          }
+          if (lastFb?.pruned?.length) lines.push(`- 本轮淘汰 ${lastFb.pruned.length} 条策略: ${lastFb.pruned.map((p) => p.id).join(", ")}`);
+        }
+      } catch (e) { lines.push(`(读取失败: ${String(e?.message || e).slice(0, 120)})`); }
+
       // 自改账本 (2026-10-27): 与进化曲线同属"变强有账可查", 不另开工具占 schema。
       // 只读 data/selfcode/ledger.jsonl 与 pending-reload.json, 不改盘。
       try {

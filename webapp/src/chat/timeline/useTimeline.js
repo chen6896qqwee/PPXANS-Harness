@@ -5,6 +5,7 @@
 
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { chat, agentColor, toolKindOf, resolveApproval, rewindAndSend } from "../../stores/chat.js";
+import { dialog } from "../../stores/dialog.js";
 import { showToast } from "../../stores/toast.js";
 import { renderMd } from "../../markdown/index.js";
 
@@ -146,6 +147,72 @@ export function useTimeline() {
   function toolRest(item) { return toolFold(item).rest; }
 
   function toggleTool(item) { item.argsOpen = !item.argsOpen; }
+
+  /* ---------- 思考链路 (WorkBuddy 式回合收拢) ----------
+     连续的 think/tool 条目归为一个 chain 组。简洁模式: 回合结束后组收拢成一行
+     「思考了 Xs · N 步」, 点击展开回看; 正文开始输出即收拢 (回答优先)。
+     等待审批/提问时不收拢 —— 需要看到正在跑什么才能做决定。
+     详细模式: 默认全展开, 组头仍可手动收拢。 */
+  function fmtChainDur(s) {
+    if (s < 60) return Math.round(s) + "s";
+    return Math.floor(s / 60) + "m " + Math.round(s % 60) + "s";
+  }
+
+  function makeChainNode(children, next, detailed) {
+    const first = children[0];
+    let secs = 0, tools = 0, running = false;
+    for (const c of children) {
+      if (c.kind === "think") secs += c.secs || 0;
+      else {
+        tools += 1;
+        if (c.durationMs != null) secs += c.durationMs / 1000;
+        if (c.status === "run") running = true;
+      }
+    }
+    let sealed;
+    if (!chat.streaming) sealed = true;
+    else if (!next) sealed = false; // 流末尾, 回合还在跑
+    else if (next.kind === "agent") sealed = !!next.text; // 正文开始输出 = 收拢
+    else if (next.kind === "approval" || next.kind === "question") sealed = !!next.done;
+    else sealed = true;
+    const live = !sealed;
+    const open = first.chainOpen !== undefined ? !!first.chainOpen : (detailed ? true : !sealed);
+    const liveSecs = live && chat.busyT0 ? Math.max(1, (chat.nowTick - chat.busyT0) / 1000) : 0;
+    const steps = children.length;
+    const label = live
+      ? "思考中 · " + fmtChainDur(liveSecs)
+      : (secs >= 1 ? "思考了 " + fmtChainDur(secs) + " · " + steps + " 步" : steps + " 步");
+    return {
+      kind: "chain", id: "chain-" + first.id, first, children,
+      steps, tools, live, open, running,
+      label: live && running ? label + " · 工具执行中" : label,
+    };
+  }
+
+  const viewItems = computed(() => {
+    const items = chat.items;
+    const detailed = dialog.processDisplay === "detailed";
+    const out = [];
+    const n = items.length;
+    let i = 0;
+    while (i < n) {
+      const it = items[i];
+      if (it.kind !== "think" && it.kind !== "tool") { out.push(it); i += 1; continue; }
+      let j = i;
+      while (j < n && (items[j].kind === "think" || items[j].kind === "tool")) j += 1;
+      out.push(makeChainNode(items.slice(i, j), items[j], detailed));
+      i = j;
+    }
+    return out;
+  });
+
+  function toggleChain(node) {
+    node.first.chainOpen = !node.open;
+  }
+  // 链收拢/展开会改变高度: 近底部则跟随
+  watch(() => viewItems.value.length, () => nextTick(() => toBottom(false)));
+
+
   function onApprovalKey(item, act) { resolveApproval(item.aId, act); }
   function qAnswer(item, qi, label, checked) {
     const a = item.answers[qi];
@@ -161,11 +228,11 @@ export function useTimeline() {
   function qDescOf(o) { return o && typeof o === "object" ? (o.description || "") : ""; }
 
   return {
-    el, lastUser, lastAgent, showJump,
+    el, lastUser, lastAgent, showJump, viewItems,
     onScroll, jump, copyText, onCopyClick, imgsOf,
     editing, editText, beginEdit, cancelEdit, sendEdit,
     md, fmtTs, dur, toolSummary, toolLabel, thinkBrief,
-    toolLines, toolRest, toggleTool, onApprovalKey,
+    toolLines, toolRest, toggleTool, toggleChain, onApprovalKey,
     qAnswer, qLabelOf, qDescOf, agentColor,
   };
 }

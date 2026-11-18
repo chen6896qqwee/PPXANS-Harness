@@ -19,4 +19,6 @@ export const APP_DATA_HOME = process.platform === "win32"
   : app.getPath("appData");
 
 export const SMOKE = process.env.PPX_DESKTOP_SMOKE === "1";
+// UI 截图回合 (2026-11-18): 真实可见窗口 + executeJavaScript 驱动 + 逐帧 capturePage
+export const UI_CAPTURE = process.env.PPX_UI_CAPTURE === "1";
 export const ICON = path.join(APP_ROOT, "electron", process.platform === "win32" ? "icon.ico" : "icon.png");

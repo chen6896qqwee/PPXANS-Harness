@@ -11,6 +11,7 @@ import { summarize as pwfSummarize } from "../session/pwf.js";
 import { renderBullets } from "../evolve/playbook.js";
 import { loadProjectInstructions } from "../memory/project-md.js";
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_SYSTEM_RATIO, CHARS_PER_TOKEN } from "./context.js";
+import { estimateTokens } from "../utils/text.js";
 import { boundaryPrompt, detectHighRisk, riskDirective } from "../ans/boundary.js";
 import { routerRolePrompt } from "./role.js";
 
@@ -58,6 +59,14 @@ const TAIL_RESERVE_MIN = 512;
 const TAIL_RESERVE_RATIO = 0.1;
 
 export const promptMethods = {
+  // 【回复风格】段 (2026-11-18, 个性化面板): config.agent.reply_style 非空时注入。
+  // 静态段 (只在用户改设置时变), 不在裁剪表 → 永不裁; 语义上与 persona 同属身份区。
+  _replyStylePrompt() {
+    const style = String(this.config?.agent?.reply_style || "").trim();
+    if (!style) return "";
+    return `【回复风格】(用户在个性化面板设定, 必须遵循)\n${style}`;
+  },
+
   // 组装记忆上下文
   // 差异化视角 (_perspective): 多 agent 场景下由委派方注入子 agent 的专属视角,
   // 对抗同质失败 (Anthropic: 同模型+同上下文 → 一个错全错), 生命周期由调用方控制
@@ -232,6 +241,7 @@ export const promptMethods = {
       { key: "boundary", text: boundaryPrompt(this.config) },  // 能力边界: 静态常驻, 与 values 同属行为底线
       { key: "loop", text: this._executionPrompt() },           // 执行循环: 取证→小步→纠错→验证→证据
       { key: "persona", text: identity },                       // 人格卡片 (静态身份区)
+      { key: "replyStyle", text: this._replyStylePrompt() },    // 回复风格: 紧跟能格卡片, 用户个性化设定
       { key: "profile", text: profile },                        // L3 画像 (静态身份区)
       { key: "skills", text: skills },
       // 按需工具名单: 紧跟技能目录 (同属"我有什么能力"的静态索引区); 全量曝光时为空串不占位
@@ -259,7 +269,17 @@ export const promptMethods = {
       // 目标看板: 恒在检索段**之后** (契约: 加/改目标不得动静态区一个字节)。
       { key: "goals", text: goalsCtx },
     ].filter((p) => p.text);
-    return this._fitSystemSections(parts, this._systemCharBudget());
+    const system = this._fitSystemSections(parts, this._systemCharBudget());
+    // 2026-11-16 (架构优化 ④ 消费侧): 记录本轮 system 的实测体积, 供紧随其后的
+    //   _loadHistory → _trimHistory 计算"固定开销之外还剩多少历史预算"。
+    try {
+      this._lastContextStats = {
+        systemChars: system.length,
+        systemTokens: estimateTokens(system),
+        toolTokens: this._toolSchemaTokens(),
+      };
+    } catch { this._lastContextStats = null; }
+    return system;
   },
 
   // system 段字符预算 (窗口 × system_ratio × 字符/token 粗估), 下限 2000 字符保证可用
